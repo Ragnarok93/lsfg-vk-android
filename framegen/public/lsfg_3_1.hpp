@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 
+#ifdef __ANDROID__
+struct AHardwareBuffer;
+#endif
+
 namespace LSFG_3_1 {
 
     ///
@@ -42,6 +46,28 @@ namespace LSFG_3_1 {
         int in0, int in1, const std::vector<int>& outN,
         VkExtent2D extent, VkFormat format);
 
+#ifdef __ANDROID__
+    ///
+    /// Android-specific variant: share input/output images via AHardwareBuffer
+    /// instead of opaque file descriptors. Required because Adreno/Mali drivers
+    /// refuse vkGetMemoryFdKHR(OPAQUE_FD) on AHB-imported memory, breaking the
+    /// FD-based path. The caller retains ownership of all AHBs and must keep
+    /// them alive for the lifetime of the context.
+    ///
+    /// @param in0 First input image's AHardwareBuffer.
+    /// @param in1 Second input image's AHardwareBuffer.
+    /// @param outN Output image AHardwareBuffers, one per generated frame.
+    /// @param extent Image dimensions.
+    /// @param format Vulkan format of all images (must match the AHB format).
+    /// @return Unique context identifier.
+    ///
+    __attribute__((visibility("default")))
+    int32_t createContextFromAHB(
+        AHardwareBuffer* in0, AHardwareBuffer* in1,
+        const std::vector<AHardwareBuffer*>& outN,
+        VkExtent2D extent, VkFormat format);
+#endif
+
     ///
     /// Present a context.
     ///
@@ -67,5 +93,15 @@ namespace LSFG_3_1 {
     ///
     __attribute__((visibility("default")))
     void finalize();
+
+#ifdef __ANDROID__
+    /// Block until framegen's internal Vulkan device is idle. Used by the
+    /// Android wrapper to sync between its own device (which writes input
+    /// AHBs) and framegen's device (which reads them) — without an explicit
+    /// shared semaphore this is the only safe way to avoid a write-after-read
+    /// race on the shared AHardwareBuffer storage.
+    __attribute__((visibility("default")))
+    void waitIdle();
+#endif
 
 }

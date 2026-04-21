@@ -97,6 +97,24 @@ namespace {
         std::string dllPath = Config::activeConf.dll;
         if (!dllPath.empty())
             return dllPath;
+        // direct Unix path from the host (GameNative / Wine-on-Android resolves the
+        // Wine-prefix path on the Java side and passes it in here).
+        const char* directPath = getenv("LSFG_DLL_PATH_UNIX");
+        if (directPath && *directPath != '\0' && std::filesystem::exists(directPath))
+            return std::string(directPath);
+        // Wine prefix: try Steam's default install locations inside drive_c.
+        const char* winePrefix = getenv("WINEPREFIX");
+        if (winePrefix && *winePrefix != '\0') {
+            const std::vector<std::filesystem::path> WINE_PATHS{{
+                "drive_c/Program Files (x86)/Steam/steamapps/common/Lossless Scaling/Lossless.dll",
+                "drive_c/Program Files/Steam/steamapps/common/Lossless Scaling/Lossless.dll"
+            }};
+            for (const auto& rel : WINE_PATHS) {
+                const std::filesystem::path path = std::filesystem::path(winePrefix) / rel;
+                if (std::filesystem::exists(path))
+                    return path.string();
+            }
+        }
         // home based paths
         const char* home = getenv("HOME");
         const std::string homeStr = home ? home : "";

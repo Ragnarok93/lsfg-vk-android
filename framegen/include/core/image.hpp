@@ -6,6 +6,10 @@
 
 #include <memory>
 
+#ifdef __ANDROID__
+struct AHardwareBuffer;
+#endif
+
 namespace LSFG::Core {
 
     ///
@@ -48,6 +52,31 @@ namespace LSFG::Core {
         Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
             VkImageUsageFlags usage, VkImageAspectFlags aspectFlags, int fd);
 
+#ifdef __ANDROID__
+        ///
+        /// Create the image backed by an Android HardwareBuffer.
+        ///
+        /// Used on Android where opaque-FD export from AHB-imported memory
+        /// isn't supported by Adreno/Mali drivers — we share via the AHB
+        /// itself instead. The caller retains ownership of the AHB and must
+        /// keep it alive (via AHardwareBuffer_acquire) for the lifetime of
+        /// this Image.
+        ///
+        /// @param device Vulkan device (must have
+        ///   VK_ANDROID_external_memory_android_hardware_buffer enabled)
+        /// @param extent Extent of the image in pixels.
+        /// @param format Vulkan format of the image
+        /// @param usage Usage flags for the image
+        /// @param aspectFlags Aspect flags for the image view
+        /// @param ahb AHardwareBuffer to import as the backing store.
+        ///
+        /// @throws LSFG::vulkan_error if object creation fails.
+        ///
+        Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
+            VkImageUsageFlags usage, VkImageAspectFlags aspectFlags,
+            AHardwareBuffer* ahb);
+#endif
+
         /// Get the Vulkan handle.
         [[nodiscard]] auto handle() const { return *this->image; }
         /// Get the Vulkan device memory handle.
@@ -60,6 +89,8 @@ namespace LSFG::Core {
         [[nodiscard]] VkFormat getFormat() const { return this->format; }
         /// Get the aspect flags of the image.
         [[nodiscard]] VkImageAspectFlags getAspectFlags() const { return this->aspectFlags; }
+        /// Whether the image is backed by externally shared memory such as AHB.
+        [[nodiscard]] bool isExternalShared() const { return this->externalShared; }
 
         /// Set the layout of the image.
         void setLayout(VkImageLayout layout) { *this->layout = layout; }
@@ -82,6 +113,7 @@ namespace LSFG::Core {
         VkExtent2D extent{};
         VkFormat format{};
         VkImageAspectFlags aspectFlags{};
+        bool externalShared{false};
     };
 
 }

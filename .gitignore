@@ -10,3 +10,5 @@
 /.clangd
 /.cache
 /.ccls
+
+build-android/

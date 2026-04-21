@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 
+#ifdef __ANDROID__
+struct AHardwareBuffer;
+#endif
+
 namespace LSFG_3_1P {
 
     ///
@@ -42,6 +46,15 @@ namespace LSFG_3_1P {
         int in0, int in1, const std::vector<int>& outN,
         VkExtent2D extent, VkFormat format);
 
+#ifdef __ANDROID__
+    /// Android-specific variant: see LSFG_3_1::createContextFromAHB.
+    __attribute__((visibility("default")))
+    int32_t createContextFromAHB(
+        AHardwareBuffer* in0, AHardwareBuffer* in1,
+        const std::vector<AHardwareBuffer*>& outN,
+        VkExtent2D extent, VkFormat format);
+#endif
+
     ///
     /// Present a context.
     ///
@@ -67,5 +80,11 @@ namespace LSFG_3_1P {
     ///
     __attribute__((visibility("default")))
     void finalize();
+
+#ifdef __ANDROID__
+    /// Block until framegen's internal Vulkan device is idle. See LSFG_3_1::waitIdle.
+    __attribute__((visibility("default")))
+    void waitIdle();
+#endif
 
 }

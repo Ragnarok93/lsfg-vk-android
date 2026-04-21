@@ -81,3 +81,44 @@ void Generate::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount, uin
     pass.descriptorSet.at(frameCount % 2).bind(buf, this->pipeline);
     buf.dispatch(threadsX, threadsY, 1);
 }
+
+Generate::Generate(Vulkan& vk,
+    Core::Image inImg1, Core::Image inImg2,
+    Core::Image inImg3, Core::Image inImg4, Core::Image inImg5,
+    std::vector<Core::Image> outImgs)
+        : inImg1(std::move(inImg1)), inImg2(std::move(inImg2)),
+          inImg3(std::move(inImg3)), inImg4(std::move(inImg4)),
+          inImg5(std::move(inImg5)),
+          outImgs(std::move(outImgs)) {
+    // create resources (same as the FD-based ctor)
+    this->shaderModule = vk.shaders.getShader(vk.device, "generate",
+        { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },
+          { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
+          { 5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
+          { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } });
+    this->pipeline = vk.shaders.getPipeline(vk.device, "generate");
+    this->samplers.at(0) = vk.resources.getSampler(vk.device);
+    this->samplers.at(1) = vk.resources.getSampler(vk.device,
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_COMPARE_OP_ALWAYS);
+
+    // hook up shaders — outImgs already populated by the caller
+    for (size_t i = 0; i < vk.generationCount; i++) {
+        auto& pass = this->passes.emplace_back();
+        pass.buffer = vk.resources.getBuffer(vk.device,
+            static_cast<float>(i + 1) / static_cast<float>(vk.generationCount + 1));
+        for (size_t j = 0; j < 2; j++) {
+            pass.descriptorSet.at(j) = Core::DescriptorSet(vk.device, vk.descriptorPool,
+                this->shaderModule);
+            pass.descriptorSet.at(j).update(vk.device)
+                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, pass.buffer)
+                .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers)
+                .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, j == 0 ? this->inImg2 : this->inImg1)
+                .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, j == 0 ? this->inImg1 : this->inImg2)
+                .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, this->inImg3)
+                .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, this->inImg4)
+                .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, this->inImg5)
+                .add(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, this->outImgs.at(i))
+                .build();
+        }
+    }
+}

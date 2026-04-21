@@ -18,6 +18,10 @@
 #include <cstdint>
 #include <array>
 
+#ifdef __ANDROID__
+struct AHardwareBuffer;
+#endif
+
 namespace LSFG_3_1P {
 
     using namespace LSFG;
@@ -39,6 +43,13 @@ namespace LSFG_3_1P {
         Context(Vulkan& vk,
             int in0, int in1, const std::vector<int>& outN,
             VkExtent2D extent, VkFormat format);
+
+#ifdef __ANDROID__
+        Context(Vulkan& vk,
+            AHardwareBuffer* in0, AHardwareBuffer* in1,
+            const std::vector<AHardwareBuffer*>& outN,
+            VkExtent2D extent, VkFormat format);
+#endif
 
         ///
         /// Present on the context.

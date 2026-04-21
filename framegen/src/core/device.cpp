@@ -13,8 +13,19 @@
 using namespace LSFG::Core;
 
 const std::vector<const char*> requiredExtensions = {
+#ifndef __ANDROID__
     "VK_KHR_external_memory_fd",
     "VK_KHR_external_semaphore_fd",
+#else
+    // On Android we share via AHardwareBuffer, not opaque FDs.
+    "VK_ANDROID_external_memory_android_hardware_buffer",
+    "VK_KHR_external_memory",                  // base ext, dependency
+    "VK_KHR_sampler_ycbcr_conversion",         // dependency of AHB ext
+    "VK_KHR_dedicated_allocation",             // required for dedicated AHB import
+    "VK_KHR_get_memory_requirements2",         // dependency
+    "VK_KHR_bind_memory2",                     // dependency
+    "VK_KHR_maintenance1",                     // dependency
+#endif
     "VK_EXT_robustness2",
 };
 

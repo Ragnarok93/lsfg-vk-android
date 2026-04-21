@@ -43,10 +43,19 @@ namespace LSFG_3_1P::Shaders {
             Core::Image inImg3, Core::Image inImg4, Core::Image inImg5,
             const std::vector<int>& fds, VkFormat format);
 
+        /// From pre-allocated output images (Android AHB path).
+        Generate(Vulkan& vk,
+            Core::Image inImg1, Core::Image inImg2,
+            Core::Image inImg3, Core::Image inImg4, Core::Image inImg5,
+            std::vector<Core::Image> outImgs);
+
         ///
         /// Dispatch the shaderchain.
         ///
         void Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount, uint64_t pass_idx);
+        /// Expose output images for Android queue-family acquire/release.
+        [[nodiscard]] std::vector<Core::Image>& getOutImages() { return this->outImgs; }
+        [[nodiscard]] const std::vector<Core::Image>& getOutImages() const { return this->outImgs; }
 
         /// Trivially copyable, moveable and destructible
         Generate(const Generate&) noexcept = default;

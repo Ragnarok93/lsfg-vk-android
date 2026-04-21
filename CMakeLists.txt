@@ -1,8 +1,17 @@
 cmake_minimum_required(VERSION 3.10)
 
+# Android / Wine-on-Android target (for GameNative emulator).
+# When ON: builds liblsfg-vk.so for the NDK toolchain, skips the GTK4 UI,
+# and defines LSFGVK_ANDROID_WINE=1 for the C++ code.
+option(LSFGVK_ANDROID_WINE "Build for GameNative / Wine-on-Android" OFF)
+
 set(CMAKE_SKIP_RPATH ON)
 set(CMAKE_C_VISIBILITY_PRESET "hidden")
 set(CMAKE_CXX_VISIBILITY_PRESET "hidden")
+
+if(LSFGVK_ANDROID_WINE)
+    add_compile_definitions(LSFGVK_ANDROID_WINE=1)
+endif()
 
 # subprojects
 add_compile_options(-fPIC

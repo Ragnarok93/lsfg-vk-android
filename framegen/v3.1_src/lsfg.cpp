@@ -95,3 +95,28 @@ void LSFG_3_1::finalize() {
     device.reset();
     instance.reset();
 }
+
+#ifdef __ANDROID__
+
+#include <android/hardware_buffer.h>
+
+int32_t LSFG_3_1::createContextFromAHB(
+        AHardwareBuffer* in0, AHardwareBuffer* in1,
+        const std::vector<AHardwareBuffer*>& outN,
+        VkExtent2D extent, VkFormat format) {
+    if (!instance.has_value() || !device.has_value())
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+
+    const int32_t id = std::rand();
+    contexts.emplace(id, Context(*device, in0, in1, outN, extent, format));
+    return id;
+}
+
+#endif // __ANDROID__
+
+#ifdef __ANDROID__
+void LSFG_3_1::waitIdle() {
+    if (!device.has_value()) return;
+    vkDeviceWaitIdle(device->device.handle());
+}
+#endif

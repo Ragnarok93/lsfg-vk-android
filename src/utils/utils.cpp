@@ -213,6 +213,13 @@ std::pair<std::string, std::string> Utils::getProcessName() {
     if (process_name && *process_name != '\0')
         return { process_name, process_name };
 
+    // GameNative / Wine-on-Android: /proc/self/exe points at the Wine loader,
+    // not the game .exe. Accept an explicit override from the launcher so
+    // per-game matching in the TOML still works.
+    const char* process_exe = std::getenv("LSFG_PROCESS_EXE");
+    if (process_exe && *process_exe != '\0')
+        return { process_exe, process_exe };
+
     const char* benchmark_flag = std::getenv("LSFG_BENCHMARK");
     if (benchmark_flag)
         return { "benchmark", "benchmark" };
