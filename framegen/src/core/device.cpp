@@ -2,12 +2,15 @@
 #include <vulkan/vulkan_core.h>
 
 #include "core/device.hpp"
+#include "core/image.hpp"
 #include "core/instance.hpp"
 #include "common/exception.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 using namespace LSFG::Core;
@@ -26,8 +29,22 @@ const std::vector<const char*> requiredExtensions = {
     "VK_KHR_bind_memory2",                     // dependency
     "VK_KHR_maintenance1",                     // dependency
 #endif
-    "VK_EXT_robustness2",
 };
+
+namespace {
+
+bool hasExtension(const std::vector<VkExtensionProperties>& extensions, const char* name) {
+    for (const auto& extension : extensions) {
+        if (std::strcmp(extension.extensionName, name) == 0) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+const Image& Device::getFallbackDescriptorImage() const {
+    return *this->fallbackDescriptorImage;
+}
 
 Device::Device(const Instance& instance, uint64_t deviceUUID) {
     // get all physical devices
@@ -73,6 +90,32 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
     if (!computeFamilyIdx)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "No compute queue family found");
 
+    uint32_t extensionCount{};
+    res = vkEnumerateDeviceExtensionProperties(*physicalDevice, nullptr, &extensionCount, nullptr);
+    if (res != VK_SUCCESS)
+        throw LSFG::vulkan_error(res, "Failed to enumerate device extensions");
+    std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+    res = vkEnumerateDeviceExtensionProperties(*physicalDevice, nullptr,
+        &extensionCount, availableExtensions.data());
+    if (res != VK_SUCCESS)
+        throw LSFG::vulkan_error(res, "Failed to get device extensions");
+
+    std::vector<const char*> enabledExtensions;
+    enabledExtensions.reserve(requiredExtensions.size() + 1);
+    for (const char* extension : requiredExtensions) {
+        if (!hasExtension(availableExtensions, extension)) {
+            throw LSFG::vulkan_error(VK_ERROR_EXTENSION_NOT_PRESENT,
+                std::string("Missing required device extension: ") + extension);
+        }
+        enabledExtensions.push_back(extension);
+    }
+
+    const bool hasRobustness2 =
+        hasExtension(availableExtensions, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    if (hasRobustness2) {
+        enabledExtensions.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    }
+
     // create logical device
     const float queuePriority{1.0F}; // highest priority
     VkPhysicalDeviceRobustness2FeaturesEXT robustness2{
@@ -81,7 +124,7 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
     };
     VkPhysicalDeviceVulkan13Features features13{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext = &robustness2,
+        .pNext = hasRobustness2 ? &robustness2 : nullptr,
         .synchronization2 = VK_TRUE
     };
     const VkPhysicalDeviceVulkan12Features features12{
@@ -101,12 +144,12 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
         .pNext = &features12,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &computeQueueDesc,
-        .enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size()),
-        .ppEnabledExtensionNames = requiredExtensions.data()
+        .enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size()),
+        .ppEnabledExtensionNames = enabledExtensions.data()
     };
     VkDevice deviceHandle{};
     res = vkCreateDevice(*physicalDevice, &deviceCreateInfo, nullptr, &deviceHandle);
-    if (res != VK_SUCCESS | deviceHandle == VK_NULL_HANDLE)
+    if (res != VK_SUCCESS || deviceHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create logical device");
 
     volkLoadDevice(deviceHandle);
@@ -119,10 +162,16 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
     this->computeQueue = queueHandle;
     this->computeFamilyIdx = *computeFamilyIdx;
     this->physicalDevice = *physicalDevice;
+    this->nullDescriptorSupported = hasRobustness2;
     this->device = std::shared_ptr<VkDevice>(
         new VkDevice(deviceHandle),
         [](VkDevice* device) {
             vkDestroyDevice(*device, nullptr);
         }
     );
+    if (!this->nullDescriptorSupported) {
+        this->fallbackDescriptorImage = std::make_shared<Core::Image>(*this,
+            VkExtent2D{1, 1}, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+    }
 }

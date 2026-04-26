@@ -102,6 +102,9 @@ DescriptorSetUpdateBuilder& DescriptorSetUpdateBuilder::add(VkDescriptorType typ
 }
 
 DescriptorSetUpdateBuilder& DescriptorSetUpdateBuilder::add(VkDescriptorType type) {
+    if (!this->device->supportsNullDescriptor()) {
+        return this->add(type, this->device->getFallbackDescriptorImage());
+    }
     this->entries.push_back({
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet = this->descriptorSet->handle(),

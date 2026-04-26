@@ -9,6 +9,8 @@
 
 namespace LSFG::Core {
 
+    class Image;
+
     ///
     /// C++ wrapper class for a Vulkan device.
     ///
@@ -34,6 +36,10 @@ namespace LSFG::Core {
         [[nodiscard]] uint32_t getComputeFamilyIdx() const { return this->computeFamilyIdx; }
         /// Get the compute queue.
         [[nodiscard]] VkQueue getComputeQueue() const { return this->computeQueue; }
+        /// Whether the device supports null image descriptors.
+        [[nodiscard]] bool supportsNullDescriptor() const { return this->nullDescriptorSupported; }
+        /// Valid sampled image used for optional bindings when nullDescriptor is absent.
+        [[nodiscard]] const Image& getFallbackDescriptorImage() const;
 
         // Trivially copyable, moveable and destructible
         Device(const Core::Device&) noexcept = default;
@@ -48,6 +54,8 @@ namespace LSFG::Core {
         uint32_t computeFamilyIdx{0};
 
         VkQueue computeQueue{};
+        bool nullDescriptorSupported{false};
+        std::shared_ptr<Image> fallbackDescriptorImage;
     };
 
 }
