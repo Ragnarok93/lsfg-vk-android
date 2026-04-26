@@ -40,6 +40,8 @@ Core::Buffer ResourcePool::getBuffer(
     // create the buffer
     const ConstantBuffer data{
         .inputOffset = { 0, 0 },
+        .firstIter = firstIter ? 1U : 0U,
+        .firstIterS = firstIterS ? 1U : 0U,
         .advancedColorKind = this->isHdr ? 2U : 0U,
         .hdrSupport = this->isHdr,
         .resolutionInvScale = this->flowScale,
