@@ -116,6 +116,23 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
         enabledExtensions.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
     }
 
+    // Probe FP16 support on this physical device. The LSFG-Android port can
+    // load precompiled SPIR-V FP16 shader variants from Lossless.dll (resource
+    // IDs 304..351) which carry `OpCapability Float16`. Vulkan rejects those at
+    // vkCreateShaderModule time unless the device was created with the
+    // shaderFloat16 feature explicitly enabled. We probe and unconditionally
+    // enable it when supported — there's no downside on FP32-only sessions and
+    // it lets the FP16 path "just work" when the user toggles it on.
+    VkPhysicalDeviceShaderFloat16Int8Features fp16Probe{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+    };
+    VkPhysicalDeviceFeatures2 featsProbe{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &fp16Probe,
+    };
+    vkGetPhysicalDeviceFeatures2(*physicalDevice, &featsProbe);
+    const bool hasFloat16 = fp16Probe.shaderFloat16 == VK_TRUE;
+
     // create logical device
     const float queuePriority{1.0F}; // highest priority
     VkPhysicalDeviceRobustness2FeaturesEXT robustness2{
@@ -127,9 +144,14 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
         .pNext = hasRobustness2 ? &robustness2 : nullptr,
         .synchronization2 = VK_TRUE
     };
-    const VkPhysicalDeviceVulkan12Features features12{
+    // shaderFloat16 is exposed in core Vulkan 1.2 — same struct we already
+    // chain. Setting it conditionally avoids regressing devices that don't
+    // advertise the feature (the validation layers reject create_device when
+    // requested features are unsupported).
+    VkPhysicalDeviceVulkan12Features features12{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
         .pNext = &features13,
+        .shaderFloat16 = hasFloat16 ? VK_TRUE : VK_FALSE,
         .timelineSemaphore = VK_TRUE,
         .vulkanMemoryModel = VK_TRUE
     };
