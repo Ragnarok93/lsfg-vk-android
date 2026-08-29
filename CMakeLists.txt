@@ -38,6 +38,12 @@ file(GLOB SOURCES
     "src/*.cpp"
 )
 
+# Android has a dedicated layer entrypoint that treats non-presenting Vulkan
+# devices as pass-through. The desktop layer keeps its existing behavior.
+if(ANDROID)
+    list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/layer.cpp")
+endif()
+
 add_library(lsfg-vk SHARED ${SOURCES})
 
 # target
@@ -77,18 +83,18 @@ if(LSFGVK_EXCESS_DEBUG)
         -Weverything
         # disable compat c++ flags
         -Wno-pre-c++20-compat-pedantic
-        -Wno-pre-c++17-compat
+        -Wno-pre-c++17-compat-pedantic
         -Wno-c++98-compat-pedantic
         -Wno-c++98-compat
         # disable other flags
         -Wno-missing-designated-field-initializers
-        -Wno-shadow         # allow shadowing
-        -Wno-switch-enum    # ignore missing cases
-        -Wno-switch-default # ignore missing default
-        -Wno-padded         # ignore automatic padding
-        -Wno-exit-time-destructors # allow globals
-        -Wno-global-constructors   # allow globals
-        -Wno-cast-function-type-strict # for vulkan
+        -Wno-shadow
+        -Wno-switch-enum
+        -Wno-switch-default
+        -Wno-padded
+        -Wno-exit-time-destructors
+        -Wno-global-constructors
+        -Wno-cast-function-type-strict
     )
 
     set_target_properties(lsfg-vk PROPERTIES
