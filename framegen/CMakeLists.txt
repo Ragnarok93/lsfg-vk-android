@@ -27,7 +27,6 @@ file(GLOB SOURCES
 
 add_library(lsfg-vk-framegen STATIC ${SOURCES})
 
-# target
 set_target_properties(lsfg-vk-framegen PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON)
@@ -43,7 +42,19 @@ if(ANDROID)
     target_link_libraries(lsfg-vk-framegen PUBLIC log)
 endif()
 
-# diagnostics
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(lsfg-capabilities-test
+        tests/capabilities_test.cpp
+        src/core/capabilities.cpp)
+    set_target_properties(lsfg-capabilities-test PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON)
+    target_include_directories(lsfg-capabilities-test PRIVATE include)
+    target_link_libraries(lsfg-capabilities-test PRIVATE volk)
+    add_test(NAME lsfg-capabilities COMMAND lsfg-capabilities-test)
+endif()
+
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_target_properties(lsfg-vk-framegen PROPERTIES
         EXPORT_COMPILE_COMMANDS ON)
@@ -52,21 +63,18 @@ endif()
 if(LSFGVK_EXCESS_DEBUG)
     target_compile_options(lsfg-vk-framegen PRIVATE
         -Weverything
-        # disable compat c++ flags
         -Wno-pre-c++20-compat-pedantic
         -Wno-pre-c++17-compat
         -Wno-c++98-compat-pedantic
         -Wno-c++98-compat
-        # disable other flags
         -Wno-missing-designated-field-initializers
-        -Wno-shadow         # allow shadowing
-        -Wno-switch-enum    # ignore missing cases
-        -Wno-switch-default # ignore missing default
-        -Wno-padded         # ignore automatic padding
-        -Wno-exit-time-destructors # allow globals
-        -Wno-global-constructors   # allow globals
-        -Wno-cast-function-type-strict # for vulkan
-    )
+        -Wno-shadow
+        -Wno-switch-enum
+        -Wno-switch-default
+        -Wno-padded
+        -Wno-exit-time-destructors
+        -Wno-global-constructors
+        -Wno-cast-function-type-strict)
 
     set_target_properties(lsfg-vk-framegen PROPERTIES
         CXX_CLANG_TIDY clang-tidy)
