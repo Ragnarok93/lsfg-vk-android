@@ -20,6 +20,30 @@ env:
   ANDROID_PLATFORM: android-28
 
 jobs:
+  capability-policy:
+    name: Capability policy tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Vulkan headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libvulkan-dev
+
+      - name: Build and run capability policy tests
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -Wall -Wextra -Werror \
+            -Iframegen/include \
+            framegen/src/core/capabilities.cpp \
+            framegen/tests/capabilities_test.cpp \
+            -o /tmp/lsfg-capabilities-test
+          /tmp/lsfg-capabilities-test
+
   build:
     name: Build ${{ matrix.abi }}
     runs-on: ubuntu-latest
@@ -68,7 +92,7 @@ jobs:
 
   tag_release:
     name: Tag Android release
-    needs: build
+    needs: [capability-policy, build]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/release'
     permissions:
@@ -116,7 +140,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: build
+    needs: [capability-policy, build]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
