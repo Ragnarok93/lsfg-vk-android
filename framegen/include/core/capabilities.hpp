@@ -28,6 +28,7 @@ enum class ShaderPrecision {
 struct VulkanCapabilities {
     uint32_t apiVersion{VK_API_VERSION_1_0};
     bool androidHardwareBuffer{false};
+    AhbFormatClass ahbFormatClass{AhbFormatClass::Unsupported};
     bool synchronization2Core{false};
     bool synchronization2Extension{false};
     bool synchronization2Feature{false};
@@ -41,6 +42,7 @@ struct VulkanCapabilities {
 
 struct SupportRequirements {
     bool requireAhb{true};
+    bool requireWritableAhbFormat{false};
     VkShaderStageFlags requiredSubgroupStages{0};
     VkSubgroupFeatureFlags requiredSubgroupOperations{0};
 };
@@ -58,5 +60,6 @@ struct SupportDecision {
 
 [[nodiscard]] const char* synchronizationPathName(SynchronizationPath path);
 [[nodiscard]] const char* shaderPrecisionName(ShaderPrecision precision);
+[[nodiscard]] const char* ahbFormatClassName(AhbFormatClass formatClass);
 
 } // namespace LSFG::Core
