@@ -16,6 +16,18 @@ SupportDecision evaluateCapabilities(
             "VK_ANDROID_external_memory_android_hardware_buffer is required by the Android frame exchange";
         return decision;
     }
+    if (requirements.requireWritableAhbFormat) {
+        if (caps.ahbFormatClass == AhbFormatClass::ExternalFormatSampledOnly) {
+            decision.rejectionReason =
+                "AHardwareBuffer is external-format-only; LSFG requires storage-image writes";
+            return decision;
+        }
+        if (caps.ahbFormatClass != AhbFormatClass::DefinedFormat) {
+            decision.rejectionReason =
+                "AHardwareBuffer writable VkFormat compatibility was not established";
+            return decision;
+        }
+    }
     if (!caps.timelineSemaphore) {
         decision.rejectionReason = "timeline semaphore support is required";
         return decision;
@@ -72,6 +84,15 @@ const char* synchronizationPathName(SynchronizationPath path) {
 
 const char* shaderPrecisionName(ShaderPrecision precision) {
     return precision == ShaderPrecision::Fp16 ? "fp16" : "fp32";
+}
+
+const char* ahbFormatClassName(AhbFormatClass formatClass) {
+    switch (formatClass) {
+        case AhbFormatClass::DefinedFormat: return "defined-format";
+        case AhbFormatClass::ExternalFormatSampledOnly: return "external-format-sampled-only";
+        case AhbFormatClass::Unsupported: return "unsupported-or-unprobed";
+    }
+    return "unsupported-or-unprobed";
 }
 
 } // namespace LSFG::Core
