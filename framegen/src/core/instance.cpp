@@ -6,44 +6,38 @@
 
 #include <cstdint>
 #include <memory>
-#include <vector>
 
 using namespace LSFG::Core;
 
-const std::vector<const char*> requiredExtensions = {
-
-};
-
 Instance::Instance() {
-    volkInitialize();
+    if (volkInitialize() != VK_SUCCESS)
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "Failed to initialize Vulkan loader");
 
-    // create Vulkan instance
+    uint32_t loaderVersion = VK_API_VERSION_1_0;
+    if (vkEnumerateInstanceVersion)
+        vkEnumerateInstanceVersion(&loaderVersion);
+    if (loaderVersion < VK_API_VERSION_1_2)
+        throw LSFG::vulkan_error(VK_ERROR_INCOMPATIBLE_DRIVER, "LSFG requires Vulkan 1.2 or newer");
+
     const VkApplicationInfo appInfo{
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "lsfg-vk-base",
         .applicationVersion = VK_MAKE_VERSION(0, 0, 1),
         .pEngineName = "lsfg-vk-base",
         .engineVersion = VK_MAKE_VERSION(0, 0, 1),
-        .apiVersion = VK_API_VERSION_1_3
+        .apiVersion = VK_API_VERSION_1_2,
     };
     const VkInstanceCreateInfo createInfo{
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &appInfo,
-        .enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size()),
-        .ppEnabledExtensionNames = requiredExtensions.data()
     };
     VkInstance instanceHandle{};
-    auto res = vkCreateInstance(&createInfo, nullptr, &instanceHandle);
-    if (res != VK_SUCCESS)
-        throw LSFG::vulkan_error(res, "Failed to create Vulkan instance");
+    const auto res = vkCreateInstance(&createInfo, nullptr, &instanceHandle);
+    if (res != VK_SUCCESS || instanceHandle == VK_NULL_HANDLE)
+        throw LSFG::vulkan_error(res, "Failed to create Vulkan 1.2 instance");
 
     volkLoadInstance(instanceHandle);
-
-    // store in shared ptr
     this->instance = std::shared_ptr<VkInstance>(
         new VkInstance(instanceHandle),
-        [](VkInstance* instance) {
-            vkDestroyInstance(*instance, nullptr);
-        }
-    );
+        [](VkInstance* instance) { vkDestroyInstance(*instance, nullptr); });
 }

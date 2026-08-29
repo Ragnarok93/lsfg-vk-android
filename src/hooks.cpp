@@ -22,9 +22,8 @@ using namespace Hooks;
 
 namespace {
 
-    ///
-    /// Add extensions to the instance create info.
-    ///
+    VkInstance layerInstance{};
+
     VkResult myvkCreateInstance(
             const VkInstanceCreateInfo* pCreateInfo,
             const VkAllocationCallbacks* pAllocator,
@@ -46,32 +45,40 @@ namespace {
             throw std::runtime_error(
                 "Required Vulkan instance extensions are not present."
                 "Your GPU driver is not supported.");
+        if (res == VK_SUCCESS)
+            layerInstance = *pInstance;
         return res;
     }
 
-    /// Map of devices to related information.
     std::unordered_map<VkDevice, DeviceInfo> deviceToInfo;
 
-    ///
-    /// Add extensions to the device create info.
-    /// (function pointers are not initialized yet)
-    ///
     VkResult myvkCreateDevicePre(
             VkPhysicalDevice physicalDevice,
             const VkDeviceCreateInfo* pCreateInfo,
             const VkAllocationCallbacks* pAllocator,
             VkDevice* pDevice) {
-        // add extensions
+#ifdef __ANDROID__
+        // The Android exchange is AHardwareBuffer-based. Do not force the
+        // desktop OPAQUE_FD memory/semaphore extensions onto the game's device:
+        // Mali/Xclipse drivers may legitimately omit those extensions even when
+        // their AHB path is fully usable.
+        auto extensions = Utils::addExtensions(
+            pCreateInfo->ppEnabledExtensionNames,
+            pCreateInfo->enabledExtensionCount,
+            { VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME }
+        );
+#else
         auto extensions = Utils::addExtensions(
             pCreateInfo->ppEnabledExtensionNames,
             pCreateInfo->enabledExtensionCount,
             {
-                "VK_KHR_external_memory",
-                "VK_KHR_external_memory_fd",
-                "VK_KHR_external_semaphore",
-                "VK_KHR_external_semaphore_fd"
+                VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+                VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+                VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
+                VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME
             }
         );
+#endif
         VkDeviceCreateInfo createInfo = *pCreateInfo;
         createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
         createInfo.ppEnabledExtensionNames = extensions.data();
@@ -83,9 +90,6 @@ namespace {
         return res;
     }
 
-    ///
-    /// Add related device information after the device is created.
-    ///
     VkResult myvkCreateDevicePost(
             VkPhysicalDevice physicalDevice,
             VkDeviceCreateInfo* pCreateInfo,
@@ -99,7 +103,6 @@ namespace {
         return VK_SUCCESS;
     }
 
-    /// Erase the device information when the device is destroyed.
     void myvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAllocator) noexcept {
         deviceToInfo.erase(device);
         Layer::ovkDestroyDevice(device, pAllocator);
@@ -108,16 +111,74 @@ namespace {
     std::unordered_map<VkSwapchainKHR, LsContext> swapchains;
     std::unordered_map<VkSwapchainKHR, VkDevice> swapchainToDeviceTable;
     std::unordered_map<VkSwapchainKHR, VkPresentModeKHR> swapchainToPresent;
+    std::unordered_map<VkSwapchainKHR, VkPresentModeKHR> swapchainToConfiguredPresent;
 
-    ///
-    /// Adjust swapchain creation parameters and create a swapchain context.
-    ///
+    VkPresentModeKHR choosePresentMode(
+            VkPhysicalDevice physicalDevice,
+            VkSurfaceKHR surface,
+            VkPresentModeKHR gamePresentMode,
+            VkPresentModeKHR configuredPresentMode) {
+        if (layerInstance == VK_NULL_HANDLE)
+            return gamePresentMode;
+
+        auto getPresentModes = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(
+            Layer::ovkGetInstanceProcAddr(layerInstance,
+                "vkGetPhysicalDeviceSurfacePresentModesKHR"));
+        if (getPresentModes == nullptr) {
+            Utils::logLimitN("presentModes", 5,
+                "vkGetPhysicalDeviceSurfacePresentModesKHR unavailable; preserving game present mode");
+            return gamePresentMode;
+        }
+
+        uint32_t count{};
+        auto res = getPresentModes(physicalDevice, surface, &count, nullptr);
+        if (res != VK_SUCCESS || count == 0) {
+            Utils::logLimitN("presentModes", 5,
+                "Could not enumerate surface present modes; preserving game present mode");
+            return gamePresentMode;
+        }
+
+        std::vector<VkPresentModeKHR> modes(count);
+        res = getPresentModes(physicalDevice, surface, &count, modes.data());
+        if (res != VK_SUCCESS || count == 0) {
+            Utils::logLimitN("presentModes", 5,
+                "Could not read surface present modes; preserving game present mode");
+            return gamePresentMode;
+        }
+        modes.resize(count);
+
+        const auto supports = [&modes](VkPresentModeKHR mode) {
+            return std::find(modes.begin(), modes.end(), mode) != modes.end();
+        };
+        if (supports(configuredPresentMode)) {
+            Utils::resetLimitN("presentModes");
+            return configuredPresentMode;
+        }
+
+        if (supports(gamePresentMode)) {
+            Utils::logLimitN("presentModes", 5,
+                "Configured present mode " + std::to_string(configuredPresentMode) +
+                " is unsupported by this surface; preserving game mode " +
+                std::to_string(gamePresentMode));
+            return gamePresentMode;
+        }
+
+        if (supports(VK_PRESENT_MODE_FIFO_KHR)) {
+            Utils::logLimitN("presentModes", 5,
+                "Configured and game present modes are unavailable; falling back to FIFO");
+            return VK_PRESENT_MODE_FIFO_KHR;
+        }
+
+        Utils::logLimitN("presentModes", 5,
+            "Configured and game present modes are unavailable; using first enumerated surface mode");
+        return modes.front();
+    }
+
     VkResult myvkCreateSwapchainKHR(
             VkDevice device,
             const VkSwapchainCreateInfoKHR* pCreateInfo,
             const VkAllocationCallbacks* pAllocator,
             VkSwapchainKHR* pSwapchain) noexcept {
-        // find device
         auto it = deviceToInfo.find(device);
         if (it == deviceToInfo.end()) {
             Utils::logLimitN("swapMap", 5, "Device not found in map");
@@ -126,7 +187,6 @@ namespace {
         Utils::resetLimitN("swapMap");
         auto& deviceInfo = it->second;
 
-        // increase amount of images in swapchain
         VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;
         const auto maxImages = Utils::getMaxImageCount(
             deviceInfo.physicalDevice, pCreateInfo->surface);
@@ -145,28 +205,29 @@ namespace {
             Utils::resetLimitN("swapCount");
         }
 
-        // allow copy operations on swapchain images
         createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
-        // enforce present mode
-        createInfo.presentMode = Config::activeConf.e_present;
+        const auto configuredPresentMode = Config::activeConf.e_present;
+        createInfo.presentMode = choosePresentMode(
+            deviceInfo.physicalDevice, pCreateInfo->surface,
+            pCreateInfo->presentMode, configuredPresentMode);
 
-        // retire potential old swapchain
         if (pCreateInfo->oldSwapchain) {
             swapchains.erase(pCreateInfo->oldSwapchain);
             swapchainToDeviceTable.erase(pCreateInfo->oldSwapchain);
+            swapchainToPresent.erase(pCreateInfo->oldSwapchain);
+            swapchainToConfiguredPresent.erase(pCreateInfo->oldSwapchain);
         }
 
-        // create swapchain
         auto res = Layer::ovkCreateSwapchainKHR(device, &createInfo, pAllocator, pSwapchain);
         if (res != VK_SUCCESS)
-            return res; // can't be caused by lsfg-vk (yet)
+            return res;
 
         try {
             swapchainToPresent.emplace(*pSwapchain, createInfo.presentMode);
+            swapchainToConfiguredPresent.emplace(*pSwapchain, configuredPresentMode);
 
-            // get all swapchain images
             uint32_t imageCount{};
             res = Layer::ovkGetSwapchainImagesKHR(device, *pSwapchain, &imageCount, nullptr);
             if (res != VK_SUCCESS || imageCount == 0)
@@ -178,7 +239,6 @@ namespace {
             if (res != VK_SUCCESS)
                 throw LSFG::vulkan_error(res, "Failed to get swapchain images");
 
-            // create swapchain context
             swapchainToDeviceTable.emplace(*pSwapchain, device);
             swapchains.emplace(*pSwapchain, LsContext(
                 deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
@@ -187,25 +247,22 @@ namespace {
 
             std::cerr << "lsfg-vk: Swapchain context " <<
                     (createInfo.oldSwapchain ? "recreated" : "created")
-                << " (using " << imageCount << " images).\n";
+                << " (using " << imageCount << " images, present mode "
+                << createInfo.presentMode << ").\n";
 
             Utils::resetLimitN("swapCtxCreate");
         } catch (const std::exception& e) {
             Utils::logLimitN("swapCtxCreate", 5,
                 "An error occurred while creating the swapchain wrapper:\n"
                 "- " + std::string(e.what()));
-            return VK_SUCCESS; // swapchain is still valid
+            return VK_SUCCESS;
         }
         return VK_SUCCESS;
     }
 
-    ///
-    /// Update presentation parameters and present the next frame(s).
-    ///
     VkResult myvkQueuePresentKHR(
             VkQueue queue,
             const VkPresentInfoKHR* pPresentInfo) noexcept {
-        // find swapchain device
         auto it = swapchainToDeviceTable.find(*pPresentInfo->pSwapchains);
         if (it == swapchainToDeviceTable.end()) {
             Utils::logLimitN("swapMap", 5,
@@ -213,7 +270,6 @@ namespace {
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
         }
 
-        // find device info
         auto it2 = deviceToInfo.find(it->second);
         if (it2 == deviceToInfo.end()) {
             Utils::logLimitN("swapMap", 5,
@@ -222,7 +278,6 @@ namespace {
         }
         auto& deviceInfo = it2->second;
 
-        // find swapchain context
         auto it3 = swapchains.find(*pPresentInfo->pSwapchains);
         if (it3 == swapchains.end()) {
             Utils::logLimitN("swapMap", 5,
@@ -231,16 +286,16 @@ namespace {
         }
         auto& swapchain = it3->second;
 
-        // find present mode
         auto it4 = swapchainToPresent.find(*pPresentInfo->pSwapchains);
-        if (it4 == swapchainToPresent.end()) {
+        auto it5 = swapchainToConfiguredPresent.find(*pPresentInfo->pSwapchains);
+        if (it4 == swapchainToPresent.end() || it5 == swapchainToConfiguredPresent.end()) {
             Utils::logLimitN("swapMap", 5,
                 "Swapchain present mode not found in map");
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
         }
         auto& present = it4->second;
+        auto& configuredPresent = it5->second;
 
-        // enforce present mode | NOLINTBEGIN
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
         const VkSwapchainPresentModeInfoEXT* presentModeInfo =
@@ -256,10 +311,8 @@ namespace {
         }
         #pragma clang diagnostic pop
 
-        // NOLINTEND | present the next frame
-        VkResult res{}; // might return VK_SUBOPTIMAL_KHR
+        VkResult res{};
         try {
-            // ensure config is valid
             auto& conf = Config::activeConf;
             if (!conf.config_file.empty()
                     && (
@@ -270,17 +323,14 @@ namespace {
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
 
-            // ensure present mode is still valid
-            if (present != conf.e_present) {
+            if (configuredPresent != conf.e_present) {
                 Layer::ovkQueuePresentKHR(queue, pPresentInfo);
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
 
-            // skip if disabled
             if (conf.multiplier <= 1)
                 return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
 
-            // present the swapchain
             std::vector<VkSemaphore> semaphores(pPresentInfo->waitSemaphoreCount);
             std::copy_n(pPresentInfo->pWaitSemaphores, semaphores.size(), semaphores.data());
 
@@ -297,7 +347,6 @@ namespace {
         return res;
     }
 
-    /// Erase the swapchain context and mapping when the swapchain is destroyed.
     void myvkDestroySwapchainKHR(
             VkDevice device,
             VkSwapchainKHR swapchain,
@@ -305,20 +354,16 @@ namespace {
         swapchains.erase(swapchain);
         swapchainToDeviceTable.erase(swapchain);
         swapchainToPresent.erase(swapchain);
+        swapchainToConfiguredPresent.erase(swapchain);
         Layer::ovkDestroySwapchainKHR(device, swapchain, pAllocator);
     }
 }
 
 std::unordered_map<std::string, PFN_vkVoidFunction> Hooks::hooks = {
-    // instance hooks
     {"vkCreateInstance", reinterpret_cast<PFN_vkVoidFunction>(myvkCreateInstance)},
-
-    // device hooks
     {"vkCreateDevicePre", reinterpret_cast<PFN_vkVoidFunction>(myvkCreateDevicePre)},
     {"vkCreateDevicePost", reinterpret_cast<PFN_vkVoidFunction>(myvkCreateDevicePost)},
     {"vkDestroyDevice", reinterpret_cast<PFN_vkVoidFunction>(myvkDestroyDevice)},
-
-    // swapchain hooks
     {"vkCreateSwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(myvkCreateSwapchainKHR)},
     {"vkQueuePresentKHR", reinterpret_cast<PFN_vkVoidFunction>(myvkQueuePresentKHR)},
     {"vkDestroySwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(myvkDestroySwapchainKHR)}
