@@ -13,6 +13,7 @@ VulkanCapabilities base12() {
     VulkanCapabilities caps{};
     caps.apiVersion = VK_API_VERSION_1_2;
     caps.androidHardwareBuffer = true;
+    caps.ahbFormatClass = AhbFormatClass::DefinedFormat;
     caps.timelineSemaphore = true;
     caps.legacyPipelineBarrier = true;
     caps.subgroupSize = 32;
@@ -60,6 +61,19 @@ void ahb_absent_is_rejected() {
     assert(decision.rejectionReason.find("android_hardware_buffer") != std::string::npos);
 }
 
+void external_format_ahb_is_rejected_for_write_path() {
+    auto caps = base12();
+    caps.ahbFormatClass = AhbFormatClass::ExternalFormatSampledOnly;
+    SupportRequirements requirements{};
+    requirements.requireWritableAhbFormat = true;
+    const auto decision = evaluateCapabilities(caps, requirements);
+    assert(!decision.supported);
+    assert(decision.rejectionReason.find("external-format-only") != std::string::npos);
+
+    caps.ahbFormatClass = AhbFormatClass::DefinedFormat;
+    assert(evaluateCapabilities(caps, requirements).supported);
+}
+
 void fp16_is_optional() {
     auto caps = base12();
     caps.shaderFloat16 = false;
@@ -100,6 +114,7 @@ int main() {
     vulkan12_with_khr_sync2_uses_extension_path();
     vulkan13_with_sync2_uses_core_path();
     ahb_absent_is_rejected();
+    external_format_ahb_is_rejected_for_write_path();
     fp16_is_optional();
     missing_timeline_is_rejected();
     required_subgroup_masks_are_checked_exactly();
