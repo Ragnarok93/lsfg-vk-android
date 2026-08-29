@@ -51,7 +51,14 @@ target_link_libraries(lsfg-vk PRIVATE
     lsfg-vk-framegen)
 
 if(ANDROID)
-    target_link_libraries(lsfg-vk PRIVATE android)
+    # AHardwareBuffer_allocate/release are exported by libnativewindow (NDK API 26+).
+    # Link that narrow NDK surface directly instead of libandroid.so. In GameNative's
+    # Bionic guest, libandroid.so pulls Android framework dependencies through a
+    # guest-first LD_LIBRARY_PATH; on Samsung this can make /system/lib64/libsqlite.so
+    # bind to the container's incompatible OpenSSL and abort layer loading before
+    # Vulkan interception begins. libnativewindow provides the exact AHB symbols
+    # LSFG needs without that unrelated framework dependency chain.
+    target_link_libraries(lsfg-vk PRIVATE nativewindow)
     target_include_directories(lsfg-vk PRIVATE "${ANDROID_NDK}/sources/android/native_app_glue")
 endif()
 
