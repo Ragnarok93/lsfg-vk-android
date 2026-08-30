@@ -7,31 +7,34 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
-    def test_manifest_routes_loader_procaddr_through_diagnostic_bridge(self) -> None:
+    def test_manifest_uses_production_layer_procaddr_entrypoints(self) -> None:
         manifest = json.loads((ROOT / "VkLayer_LS_frame_generation.json").read_text(encoding="utf-8"))
         functions = manifest["layer"]["functions"]
-        self.assertEqual(functions["vkGetInstanceProcAddr"], "lsfg_vkGetInstanceProcAddrDiagnostic")
-        self.assertEqual(functions["vkGetDeviceProcAddr"], "lsfg_vkGetDeviceProcAddrDiagnostic")
+        self.assertEqual(functions["vkGetInstanceProcAddr"], "layer_vkGetInstanceProcAddr")
+        self.assertEqual(functions["vkGetDeviceProcAddr"], "layer_vkGetDeviceProcAddr")
+        self.assertNotIn("Diagnostic", functions["vkGetInstanceProcAddr"])
+        self.assertNotIn("Diagnostic", functions["vkGetDeviceProcAddr"])
 
-    def test_bridge_only_wraps_lsfg_wsi_hooks_and_has_staged_breadcrumbs(self) -> None:
-        source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")
+    def test_production_dispatch_path_retains_wsi_resolution_breadcrumbs(self) -> None:
+        layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
         for token in (
-            'Hooks::hooks.find("vkCreateSwapchainKHR")',
-            'Hooks::hooks.find("vkQueuePresentKHR")',
-            "resolved == swapchainHook->second",
-            "resolved == presentHook->second",
-            "runtime stage=wsi-hook-resolved resolver=gipa command=vkCreateSwapchainKHR",
-            "runtime stage=wsi-hook-resolved resolver=gipa command=vkQueuePresentKHR",
-            "runtime stage=wsi-hook-resolved resolver=gdpa command=vkCreateSwapchainKHR",
-            "runtime stage=wsi-hook-resolved resolver=gdpa command=vkQueuePresentKHR",
-            "runtime stage=swapchain-dispatch-enter",
-            "runtime stage=present-hook-enter",
+            'logPresentationHookResolution("gipa", name)',
+            'logPresentationHookResolution("gdpa", name)',
+            '"vkCreateSwapchainKHR"',
+            '"vkQueuePresentKHR"',
+            '"-hook-resolved name="',
         ):
-            self.assertIn(token, source)
+            self.assertIn(token, layer)
 
-        self.assertIn("std::atomic<PFN_vkCreateSwapchainKHR>", source)
-        self.assertIn("std::atomic<PFN_vkQueuePresentKHR>", source)
-        self.assertIn("compare_exchange_strong", source)
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        self.assertIn("init stage=swapchain-hook-enter", hooks)
+        self.assertIn("runtime stage=present-hook-enter", hooks)
+
+    def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:
+        source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")
+        self.assertIn("lsfg_vkGetInstanceProcAddrDiagnostic", source)
+        self.assertIn("lsfg_vkGetDeviceProcAddrDiagnostic", source)
+        self.assertIn("runtime stage=wsi-hook-resolved", source)
 
 
 if __name__ == "__main__":
