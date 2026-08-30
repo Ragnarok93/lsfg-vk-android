@@ -17,12 +17,16 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <atomic>
 
 using namespace Hooks;
 
 namespace {
 
     VkInstance layerInstance{};
+    std::atomic_bool swapchainCreateHookLogged{false};
+    std::atomic_bool queuePresentHookLogged{false};
+    std::atomic_uint32_t swapchainCreateResultLogCount{0};
 
     VkResult myvkCreateInstance(
             const VkInstanceCreateInfo* pCreateInfo,
@@ -179,6 +183,15 @@ namespace {
             const VkSwapchainCreateInfoKHR* pCreateInfo,
             const VkAllocationCallbacks* pAllocator,
             VkSwapchainKHR* pSwapchain) noexcept {
+        if (!swapchainCreateHookLogged.exchange(true, std::memory_order_relaxed)) {
+            std::cerr << "lsfg-vk: vkCreateSwapchainKHR hook entered"
+                << " (requested images=" << pCreateInfo->minImageCount
+                << ", extent=" << pCreateInfo->imageExtent.width << 'x'
+                << pCreateInfo->imageExtent.height
+                << ", usage=" << pCreateInfo->imageUsage
+                << ", present mode=" << pCreateInfo->presentMode << ").\n";
+        }
+
         auto it = deviceToInfo.find(device);
         if (it == deviceToInfo.end()) {
             Utils::logLimitN("swapMap", 5, "Device not found in map");
@@ -221,6 +234,16 @@ namespace {
         }
 
         auto res = Layer::ovkCreateSwapchainKHR(device, &createInfo, pAllocator, pSwapchain);
+        const auto resultLogIndex =
+            swapchainCreateResultLogCount.fetch_add(1, std::memory_order_relaxed);
+        if (resultLogIndex < 3 || res != VK_SUCCESS) {
+            std::cerr << "lsfg-vk: vkCreateSwapchainKHR next returned " << res
+                << " (requested images=" << pCreateInfo->minImageCount
+                << ", layer images=" << createInfo.minImageCount
+                << ", game present=" << pCreateInfo->presentMode
+                << ", layer present=" << createInfo.presentMode
+                << ", usage=" << createInfo.imageUsage << ").\n";
+        }
         if (res != VK_SUCCESS)
             return res;
 
@@ -263,6 +286,15 @@ namespace {
     VkResult myvkQueuePresentKHR(
             VkQueue queue,
             const VkPresentInfoKHR* pPresentInfo) noexcept {
+        if (!queuePresentHookLogged.exchange(true, std::memory_order_relaxed)) {
+            std::cerr << "lsfg-vk: vkQueuePresentKHR hook entered"
+                << " (swapchainCount=" << pPresentInfo->swapchainCount
+                << ", waitSemaphoreCount=" << pPresentInfo->waitSemaphoreCount << ").\n";
+        }
+
+        if (pPresentInfo->swapchainCount == 0 || pPresentInfo->pSwapchains == nullptr)
+            return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+
         auto it = swapchainToDeviceTable.find(*pPresentInfo->pSwapchains);
         if (it == swapchainToDeviceTable.end()) {
             Utils::logLimitN("swapMap", 5,
