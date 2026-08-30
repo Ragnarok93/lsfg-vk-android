@@ -21,6 +21,19 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             "Keep an explicit compatibility fallback for wrapper ICDs that do not expose the query",
         )
 
+    def test_game_side_ahb_descriptor_only_requests_actual_gpu_usage(self) -> None:
+        source = (ROOT / "src/mini/image.cpp").read_text(encoding="utf-8")
+        android_ctor = source.split("#ifdef __ANDROID__\nImage::Image", 1)[1]
+        descriptor = android_ctor.split("AHardwareBuffer_Desc ahbDesc", 1)[1].split("};", 1)[0]
+
+        self.assertIn("AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE", descriptor)
+        self.assertIn("AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT", descriptor)
+        self.assertNotIn(
+            "AHARDWAREBUFFER_USAGE_CPU_READ",
+            descriptor,
+            "The LSFG AHB path never CPU-locks these images; requiring CPU readability can make an otherwise valid GPU descriptor unallocatable on vendor gralloc implementations",
+        )
+
     def test_game_side_ahb_copies_transfer_external_queue_ownership(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertGreaterEqual(
