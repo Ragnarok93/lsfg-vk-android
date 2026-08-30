@@ -12,6 +12,7 @@
 #include <memory>
 #include <cstdint>
 #include <optional>
+#include <iostream>
 
 using namespace Mini;
 
