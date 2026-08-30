@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import re
 import unittest
 from pathlib import Path
 
@@ -32,6 +31,8 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         self.assertIn("VK_IMAGE_LAYOUT_GENERAL", source)
         self.assertIn("VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL", source)
         self.assertIn("VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL", source)
+        self.assertIn("copySwapchainToExternalAhb", source)
+        self.assertIn("copyExternalAhbToSwapchain", source)
 
     def test_android_pre_copy_has_real_completion_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -40,19 +41,19 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             source,
             "A zero-submit is not a completion wait and cannot synchronize the shared AHB across VkDevices",
         )
-        self.assertRegex(
-            source,
-            re.compile(r"Layer::ovkWaitForFences|Layer::ovkQueueWaitIdle"),
-            "Android AHB handoff must wait for the game-device copy before framegen consumes it",
-        )
+        self.assertIn("PFN_vkWaitForFences", source)
+        self.assertIn("submitAndWaitForAhbHandoff", source)
+        self.assertIn("waitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX)", source)
 
-    def test_generated_ahb_is_not_treated_as_present_src(self) -> None:
+    def test_generated_ahb_uses_external_ownership_copy_path(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        android = source.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
-        self.assertNotRegex(
-            android,
-            re.compile(r"copyImage\([^;]*out_n", re.DOTALL),
-            "Generated AHB output needs an external-ownership-aware copy helper, not swapchain copyImage semantics",
+        present = source.split("VkResult LsContext::present", 1)[1]
+        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        self.assertIn("copyExternalAhbToSwapchain", android_present)
+        self.assertNotIn(
+            "Utils::copyImage(",
+            android_present,
+            "Android generated AHB output must not use swapchain-only copyImage layout semantics",
         )
 
 
