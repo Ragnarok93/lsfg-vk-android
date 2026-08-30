@@ -1,0 +1,115 @@
+name: Apply isolated early GDPA fix
+
+on:
+  push:
+    branches:
+      - fix/android-early-gdpa-wsi-routing
+    paths:
+      - .github/workflows/apply-early-gdpa-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch Android WSI routing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/layer_android.cpp")
+          text = path.read_text(encoding="utf-8")
+
+          marker = '''bool deviceExtensionEnabled(const VkDeviceCreateInfo* createInfo, const char* extension) {
+              if (!createInfo || !createInfo->ppEnabledExtensionNames) return false;
+              for (uint32_t i = 0; i < createInfo->enabledExtensionCount; ++i) {
+                  const char* name = createInfo->ppEnabledExtensionNames[i];
+                  if (name && std::strcmp(name, extension) == 0) return true;
+              }
+              return false;
+          }
+          '''
+          helper = marker + '''
+          bool isDeviceWsiHook(const std::string& name) {
+              return name == "vkCreateSwapchainKHR"
+                  || name == "vkQueuePresentKHR"
+                  || name == "vkDestroySwapchainKHR";
+          }
+          '''
+          if "bool isDeviceWsiHook(const std::string& name)" not in text:
+              if marker not in text:
+                  raise SystemExit("deviceExtensionEnabled marker not found")
+              text = text.replace(marker, helper, 1)
+
+          old = '''    it = Hooks::hooks.find(name);
+              if (it != Hooks::hooks.end() && Config::activeConf.enable) {
+                  // Never advertise LSFG WSI hooks on helper devices, and never advertise
+                  // an extension command that the next entity reports as unavailable for
+                  // this exact logical device.  This is required by the loader contract.
+                  if (!tracked || (!dispatch.presentationDevice && name != "vkDestroyDevice"))
+                      return downstream ? downstream(device, pName) : nullptr;
+                  if (!downstream || !downstream(device, pName))
+                      return nullptr;
+                  logPresentationHookResolution("gdpa", name);
+                  return it->second;
+              }
+          '''
+          new = '''    it = Hooks::hooks.find(name);
+              if (it != Hooks::hooks.end() && Config::activeConf.enable) {
+                  // The loader may query GDPA while it is still constructing a logical
+                  // device's dispatch table, before storeDeviceDispatch() has published
+                  // our per-device snapshot.  Do not hand it a permanent downstream WSI
+                  // bypass in that window.  The exact device's downstream GDPA remains
+                  // the capability gate: helper devices without VK_KHR_swapchain return
+                  // NULL here, while presentation devices retain LSFG interception.
+                  if (!tracked && isDeviceWsiHook(name)) {
+                      if (!downstream || !downstream(device, pName))
+                          return nullptr;
+                      std::cerr << "lsfg-vk: runtime stage=gdpa-untracked-wsi-hook-resolved name="
+                                << name << "\\n";
+                      return it->second;
+                  }
+
+                  // Never advertise LSFG hooks on a helper device once its dispatch
+                  // identity is known, and never advertise an extension command that
+                  // the next entity reports as unavailable for this exact device.
+                  if (!tracked || (!dispatch.presentationDevice && name != "vkDestroyDevice"))
+                      return downstream ? downstream(device, pName) : nullptr;
+                  if (!downstream || !downstream(device, pName))
+                      return nullptr;
+                  logPresentationHookResolution("gdpa", name);
+                  return it->second;
+              }
+          '''
+          if "runtime stage=gdpa-untracked-wsi-hook-resolved name=" not in text:
+              if old not in text:
+                  raise SystemExit("GDPA hook block marker not found")
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          git diff --check
+          python3 tests/android_wsi_loader_bridge_test.py
+          git diff -- src/layer_android.cpp
+
+      - name: Commit implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- src/layer_android.cpp; then
+            echo "Source already patched"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/layer_android.cpp
+          git commit -m "fix(android): keep WSI hooks during early GDPA dispatch build"
+          git push origin HEAD:fix/android-early-gdpa-wsi-routing
