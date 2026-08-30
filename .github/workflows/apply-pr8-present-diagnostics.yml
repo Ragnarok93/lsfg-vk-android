@@ -19,7 +19,7 @@ jobs:
           ref: fix/pr8-present-diagnostics
           fetch-depth: 0
 
-      - name: Add diagnostics regression contract and confirm RED
+      - name: Add regression contract and confirm RED
         shell: bash
         run: |
           set -euo pipefail
@@ -28,29 +28,24 @@ jobs:
           path = Path('tests/android_ahb_portability_test.py')
           text = path.read_text(encoding='utf-8')
           anchor = '\n\nif __name__ == "__main__":\n'
-          method = r'''
-
-    def test_android_first_present_has_one_shot_framegen_stage_diagnostics(self) -> None:
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        present = source.split("VkResult LsContext::present", 1)[1]
-        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
-        self.assertIn("const bool firstPresentDiagnostic = this->frameIdx == 0;", android_present)
-        for marker in (
-            "runtime stage=first-present-enter",
-            "runtime stage=source-ahb-handoff-ready",
-            "runtime stage=framegen-dispatch-begin",
-            "runtime stage=framegen-dispatch-returned",
-            "runtime stage=framegen-idle-ready",
-            "runtime stage=generated-present-ready",
-            "runtime stage=first-present-cycle-ready",
-        ):
-            self.assertIn(marker, android_present)
-        self.assertGreaterEqual(
-            android_present.count("if (firstPresentDiagnostic)"),
-            6,
-            "Runtime milestones must be first-present gated rather than emitted every frame",
-        )
-'''
+          method = (
+              '\n\n    def test_android_first_present_has_one_shot_framegen_stage_diagnostics(self) -> None:\n'
+              '        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")\n'
+              '        present = source.split("VkResult LsContext::present", 1)[1]\n'
+              '        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]\n'
+              '        self.assertIn("const bool firstPresentDiagnostic = this->frameIdx == 0;", android_present)\n'
+              '        for marker in (\n'
+              '            "runtime stage=first-present-enter",\n'
+              '            "runtime stage=source-ahb-handoff-ready",\n'
+              '            "runtime stage=framegen-dispatch-begin",\n'
+              '            "runtime stage=framegen-dispatch-returned",\n'
+              '            "runtime stage=framegen-idle-ready",\n'
+              '            "runtime stage=generated-present-ready",\n'
+              '            "runtime stage=first-present-cycle-ready",\n'
+              '        ):\n'
+              '            self.assertIn(marker, android_present)\n'
+              '        self.assertGreaterEqual(android_present.count("if (firstPresentDiagnostic)"), 6)\n'
+          )
           if 'test_android_first_present_has_one_shot_framegen_stage_diagnostics' not in text:
               if anchor not in text:
                   raise SystemExit('test insertion anchor not found')
@@ -62,7 +57,7 @@ jobs:
           fi
           echo 'RED confirmed: post-context first-present milestones are absent'
 
-      - name: Add one-shot first-present and framegen milestones
+      - name: Add one-shot first-present milestones
         shell: bash
         run: |
           set -euo pipefail
@@ -70,53 +65,108 @@ jobs:
           from pathlib import Path
           path = Path('src/context.cpp')
           text = path.read_text(encoding='utf-8')
-
-          replacements = [
+          edits = [
               (
-                  '''#ifdef __ANDROID__\n    // Android path: AHardwareBuffer exchange between two VkDevices. Keep the\n''',
-                  '''#ifdef __ANDROID__\n    const bool firstPresentDiagnostic = this->frameIdx == 0;\n    if (firstPresentDiagnostic) {\n        std::cerr << "lsfg-vk: runtime stage=first-present-enter image=" << presentIdx\n                  << " multiplier=" << conf.multiplier\n                  << " performance=" << (conf.performance ? 1 : 0) << "\\n";\n    }\n\n    // Android path: AHardwareBuffer exchange between two VkDevices. Keep the\n'''
+                  '#ifdef __ANDROID__\n    // Android path: AHardwareBuffer exchange between two VkDevices. Keep the\n',
+                  '#ifdef __ANDROID__\n'
+                  '    const bool firstPresentDiagnostic = this->frameIdx == 0;\n'
+                  '    if (firstPresentDiagnostic) {\n'
+                  '        std::cerr << "lsfg-vk: runtime stage=first-present-enter image=" << presentIdx\n'
+                  '                  << " multiplier=" << conf.multiplier\n'
+                  '                  << " performance=" << (conf.performance ? 1 : 0) << "\\n";\n'
+                  '    }\n\n'
+                  '    // Android path: AHardwareBuffer exchange between two VkDevices. Keep the\n'
               ),
               (
-                  '''    submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,\n        gameRenderSemaphores2,\n        { pass.preCopySemaphores.at(1).handle() });\n\n    // 2. Tell framegen to generate intermediary frames. It acquires the input\n''',
-                  '''    submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,\n        gameRenderSemaphores2,\n        { pass.preCopySemaphores.at(1).handle() });\n    if (firstPresentDiagnostic)\n        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\\n";\n\n    // 2. Tell framegen to generate intermediary frames. It acquires the input\n'''
+                  '    submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,\n'
+                  '        gameRenderSemaphores2,\n'
+                  '        { pass.preCopySemaphores.at(1).handle() });\n\n'
+                  '    // 2. Tell framegen to generate intermediary frames. It acquires the input\n',
+                  '    submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,\n'
+                  '        gameRenderSemaphores2,\n'
+                  '        { pass.preCopySemaphores.at(1).handle() });\n'
+                  '    if (firstPresentDiagnostic)\n'
+                  '        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\\n";\n\n'
+                  '    // 2. Tell framegen to generate intermediary frames. It acquires the input\n'
               ),
               (
-                  '''    std::vector<int> noOutSems;\n    if (conf.performance)\n        LSFG_3_1P::presentContext(*this->lsfgCtxId, -1, noOutSems);\n    else\n        LSFG_3_1::presentContext(*this->lsfgCtxId, -1, noOutSems);\n\n    // 3. Ensure framegen's separate VkDevice has completed its release barriers\n''',
-                  '''    std::vector<int> noOutSems;\n    if (firstPresentDiagnostic) {\n        std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="\n                  << (conf.performance ? "performance" : "quality")\n                  << " generated=" << (conf.multiplier - 1) << "\\n";\n    }\n    if (conf.performance)\n        LSFG_3_1P::presentContext(*this->lsfgCtxId, -1, noOutSems);\n    else\n        LSFG_3_1::presentContext(*this->lsfgCtxId, -1, noOutSems);\n    if (firstPresentDiagnostic)\n        std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-returned\\n";\n\n    // 3. Ensure framegen's separate VkDevice has completed its release barriers\n'''
+                  '    std::vector<int> noOutSems;\n'
+                  '    if (conf.performance)\n'
+                  '        LSFG_3_1P::presentContext(*this->lsfgCtxId, -1, noOutSems);\n'
+                  '    else\n'
+                  '        LSFG_3_1::presentContext(*this->lsfgCtxId, -1, noOutSems);\n\n',
+                  '    std::vector<int> noOutSems;\n'
+                  '    if (firstPresentDiagnostic) {\n'
+                  '        std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="\n'
+                  '                  << (conf.performance ? "performance" : "quality")\n'
+                  '                  << " generated=" << (conf.multiplier - 1) << "\\n";\n'
+                  '    }\n'
+                  '    if (conf.performance)\n'
+                  '        LSFG_3_1P::presentContext(*this->lsfgCtxId, -1, noOutSems);\n'
+                  '    else\n'
+                  '        LSFG_3_1::presentContext(*this->lsfgCtxId, -1, noOutSems);\n'
+                  '    if (firstPresentDiagnostic)\n'
+                  '        std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-returned\\n";\n\n'
               ),
               (
-                  '''    if (conf.performance)\n        LSFG_3_1P::waitIdle();\n    else\n        LSFG_3_1::waitIdle();\n\n    // 4. Copy generated frames to swapchain images and present them.\n''',
-                  '''    if (conf.performance)\n        LSFG_3_1P::waitIdle();\n    else\n        LSFG_3_1::waitIdle();\n    if (firstPresentDiagnostic)\n        std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\\n";\n\n    // 4. Copy generated frames to swapchain images and present them.\n'''
+                  '    if (conf.performance)\n'
+                  '        LSFG_3_1P::waitIdle();\n'
+                  '    else\n'
+                  '        LSFG_3_1::waitIdle();\n\n'
+                  '    // 4. Copy generated frames to swapchain images and present them.\n',
+                  '    if (conf.performance)\n'
+                  '        LSFG_3_1P::waitIdle();\n'
+                  '    else\n'
+                  '        LSFG_3_1::waitIdle();\n'
+                  '    if (firstPresentDiagnostic)\n'
+                  '        std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\\n";\n\n'
+                  '    // 4. Copy generated frames to swapchain images and present them.\n'
               ),
               (
-                  '''        res = Layer::ovkQueuePresentKHR(queue, &presentInfo);\n        if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)\n            throw LSFG::vulkan_error(res, "Failed to present swapchain image");\n    }\n\n    // 5. Present the actual game frame after generated frames, unchanged from\n''',
-                  '''        res = Layer::ovkQueuePresentKHR(queue, &presentInfo);\n        if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)\n            throw LSFG::vulkan_error(res, "Failed to present swapchain image");\n        if (firstPresentDiagnostic && i == 0) {\n            std::cerr << "lsfg-vk: runtime stage=generated-present-ready image=" << imageIdx\n                      << " result=" << res << "\\n";\n        }\n    }\n\n    // 5. Present the actual game frame after generated frames, unchanged from\n'''
+                  '        res = Layer::ovkQueuePresentKHR(queue, &presentInfo);\n'
+                  '        if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)\n'
+                  '            throw LSFG::vulkan_error(res, "Failed to present swapchain image");\n'
+                  '    }\n\n'
+                  '    // 5. Present the actual game frame after generated frames, unchanged from\n',
+                  '        res = Layer::ovkQueuePresentKHR(queue, &presentInfo);\n'
+                  '        if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)\n'
+                  '            throw LSFG::vulkan_error(res, "Failed to present swapchain image");\n'
+                  '        if (firstPresentDiagnostic && i == 0) {\n'
+                  '            std::cerr << "lsfg-vk: runtime stage=generated-present-ready image=" << imageIdx\n'
+                  '                      << " result=" << res << "\\n";\n'
+                  '        }\n'
+                  '    }\n\n'
+                  '    // 5. Present the actual game frame after generated frames, unchanged from\n'
               ),
               (
-                  '''    auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);\n    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)\n        throw LSFG::vulkan_error(res, "Failed to present swapchain image");\n\n    this->frameIdx++;\n''',
-                  '''    auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);\n    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)\n        throw LSFG::vulkan_error(res, "Failed to present swapchain image");\n    if (firstPresentDiagnostic) {\n        std::cerr << "lsfg-vk: runtime stage=first-present-cycle-ready result=" << res\n                  << " generated=" << (conf.multiplier - 1) << "\\n";\n    }\n\n    this->frameIdx++;\n'''
+                  '    auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);\n'
+                  '    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)\n'
+                  '        throw LSFG::vulkan_error(res, "Failed to present swapchain image");\n\n'
+                  '    this->frameIdx++;\n',
+                  '    auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);\n'
+                  '    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)\n'
+                  '        throw LSFG::vulkan_error(res, "Failed to present swapchain image");\n'
+                  '    if (firstPresentDiagnostic) {\n'
+                  '        std::cerr << "lsfg-vk: runtime stage=first-present-cycle-ready result=" << res\n'
+                  '                  << " generated=" << (conf.multiplier - 1) << "\\n";\n'
+                  '    }\n\n'
+                  '    this->frameIdx++;\n'
               ),
           ]
-
-          for old, new in replacements:
+          for old, new in edits:
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f'expected exactly one production seam, found {count}: {old[:80]!r}')
+                  raise SystemExit(f'expected exactly one production seam, found {count}')
               text = text.replace(old, new, 1)
           path.write_text(text, encoding='utf-8')
           PY
 
-      - name: Confirm GREEN diagnostics contract
+      - name: Confirm GREEN and commit
         shell: bash
         run: |
           set -euo pipefail
           python3 tests/android_ahb_portability_test.py
           git diff --check
-
-      - name: Commit tested diagnostics
-        shell: bash
-        run: |
-          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/context.cpp tests/android_ahb_portability_test.py
