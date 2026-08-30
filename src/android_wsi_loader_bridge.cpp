@@ -20,6 +20,11 @@
 #endif
 
 #ifdef __ANDROID__
+extern "C" PFN_vkVoidFunction lsfg_layer_vkGetInstanceProcAddr_impl(
+    VkInstance instance, const char* pName);
+extern "C" PFN_vkVoidFunction lsfg_layer_vkGetDeviceProcAddr_impl(
+    VkDevice device, const char* pName);
+
 namespace {
 std::atomic<PFN_vkCreateSwapchainKHR> diagnosticCreateSwapchainTarget{nullptr};
 std::atomic<PFN_vkQueuePresentKHR> diagnosticQueuePresentTarget{nullptr};
@@ -74,7 +79,8 @@ bool shouldLogAcquisition(const char* resolver, const char* command, const void*
 }
 
 void logAcquire(const char* resolver, const char* command, VkDevice device,
-        PFN_vkVoidFunction returned, PFN_vkVoidFunction target) {
+        PFN_vkVoidFunction returned, PFN_vkVoidFunction target,
+        PFN_vkVoidFunction downstream) {
     const void* key = dispatchKey(device);
     if (!shouldLogAcquisition(resolver, command, key)) return;
     std::cerr << "LSFG_PROVENANCE acquire"
@@ -85,14 +91,17 @@ void logAcquire(const char* resolver, const char* command, VkDevice device,
               << " returned=0x" << std::hex << pointerValue(returned)
               << " returnedModule=" << moduleFor(returned)
               << " target=0x" << pointerValue(target)
-              << " module=" << moduleFor(target) << std::dec
+              << " targetModule=" << moduleFor(target)
+              << " downstream=0x" << pointerValue(downstream)
+              << " downstreamModule=" << moduleFor(downstream) << std::dec
               << " exe=" << processCmdline()
               << " pid=" << getpid()
               << " tid=" << currentTid()
               << '\n';
 }
 
-void logAcquireGipa(const char* command, PFN_vkVoidFunction returned, PFN_vkVoidFunction target) {
+void logAcquireGipa(const char* command, PFN_vkVoidFunction returned,
+        PFN_vkVoidFunction target, PFN_vkVoidFunction downstream) {
     if (!shouldLogAcquisition("gipa", command, nullptr)) return;
     std::cerr << "LSFG_PROVENANCE acquire"
               << " source=gipa"
@@ -102,7 +111,9 @@ void logAcquireGipa(const char* command, PFN_vkVoidFunction returned, PFN_vkVoid
               << " returned=0x" << std::hex << pointerValue(returned)
               << " returnedModule=" << moduleFor(returned)
               << " target=0x" << pointerValue(target)
-              << " module=" << moduleFor(target) << std::dec
+              << " targetModule=" << moduleFor(target)
+              << " downstream=0x" << pointerValue(downstream)
+              << " downstreamModule=" << moduleFor(downstream) << std::dec
               << " exe=" << processCmdline()
               << " pid=" << getpid()
               << " tid=" << currentTid()
@@ -121,6 +132,7 @@ VkResult diagnostic_vkCreateSwapchainKHR(
               << " target=0x" << std::hex << pointerValue(target)
               << " module=" << moduleFor(target) << std::dec
               << " exe=" << processCmdline()
+              << " pid=" << getpid()
               << " tid=" << currentTid() << '\n';
 
     if (pCreateInfo) {
@@ -158,6 +170,7 @@ VkResult diagnostic_vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPr
                   << " target=0x" << std::hex << pointerValue(target)
                   << " module=" << moduleFor(target) << std::dec
                   << " exe=" << processCmdline()
+                  << " pid=" << getpid()
                   << " tid=" << currentTid() << '\n';
     }
     if (detailed) {
@@ -194,13 +207,14 @@ void diagnostic_vkDestroySwapchainKHR(
               << " target=0x" << std::hex << pointerValue(target)
               << " module=" << moduleFor(target) << std::dec
               << " exe=" << processCmdline()
+              << " pid=" << getpid()
               << " tid=" << currentTid() << '\n';
     std::cerr << "LSFG_PROVENANCE destroy swapchain=" << swapchain << '\n';
     if (target) target(device, swapchain, pAllocator);
 }
 
-PFN_vkVoidFunction wrapWsiHook(const char* resolver, VkDevice device,
-        const char* pName, PFN_vkVoidFunction resolved) {
+PFN_vkVoidFunction wrapWsiHook(const char* resolver, VkInstance instance,
+        VkDevice device, const char* pName, PFN_vkVoidFunction resolved) {
     if (pName == nullptr || resolved == nullptr) return resolved;
 
     const auto createHook = Hooks::hooks.find("vkCreateSwapchainKHR");
@@ -209,8 +223,15 @@ PFN_vkVoidFunction wrapWsiHook(const char* resolver, VkDevice device,
         diagnosticCreateSwapchainTarget.store(
             reinterpret_cast<PFN_vkCreateSwapchainKHR>(resolved), std::memory_order_release);
         auto wrapper = reinterpret_cast<PFN_vkVoidFunction>(&diagnostic_vkCreateSwapchainKHR);
-        if (std::strcmp(resolver, "gipa") == 0) logAcquireGipa(pName, wrapper, resolved);
-        else logAcquire(resolver, pName, device, wrapper, resolved);
+        PFN_vkVoidFunction downstream = device != VK_NULL_HANDLE
+            ? Layer::ovkGetDeviceProcAddr(device, pName)
+            : Layer::ovkGetInstanceProcAddr(instance, pName);
+        std::cerr << "lsfg-vk: runtime stage=wsi-hook-resolved source=" << resolver
+                  << " name=" << pName << '\n';
+        if (std::strcmp(resolver, "gipa") == 0)
+            logAcquireGipa(pName, wrapper, resolved, downstream);
+        else
+            logAcquire(resolver, pName, device, wrapper, resolved, downstream);
         return wrapper;
     }
 
@@ -220,8 +241,15 @@ PFN_vkVoidFunction wrapWsiHook(const char* resolver, VkDevice device,
         diagnosticQueuePresentTarget.store(
             reinterpret_cast<PFN_vkQueuePresentKHR>(resolved), std::memory_order_release);
         auto wrapper = reinterpret_cast<PFN_vkVoidFunction>(&diagnostic_vkQueuePresentKHR);
-        if (std::strcmp(resolver, "gipa") == 0) logAcquireGipa(pName, wrapper, resolved);
-        else logAcquire(resolver, pName, device, wrapper, resolved);
+        PFN_vkVoidFunction downstream = device != VK_NULL_HANDLE
+            ? Layer::ovkGetDeviceProcAddr(device, pName)
+            : Layer::ovkGetInstanceProcAddr(instance, pName);
+        std::cerr << "lsfg-vk: runtime stage=wsi-hook-resolved source=" << resolver
+                  << " name=" << pName << '\n';
+        if (std::strcmp(resolver, "gipa") == 0)
+            logAcquireGipa(pName, wrapper, resolved, downstream);
+        else
+            logAcquire(resolver, pName, device, wrapper, resolved, downstream);
         return wrapper;
     }
 
@@ -231,8 +259,15 @@ PFN_vkVoidFunction wrapWsiHook(const char* resolver, VkDevice device,
         diagnosticDestroySwapchainTarget.store(
             reinterpret_cast<PFN_vkDestroySwapchainKHR>(resolved), std::memory_order_release);
         auto wrapper = reinterpret_cast<PFN_vkVoidFunction>(&diagnostic_vkDestroySwapchainKHR);
-        if (std::strcmp(resolver, "gipa") == 0) logAcquireGipa(pName, wrapper, resolved);
-        else logAcquire(resolver, pName, device, wrapper, resolved);
+        PFN_vkVoidFunction downstream = device != VK_NULL_HANDLE
+            ? Layer::ovkGetDeviceProcAddr(device, pName)
+            : Layer::ovkGetInstanceProcAddr(instance, pName);
+        std::cerr << "lsfg-vk: runtime stage=wsi-hook-resolved source=" << resolver
+                  << " name=" << pName << '\n';
+        if (std::strcmp(resolver, "gipa") == 0)
+            logAcquireGipa(pName, wrapper, resolved, downstream);
+        else
+            logAcquire(resolver, pName, device, wrapper, resolved, downstream);
         return wrapper;
     }
 
@@ -242,21 +277,33 @@ PFN_vkVoidFunction wrapWsiHook(const char* resolver, VkDevice device,
 #endif
 
 extern "C" __attribute__((visibility("default")))
-PFN_vkVoidFunction lsfg_vkGetInstanceProcAddrDiagnostic(VkInstance instance, const char* pName) {
-    const auto resolved = layer_vkGetInstanceProcAddr(instance, pName);
+PFN_vkVoidFunction layer_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
 #ifdef __ANDROID__
-    return wrapWsiHook("gipa", VK_NULL_HANDLE, pName, resolved);
+    const auto resolved = lsfg_layer_vkGetInstanceProcAddr_impl(instance, pName);
+    return wrapWsiHook("gipa", instance, VK_NULL_HANDLE, pName, resolved);
 #else
-    return resolved;
+    return nullptr;
 #endif
 }
 
 extern "C" __attribute__((visibility("default")))
-PFN_vkVoidFunction lsfg_vkGetDeviceProcAddrDiagnostic(VkDevice device, const char* pName) {
-    const auto resolved = layer_vkGetDeviceProcAddr(device, pName);
+PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
 #ifdef __ANDROID__
-    return wrapWsiHook("gdpa", device, pName, resolved);
+    const auto resolved = lsfg_layer_vkGetDeviceProcAddr_impl(device, pName);
+    return wrapWsiHook("gdpa", VK_NULL_HANDLE, device, pName, resolved);
 #else
-    return resolved;
+    return nullptr;
 #endif
+}
+
+// Keep explicitly named diagnostic aliases available for standalone loader
+// experiments, but the manifest intentionally remains on the production names.
+extern "C" __attribute__((visibility("default")))
+PFN_vkVoidFunction lsfg_vkGetInstanceProcAddrDiagnostic(VkInstance instance, const char* pName) {
+    return layer_vkGetInstanceProcAddr(instance, pName);
+}
+
+extern "C" __attribute__((visibility("default")))
+PFN_vkVoidFunction lsfg_vkGetDeviceProcAddrDiagnostic(VkDevice device, const char* pName) {
+    return layer_vkGetDeviceProcAddr(device, pName);
 }
