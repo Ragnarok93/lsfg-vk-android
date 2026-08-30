@@ -7,9 +7,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
-    def test_manifest_uses_production_layer_procaddr_entrypoints(self) -> None:
+    def test_manifest_uses_android_loader_compatible_api13_and_production_procaddr(self) -> None:
         manifest = json.loads((ROOT / "VkLayer_LS_frame_generation.json").read_text(encoding="utf-8"))
-        functions = manifest["layer"]["functions"]
+        layer_manifest = manifest["layer"]
+        functions = layer_manifest["functions"]
+
+        # GameNative's known-good Xclipse/Proton run used an API 1.3 layer
+        # manifest even though the application requested Vulkan 1.4.  With the
+        # otherwise-equivalent 1.4.313 manifest, the loader resolves our GDPA
+        # WSI hooks but the effective device dispatch bypasses them.  Keep the
+        # layer's advertised API at the minimum API the implementation actually
+        # requires so Android/Wine loaders retain the proven WSI dispatch path.
+        self.assertEqual(layer_manifest["api_version"], "1.3.0")
         self.assertEqual(functions["vkGetInstanceProcAddr"], "layer_vkGetInstanceProcAddr")
         self.assertEqual(functions["vkGetDeviceProcAddr"], "layer_vkGetDeviceProcAddr")
         self.assertNotIn("Diagnostic", functions["vkGetInstanceProcAddr"])
