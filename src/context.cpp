@@ -28,6 +28,229 @@
 #include <thread>
 #include <array>
 
+#ifdef __ANDROID__
+namespace {
+
+VkImageSubresourceRange colorSubresourceRange() {
+    return VkImageSubresourceRange{
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+}
+
+VkImageBlit fullImageBlit(uint32_t width, uint32_t height) {
+    return VkImageBlit{
+        .srcSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .srcOffsets = {
+            { 0, 0, 0 },
+            { static_cast<int32_t>(width), static_cast<int32_t>(height), 1 },
+        },
+        .dstSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .dstOffsets = {
+            { 0, 0, 0 },
+            { static_cast<int32_t>(width), static_cast<int32_t>(height), 1 },
+        },
+    };
+}
+
+// Copy the real game frame into an AHardwareBuffer-backed VkImage and release
+// ownership to the external queue family. The framegen VkDevice performs the
+// matching EXTERNAL -> compute-family acquire before reading the same AHB.
+void copySwapchainToExternalAhb(VkCommandBuffer buf,
+        VkImage swapchainImage, VkImage ahbImage,
+        uint32_t width, uint32_t height,
+        uint32_t graphicsFamily, bool firstUse) {
+    const auto range = colorSubresourceRange();
+    const VkImageMemoryBarrier acquireBarriers[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = swapchainImage,
+            .subresourceRange = range,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = 0,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = firstUse ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+            .dstQueueFamilyIndex = graphicsFamily,
+            .image = ahbImage,
+            .subresourceRange = range,
+        },
+    };
+    Layer::ovkCmdPipelineBarrier(buf,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+        0, nullptr, 0, nullptr,
+        static_cast<uint32_t>(std::size(acquireBarriers)), acquireBarriers);
+
+    const auto blit = fullImageBlit(width, height);
+    Layer::ovkCmdBlitImage(buf,
+        swapchainImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        ahbImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1, &blit, VK_FILTER_NEAREST);
+
+    const VkImageMemoryBarrier releaseBarriers[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = swapchainImage,
+            .subresourceRange = range,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = 0,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = graphicsFamily,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+            .image = ahbImage,
+            .subresourceRange = range,
+        },
+    };
+    Layer::ovkCmdPipelineBarrier(buf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+        0, nullptr, 0, nullptr,
+        static_cast<uint32_t>(std::size(releaseBarriers)), releaseBarriers);
+}
+
+// Acquire a generated AHB from framegen, copy it into an acquired swapchain
+// image, then release the AHB back to EXTERNAL for the next framegen cycle.
+void copyExternalAhbToSwapchain(VkCommandBuffer buf,
+        VkImage ahbImage, VkImage swapchainImage,
+        uint32_t width, uint32_t height,
+        uint32_t graphicsFamily) {
+    const auto range = colorSubresourceRange();
+    const VkImageMemoryBarrier acquireBarriers[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = 0,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+            .dstQueueFamilyIndex = graphicsFamily,
+            .image = ahbImage,
+            .subresourceRange = range,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = 0,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = swapchainImage,
+            .subresourceRange = range,
+        },
+    };
+    Layer::ovkCmdPipelineBarrier(buf,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+        0, nullptr, 0, nullptr,
+        static_cast<uint32_t>(std::size(acquireBarriers)), acquireBarriers);
+
+    const auto blit = fullImageBlit(width, height);
+    Layer::ovkCmdBlitImage(buf,
+        ahbImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        swapchainImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1, &blit, VK_FILTER_NEAREST);
+
+    const VkImageMemoryBarrier releaseBarriers[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            .dstAccessMask = 0,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = graphicsFamily,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+            .image = ahbImage,
+            .subresourceRange = range,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = swapchainImage,
+            .subresourceRange = range,
+        },
+    };
+    Layer::ovkCmdPipelineBarrier(buf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+        0, nullptr, 0, nullptr,
+        static_cast<uint32_t>(std::size(releaseBarriers)), releaseBarriers);
+}
+
+// AHardwareBuffer makes memory visible to both VkDevices, but it does not make
+// an unfinished queue submission visible. Attach a fence to the game-device
+// copy and wait on the host before framegen submits work on its separate device.
+void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuffer,
+        VkQueue queue, const std::vector<VkSemaphore>& waitSemaphores,
+        const std::vector<VkSemaphore>& signalSemaphores) {
+    const auto createFence = reinterpret_cast<PFN_vkCreateFence>(
+        Layer::ovkGetDeviceProcAddr(device, "vkCreateFence"));
+    const auto waitForFences = reinterpret_cast<PFN_vkWaitForFences>(
+        Layer::ovkGetDeviceProcAddr(device, "vkWaitForFences"));
+    const auto destroyFence = reinterpret_cast<PFN_vkDestroyFence>(
+        Layer::ovkGetDeviceProcAddr(device, "vkDestroyFence"));
+    if (createFence == nullptr || waitForFences == nullptr || destroyFence == nullptr)
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+            "Required fence functions unavailable for Android AHB handoff");
+
+    const VkFenceCreateInfo fenceInfo{
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+    };
+    VkFence fence{};
+    auto res = createFence(device, &fenceInfo, nullptr, &fence);
+    if (res != VK_SUCCESS || fence == VK_NULL_HANDLE)
+        throw LSFG::vulkan_error(res, "Failed to create Android AHB handoff fence");
+
+    try {
+        commandBuffer.submit(queue, waitSemaphores, signalSemaphores, fence);
+        res = waitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+    } catch (...) {
+        destroyFence(device, fence, nullptr);
+        throw;
+    }
+    destroyFence(device, fence, nullptr);
+
+    if (res != VK_SUCCESS)
+        throw LSFG::vulkan_error(res, "Failed waiting for Android AHB handoff copy");
+}
+
+} // namespace
+#endif
+
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages)
         : swapchain(swapchain), swapchainImages(swapchainImages),
@@ -75,8 +298,9 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
 #ifdef __ANDROID__
     // Android path: use AHardwareBuffer-backed images for sharing with framegen.
-    // Turnip/Mesa on Android doesn't support OPAQUE_FD export, so we use the
-    // AHB path (createContextFromAHB + presentContext with -1 + waitIdle).
+    // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL
+    // ownership around every shared-image access, so this path is valid on
+    // stock Android ICDs as well as wrapper/custom drivers.
 
     this->frame_0 = Mini::Image(info.device, info.physicalDevice,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -203,21 +427,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     auto& pass = this->passInfos.at(this->frameIdx % 8);
 
 #ifdef __ANDROID__
-    // Android path: synchronous frame generation using waitIdle()
-    // instead of OPAQUE_FD semaphore export which Turnip doesn't support.
+    // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
+    // PR #8 presentation sequence intact, but make the external-memory handoff
+    // explicit and synchronized instead of relying on Turnip-specific behavior.
 
-    // 1. copy swapchain image to frame_0/frame_1
-    //    Use a simple semaphore (no fd export) to synchronize the copy
+    // 1. Copy the game swapchain image into frame_0/frame_1, then release the
+    //    AHB to VK_QUEUE_FAMILY_EXTERNAL for framegen.
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
     pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
     pass.preCopyBuf.begin();
 
-    Utils::copyImage(pass.preCopyBuf.handle(),
+    copySwapchainToExternalAhb(pass.preCopyBuf.handle(),
         this->swapchainImages.at(presentIdx),
         this->frameIdx % 2 == 0 ? this->frame_0.handle() : this->frame_1.handle(),
         this->extent.width, this->extent.height,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        true, false);
+        info.queue.first, this->frameIdx < 2);
 
     pass.preCopyBuf.end();
 
@@ -226,37 +450,30 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
             .preCopySemaphores.at(1).handle());
 
-    // Submit the copy and wait for it to complete synchronously.
-    // On Android we need the copy to finish before calling presentContext
-    // because there's no FD-based cross-device semaphore to chain them.
-    pass.preCopyBuf.submit(info.queue.second,
+    // The AHB is shared memory, not implicit synchronization. Wait for the
+    // game-device release barrier/copy to complete before the framegen VkDevice
+    // performs its matching external acquire.
+    submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
         gameRenderSemaphores2,
         { pass.preCopySemaphores.at(1).handle() });
 
-    // Wait for the pre-copy to finish before telling framegen to start.
-    // This is a device-wide idle wait — heavier than semaphore-based sync
-    // but necessary because OPAQUE_FD is not available on Android.
-    Layer::ovkQueueSubmit(info.queue.second, 0, nullptr, VK_NULL_HANDLE);
-
-    // 2. Tell framegen to generate intermediary frames
-    //    presentContext(id, -1, {}) — no semaphore FDs, synchronous
-    std::vector<int> noOutSems;  // empty
+    // 2. Tell framegen to generate intermediary frames. It acquires the input
+    //    and output AHBs from EXTERNAL and releases them back to EXTERNAL.
+    std::vector<int> noOutSems;
     if (conf.performance)
         LSFG_3_1P::presentContext(*this->lsfgCtxId, -1, noOutSems);
     else
         LSFG_3_1::presentContext(*this->lsfgCtxId, -1, noOutSems);
 
-    // 3. Wait for framegen's GPU work to finish before reading output images.
-    //    framegen uses its own VkDevice internally, so we need waitIdle()
-    //    to ensure cross-device synchronization.
+    // 3. Ensure framegen's separate VkDevice has completed its release barriers
+    //    before the game device acquires generated AHBs for readback/blit.
     if (conf.performance)
         LSFG_3_1P::waitIdle();
     else
         LSFG_3_1::waitIdle();
 
-    // 4. Copy generated frames to swapchain images and present them
+    // 4. Copy generated frames to swapchain images and present them.
     for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); i++) {
-        // acquire next swapchain image
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
         auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, UINT64_MAX,
@@ -264,24 +481,23 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");
 
-        // copy output image to swapchain image
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.postCopyBufs.at(i) = Mini::CommandBuffer(info.device, this->cmdPool);
         pass.postCopyBufs.at(i).begin();
 
-        Utils::copyImage(pass.postCopyBufs.at(i).handle(),
+        copyExternalAhbToSwapchain(pass.postCopyBufs.at(i).handle(),
             this->out_n.at(i).handle(),
             this->swapchainImages.at(imageIdx),
             this->extent.width, this->extent.height,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-            false, true);
+            info.queue.first);
 
         pass.postCopyBufs.at(i).end();
         pass.postCopyBufs.at(i).submit(info.queue.second,
             { pass.acquireSemaphores.at(i).handle() },
             { pass.postCopySemaphores.at(i).handle() });
 
-        // present swapchain image
+        // Preserve PR #8's generated-frame present behavior. This is also the
+        // path that restored visible present/FPS accounting on-device.
         VkSemaphore postCopySem = pass.postCopySemaphores.at(i).handle();
         const VkPresentInfoKHR presentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -297,8 +513,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             throw LSFG::vulkan_error(res, "Failed to present swapchain image");
     }
 
-    // 5. present actual next frame (the real capture, not a generated one)
-    //    Wait for the last post-copy to finish
+    // 5. Present the actual game frame after generated frames, unchanged from
+    //    PR #8 so presentation cadence/reporting semantics remain intact.
     pass.prevPostCopySemaphores.at(conf.multiplier - 1 - 1) = Mini::Semaphore(info.device);
     VkSemaphore lastPostCopySem = pass.postCopySemaphores.at(conf.multiplier - 1 - 1).handle();
     const VkPresentInfoKHR finalPresentInfo{
