@@ -329,6 +329,22 @@ namespace {
                             !std::filesystem::exists(conf.config_file)
                           || conf.timestamp != std::filesystem::last_write_time(conf.config_file)
                     )) {
+                const std::string configFile = conf.config_file;
+                if (std::filesystem::exists(configFile)) {
+                    try {
+                        Config::updateConfig(configFile);
+                        Config::activeConf = Config::getConfig(Utils::getProcessName());
+                        std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
+                                  << Config::activeConf.multiplier
+                                  << " presentMode=" << Config::activeConf.e_present
+                                  << " enabled=" << (Config::activeConf.enable ? 1 : 0)
+                                  << "\n";
+                    } catch (const std::exception& e) {
+                        Utils::logLimitN("configReload", 5,
+                            "Failed to hot-reload configuration; requesting swapchain recreation:\n- "
+                            + std::string(e.what()));
+                    }
+                }
                 Layer::ovkQueuePresentKHR(queue, pPresentInfo);
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
