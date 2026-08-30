@@ -427,6 +427,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     auto& pass = this->passInfos.at(this->frameIdx % 8);
 
 #ifdef __ANDROID__
+    const bool firstPresentDiagnostic = this->frameIdx == 0;
+    if (firstPresentDiagnostic) {
+        std::cerr << "lsfg-vk: runtime stage=first-present-enter image=" << presentIdx
+                  << " multiplier=" << conf.multiplier
+                  << " performance=" << (conf.performance ? 1 : 0) << "\n";
+    }
+
     // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
     // PR #8 presentation sequence intact, but make the external-memory handoff
     // explicit and synchronized instead of relying on Turnip-specific behavior.
@@ -456,14 +463,23 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
         gameRenderSemaphores2,
         { pass.preCopySemaphores.at(1).handle() });
+    if (firstPresentDiagnostic)
+        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\n";
 
     // 2. Tell framegen to generate intermediary frames. It acquires the input
     //    and output AHBs from EXTERNAL and releases them back to EXTERNAL.
     std::vector<int> noOutSems;
+    if (firstPresentDiagnostic) {
+        std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
+                  << (conf.performance ? "performance" : "quality")
+                  << " generated=" << (conf.multiplier - 1) << "\n";
+    }
     if (conf.performance)
         LSFG_3_1P::presentContext(*this->lsfgCtxId, -1, noOutSems);
     else
         LSFG_3_1::presentContext(*this->lsfgCtxId, -1, noOutSems);
+    if (firstPresentDiagnostic)
+        std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-returned\n";
 
     // 3. Ensure framegen's separate VkDevice has completed its release barriers
     //    before the game device acquires generated AHBs for readback/blit.
@@ -471,6 +487,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         LSFG_3_1P::waitIdle();
     else
         LSFG_3_1::waitIdle();
+    if (firstPresentDiagnostic)
+        std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
 
     // 4. Copy generated frames to swapchain images and present them.
     for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); i++) {
@@ -511,6 +529,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to present swapchain image");
+        if (firstPresentDiagnostic && i == 0) {
+            std::cerr << "lsfg-vk: runtime stage=generated-present-ready image=" << imageIdx
+                      << " result=" << res << "\n";
+        }
     }
 
     // 5. Present the actual game frame after generated frames, unchanged from
@@ -528,6 +550,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
         throw LSFG::vulkan_error(res, "Failed to present swapchain image");
+    if (firstPresentDiagnostic) {
+        std::cerr << "lsfg-vk: runtime stage=first-present-cycle-ready result=" << res
+                  << " generated=" << (conf.multiplier - 1) << "\n";
+    }
 
     this->frameIdx++;
     return res;

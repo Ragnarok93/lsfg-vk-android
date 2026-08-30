@@ -80,5 +80,23 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             self.assertIn(marker, hooks)
 
 
+    def test_android_first_present_has_one_shot_framegen_stage_diagnostics(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        present = source.split("VkResult LsContext::present", 1)[1]
+        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        self.assertIn("const bool firstPresentDiagnostic = this->frameIdx == 0;", android_present)
+        for marker in (
+            "runtime stage=first-present-enter",
+            "runtime stage=source-ahb-handoff-ready",
+            "runtime stage=framegen-dispatch-begin",
+            "runtime stage=framegen-dispatch-returned",
+            "runtime stage=framegen-idle-ready",
+            "runtime stage=generated-present-ready",
+            "runtime stage=first-present-cycle-ready",
+        ):
+            self.assertIn(marker, android_present)
+        self.assertGreaterEqual(android_present.count("if (firstPresentDiagnostic)"), 6)
+
+
 if __name__ == "__main__":
     unittest.main()
