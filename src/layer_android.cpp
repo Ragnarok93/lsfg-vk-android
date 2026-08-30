@@ -207,6 +207,12 @@ bool deviceExtensionEnabled(const VkDeviceCreateInfo* createInfo, const char* ex
     return false;
 }
 
+bool isDeviceWsiHook(const std::string& name) {
+    return name == "vkCreateSwapchainKHR"
+        || name == "vkQueuePresentKHR"
+        || name == "vkDestroySwapchainKHR";
+}
+
 void logPresentationHookResolution(const char* resolver, const std::string& name) {
     if (name != "vkCreateSwapchainKHR" && name != "vkQueuePresentKHR") return;
 
@@ -437,9 +443,23 @@ PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName)
 
     it = Hooks::hooks.find(name);
     if (it != Hooks::hooks.end() && Config::activeConf.enable) {
-        // Never advertise LSFG WSI hooks on helper devices, and never advertise
-        // an extension command that the next entity reports as unavailable for
-        // this exact logical device.  This is required by the loader contract.
+        // The loader may query GDPA while it is still constructing a logical
+        // device's dispatch table, before storeDeviceDispatch() has published
+        // our per-device snapshot.  Do not hand it a permanent downstream WSI
+        // bypass in that window.  The exact device's downstream GDPA remains
+        // the capability gate: helper devices without VK_KHR_swapchain return
+        // NULL here, while presentation devices retain LSFG interception.
+        if (!tracked && isDeviceWsiHook(name)) {
+            if (!downstream || !downstream(device, pName))
+                return nullptr;
+            std::cerr << "lsfg-vk: runtime stage=gdpa-untracked-wsi-hook-resolved name="
+                      << name << "\n";
+            return it->second;
+        }
+
+        // Never advertise LSFG hooks on a helper device once its dispatch
+        // identity is known, and never advertise an extension command that
+        // the next entity reports as unavailable for this exact device.
         if (!tracked || (!dispatch.presentationDevice && name != "vkDestroyDevice"))
             return downstream ? downstream(device, pName) : nullptr;
         if (!downstream || !downstream(device, pName))
