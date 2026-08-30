@@ -169,6 +169,28 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             "Unsupported transfer usage must leave the game's swapchain untouched instead of failing creation",
         )
 
+    def test_android_wsi_resolution_and_first_present_hook_have_breadcrumbs(self) -> None:
+        layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
+        helper = layer.split("void logPresentationHookResolution", 1)[1].split(
+            "VkResult layer_vkCreateInstance", 1
+        )[0]
+        self.assertIn('"vkCreateSwapchainKHR"', helper)
+        self.assertIn('"vkQueuePresentKHR"', helper)
+        self.assertIn("runtime stage=", helper)
+
+        gipa = layer.split("PFN_vkVoidFunction layer_vkGetInstanceProcAddr", 1)[1].split(
+            "PFN_vkVoidFunction layer_vkGetDeviceProcAddr", 1
+        )[0]
+        gdpa = layer.split("PFN_vkVoidFunction layer_vkGetDeviceProcAddr", 1)[1].split(
+            "namespace Layer", 1
+        )[0]
+        self.assertIn('logPresentationHookResolution("gipa", name)', gipa)
+        self.assertIn('logPresentationHookResolution("gdpa", name)', gdpa)
+
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        present = hooks.split("VkResult myvkQueuePresentKHR", 1)[1]
+        self.assertIn("runtime stage=present-hook-enter", present)
+
 
 if __name__ == "__main__":
     unittest.main()
