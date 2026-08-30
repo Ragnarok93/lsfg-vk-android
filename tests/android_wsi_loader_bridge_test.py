@@ -42,6 +42,53 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertIn("runtime stage=first-present-enter", context)
         self.assertIn("runtime stage=first-present-cycle-ready", context)
 
+    def test_android_device_dispatch_is_per_logical_device(self) -> None:
+        layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
+
+        # Vulkan's distributed-dispatch contract requires device commands to be
+        # resolved for the exact logical device.  Android vendor wrappers may
+        # return device-specific thunks, so a process-global GDPA/PFN table is
+        # not sufficient when Proton creates helper and presentation devices.
+        for token in (
+            "struct DeviceDispatch",
+            "deviceDispatchTables",
+            "deviceDispatchKey",
+            "*reinterpret_cast<void* const*>(handle)",
+            "storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())",
+            "loadDeviceDispatch(device, &dispatch)",
+            "dispatch.presentationDevice",
+            "downstream(device, pName)",
+            "runtime stage=device-dispatch-ready presentation=1",
+        ):
+            self.assertIn(token, layer)
+
+        # The presentation dispatch snapshot must exist before the post-create
+        # hook obtains VkQueue/command buffers, otherwise those dispatchable
+        # handles can be initialized against a later device's function table.
+        snapshot = layer.index("storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())")
+        post_hook = layer.index("Hooks::hooks[\"vkCreateDevicePost\"]")
+        self.assertLess(snapshot, post_hook)
+
+    def test_wsi_hooks_are_not_advertised_for_helper_devices(self) -> None:
+        layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
+        self.assertIn("registerPassthroughDevice(*pDevice)", layer)
+        self.assertIn("!dispatch.presentationDevice", layer)
+        self.assertIn("if (!downstream || !downstream(device, pName))", layer)
+        self.assertIn("return nullptr;", layer)
+
+    def test_device_level_wrappers_use_dispatchable_handle_table(self) -> None:
+        layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
+        for signature in (
+            "VkResult ovkCreateSwapchainKHR(VkDevice a",
+            "VkResult ovkQueuePresentKHR(VkQueue a",
+            "VkResult ovkQueueSubmit(VkQueue a",
+            "VkResult ovkBeginCommandBuffer(VkCommandBuffer a",
+            "void ovkCmdPipelineBarrier(VkCommandBuffer a",
+        ):
+            start = layer.index(signature)
+            body = layer[start:start + 900]
+            self.assertIn("loadDeviceDispatch(a, &dispatch)", body)
+
     def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:
         source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")
         self.assertIn("lsfg_vkGetInstanceProcAddrDiagnostic", source)
