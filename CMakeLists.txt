@@ -42,6 +42,19 @@ file(GLOB SOURCES
 # devices as pass-through. The desktop layer keeps its existing behavior.
 if(ANDROID)
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/layer.cpp")
+
+    # Keep the manifest's proven production entrypoint names exactly unchanged,
+    # but route this diagnostic build through a transparent provenance shim.
+    # Only layer_android.cpp sees these renames; android_wsi_loader_bridge.cpp
+    # exports layer_vkGet*ProcAddr and forwards to these implementation symbols.
+    # This avoids changing the Android/Wine loader contract that is known to be
+    # sensitive on Xclipse while still letting us see which WSI pointer is
+    # returned and whether that exact trampoline is later invoked.
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/layer_android.cpp"
+        PROPERTIES COMPILE_DEFINITIONS
+        "layer_vkGetInstanceProcAddr=lsfg_layer_vkGetInstanceProcAddr_impl;layer_vkGetDeviceProcAddr=lsfg_layer_vkGetDeviceProcAddr_impl"
+    )
 endif()
 
 add_library(lsfg-vk SHARED ${SOURCES})
