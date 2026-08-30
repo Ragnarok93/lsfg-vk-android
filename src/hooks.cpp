@@ -179,6 +179,12 @@ namespace {
             const VkSwapchainCreateInfoKHR* pCreateInfo,
             const VkAllocationCallbacks* pAllocator,
             VkSwapchainKHR* pSwapchain) noexcept {
+        std::cerr << "lsfg-vk: init stage=swapchain-hook-enter requestedImages="
+                  << pCreateInfo->minImageCount
+                  << " extent=" << pCreateInfo->imageExtent.width << "x"
+                  << pCreateInfo->imageExtent.height
+                  << " presentMode=" << pCreateInfo->presentMode << "\n";
+
         auto it = deviceToInfo.find(device);
         if (it == deviceToInfo.end()) {
             Utils::logLimitN("swapMap", 5, "Device not found in map");
@@ -240,10 +246,13 @@ namespace {
                 throw LSFG::vulkan_error(res, "Failed to get swapchain images");
 
             swapchainToDeviceTable.emplace(*pSwapchain, device);
+            std::cerr << "lsfg-vk: init stage=ls-context-begin images=" << imageCount
+                      << " selectedPresentMode=" << createInfo.presentMode << "\n";
             swapchains.emplace(*pSwapchain, LsContext(
                 deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
                 swapchainImages
             ));
+            std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 
             std::cerr << "lsfg-vk: Swapchain context " <<
                     (createInfo.oldSwapchain ? "recreated" : "created")
@@ -252,6 +261,7 @@ namespace {
 
             Utils::resetLimitN("swapCtxCreate");
         } catch (const std::exception& e) {
+            std::cerr << "lsfg-vk: init stage=ls-context-failed error=" << e.what() << "\n";
             Utils::logLimitN("swapCtxCreate", 5,
                 "An error occurred while creating the swapchain wrapper:\n"
                 "- " + std::string(e.what()));
