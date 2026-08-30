@@ -76,6 +76,30 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertIn("if (!downstream || !downstream(device, pName))", layer)
         self.assertIn("return nullptr;", layer)
 
+    def test_untracked_swapchain_device_keeps_wsi_hooks_during_loader_dispatch_build(self) -> None:
+        layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
+        start = layer.index("PFN_vkVoidFunction layer_vkGetDeviceProcAddr")
+        body = layer[start:start + 2600]
+
+        # The Vulkan loader may query GDPA while it is still constructing a
+        # logical device's dispatch table. At that instant our per-device table
+        # can legitimately be empty. If we return the downstream WSI pointer in
+        # that window, the loader can cache a bypass forever even though later
+        # GDPA calls correctly resolve the LSFG hook. Preserve WSI interception
+        # whenever the exact device reports the command as available; helper
+        # devices remain safe because their downstream GDPA returns NULL for
+        # disabled VK_KHR_swapchain commands.
+        for token in (
+            "isDeviceWsiHook(name)",
+            "!tracked && isDeviceWsiHook(name)",
+            "runtime stage=gdpa-untracked-wsi-hook-resolved name=",
+        ):
+            self.assertIn(token, body)
+
+        early_wsi = body.index("!tracked && isDeviceWsiHook(name)")
+        generic_untracked_bypass = body.index("!tracked || (!dispatch.presentationDevice")
+        self.assertLess(early_wsi, generic_untracked_bypass)
+
     def test_device_level_wrappers_use_dispatchable_handle_table(self) -> None:
         layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
         for signature in (
