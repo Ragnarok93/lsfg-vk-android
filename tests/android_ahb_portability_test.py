@@ -123,10 +123,20 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
 
     def test_missing_ahb_extension_fails_open_without_breaking_game_device(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        extension_dispatch = hooks.split("namespace Layer {", 1)[1].split("namespace {", 1)[0]
+        self.assertIn("ovkEnumerateDeviceExtensionProperties", extension_dispatch)
+        self.assertIn("ovkGetInstanceProcAddr(layerInstance", extension_dispatch)
+        self.assertIn('"vkEnumerateDeviceExtensionProperties"', extension_dispatch)
+        self.assertIn(
+            "physicalDevice, nullptr, pPropertyCount, pProperties",
+            extension_dispatch,
+            "The capability probe must query the next Vulkan layer/ICD rather than recurse through this layer",
+        )
+
         device_pre = hooks.split("VkResult myvkCreateDevicePre", 1)[1].split(
             "VkResult myvkCreateDevicePost", 1
         )[0]
-        self.assertIn("ovkEnumerateDeviceExtensionProperties", device_pre)
+        self.assertIn("supportsDeviceExtension(physicalDevice", device_pre)
         self.assertIn("VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME", device_pre)
         self.assertIn("stage=ahb-extension-unavailable", device_pre)
         self.assertIn("Layer::ovkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice)", device_pre)
