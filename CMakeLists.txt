@@ -42,6 +42,11 @@ file(GLOB SOURCES
 # devices as pass-through. The desktop layer keeps its existing behavior.
 if(ANDROID)
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/layer.cpp")
+    # Keep the experimental procaddr bridge available in source control without
+    # changing the production Android shared object's symbol/link layout. The
+    # device-proven e53 runtime predates this translation unit, and production
+    # manifests use layer_vkGet{Instance,Device}ProcAddr directly.
+    list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/android_wsi_loader_bridge.cpp")
 endif()
 
 add_library(lsfg-vk SHARED ${SOURCES})
