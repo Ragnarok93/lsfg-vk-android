@@ -108,6 +108,19 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertLess(reload_pos, disable_pos)
         self.assertLess(disable_pos, context_lookup_pos)
 
+    def test_android_build_excludes_diagnostic_bridge_from_linked_layer(self) -> None:
+        cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+
+        # The device-proven e53 Android binary predates the diagnostic procaddr
+        # translation unit.  Production manifests no longer call those exports,
+        # but src/*.cpp globbing still links the bridge into the shared object.
+        # Keep the source available for diagnostics/tests while restoring the
+        # proven production Android link set for a clean device A/B.
+        self.assertIn(
+            'list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/android_wsi_loader_bridge.cpp")',
+            cmake,
+        )
+
     def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:
         source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")
         self.assertIn("lsfg_vkGetInstanceProcAddrDiagnostic", source)
