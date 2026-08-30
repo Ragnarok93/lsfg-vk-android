@@ -221,12 +221,16 @@ namespace {
             success &= initDeviceFunc(*pDevice, "vkDestroyImage", &next_vkDestroyImage);
             success &= initDeviceFunc(*pDevice, "vkGetImageMemoryRequirements", &next_vkGetImageMemoryRequirements);
             success &= initDeviceFunc(*pDevice, "vkBindImageMemory", &next_vkBindImageMemory);
-            success &= initDeviceFunc(*pDevice, "vkGetMemoryFdKHR", &next_vkGetMemoryFdKHR);
             success &= initDeviceFunc(*pDevice, "vkAllocateMemory", &next_vkAllocateMemory);
             success &= initDeviceFunc(*pDevice, "vkFreeMemory", &next_vkFreeMemory);
             success &= initDeviceFunc(*pDevice, "vkCreateSemaphore", &next_vkCreateSemaphore);
             success &= initDeviceFunc(*pDevice, "vkDestroySemaphore", &next_vkDestroySemaphore);
+#ifndef __ANDROID__
+            // Desktop Linux shares memory and semaphores through OPAQUE_FD.
+            // Android uses AHardwareBuffer and must not require these entrypoints.
+            success &= initDeviceFunc(*pDevice, "vkGetMemoryFdKHR", &next_vkGetMemoryFdKHR);
             success &= initDeviceFunc(*pDevice, "vkGetSemaphoreFdKHR", &next_vkGetSemaphoreFdKHR);
+#endif
 #ifdef __ANDROID__
             // AHB function is optional — not all ICDs (e.g. Vortek wrapper) support it.
             // If unavailable, the AHB image path will fail at point-of-use, but
