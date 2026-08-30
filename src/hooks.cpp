@@ -20,14 +20,61 @@
 
 using namespace Hooks;
 
+static VkInstance layerInstance{};
+
+namespace Layer {
+    VkResult ovkEnumerateDeviceExtensionProperties(
+            VkPhysicalDevice physicalDevice,
+            uint32_t* pPropertyCount,
+            VkExtensionProperties* pProperties) {
+        if (layerInstance == VK_NULL_HANDLE)
+            return VK_ERROR_INITIALIZATION_FAILED;
+
+        auto enumerateDeviceExtensions =
+            reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+                ovkGetInstanceProcAddr(layerInstance,
+                    "vkEnumerateDeviceExtensionProperties"));
+        if (enumerateDeviceExtensions == nullptr)
+            return VK_ERROR_INITIALIZATION_FAILED;
+
+        return enumerateDeviceExtensions(
+            physicalDevice, nullptr, pPropertyCount, pProperties);
+    }
+}
+
 namespace {
 
-    VkInstance layerInstance{};
+    bool supportsDeviceExtension(VkPhysicalDevice physicalDevice, const char* extensionName) {
+        uint32_t count{};
+        auto res = Layer::ovkEnumerateDeviceExtensionProperties(
+            physicalDevice, &count, nullptr);
+        if (res != VK_SUCCESS || count == 0)
+            return false;
+
+        std::vector<VkExtensionProperties> extensions(count);
+        res = Layer::ovkEnumerateDeviceExtensionProperties(
+            physicalDevice, &count, extensions.data());
+        if (res != VK_SUCCESS)
+            return false;
+        extensions.resize(count);
+
+        return std::any_of(extensions.begin(), extensions.end(),
+            [extensionName](const VkExtensionProperties& extension) {
+                return std::string(extension.extensionName) == extensionName;
+            });
+    }
 
     VkResult myvkCreateInstance(
             const VkInstanceCreateInfo* pCreateInfo,
             const VkAllocationCallbacks* pAllocator,
             VkInstance* pInstance) {
+#ifdef __ANDROID__
+        // The Android game-side AHB path does not consume any of the desktop
+        // external-memory capability instance extensions. Preserve the game's
+        // instance extension list exactly so promoted/omitted KHR aliases on a
+        // stock ICD cannot make an otherwise valid instance creation fail.
+        auto res = Layer::ovkCreateInstance(pCreateInfo, pAllocator, pInstance);
+#else
         auto extensions = Utils::addExtensions(
             pCreateInfo->ppEnabledExtensionNames,
             pCreateInfo->enabledExtensionCount,
@@ -45,6 +92,7 @@ namespace {
             throw std::runtime_error(
                 "Required Vulkan instance extensions are not present."
                 "Your GPU driver is not supported.");
+#endif
         if (res == VK_SUCCESS)
             layerInstance = *pInstance;
         return res;
@@ -58,10 +106,16 @@ namespace {
             const VkAllocationCallbacks* pAllocator,
             VkDevice* pDevice) {
 #ifdef __ANDROID__
-        // The Android exchange is AHardwareBuffer-based. Do not force the
-        // desktop OPAQUE_FD memory/semaphore extensions onto the game's device:
-        // Mali/Xclipse drivers may legitimately omit those extensions even when
-        // their AHB path is fully usable.
+        // AHB is required by this Android exchange path, but LSFG must never
+        // turn a missing optional capability into failure of the game's own
+        // Vulkan device. Probe first and fail open to the unmodified create info.
+        const bool ahbSupported = supportsDeviceExtension(physicalDevice,
+            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+        if (!ahbSupported) {
+            std::cerr << "lsfg-vk: init stage=ahb-extension-unavailable; "
+                         "creating game device without LSFG AHB augmentation\n";
+            return Layer::ovkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+        }
         auto extensions = Utils::addExtensions(
             pCreateInfo->ppEnabledExtensionNames,
             pCreateInfo->enabledExtensionCount,
@@ -95,10 +149,17 @@ namespace {
             VkDeviceCreateInfo* pCreateInfo,
             const VkAllocationCallbacks*,
             VkDevice* pDevice) {
+#ifdef __ANDROID__
+        const bool androidAhbSupported = supportsDeviceExtension(physicalDevice,
+            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+#else
+        const bool androidAhbSupported = true;
+#endif
         deviceToInfo.emplace(*pDevice, DeviceInfo {
             .device = *pDevice,
             .physicalDevice = physicalDevice,
-            .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT)
+            .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
+            .androidAhbSupported = androidAhbSupported
         });
         return VK_SUCCESS;
     }
@@ -179,6 +240,12 @@ namespace {
             const VkSwapchainCreateInfoKHR* pCreateInfo,
             const VkAllocationCallbacks* pAllocator,
             VkSwapchainKHR* pSwapchain) noexcept {
+        std::cerr << "lsfg-vk: init stage=swapchain-hook-enter requestedImages="
+                  << pCreateInfo->minImageCount
+                  << " extent=" << pCreateInfo->imageExtent.width << "x"
+                  << pCreateInfo->imageExtent.height
+                  << " presentMode=" << pCreateInfo->presentMode << "\n";
+
         auto it = deviceToInfo.find(device);
         if (it == deviceToInfo.end()) {
             Utils::logLimitN("swapMap", 5, "Device not found in map");
@@ -187,11 +254,41 @@ namespace {
         Utils::resetLimitN("swapMap");
         auto& deviceInfo = it->second;
 
+#ifdef __ANDROID__
+        if (!deviceInfo.androidAhbSupported) {
+            Utils::logLimitN("swapAhb", 5,
+                "init stage=ahb-extension-unavailable; preserving original swapchain");
+            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+        }
+#endif
+
+        VkSurfaceCapabilitiesKHR surfaceCapabilities{};
+        auto surfaceRes = Layer::ovkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+            deviceInfo.physicalDevice, pCreateInfo->surface, &surfaceCapabilities);
+        if (surfaceRes != VK_SUCCESS) {
+            Utils::logLimitN("swapCaps", 5,
+                "init stage=swapchain-capabilities-unavailable; preserving original swapchain");
+            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+        }
+
+        constexpr VkImageUsageFlags requiredTransferUsage =
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if ((surfaceCapabilities.supportedUsageFlags & requiredTransferUsage)
+                != requiredTransferUsage) {
+            std::cerr << "lsfg-vk: init stage=swapchain-unsupported-usage supportedUsage="
+                      << surfaceCapabilities.supportedUsageFlags
+                      << " requiredUsage=" << requiredTransferUsage
+                      << "; preserving original swapchain\n";
+            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+        }
+
         VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;
-        const auto maxImages = Utils::getMaxImageCount(
-            deviceInfo.physicalDevice, pCreateInfo->surface);
-        createInfo.minImageCount = createInfo.minImageCount + 1
-            + static_cast<uint32_t>(deviceInfo.queue.first);
+        const uint32_t maxImages = surfaceCapabilities.maxImageCount == 0
+            ? UINT32_MAX : surfaceCapabilities.maxImageCount;
+        // LSFG needs one additional image available while the game's acquired
+        // image is being transformed. Queue-family numbering is unrelated and
+        // is vendor-defined, so it must not influence swapchain sizing.
+        createInfo.minImageCount = pCreateInfo->minImageCount + 1;
         if (createInfo.minImageCount > maxImages) {
             createInfo.minImageCount = maxImages;
             Utils::logLimitN("swapCount", 10,
@@ -205,8 +302,7 @@ namespace {
             Utils::resetLimitN("swapCount");
         }
 
-        createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        createInfo.imageUsage |= requiredTransferUsage;
 
         const auto configuredPresentMode = Config::activeConf.e_present;
         createInfo.presentMode = choosePresentMode(
@@ -240,10 +336,13 @@ namespace {
                 throw LSFG::vulkan_error(res, "Failed to get swapchain images");
 
             swapchainToDeviceTable.emplace(*pSwapchain, device);
+            std::cerr << "lsfg-vk: init stage=ls-context-begin images=" << imageCount
+                      << " selectedPresentMode=" << createInfo.presentMode << "\n";
             swapchains.emplace(*pSwapchain, LsContext(
                 deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
                 swapchainImages
             ));
+            std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 
             std::cerr << "lsfg-vk: Swapchain context " <<
                     (createInfo.oldSwapchain ? "recreated" : "created")
@@ -252,6 +351,7 @@ namespace {
 
             Utils::resetLimitN("swapCtxCreate");
         } catch (const std::exception& e) {
+            std::cerr << "lsfg-vk: init stage=ls-context-failed error=" << e.what() << "\n";
             Utils::logLimitN("swapCtxCreate", 5,
                 "An error occurred while creating the swapchain wrapper:\n"
                 "- " + std::string(e.what()));
@@ -319,6 +419,22 @@ namespace {
                             !std::filesystem::exists(conf.config_file)
                           || conf.timestamp != std::filesystem::last_write_time(conf.config_file)
                     )) {
+                const std::string configFile = conf.config_file;
+                if (std::filesystem::exists(configFile)) {
+                    try {
+                        Config::updateConfig(configFile);
+                        Config::activeConf = Config::getConfig(Utils::getProcessName());
+                        std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
+                                  << Config::activeConf.multiplier
+                                  << " presentMode=" << Config::activeConf.e_present
+                                  << " enabled=" << (Config::activeConf.enable ? 1 : 0)
+                                  << "\n";
+                    } catch (const std::exception& e) {
+                        Utils::logLimitN("configReload", 5,
+                            "Failed to hot-reload configuration; requesting swapchain recreation:\n- "
+                            + std::string(e.what()));
+                    }
+                }
                 Layer::ovkQueuePresentKHR(queue, pPresentInfo);
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }

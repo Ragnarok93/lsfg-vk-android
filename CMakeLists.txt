@@ -38,6 +38,12 @@ file(GLOB SOURCES
     "src/*.cpp"
 )
 
+# Android has a dedicated layer entrypoint that treats non-presenting Vulkan
+# devices as pass-through. The desktop layer keeps its existing behavior.
+if(ANDROID)
+    list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/layer.cpp")
+endif()
+
 add_library(lsfg-vk SHARED ${SOURCES})
 
 # target
@@ -51,7 +57,14 @@ target_link_libraries(lsfg-vk PRIVATE
     lsfg-vk-framegen)
 
 if(ANDROID)
-    target_link_libraries(lsfg-vk PRIVATE android)
+    # AHardwareBuffer_allocate/release are exported by libnativewindow (NDK API 26+).
+    # Link that narrow NDK surface directly instead of libandroid.so. In GameNative's
+    # Bionic guest, libandroid.so pulls Android framework dependencies through a
+    # guest-first LD_LIBRARY_PATH; on Samsung this can make /system/lib64/libsqlite.so
+    # bind to the container's incompatible OpenSSL and abort layer loading before
+    # Vulkan interception begins. libnativewindow provides the exact AHB symbols
+    # LSFG needs without that unrelated framework dependency chain.
+    target_link_libraries(lsfg-vk PRIVATE nativewindow)
     target_include_directories(lsfg-vk PRIVATE "${ANDROID_NDK}/sources/android/native_app_glue")
 endif()
 
@@ -70,18 +83,18 @@ if(LSFGVK_EXCESS_DEBUG)
         -Weverything
         # disable compat c++ flags
         -Wno-pre-c++20-compat-pedantic
-        -Wno-pre-c++17-compat
+        -Wno-pre-c++17-compat-pedantic
         -Wno-c++98-compat-pedantic
         -Wno-c++98-compat
         # disable other flags
         -Wno-missing-designated-field-initializers
-        -Wno-shadow         # allow shadowing
-        -Wno-switch-enum    # ignore missing cases
-        -Wno-switch-default # ignore missing default
-        -Wno-padded         # ignore automatic padding
-        -Wno-exit-time-destructors # allow globals
-        -Wno-global-constructors   # allow globals
-        -Wno-cast-function-type-strict # for vulkan
+        -Wno-shadow
+        -Wno-switch-enum
+        -Wno-switch-default
+        -Wno-padded
+        -Wno-exit-time-destructors
+        -Wno-global-constructors
+        -Wno-cast-function-type-strict
     )
 
     set_target_properties(lsfg-vk PROPERTIES

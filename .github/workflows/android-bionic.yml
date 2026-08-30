@@ -29,6 +29,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Run Android AHB portability contract tests
+        run: python3 tests/android_ahb_portability_test.py
+
       - name: Install Vulkan headers
         run: |
           sudo apt-get update

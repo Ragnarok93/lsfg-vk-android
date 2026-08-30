@@ -15,6 +15,7 @@
 #include <exception>
 #include <iostream>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 namespace {
@@ -81,6 +82,16 @@ namespace {
             return false;
         }
         return true;
+    }
+
+    bool deviceExtensionEnabled(const VkDeviceCreateInfo* createInfo, const char* extensionName) {
+        if (!createInfo || !extensionName) return false;
+        for (uint32_t i = 0; i < createInfo->enabledExtensionCount; ++i) {
+            const char* enabled = createInfo->ppEnabledExtensionNames[i];
+            if (enabled && std::strcmp(enabled, extensionName) == 0)
+                return true;
+        }
+        return false;
     }
 }
 
@@ -193,6 +204,9 @@ namespace {
             if (!Config::activeConf.enable)
                 return next_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
 
+            const bool swapchainEnabled = deviceExtensionEnabled(
+                pCreateInfo, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
             // create device
             try {
                 auto* createDeviceHook = reinterpret_cast<PFN_vkCreateDevice>(
@@ -204,13 +218,12 @@ namespace {
                 throw LSFG::rethrowable_error("Failed to create Vulkan device", e);
             }
 
-            // get relevant function pointers from the next layer
+            // Core functions are mandatory for every device. Presentation
+            // entry points are only legal to require when VK_KHR_swapchain is
+            // enabled for this particular logical device. Vulkan applications
+            // commonly create probe/compute devices without presentation.
             bool success = true;
             success &= initDeviceFunc(*pDevice, "vkDestroyDevice", &next_vkDestroyDevice);
-            success &= initDeviceFunc(*pDevice, "vkCreateSwapchainKHR", &next_vkCreateSwapchainKHR);
-            success &= initDeviceFunc(*pDevice, "vkQueuePresentKHR", &next_vkQueuePresentKHR);
-            success &= initDeviceFunc(*pDevice, "vkDestroySwapchainKHR", &next_vkDestroySwapchainKHR);
-            success &= initDeviceFunc(*pDevice, "vkGetSwapchainImagesKHR", &next_vkGetSwapchainImagesKHR);
             success &= initDeviceFunc(*pDevice, "vkAllocateCommandBuffers", &next_vkAllocateCommandBuffers);
             success &= initDeviceFunc(*pDevice, "vkFreeCommandBuffers", &next_vkFreeCommandBuffers);
             success &= initDeviceFunc(*pDevice, "vkBeginCommandBuffer", &next_vkBeginCommandBuffer);
@@ -221,26 +234,44 @@ namespace {
             success &= initDeviceFunc(*pDevice, "vkDestroyImage", &next_vkDestroyImage);
             success &= initDeviceFunc(*pDevice, "vkGetImageMemoryRequirements", &next_vkGetImageMemoryRequirements);
             success &= initDeviceFunc(*pDevice, "vkBindImageMemory", &next_vkBindImageMemory);
-            success &= initDeviceFunc(*pDevice, "vkGetMemoryFdKHR", &next_vkGetMemoryFdKHR);
             success &= initDeviceFunc(*pDevice, "vkAllocateMemory", &next_vkAllocateMemory);
             success &= initDeviceFunc(*pDevice, "vkFreeMemory", &next_vkFreeMemory);
             success &= initDeviceFunc(*pDevice, "vkCreateSemaphore", &next_vkCreateSemaphore);
             success &= initDeviceFunc(*pDevice, "vkDestroySemaphore", &next_vkDestroySemaphore);
-            success &= initDeviceFunc(*pDevice, "vkGetSemaphoreFdKHR", &next_vkGetSemaphoreFdKHR);
 #ifdef __ANDROID__
-            // AHB function is optional — not all ICDs (e.g. Vortek wrapper) support it.
-            // If unavailable, the AHB image path will fail at point-of-use, but
-            // the layer still initializes so it can fall back gracefully.
-            initDeviceFunc(*pDevice, "vkGetAndroidHardwareBufferPropertiesANDROID", &next_vkGetAndroidHardwareBufferPropertiesANDROID);
+            // Android uses AHardwareBuffer interop. Desktop OPAQUE_FD entry
+            // points are neither requested nor required on this path.
+            success &= initDeviceFunc(*pDevice,
+                "vkGetAndroidHardwareBufferPropertiesANDROID",
+                &next_vkGetAndroidHardwareBufferPropertiesANDROID);
+#else
+            success &= initDeviceFunc(*pDevice, "vkGetMemoryFdKHR", &next_vkGetMemoryFdKHR);
+            success &= initDeviceFunc(*pDevice, "vkGetSemaphoreFdKHR", &next_vkGetSemaphoreFdKHR);
 #endif
             success &= initDeviceFunc(*pDevice, "vkGetDeviceQueue", &next_vkGetDeviceQueue);
             success &= initDeviceFunc(*pDevice, "vkQueueSubmit", &next_vkQueueSubmit);
             success &= initDeviceFunc(*pDevice, "vkCmdPipelineBarrier", &next_vkCmdPipelineBarrier);
             success &= initDeviceFunc(*pDevice, "vkCmdBlitImage", &next_vkCmdBlitImage);
-            success &= initDeviceFunc(*pDevice, "vkAcquireNextImageKHR", &next_vkAcquireNextImageKHR);
+
+            if (swapchainEnabled) {
+                success &= initDeviceFunc(*pDevice, "vkCreateSwapchainKHR", &next_vkCreateSwapchainKHR);
+                success &= initDeviceFunc(*pDevice, "vkQueuePresentKHR", &next_vkQueuePresentKHR);
+                success &= initDeviceFunc(*pDevice, "vkDestroySwapchainKHR", &next_vkDestroySwapchainKHR);
+                success &= initDeviceFunc(*pDevice, "vkGetSwapchainImagesKHR", &next_vkGetSwapchainImagesKHR);
+                success &= initDeviceFunc(*pDevice, "vkAcquireNextImageKHR", &next_vkAcquireNextImageKHR);
+            } else {
+                next_vkCreateSwapchainKHR = nullptr;
+                next_vkQueuePresentKHR = nullptr;
+                next_vkDestroySwapchainKHR = nullptr;
+                next_vkGetSwapchainImagesKHR = nullptr;
+                next_vkAcquireNextImageKHR = nullptr;
+                std::cerr << "lsfg-vk: logical device has no VK_KHR_swapchain; "
+                             "passing through without presentation hooks.\n";
+            }
+
             if (!success)
                 throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
-                    "Failed to get device function pointers");
+                    "Failed to get required device function pointers");
 
             auto postCreateDeviceHook = reinterpret_cast<PFN_vkCreateDevice>(
                 Hooks::hooks["vkCreateDevicePost"]);
@@ -248,7 +279,8 @@ namespace {
             if (res != VK_SUCCESS)
                 throw LSFG::vulkan_error(res, "Unknown error");
 
-            std::cerr << "lsfg-vk: Vulkan device layer initialized successfully.\n";
+            std::cerr << "lsfg-vk: Vulkan device layer initialized successfully"
+                      << " (swapchain=" << (swapchainEnabled ? 1 : 0) << ").\n";
         } catch (const std::exception& e) {
             std::cerr << "lsfg-vk: An error occurred while initializing the Vulkan device layer:\n";
             std::cerr << "- " << e.what() << '\n';
@@ -289,8 +321,14 @@ PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName)
         return it->second;
 
     it = Hooks::hooks.find(name);
-    if (it != Hooks::hooks.end() && Config::activeConf.enable)
+    if (it != Hooks::hooks.end() && Config::activeConf.enable) {
+        // Preserve the Vulkan loader's extension gating. A layer must not make
+        // an extension command appear supported when the next device chain
+        // reports it as unavailable for this logical device.
+        if (!next_vkGetDeviceProcAddr(device, pName))
+            return nullptr;
         return it->second;
+    }
 
     return next_vkGetDeviceProcAddr(device, pName);
 }
@@ -416,7 +454,7 @@ namespace Layer {
             const VkCommandPoolCreateInfo* pCreateInfo,
             const VkAllocationCallbacks* pAllocator,
             VkCommandPool* pCommandPool) {
-        return  next_vkCreateCommandPool(device, pCreateInfo, pAllocator, pCommandPool);
+        return next_vkCreateCommandPool(device, pCreateInfo, pAllocator, pCommandPool);
     }
     void ovkDestroyCommandPool(
             VkDevice device,
