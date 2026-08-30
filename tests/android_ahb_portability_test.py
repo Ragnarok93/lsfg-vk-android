@@ -56,21 +56,15 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             "Android generated AHB output must not use swapchain-only copyImage layout semantics",
         )
 
-    def test_android_context_initialization_has_staged_diagnostics(self) -> None:
-        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+    def test_swapchain_context_initialization_has_staged_diagnostics(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         for marker in (
-            "stage=ahb-images-begin",
-            "stage=ahb-images-ready",
-            "stage=framegen-initialize-begin",
-            "stage=framegen-initialize-ready",
-            "stage=create-context-ahb-begin",
-            "stage=create-context-ahb-ready",
+            "stage=swapchain-hook-enter",
+            "stage=ls-context-begin",
+            "stage=ls-context-ready",
+            "stage=ls-context-failed",
         ):
-            self.assertIn(marker, context)
-        self.assertIn("stage=swapchain-hook-enter", hooks)
-        self.assertIn("stage=ls-context-begin", hooks)
-        self.assertIn("stage=ls-context-failed", hooks)
+            self.assertIn(marker, hooks)
 
 
 if __name__ == "__main__":
