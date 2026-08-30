@@ -14,6 +14,7 @@
 #include "mini/semaphore.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -68,6 +69,35 @@ private:
 
     Mini::CommandPool cmdPool;
     uint64_t frameIdx{0};
+
+#ifdef __ANDROID__
+    struct RuntimeMetrics {
+        using Clock = std::chrono::steady_clock;
+
+        Clock::time_point windowStart{Clock::now()};
+        Clock::time_point lastSourcePresent{};
+        bool hasLastSourcePresent{false};
+
+        uint64_t windowSourceFrames{0};
+        uint64_t windowGeneratedFrames{0};
+        uint64_t windowSourcePresentFailures{0};
+        uint64_t windowGeneratedPresentFailures{0};
+        uint64_t totalSourceFrames{0};
+        uint64_t totalGeneratedFrames{0};
+        uint64_t totalSourcePresentFailures{0};
+        uint64_t totalGeneratedPresentFailures{0};
+
+        double windowCycleMs{0.0};
+        double windowCycleMaxMs{0.0};
+        double windowHandoffMs{0.0};
+        double windowDispatchMs{0.0};
+        double windowWaitIdleMs{0.0};
+        double windowGeneratedPresentMs{0.0};
+        double windowSourceIntervalMs{0.0};
+        double windowSourceIntervalMaxMs{0.0};
+        uint64_t windowSourceIntervals{0};
+    } runtimeMetrics;
+#endif
 
     struct RenderPassInfo {
         Mini::CommandBuffer preCopyBuf; // copy from swapchain image to frame_0/frame_1
