@@ -29,6 +29,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Run Android layer contract tests
+        run: python3 tests/android_layer_contract_test.py
+
       - name: Install Vulkan headers
         run: |
           sudo apt-get update
