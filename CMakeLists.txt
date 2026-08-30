@@ -64,7 +64,9 @@ if(ANDROID)
     # bind to the container's incompatible OpenSSL and abort layer loading before
     # Vulkan interception begins. libnativewindow provides the exact AHB symbols
     # LSFG needs without that unrelated framework dependency chain.
-    target_link_libraries(lsfg-vk PRIVATE nativewindow)
+    # libdl is used only by Android provenance diagnostics (dladdr) to identify
+    # which module owns the function pointers returned to the Vulkan loader.
+    target_link_libraries(lsfg-vk PRIVATE nativewindow dl)
     target_include_directories(lsfg-vk PRIVATE "${ANDROID_NDK}/sources/android/native_app_glue")
 endif()
 
