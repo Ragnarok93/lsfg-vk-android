@@ -79,6 +79,19 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, hooks)
 
+    def test_runtime_config_change_is_reparsed_before_swapchain_recreation(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        present = hooks.split("VkResult myvkQueuePresentKHR", 1)[1]
+        self.assertIn(
+            "Config::updateConfig(",
+            present,
+            "A GameNative hot-reload must reparse conf.toml instead of remaining permanently OUT_OF_DATE",
+        )
+        self.assertIn(
+            "Config::activeConf = Config::getConfig(Utils::getProcessName())",
+            present,
+        )
+        self.assertIn("stage=config-reloaded", present)
 
     def test_android_first_present_has_one_shot_framegen_stage_diagnostics(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
