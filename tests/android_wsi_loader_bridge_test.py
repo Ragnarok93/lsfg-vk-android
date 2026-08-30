@@ -28,7 +28,10 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
 
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         self.assertIn("init stage=swapchain-hook-enter", hooks)
-        self.assertIn("runtime stage=present-hook-enter", hooks)
+
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("runtime stage=first-present-enter", context)
+        self.assertIn("runtime stage=first-present-cycle-ready", context)
 
     def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:
         source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")
