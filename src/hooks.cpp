@@ -20,9 +20,29 @@
 
 using namespace Hooks;
 
-namespace {
+static VkInstance layerInstance{};
 
-    VkInstance layerInstance{};
+namespace Layer {
+    VkResult ovkEnumerateDeviceExtensionProperties(
+            VkPhysicalDevice physicalDevice,
+            uint32_t* pPropertyCount,
+            VkExtensionProperties* pProperties) {
+        if (layerInstance == VK_NULL_HANDLE)
+            return VK_ERROR_INITIALIZATION_FAILED;
+
+        auto enumerateDeviceExtensions =
+            reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+                ovkGetInstanceProcAddr(layerInstance,
+                    "vkEnumerateDeviceExtensionProperties"));
+        if (enumerateDeviceExtensions == nullptr)
+            return VK_ERROR_INITIALIZATION_FAILED;
+
+        return enumerateDeviceExtensions(
+            physicalDevice, nullptr, pPropertyCount, pProperties);
+    }
+}
+
+namespace {
 
     bool supportsDeviceExtension(VkPhysicalDevice physicalDevice, const char* extensionName) {
         uint32_t count{};
