@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+import json
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
+    def test_manifest_uses_android_loader_compatible_api13_and_production_procaddr(self) -> None:
+        manifest = json.loads((ROOT / "VkLayer_LS_frame_generation.json").read_text(encoding="utf-8"))
+        layer_manifest = manifest["layer"]
+        functions = layer_manifest["functions"]
+
+        # GameNative's known-good Xclipse/Proton run used an API 1.3 layer
+        # manifest even though the application requested Vulkan 1.4.  With the
+        # otherwise-equivalent 1.4.313 manifest, the loader resolves our GDPA
+        # WSI hooks but the effective device dispatch bypasses them.  Keep the
+        # layer's advertised API at the minimum API the implementation actually
+        # requires so Android/Wine loaders retain the proven WSI dispatch path.
+        self.assertEqual(layer_manifest["api_version"], "1.3.0")
+        self.assertEqual(functions["vkGetInstanceProcAddr"], "layer_vkGetInstanceProcAddr")
+        self.assertEqual(functions["vkGetDeviceProcAddr"], "layer_vkGetDeviceProcAddr")
+        self.assertNotIn("Diagnostic", functions["vkGetInstanceProcAddr"])
+        self.assertNotIn("Diagnostic", functions["vkGetDeviceProcAddr"])
+
+    def test_production_dispatch_path_retains_wsi_resolution_breadcrumbs(self) -> None:
+        layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
+        for token in (
+            'logPresentationHookResolution("gipa", name)',
+            'logPresentationHookResolution("gdpa", name)',
+            '"vkCreateSwapchainKHR"',
+            '"vkQueuePresentKHR"',
+            '"-hook-resolved name="',
+        ):
+            self.assertIn(token, layer)
+
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        self.assertIn("init stage=swapchain-hook-enter", hooks)
+
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("runtime stage=first-present-enter", context)
+        self.assertIn("runtime stage=first-present-cycle-ready", context)
+
+    def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:
+        source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")
+        self.assertIn("lsfg_vkGetInstanceProcAddrDiagnostic", source)
+        self.assertIn("lsfg_vkGetDeviceProcAddrDiagnostic", source)
+        self.assertIn("runtime stage=wsi-hook-resolved", source)
+
+
+if __name__ == "__main__":
+    unittest.main()

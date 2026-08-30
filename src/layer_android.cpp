@@ -9,6 +9,7 @@
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan_core.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -83,6 +84,27 @@ bool deviceExtensionEnabled(const VkDeviceCreateInfo* createInfo, const char* ex
         if (name && std::strcmp(name, extension) == 0) return true;
     }
     return false;
+}
+
+void logPresentationHookResolution(const char* resolver, const std::string& name) {
+    if (name != "vkCreateSwapchainKHR" && name != "vkQueuePresentKHR") return;
+
+    static std::atomic_bool gipaCreateLogged{false};
+    static std::atomic_bool gipaPresentLogged{false};
+    static std::atomic_bool gdpaCreateLogged{false};
+    static std::atomic_bool gdpaPresentLogged{false};
+
+    const bool isGipa = std::strcmp(resolver, "gipa") == 0;
+    std::atomic_bool* logged = nullptr;
+    if (name == "vkCreateSwapchainKHR")
+        logged = isGipa ? &gipaCreateLogged : &gdpaCreateLogged;
+    else
+        logged = isGipa ? &gipaPresentLogged : &gdpaPresentLogged;
+
+    if (!logged->exchange(true, std::memory_order_relaxed)) {
+        std::cerr << "lsfg-vk: runtime stage=" << resolver
+                  << "-hook-resolved name=" << name << "\n";
+    }
 }
 
 VkResult layer_vkCreateInstance(
@@ -262,7 +284,10 @@ PFN_vkVoidFunction layer_vkGetInstanceProcAddr(VkInstance instance, const char* 
     auto it = layerFunctions.find(name);
     if (it != layerFunctions.end()) return it->second;
     it = Hooks::hooks.find(name);
-    if (it != Hooks::hooks.end() && Config::activeConf.enable) return it->second;
+    if (it != Hooks::hooks.end() && Config::activeConf.enable) {
+        logPresentationHookResolution("gipa", name);
+        return it->second;
+    }
     return next_vkGetInstanceProcAddr(instance, pName);
 }
 
@@ -271,7 +296,10 @@ PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName)
     auto it = layerFunctions.find(name);
     if (it != layerFunctions.end()) return it->second;
     it = Hooks::hooks.find(name);
-    if (it != Hooks::hooks.end() && Config::activeConf.enable) return it->second;
+    if (it != Hooks::hooks.end() && Config::activeConf.enable) {
+        logPresentationHookResolution("gdpa", name);
+        return it->second;
+    }
     return next_vkGetDeviceProcAddr(device, pName);
 }
 
