@@ -133,24 +133,30 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     }
 
     // Allocate the shared AHardwareBuffer. These usage flags describe the
-    // cross-device GPU use; the VkImage on this device is still limited by
-    // its own VkImageUsageFlags below.
+    // actual cross-device GPU accesses. The LSFG path never CPU-locks these
+    // images, so advertising CPU readability only narrows the set of gralloc
+    // implementations that can satisfy this descriptor without adding value.
     AHardwareBuffer_Desc ahbDesc{
         .width = extent.width,
         .height = extent.height,
         .layers = 1,
         .format = ahbFormat,
         .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
-               | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT
-               | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+               | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT,
         .stride = 0,
         .rfu0 = 0,
         .rfu1 = 0,
     };
     AHardwareBuffer* ahbHandle{};
-    if (AHardwareBuffer_allocate(&ahbDesc, &ahbHandle) != 0 || ahbHandle == nullptr)
+    const int ahbStatus = AHardwareBuffer_allocate(&ahbDesc, &ahbHandle);
+    if (ahbStatus != 0 || ahbHandle == nullptr) {
+        std::cerr << "lsfg-vk: AHB allocation failed status=" << ahbStatus
+                  << " format=" << ahbFormat
+                  << " usage=" << ahbDesc.usage
+                  << " extent=" << extent.width << 'x' << extent.height << "\n";
         throw LSFG::vulkan_error(VK_ERROR_OUT_OF_DEVICE_MEMORY,
             "Failed to allocate AHardwareBuffer for image");
+    }
     this->ahb = ahbHandle;
 
     // A stock Android ICD exposes the AHB properties query when the extension
