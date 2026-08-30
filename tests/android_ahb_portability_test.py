@@ -110,6 +110,55 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             self.assertIn(marker, android_present)
         self.assertGreaterEqual(android_present.count("if (firstPresentDiagnostic)"), 6)
 
+    def test_android_instance_preserves_game_extension_list(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        create_instance = hooks.split("VkResult myvkCreateInstance", 1)[1].split(
+            "std::unordered_map<VkDevice, DeviceInfo>", 1
+        )[0]
+        android_path = create_instance.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        self.assertIn("Layer::ovkCreateInstance(pCreateInfo, pAllocator, pInstance)", android_path)
+        self.assertNotIn("VK_KHR_external_memory_capabilities", android_path)
+        self.assertNotIn("VK_KHR_external_semaphore_capabilities", android_path)
+        self.assertNotIn("VK_KHR_get_physical_device_properties2", android_path)
+
+    def test_missing_ahb_extension_fails_open_without_breaking_game_device(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        device_pre = hooks.split("VkResult myvkCreateDevicePre", 1)[1].split(
+            "VkResult myvkCreateDevicePost", 1
+        )[0]
+        self.assertIn("ovkEnumerateDeviceExtensionProperties", device_pre)
+        self.assertIn("VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME", device_pre)
+        self.assertIn("stage=ahb-extension-unavailable", device_pre)
+        self.assertIn("Layer::ovkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice)", device_pre)
+        self.assertIn("androidAhbSupported", hooks)
+
+    def test_swapchain_size_is_not_derived_from_queue_family_index(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        swapchain = hooks.split("VkResult myvkCreateSwapchainKHR", 1)[1].split(
+            "VkResult myvkQueuePresentKHR", 1
+        )[0]
+        self.assertNotIn(
+            "static_cast<uint32_t>(deviceInfo.queue.first)",
+            swapchain,
+            "Queue-family numbering is vendor-specific and must never affect swapchain image count",
+        )
+        self.assertIn("pCreateInfo->minImageCount + 1", swapchain)
+
+    def test_swapchain_transfer_usage_is_capability_gated_and_fails_open(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        swapchain = hooks.split("VkResult myvkCreateSwapchainKHR", 1)[1].split(
+            "VkResult myvkQueuePresentKHR", 1
+        )[0]
+        self.assertIn("supportedUsageFlags", swapchain)
+        self.assertIn("VK_IMAGE_USAGE_TRANSFER_SRC_BIT", swapchain)
+        self.assertIn("VK_IMAGE_USAGE_TRANSFER_DST_BIT", swapchain)
+        self.assertIn("stage=swapchain-unsupported-usage", swapchain)
+        self.assertIn(
+            "Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain)",
+            swapchain,
+            "Unsupported transfer usage must leave the game's swapchain untouched instead of failing creation",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
