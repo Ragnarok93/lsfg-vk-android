@@ -174,6 +174,15 @@ namespace {
     std::unordered_map<VkSwapchainKHR, VkPresentModeKHR> swapchainToPresent;
     std::unordered_map<VkSwapchainKHR, VkPresentModeKHR> swapchainToConfiguredPresent;
 
+    void eraseSwapchainState(VkSwapchainKHR swapchain) {
+        if (swapchain == VK_NULL_HANDLE)
+            return;
+        swapchains.erase(swapchain);
+        swapchainToDeviceTable.erase(swapchain);
+        swapchainToPresent.erase(swapchain);
+        swapchainToConfiguredPresent.erase(swapchain);
+    }
+
     VkPresentModeKHR choosePresentMode(
             VkPhysicalDevice physicalDevice,
             VkSurfaceKHR surface,
@@ -254,6 +263,21 @@ namespace {
         Utils::resetLimitN("swapMap");
         auto& deviceInfo = it->second;
 
+        if (pCreateInfo->oldSwapchain)
+            eraseSwapchainState(pCreateInfo->oldSwapchain);
+
+        const auto& activeConf = Config::activeConf;
+        if (!activeConf.enable || activeConf.multiplier <= 1) {
+            const auto res = Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+            if (res == VK_SUCCESS) {
+                swapchainToDeviceTable.emplace(*pSwapchain, device);
+                std::cerr << "lsfg-vk: init stage=swapchain-pass-through enabled="
+                          << (activeConf.enable ? 1 : 0)
+                          << " multiplier=" << activeConf.multiplier << "\n";
+            }
+            return res;
+        }
+
 #ifdef __ANDROID__
         if (!deviceInfo.androidAhbSupported) {
             Utils::logLimitN("swapAhb", 5,
@@ -308,13 +332,6 @@ namespace {
         createInfo.presentMode = choosePresentMode(
             deviceInfo.physicalDevice, pCreateInfo->surface,
             pCreateInfo->presentMode, configuredPresentMode);
-
-        if (pCreateInfo->oldSwapchain) {
-            swapchains.erase(pCreateInfo->oldSwapchain);
-            swapchainToDeviceTable.erase(pCreateInfo->oldSwapchain);
-            swapchainToPresent.erase(pCreateInfo->oldSwapchain);
-            swapchainToConfiguredPresent.erase(pCreateInfo->oldSwapchain);
-        }
 
         auto res = Layer::ovkCreateSwapchainKHR(device, &createInfo, pAllocator, pSwapchain);
         if (res != VK_SUCCESS)
@@ -378,6 +395,35 @@ namespace {
         }
         auto& deviceInfo = it2->second;
 
+        auto& conf = Config::activeConf;
+        if (!conf.config_file.empty()
+                && (
+                        !std::filesystem::exists(conf.config_file)
+                      || conf.timestamp != std::filesystem::last_write_time(conf.config_file)
+                )) {
+            const std::string configFile = conf.config_file;
+            if (std::filesystem::exists(configFile)) {
+                try {
+                    Config::updateConfig(configFile);
+                    Config::activeConf = Config::getConfig(Utils::getProcessName());
+                    std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
+                              << Config::activeConf.multiplier
+                              << " presentMode=" << Config::activeConf.e_present
+                              << " enabled=" << (Config::activeConf.enable ? 1 : 0)
+                              << "\n";
+                } catch (const std::exception& e) {
+                    Utils::logLimitN("configReload", 5,
+                        "Failed to hot-reload configuration; requesting swapchain recreation:\n- "
+                        + std::string(e.what()));
+                }
+            }
+            Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+            return VK_ERROR_OUT_OF_DATE_KHR;
+        }
+
+        if (!conf.enable || conf.multiplier <= 1)
+            return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+
         auto it3 = swapchains.find(*pPresentInfo->pSwapchains);
         if (it3 == swapchains.end()) {
             Utils::logLimitN("swapMap", 5,
@@ -411,66 +457,33 @@ namespace {
         }
         #pragma clang diagnostic pop
 
-        VkResult res{};
+        if (configuredPresent != conf.e_present) {
+            Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+            return VK_ERROR_OUT_OF_DATE_KHR;
+        }
+
         try {
-            auto& conf = Config::activeConf;
-            if (!conf.config_file.empty()
-                    && (
-                            !std::filesystem::exists(conf.config_file)
-                          || conf.timestamp != std::filesystem::last_write_time(conf.config_file)
-                    )) {
-                const std::string configFile = conf.config_file;
-                if (std::filesystem::exists(configFile)) {
-                    try {
-                        Config::updateConfig(configFile);
-                        Config::activeConf = Config::getConfig(Utils::getProcessName());
-                        std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
-                                  << Config::activeConf.multiplier
-                                  << " presentMode=" << Config::activeConf.e_present
-                                  << " enabled=" << (Config::activeConf.enable ? 1 : 0)
-                                  << "\n";
-                    } catch (const std::exception& e) {
-                        Utils::logLimitN("configReload", 5,
-                            "Failed to hot-reload configuration; requesting swapchain recreation:\n- "
-                            + std::string(e.what()));
-                    }
-                }
-                Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-                return VK_ERROR_OUT_OF_DATE_KHR;
-            }
-
-            if (configuredPresent != conf.e_present) {
-                Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-                return VK_ERROR_OUT_OF_DATE_KHR;
-            }
-
-            if (conf.multiplier <= 1)
-                return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-
             std::vector<VkSemaphore> semaphores(pPresentInfo->waitSemaphoreCount);
             std::copy_n(pPresentInfo->pWaitSemaphores, semaphores.size(), semaphores.data());
 
-            res = swapchain.present(deviceInfo, pPresentInfo->pNext,
+            const auto res = swapchain.present(deviceInfo, pPresentInfo->pNext,
                 queue, semaphores, *pPresentInfo->pImageIndices);
 
             Utils::resetLimitN("swapPresent");
+            return res;
         } catch (const std::exception& e) {
             Utils::logLimitN("swapPresent", 5,
                 "An error occurred while presenting the swapchain:\n"
                 "- " + std::string(e.what()));
             return VK_ERROR_INITIALIZATION_FAILED;
         }
-        return res;
     }
 
     void myvkDestroySwapchainKHR(
             VkDevice device,
             VkSwapchainKHR swapchain,
             const VkAllocationCallbacks* pAllocator) noexcept {
-        swapchains.erase(swapchain);
-        swapchainToDeviceTable.erase(swapchain);
-        swapchainToPresent.erase(swapchain);
-        swapchainToConfiguredPresent.erase(swapchain);
+        eraseSwapchainState(swapchain);
         Layer::ovkDestroySwapchainKHR(device, swapchain, pAllocator);
     }
 }
