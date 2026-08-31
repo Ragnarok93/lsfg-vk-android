@@ -116,6 +116,7 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
     def test_android_runtime_metrics_cover_output_rate_latency_failures_and_stats_file(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
         for token in (
             "windowSourceFrames",
@@ -148,13 +149,19 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
             '" generated_present_avg_ms="',
             '" source_interval_avg_ms="',
             '" source_interval_max_ms="',
+        ):
+            self.assertIn(token, source)
+
+        for token in (
             '"stats.txt"',
             '"fps="',
             '"source_fps="',
             '"generated_fps="',
             '"present_failures="',
+            "recordSuccessfulOutputCycle",
+            "recordOutputFailure",
         ):
-            self.assertIn(token, source)
+            self.assertIn(token, hooks)
 
         self.assertIn("metrics.windowGeneratedFrames++", source)
         self.assertIn("metrics.totalGeneratedFrames++", source)
