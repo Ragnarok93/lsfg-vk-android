@@ -6,6 +6,7 @@
 #include "common/exception.hpp"
 
 #include <vector>
+#include <chrono>
 #include <cstddef>
 #include <algorithm>
 #include <optional>
@@ -230,6 +231,30 @@ void Context::present(Vulkan& vk,
     }
 
     this->frameIdx++;
+}
+
+bool Context::waitForLastPresent(Vulkan& vk, uint64_t timeoutNs) {
+    if (this->frameIdx == 0)
+        return true;
+
+    auto& renderData = this->data.at((this->frameIdx - 1) % this->data.size());
+    if (!renderData.shouldWait)
+        return true;
+
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::nanoseconds(timeoutNs);
+    for (size_t i = 0; i < renderData.generationCount; ++i) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline)
+            return false;
+        const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            deadline - now).count();
+        if (!renderData.completionFences.at(i).wait(
+                vk.device, static_cast<uint64_t>(remaining)))
+            return false;
+    }
+    renderData.shouldWait = false;
+    return true;
 }
 
 #ifdef __ANDROID__

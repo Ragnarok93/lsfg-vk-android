@@ -471,7 +471,27 @@ namespace {
             Utils::logLimitN("swapCtxCreate", 5,
                 "An error occurred while creating the swapchain wrapper:\n"
                 "- " + std::string(e.what()));
-            return VK_SUCCESS;
+
+            // The handle above was created with LSFG-specific image count,
+            // usage, and present mode. Keeping it without an LsContext is not
+            // pass-through and can perturb the game's pacing. Replace it with
+            // a swapchain created from the game's untouched parameters.
+            const VkSwapchainKHR failedSwapchain = *pSwapchain;
+            eraseSwapchainState(failedSwapchain);
+            Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);
+            *pSwapchain = VK_NULL_HANDLE;
+
+            const auto fallbackRes = Layer::ovkCreateSwapchainKHR(
+                device, pCreateInfo, pAllocator, pSwapchain);
+            if (fallbackRes == VK_SUCCESS) {
+                swapchainToDeviceTable.emplace(*pSwapchain, device);
+                std::cerr << "lsfg-vk: init stage=swapchain-fallback-pass-through"
+                             " reason=ls-context-failed\n";
+                return VK_SUCCESS;
+            }
+            std::cerr << "lsfg-vk: init stage=swapchain-fallback-failed result="
+                      << fallbackRes << "\n";
+            return fallbackRes;
         }
         return VK_SUCCESS;
     }

@@ -67,6 +67,8 @@ namespace LSFG_3_1 {
             int inSem, const std::vector<int>& outSem,
             size_t activeGenerationCount);
 
+        [[nodiscard]] bool waitForLastPresent(Vulkan& vk, uint64_t timeoutNs);
+
         // Trivially copyable, moveable and destructible
         Context(const Context&) = default;
         Context& operator=(const Context&) = default;

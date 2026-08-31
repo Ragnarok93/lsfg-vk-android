@@ -95,7 +95,7 @@ void Config::updateConfig(const std::string& file) {
 
         const std::string exe = toml::find<std::string>(gameTable, "exe");
         Configuration game{
-            .enable = true,
+            .enable = toml::find_or(gameTable, "enabled", true),
             .dll = global.dll,
             .multiplier = toml::find_or(gameTable, "multiplier", 2U),
             .flowScale = toml::find_or(gameTable, "flow_scale", 1.0F),

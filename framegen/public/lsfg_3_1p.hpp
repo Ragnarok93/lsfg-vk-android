@@ -71,6 +71,11 @@ namespace LSFG_3_1P {
     void presentContextWithCount(int32_t id, int inSem,
         const std::vector<int>& outSem, size_t activeGenerationCount);
 
+#ifdef __ANDROID__
+    __attribute__((visibility("default")))
+    bool waitContext(int32_t id, uint64_t timeoutNs);
+#endif
+
     ///
     /// Delete an LSFG context.
     ///
@@ -84,11 +89,5 @@ namespace LSFG_3_1P {
     ///
     __attribute__((visibility("default")))
     void finalize();
-
-#ifdef __ANDROID__
-    /// Block until framegen's internal Vulkan device is idle. See LSFG_3_1::waitIdle.
-    __attribute__((visibility("default")))
-    void waitIdle();
-#endif
 
 }

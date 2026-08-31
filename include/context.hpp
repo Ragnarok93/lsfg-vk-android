@@ -78,6 +78,8 @@ private:
 
 #ifdef __ANDROID__
     AdaptiveFrameScheduler adaptiveScheduler_;
+    bool requiresSourceHistoryWarmup_{false};
+    bool previousSourceCopySignalValid_{false};
     struct RuntimeMetrics {
         using Clock = std::chrono::steady_clock;
 
