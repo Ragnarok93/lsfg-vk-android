@@ -113,6 +113,70 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
             body = layer[start:start + 900]
             self.assertIn("loadDeviceDispatch(a, &dispatch)", body)
 
+    def test_android_runtime_metrics_cover_output_rate_latency_failures_and_stats_file(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "windowSourceFrames",
+            "windowGeneratedFrames",
+            "windowSourcePresentFailures",
+            "windowGeneratedPresentFailures",
+            "windowCycleMs",
+            "windowHandoffMs",
+            "windowDispatchMs",
+            "windowWaitIdleMs",
+            "windowGeneratedPresentMs",
+            "windowSourceIntervalMs",
+        ):
+            self.assertIn(token, header)
+
+        for token in (
+            '"lsfg-vk: metrics"',
+            '" source_fps="',
+            '" generated_fps="',
+            '" output_fps="',
+            '" source_frames_total="',
+            '" generated_frames_total="',
+            '" source_present_failures_total="',
+            '" generated_present_failures_total="',
+            '" cycle_avg_ms="',
+            '" cycle_max_ms="',
+            '" ahb_handoff_avg_ms="',
+            '" framegen_dispatch_avg_ms="',
+            '" framegen_wait_avg_ms="',
+            '" generated_present_avg_ms="',
+            '" source_interval_avg_ms="',
+            '" source_interval_max_ms="',
+            '"stats.txt"',
+            '"fps="',
+            '"source_fps="',
+            '"generated_fps="',
+            '"present_failures="',
+        ):
+            self.assertIn(token, source)
+
+        self.assertIn("metrics.windowGeneratedFrames++", source)
+        self.assertIn("metrics.totalGeneratedFrames++", source)
+        self.assertIn("metrics.windowSourceFrames++", source)
+        self.assertIn("metrics.totalSourceFrames++", source)
+        self.assertIn("metrics.windowGeneratedPresentFailures++", source)
+        self.assertIn("metrics.windowSourcePresentFailures++", source)
+
+    def test_runtime_disable_recreates_a_tracked_pass_through_swapchain(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("if (!activeConf.enable || activeConf.multiplier <= 1)", hooks)
+        self.assertIn("init stage=swapchain-pass-through enabled=", hooks)
+        self.assertIn("swapchainToDeviceTable.emplace(*pSwapchain, device)", hooks)
+        self.assertIn("if (!conf.enable || conf.multiplier <= 1)", hooks)
+
+        reload_pos = hooks.index("init stage=config-reloaded multiplier=")
+        disable_pos = hooks.index("if (!conf.enable || conf.multiplier <= 1)")
+        context_lookup_pos = hooks.index("auto it3 = swapchains.find")
+        self.assertLess(reload_pos, disable_pos)
+        self.assertLess(disable_pos, context_lookup_pos)
+
     def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:
         source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")
         self.assertIn("lsfg_vkGetInstanceProcAddrDiagnostic", source)
