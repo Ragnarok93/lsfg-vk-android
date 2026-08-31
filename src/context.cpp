@@ -427,6 +427,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     auto& pass = this->passInfos.at(this->frameIdx % 8);
 
 #ifdef __ANDROID__
+    auto& metrics = this->runtimeMetrics;
+    const auto cycleStart = RuntimeMetrics::Clock::now();
+    if (metrics.hasLastSourcePresent) {
+        const double sourceIntervalMs = std::chrono::duration<double, std::milli>(
+            cycleStart - metrics.lastSourcePresent).count();
+        metrics.windowSourceIntervalMs += sourceIntervalMs;
+        if (sourceIntervalMs > metrics.windowSourceIntervalMaxMs)
+            metrics.windowSourceIntervalMaxMs = sourceIntervalMs;
+        metrics.windowSourceIntervals++;
+    }
+    metrics.lastSourcePresent = cycleStart;
+    metrics.hasLastSourcePresent = true;
+
     const bool firstPresentDiagnostic = this->frameIdx == 0;
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=first-present-enter image=" << presentIdx
@@ -460,9 +473,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // The AHB is shared memory, not implicit synchronization. Wait for the
     // game-device release barrier/copy to complete before the framegen VkDevice
     // performs its matching external acquire.
+    const auto handoffStart = RuntimeMetrics::Clock::now();
     submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
         gameRenderSemaphores2,
         { pass.preCopySemaphores.at(1).handle() });
+    metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
+        RuntimeMetrics::Clock::now() - handoffStart).count();
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\n";
 
@@ -474,30 +490,40 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << (conf.performance ? "performance" : "quality")
                   << " generated=" << (conf.multiplier - 1) << "\n";
     }
+    const auto dispatchStart = RuntimeMetrics::Clock::now();
     if (conf.performance)
         LSFG_3_1P::presentContext(*this->lsfgCtxId, -1, noOutSems);
     else
         LSFG_3_1::presentContext(*this->lsfgCtxId, -1, noOutSems);
+    metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
+        RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-returned\n";
 
     // 3. Ensure framegen's separate VkDevice has completed its release barriers
     //    before the game device acquires generated AHBs for readback/blit.
+    const auto waitIdleStart = RuntimeMetrics::Clock::now();
     if (conf.performance)
         LSFG_3_1P::waitIdle();
     else
         LSFG_3_1::waitIdle();
+    metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+        RuntimeMetrics::Clock::now() - waitIdleStart).count();
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
 
     // 4. Copy generated frames to swapchain images and present them.
     for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); i++) {
+        const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
         auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, UINT64_MAX,
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
-        if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
+        if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+            metrics.windowGeneratedPresentFailures++;
+            metrics.totalGeneratedPresentFailures++;
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");
+        }
 
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.postCopyBufs.at(i) = Mini::CommandBuffer(info.device, this->cmdPool);
@@ -527,8 +553,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pImageIndices = &imageIdx,
         };
         res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
-        if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
+        if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+            metrics.windowGeneratedPresentFailures++;
+            metrics.totalGeneratedPresentFailures++;
             throw LSFG::vulkan_error(res, "Failed to present swapchain image");
+        }
+        metrics.windowGeneratedFrames++;
+        metrics.totalGeneratedFrames++;
+        metrics.windowGeneratedPresentMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - generatedPresentStart).count();
         if (firstPresentDiagnostic && i == 0) {
             std::cerr << "lsfg-vk: runtime stage=generated-present-ready image=" << imageIdx
                       << " result=" << res << "\n";
@@ -548,11 +581,81 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .pImageIndices = &presentIdx,
     };
     auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);
-    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
+    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+        metrics.windowSourcePresentFailures++;
+        metrics.totalSourcePresentFailures++;
         throw LSFG::vulkan_error(res, "Failed to present swapchain image");
+    }
+    metrics.windowSourceFrames++;
+    metrics.totalSourceFrames++;
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=first-present-cycle-ready result=" << res
                   << " generated=" << (conf.multiplier - 1) << "\n";
+    }
+
+    const auto cycleEnd = RuntimeMetrics::Clock::now();
+    const double cycleMs = std::chrono::duration<double, std::milli>(
+        cycleEnd - cycleStart).count();
+    metrics.windowCycleMs += cycleMs;
+    if (cycleMs > metrics.windowCycleMaxMs)
+        metrics.windowCycleMaxMs = cycleMs;
+
+    const double elapsedSeconds = std::chrono::duration<double>(
+        cycleEnd - metrics.windowStart).count();
+    if (elapsedSeconds >= 1.0) {
+        const double sourceCount = static_cast<double>(metrics.windowSourceFrames);
+        const double generatedCount = static_cast<double>(metrics.windowGeneratedFrames);
+        const double sourceFps = sourceCount / elapsedSeconds;
+        const double generatedFps = generatedCount / elapsedSeconds;
+        const double outputFps = (sourceCount + generatedCount) / elapsedSeconds;
+        const double cycleAvgMs = sourceCount > 0.0 ? metrics.windowCycleMs / sourceCount : 0.0;
+        const double handoffAvgMs = sourceCount > 0.0 ? metrics.windowHandoffMs / sourceCount : 0.0;
+        const double dispatchAvgMs = sourceCount > 0.0 ? metrics.windowDispatchMs / sourceCount : 0.0;
+        const double waitIdleAvgMs = sourceCount > 0.0 ? metrics.windowWaitIdleMs / sourceCount : 0.0;
+        const double generatedPresentAvgMs = generatedCount > 0.0
+            ? metrics.windowGeneratedPresentMs / generatedCount : 0.0;
+        const double sourceIntervalAvgMs = metrics.windowSourceIntervals > 0
+            ? metrics.windowSourceIntervalMs / static_cast<double>(metrics.windowSourceIntervals)
+            : 0.0;
+
+        std::cerr << "lsfg-vk: metrics"
+                  << " source_fps=" << sourceFps
+                  << " generated_fps=" << generatedFps
+                  << " output_fps=" << outputFps
+                  << " source_frames=" << metrics.windowSourceFrames
+                  << " generated_frames=" << metrics.windowGeneratedFrames
+                  << " source_frames_total=" << metrics.totalSourceFrames
+                  << " generated_frames_total=" << metrics.totalGeneratedFrames
+                  << " source_present_failures=" << metrics.windowSourcePresentFailures
+                  << " generated_present_failures=" << metrics.windowGeneratedPresentFailures
+                  << " source_present_failures_total=" << metrics.totalSourcePresentFailures
+                  << " generated_present_failures_total=" << metrics.totalGeneratedPresentFailures
+                  << " cycle_avg_ms=" << cycleAvgMs
+                  << " cycle_max_ms=" << metrics.windowCycleMaxMs
+                  << " ahb_handoff_avg_ms=" << handoffAvgMs
+                  << " framegen_dispatch_avg_ms=" << dispatchAvgMs
+                  << " framegen_wait_avg_ms=" << waitIdleAvgMs
+                  << " generated_present_avg_ms=" << generatedPresentAvgMs
+                  << " source_interval_avg_ms=" << sourceIntervalAvgMs
+                  << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
+                  << " multiplier=" << conf.multiplier
+                  << " performance=" << (conf.performance ? 1 : 0)
+                  << "\n";
+
+        metrics.windowStart = cycleEnd;
+        metrics.windowSourceFrames = 0;
+        metrics.windowGeneratedFrames = 0;
+        metrics.windowSourcePresentFailures = 0;
+        metrics.windowGeneratedPresentFailures = 0;
+        metrics.windowCycleMs = 0.0;
+        metrics.windowCycleMaxMs = 0.0;
+        metrics.windowHandoffMs = 0.0;
+        metrics.windowDispatchMs = 0.0;
+        metrics.windowWaitIdleMs = 0.0;
+        metrics.windowGeneratedPresentMs = 0.0;
+        metrics.windowSourceIntervalMs = 0.0;
+        metrics.windowSourceIntervalMaxMs = 0.0;
+        metrics.windowSourceIntervals = 0;
     }
 
     this->frameIdx++;
