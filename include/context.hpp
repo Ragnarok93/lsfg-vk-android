@@ -97,6 +97,12 @@ private:
         double windowSourceIntervalMaxMs{0.0};
         uint64_t windowSourceIntervals{0};
     } runtimeMetrics;
+
+    // Reused for the game-device -> framegen AHB handoff. The handoff
+    // is fully waited before reuse, so one fence per swapchain context is enough.
+    std::shared_ptr<VkFence> ahbHandoffFence;
+    PFN_vkResetFences resetHandoffFences{nullptr};
+    PFN_vkWaitForFences waitHandoffFences{nullptr};
 #endif
 
     struct RenderPassInfo {

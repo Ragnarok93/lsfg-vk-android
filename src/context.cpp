@@ -216,34 +216,19 @@ void copyExternalAhbToSwapchain(VkCommandBuffer buf,
 // copy and wait on the host before framegen submits work on its separate device.
 void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuffer,
         VkQueue queue, const std::vector<VkSemaphore>& waitSemaphores,
-        const std::vector<VkSemaphore>& signalSemaphores) {
-    const auto createFence = reinterpret_cast<PFN_vkCreateFence>(
-        Layer::ovkGetDeviceProcAddr(device, "vkCreateFence"));
-    const auto waitForFences = reinterpret_cast<PFN_vkWaitForFences>(
-        Layer::ovkGetDeviceProcAddr(device, "vkWaitForFences"));
-    const auto destroyFence = reinterpret_cast<PFN_vkDestroyFence>(
-        Layer::ovkGetDeviceProcAddr(device, "vkDestroyFence"));
-    if (createFence == nullptr || waitForFences == nullptr || destroyFence == nullptr)
+        const std::vector<VkSemaphore>& signalSemaphores,
+        VkFence fence, PFN_vkResetFences resetFences,
+        PFN_vkWaitForFences waitForFences) {
+    if (fence == VK_NULL_HANDLE || resetFences == nullptr || waitForFences == nullptr)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
-            "Required fence functions unavailable for Android AHB handoff");
+            "Android AHB handoff fence is unavailable");
 
-    const VkFenceCreateInfo fenceInfo{
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-    };
-    VkFence fence{};
-    auto res = createFence(device, &fenceInfo, nullptr, &fence);
-    if (res != VK_SUCCESS || fence == VK_NULL_HANDLE)
-        throw LSFG::vulkan_error(res, "Failed to create Android AHB handoff fence");
+    auto res = resetFences(device, 1, &fence);
+    if (res != VK_SUCCESS)
+        throw LSFG::vulkan_error(res, "Failed resetting Android AHB handoff fence");
 
-    try {
-        commandBuffer.submit(queue, waitSemaphores, signalSemaphores, fence);
-        res = waitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
-    } catch (...) {
-        destroyFence(device, fence, nullptr);
-        throw;
-    }
-    destroyFence(device, fence, nullptr);
-
+    commandBuffer.submit(queue, waitSemaphores, signalSemaphores, fence);
+    res = waitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Failed waiting for Android AHB handoff copy");
 }
@@ -356,6 +341,43 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     );
 
     unsetenv("DISABLE_LSFG"); // NOLINT
+
+
+    // Resolve and allocate the handoff fence once per swapchain context. The old
+    // path looked up three entrypoints and created/destroyed a fence every source
+    // frame even though each handoff is synchronously completed before the next.
+    const auto createHandoffFence = reinterpret_cast<PFN_vkCreateFence>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkCreateFence"));
+    this->resetHandoffFences = reinterpret_cast<PFN_vkResetFences>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkResetFences"));
+    this->waitHandoffFences = reinterpret_cast<PFN_vkWaitForFences>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkWaitForFences"));
+    const auto destroyHandoffFence = reinterpret_cast<PFN_vkDestroyFence>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkDestroyFence"));
+    if (createHandoffFence == nullptr || this->resetHandoffFences == nullptr
+            || this->waitHandoffFences == nullptr || destroyHandoffFence == nullptr)
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+            "Required fence functions unavailable for Android AHB handoff");
+
+    const VkFenceCreateInfo handoffFenceInfo{
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+    };
+    VkFence handoffFence{};
+    const auto handoffFenceRes = createHandoffFence(
+        info.device, &handoffFenceInfo, nullptr, &handoffFence);
+    if (handoffFenceRes != VK_SUCCESS || handoffFence == VK_NULL_HANDLE)
+        throw LSFG::vulkan_error(handoffFenceRes,
+            "Failed to create Android AHB handoff fence");
+
+    this->ahbHandoffFence = std::shared_ptr<VkFence>(
+        new VkFence(handoffFence),
+        [device = info.device, destroyHandoffFence](VkFence* ownedFence) {
+            if (ownedFence != nullptr) {
+                if (*ownedFence != VK_NULL_HANDLE)
+                    destroyHandoffFence(device, *ownedFence, nullptr);
+                delete ownedFence;
+            }
+        });
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId << ")\n";
 
@@ -476,7 +498,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     const auto handoffStart = RuntimeMetrics::Clock::now();
     submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
         gameRenderSemaphores2,
-        { pass.preCopySemaphores.at(1).handle() });
+        { pass.preCopySemaphores.at(1).handle() },
+        *this->ahbHandoffFence, this->resetHandoffFences,
+        this->waitHandoffFences);
     metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - handoffStart).count();
     if (firstPresentDiagnostic)
