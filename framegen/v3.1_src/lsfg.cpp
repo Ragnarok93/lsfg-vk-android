@@ -64,6 +64,13 @@ int32_t LSFG_3_1::createContext(
 }
 
 void LSFG_3_1::presentContext(int32_t id, int inSem, const std::vector<int>& outSem) {
+    if (!device.has_value())
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    presentContextWithCount(id, inSem, outSem, device->generationCount);
+}
+
+void LSFG_3_1::presentContextWithCount(int32_t id, int inSem,
+        const std::vector<int>& outSem, size_t activeGenerationCount) {
     if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
 
@@ -71,7 +78,7 @@ void LSFG_3_1::presentContext(int32_t id, int inSem, const std::vector<int>& out
     if (it == contexts.end())
         throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
 
-    it->second.present(*device, inSem, outSem);
+    it->second.present(*device, inSem, outSem, activeGenerationCount);
 }
 
 void LSFG_3_1::deleteContext(int32_t id) {

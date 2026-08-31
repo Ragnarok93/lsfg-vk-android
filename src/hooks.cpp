@@ -194,7 +194,8 @@ namespace {
 
     void writeRuntimeStatsFile(const std::string& configFile,
             double outputFps, double sourceFps, double generatedFps,
-            const RuntimeOutputStats& stats, int multiplier, bool performance) {
+            const RuntimeOutputStats& stats, int multiplier, bool performance,
+            bool adaptive, uint32_t targetFps) {
         if (configFile.empty())
             return;
 
@@ -213,6 +214,8 @@ namespace {
                 << "generated_frames_total=" << stats.totalGeneratedFrames << '\n'
                 << "present_failures=" << stats.presentFailures << '\n'
                 << "multiplier=" << multiplier << '\n'
+                << "adaptive=" << (adaptive ? 1 : 0) << '\n'
+                << "target_fps=" << targetFps << '\n'
                 << "performance=" << (performance ? 1 : 0) << '\n';
             out.close();
             if (!out)
@@ -237,12 +240,11 @@ namespace {
     }
 
     void recordSuccessfulOutputCycle(VkSwapchainKHR swapchain,
-            const std::string& configFile, int multiplier, bool performance) {
+            const std::string& configFile, uint64_t generated,
+            int multiplier, bool performance, bool adaptive, uint32_t targetFps) {
         auto& stats = runtimeOutputStats[swapchain];
         stats.windowSourceFrames++;
         stats.totalSourceFrames++;
-        const uint64_t generated = multiplier > 1
-            ? static_cast<uint64_t>(multiplier - 1) : 0;
         stats.windowGeneratedFrames += generated;
         stats.totalGeneratedFrames += generated;
 
@@ -256,7 +258,7 @@ namespace {
         const double generatedFps = static_cast<double>(stats.windowGeneratedFrames) / elapsedSeconds;
         const double outputFps = sourceFps + generatedFps;
         writeRuntimeStatsFile(configFile, outputFps, sourceFps, generatedFps,
-            stats, multiplier, performance);
+            stats, multiplier, performance, adaptive, targetFps);
 
         stats.windowStart = now;
         stats.windowSourceFrames = 0;
@@ -514,6 +516,8 @@ namespace {
                     Config::activeConf = Config::getConfig(Utils::getProcessName());
                     std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
                               << Config::activeConf.multiplier
+                              << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
+                              << " targetFps=" << Config::activeConf.fpsLimit
                               << " presentMode=" << Config::activeConf.e_present
                               << " enabled=" << (Config::activeConf.enable ? 1 : 0)
                               << "\n";
@@ -583,7 +587,9 @@ namespace {
 
 #ifdef __ANDROID__
             recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
-                conf.config_file, conf.multiplier, conf.performance);
+                conf.config_file, swapchain.lastGeneratedFrameCount(),
+                conf.multiplier, conf.performance,
+                conf.adaptiveFramegen, conf.fpsLimit);
 #endif
             Utils::resetLimitN("swapPresent");
             return res;

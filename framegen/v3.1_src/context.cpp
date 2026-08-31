@@ -128,19 +128,26 @@ Context::Context(Vulkan& vk,
 }
 
 void Context::present(Vulkan& vk,
-        int inSem, const std::vector<int>& outSem) {
+        int inSem, const std::vector<int>& outSem,
+        size_t activeGenerationCount) {
+    const size_t generationCount = std::min(activeGenerationCount, vk.generationCount);
+    if (generationCount == 0) {
+        this->frameIdx++;
+        return;
+    }
     auto& data = this->data.at(this->frameIdx % 8);
 
     // 3. wait for completion of previous frame in this slot
     if (data.shouldWait)
-        for (auto& fence : data.completionFences)
-            if (!fence.wait(vk.device, UINT64_MAX))
+        for (size_t i = 0; i < data.generationCount; ++i)
+            if (!data.completionFences.at(i).wait(vk.device, UINT64_MAX))
                 throw LSFG::vulkan_error(VK_TIMEOUT, "Fence wait timed out");
     data.shouldWait = true;
+    data.generationCount = generationCount;
 
     // 1. create mipmaps and process input image
     if (inSem >= 0) data.inSemaphore = Core::Semaphore(vk.device, inSem);
-    for (size_t i = 0; i < vk.generationCount; i++)
+    for (size_t i = 0; i < generationCount; i++)
         data.internalSemaphores.at(i) = Core::Semaphore(vk.device);
 
     data.cmdBuffer1 = Core::CommandBuffer(vk.device, vk.commandPool);
@@ -164,12 +171,15 @@ void Context::present(Vulkan& vk,
     data.cmdBuffer1.end();
     std::vector<Core::Semaphore> waits = { data.inSemaphore };
     if (inSem < 0) waits.clear();
+    const std::vector<Core::Semaphore> activeInternalSemaphores(
+        data.internalSemaphores.begin(),
+        data.internalSemaphores.begin() + static_cast<std::ptrdiff_t>(generationCount));
     data.cmdBuffer1.submit(vk.device.getComputeQueue(), std::nullopt,
         waits, std::nullopt,
-        data.internalSemaphores, std::nullopt);
+        activeInternalSemaphores, std::nullopt);
 
     // 2. generate intermediary frames
-    for (size_t pass = 0; pass < vk.generationCount; pass++) {
+    for (size_t pass = 0; pass < generationCount; pass++) {
         auto& internalSemaphore = data.internalSemaphores.at(pass);
         auto& outSemaphore = data.outSemaphores.at(pass);
         if (inSem >= 0) outSemaphore = Core::Semaphore(vk.device, outSem.empty() ? -1 : outSem.at(pass));
@@ -191,19 +201,19 @@ void Context::present(Vulkan& vk,
 #endif
 
         for (size_t i = 0; i < 7; i++) {
-            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass);
+            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);
             if (i >= 4)
-                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass);
+                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);
         }
-        this->generate.Dispatch(buf2, this->frameIdx, pass);
+        this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);
 
 #ifdef __ANDROID__
         {
             std::vector<VkImageMemoryBarrier2> releaseBarriers;
-            releaseBarriers.reserve(pass + 1 == vk.generationCount ? 3 : 1);
+            releaseBarriers.reserve(pass + 1 == generationCount ? 3 : 1);
             add_external_release(releaseBarriers, vk, this->generate.getOutImages().at(pass),
                 VK_ACCESS_2_SHADER_WRITE_BIT);
-            if (pass + 1 == vk.generationCount) {
+            if (pass + 1 == generationCount) {
                 add_external_release(releaseBarriers, vk, this->inImg_0, VK_ACCESS_2_SHADER_READ_BIT);
                 add_external_release(releaseBarriers, vk, this->inImg_1, VK_ACCESS_2_SHADER_READ_BIT);
             }
@@ -257,7 +267,7 @@ Context::Context(Vulkan& vk,
         data.cmdBuffers2.resize(vk.generationCount);
     }
 
-    // build the same shader chain as the FD ctor — only Generate differs
+    // build the same shader chain as the FD ctor â only Generate differs
     // (it now takes pre-built outImgs instead of FDs).
     this->mipmaps = Shaders::Mipmaps(vk, this->inImg_0, this->inImg_1);
     for (size_t i = 0; i < 7; i++)

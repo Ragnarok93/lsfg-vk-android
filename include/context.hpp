@@ -8,6 +8,7 @@
 #endif
 
 #include "hooks.hpp"
+#include "adaptive_scheduler.hpp"
 #include "mini/commandbuffer.hpp"
 #include "mini/commandpool.hpp"
 #include "mini/image.hpp"
@@ -52,6 +53,10 @@ public:
     VkResult present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx);
 
+    [[nodiscard]] size_t lastGeneratedFrameCount() const {
+        return lastGeneratedFrameCount_;
+    }
+
     // Non-copyable, trivially moveable and destructible
     LsContext(const LsContext&) = delete;
     LsContext& operator=(const LsContext&) = delete;
@@ -69,8 +74,10 @@ private:
 
     Mini::CommandPool cmdPool;
     uint64_t frameIdx{0};
+    size_t lastGeneratedFrameCount_{0};
 
 #ifdef __ANDROID__
+    AdaptiveFrameScheduler adaptiveScheduler_;
     struct RuntimeMetrics {
         using Clock = std::chrono::steady_clock;
 

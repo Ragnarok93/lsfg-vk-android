@@ -67,6 +67,10 @@ namespace LSFG_3_1P {
     __attribute__((visibility("default")))
     void presentContext(int32_t id, int inSem, const std::vector<int>& outSem);
 
+    __attribute__((visibility("default")))
+    void presentContextWithCount(int32_t id, int inSem,
+        const std::vector<int>& outSem, size_t activeGenerationCount);
+
     ///
     /// Delete an LSFG context.
     ///

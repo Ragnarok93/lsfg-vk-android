@@ -57,6 +57,28 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("LSFG_3_1P::waitIdle();", android)
         self.assertIn("LSFG_3_1::waitIdle();", android)
 
+    def test_adaptive_path_skips_unneeded_gpu_work_and_keeps_binary_signals_valid(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("AdaptiveFrameScheduler adaptiveScheduler_", header)
+        self.assertIn("lastGeneratedFrameCount", header)
+        for token in (
+            "adaptiveScheduler_.configure",
+            "adaptiveScheduler_.plan(sourceInterval)",
+            "presentContextWithCount",
+            "if (generatedFrameCount > 0)",
+            "if (generatedFrameCount == 0)",
+            "preCopySignals.emplace_back(pass.preCopySemaphores.at(0).handle())",
+            "generatedFrameCount == 0 ? pNext : nullptr",
+        ):
+            self.assertIn(token, source)
+
+        self.assertIn("swapchain.lastGeneratedFrameCount()", hooks)
+        self.assertIn('"adaptive="', hooks)
+        self.assertIn('"target_fps="', hooks)
+
 
 if __name__ == "__main__":
     unittest.main()

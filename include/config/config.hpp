@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace Config {
@@ -24,6 +25,10 @@ namespace Config {
         bool performance{false};
         /// Whether HDR is enabled
         bool hdr{false};
+        /// Vary the generated frame count to approach fpsLimit.
+        bool adaptiveFramegen{false};
+        /// Final output FPS ceiling used by adaptive frame generation.
+        uint32_t fpsLimit{0};
 
         /// Experimental flag for overriding the synchronization method.
         VkPresentModeKHR e_present;

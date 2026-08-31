@@ -60,7 +60,8 @@ namespace LSFG_3_1P {
         /// @throws LSFG::vulkan_error if the context fails to present.
         ///
         void present(Vulkan& vk,
-            int inSem, const std::vector<int>& outSem);
+            int inSem, const std::vector<int>& outSem,
+            size_t activeGenerationCount);
 
         // Trivially copyable, moveable and destructible
         Context(const Context&) = default;
@@ -82,6 +83,7 @@ namespace LSFG_3_1P {
             std::vector<Core::CommandBuffer> cmdBuffers2; // command buffers for second step
 
             bool shouldWait{false};
+            size_t generationCount{0};
         };
         std::array<RenderData, 8> data;
 

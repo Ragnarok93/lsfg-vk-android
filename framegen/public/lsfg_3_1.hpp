@@ -80,6 +80,12 @@ namespace LSFG_3_1 {
     __attribute__((visibility("default")))
     void presentContext(int32_t id, int inSem, const std::vector<int>& outSem);
 
+    /// Present only the requested subset of the output images. Used by the
+    /// adaptive Android path; the original API retains fixed-multiplier behavior.
+    __attribute__((visibility("default")))
+    void presentContextWithCount(int32_t id, int inSem,
+        const std::vector<int>& outSem, size_t activeGenerationCount);
+
     ///
     /// Delete an LSFG context.
     ///
@@ -97,7 +103,7 @@ namespace LSFG_3_1 {
 #ifdef __ANDROID__
     /// Block until framegen's internal Vulkan device is idle. Used by the
     /// Android wrapper to sync between its own device (which writes input
-    /// AHBs) and framegen's device (which reads them) — without an explicit
+    /// AHBs) and framegen's device (which reads them) â without an explicit
     /// shared semaphore this is the only safe way to avoid a write-after-read
     /// race on the shared AHardwareBuffer storage.
     __attribute__((visibility("default")))
