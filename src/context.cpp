@@ -512,7 +512,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
 
-    // 4. Copy generated frames to swapchain images and present them.
+    // 4. Copy generated frames to swapchain images and present them. Each
+    // copy submission signals two binary semaphores: one consumed by this
+    // generated present, and one reserved for the next generated/source
+    // present. A binary semaphore signal must not be consumed twice.
     for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
@@ -526,6 +529,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
 
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
+        pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.postCopyBufs.at(i) = Mini::CommandBuffer(info.device, this->cmdPool);
         pass.postCopyBufs.at(i).begin();
 
@@ -538,16 +542,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.postCopyBufs.at(i).end();
         pass.postCopyBufs.at(i).submit(info.queue.second,
             { pass.acquireSemaphores.at(i).handle() },
-            { pass.postCopySemaphores.at(i).handle() });
+            { pass.postCopySemaphores.at(i).handle(),
+              pass.prevPostCopySemaphores.at(i).handle() });
 
-        // Preserve PR #8's generated-frame present behavior. This is also the
-        // path that restored visible present/FPS accounting on-device.
-        VkSemaphore postCopySem = pass.postCopySemaphores.at(i).handle();
+        std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
+        if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());
+
         const VkPresentInfoKHR presentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = i == 0 ? pNext : nullptr,
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &postCopySem,
+            .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
+            .pWaitSemaphores = waitSemaphores.data(),
             .swapchainCount = 1,
             .pSwapchains = &this->swapchain,
             .pImageIndices = &imageIdx,
@@ -568,14 +573,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    // 5. Present the actual game frame after generated frames, unchanged from
-    //    PR #8 so presentation cadence/reporting semantics remain intact.
-    pass.prevPostCopySemaphores.at(conf.multiplier - 1 - 1) = Mini::Semaphore(info.device);
-    VkSemaphore lastPostCopySem = pass.postCopySemaphores.at(conf.multiplier - 1 - 1).handle();
+    // 5. Present the actual game frame after generated frames using the signal
+    // reserved for this present, rather than waiting a second time on the
+    // generated-present semaphore.
+    VkSemaphore lastPrevPostCopySemaphore =
+        pass.prevPostCopySemaphores.at(conf.multiplier - 1 - 1).handle();
     const VkPresentInfoKHR finalPresentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &lastPostCopySem,
+        .pWaitSemaphores = &lastPrevPostCopySemaphore,
         .swapchainCount = 1,
         .pSwapchains = &this->swapchain,
         .pImageIndices = &presentIdx,
@@ -589,6 +595,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     metrics.windowSourceFrames++;
     metrics.totalSourceFrames++;
     if (firstPresentDiagnostic) {
+        std::cerr << "lsfg-vk: runtime stage=present-sync-ready generatedSignals="
+                  << (conf.multiplier - 1) << " sourceWait=prev-post-copy\n";
         std::cerr << "lsfg-vk: runtime stage=first-present-cycle-ready result=" << res
                   << " generated=" << (conf.multiplier - 1) << "\n";
     }
