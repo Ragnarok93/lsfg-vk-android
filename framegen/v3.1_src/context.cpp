@@ -267,7 +267,7 @@ Context::Context(Vulkan& vk,
         data.cmdBuffers2.resize(vk.generationCount);
     }
 
-    // build the same shader chain as the FD ctor â only Generate differs
+    // build the same shader chain as the FD ctor — only Generate differs
     // (it now takes pre-built outImgs instead of FDs).
     this->mipmaps = Shaders::Mipmaps(vk, this->inImg_0, this->inImg_1);
     for (size_t i = 0; i < 7; i++)

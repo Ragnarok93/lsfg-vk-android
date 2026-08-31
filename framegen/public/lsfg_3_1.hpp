@@ -103,7 +103,7 @@ namespace LSFG_3_1 {
 #ifdef __ANDROID__
     /// Block until framegen's internal Vulkan device is idle. Used by the
     /// Android wrapper to sync between its own device (which writes input
-    /// AHBs) and framegen's device (which reads them) â without an explicit
+    /// AHBs) and framegen's device (which reads them) — without an explicit
     /// shared semaphore this is the only safe way to avoid a write-after-read
     /// race on the shared AHardwareBuffer storage.
     __attribute__((visibility("default")))
