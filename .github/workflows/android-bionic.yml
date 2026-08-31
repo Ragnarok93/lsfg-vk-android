@@ -34,6 +34,7 @@ jobs:
           python3 tests/android_ahb_portability_test.py
           python3 tests/android_wsi_loader_bridge_test.py
           python3 tests/android_wsi_provenance_test.py
+          python3 tests/android_runtime_stability_test.py
 
       - name: Install Vulkan headers
         run: |

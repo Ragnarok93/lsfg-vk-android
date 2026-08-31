@@ -181,6 +181,8 @@ namespace {
     struct RuntimeOutputStats {
         using Clock = std::chrono::steady_clock;
         Clock::time_point windowStart{Clock::now()};
+        Clock::time_point nextConfigPoll{};
+        std::vector<VkSemaphore> presentWaitSemaphores;
         uint64_t windowSourceFrames{0};
         uint64_t windowGeneratedFrames{0};
         uint64_t totalSourceFrames{0};
@@ -491,7 +493,16 @@ namespace {
         auto& deviceInfo = it2->second;
 
         auto& conf = Config::activeConf;
-        if (!conf.config_file.empty()
+#ifdef __ANDROID__
+        auto& runtimeStats = runtimeOutputStats[*pPresentInfo->pSwapchains];
+        const auto configPollNow = RuntimeOutputStats::Clock::now();
+        const bool shouldPollConfig = configPollNow >= runtimeStats.nextConfigPoll;
+        if (shouldPollConfig)
+            runtimeStats.nextConfigPoll = configPollNow + std::chrono::milliseconds(250);
+#else
+        const bool shouldPollConfig = true;
+#endif
+        if (shouldPollConfig && !conf.config_file.empty()
                 && (
                         !std::filesystem::exists(conf.config_file)
                       || conf.timestamp != std::filesystem::last_write_time(conf.config_file)
@@ -558,8 +569,14 @@ namespace {
         }
 
         try {
+#ifdef __ANDROID__
+            auto& semaphores = runtimeStats.presentWaitSemaphores;
+            semaphores.resize(pPresentInfo->waitSemaphoreCount);
+#else
             std::vector<VkSemaphore> semaphores(pPresentInfo->waitSemaphoreCount);
-            std::copy_n(pPresentInfo->pWaitSemaphores, semaphores.size(), semaphores.data());
+#endif
+            if (!semaphores.empty())
+                std::copy_n(pPresentInfo->pWaitSemaphores, semaphores.size(), semaphores.data());
 
             const auto res = swapchain.present(deviceInfo, pPresentInfo->pNext,
                 queue, semaphores, *pPresentInfo->pImageIndices);
