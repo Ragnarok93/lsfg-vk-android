@@ -170,6 +170,30 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertIn("metrics.windowGeneratedPresentFailures++", source)
         self.assertIn("metrics.windowSourcePresentFailures++", source)
 
+    def test_android_present_chain_uses_distinct_binary_semaphore_signals(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        present_start = source.index("VkResult LsContext::present")
+        android_start = source.index("#ifdef __ANDROID__", present_start)
+        desktop_start = source.index("#else", android_start)
+        android = source[android_start:desktop_start]
+
+        # A Vulkan binary semaphore signal can satisfy only one wait. The
+        # generated present and following generated/source present therefore
+        # require independently signaled semaphores, matching the desktop path.
+        self.assertIn("pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);", android)
+        self.assertIn(
+            "{ pass.postCopySemaphores.at(i).handle(),\n"
+            "              pass.prevPostCopySemaphores.at(i).handle() }",
+            android,
+        )
+        self.assertIn(
+            "if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());",
+            android,
+        )
+        self.assertIn("VkSemaphore lastPrevPostCopySemaphore =", android)
+        self.assertNotIn("VkSemaphore lastPostCopySem =", android)
+        self.assertIn("runtime stage=present-sync-ready", android)
+
     def test_runtime_disable_recreates_a_tracked_pass_through_swapchain(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
