@@ -16,6 +16,17 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         self.assertNotIn("static_cast<uint64_t>(properties.vendorID) << 32", utils)
         self.assertNotIn("deviceUUID == 0x1463ABAC", device)
 
+    def test_optional_device_extensions_are_probed_from_advertised_extensions(self) -> None:
+        device = (ROOT / "framegen/src/core/device.cpp").read_text(encoding="utf-8")
+        self.assertIn(
+            "hasExtension(availableExtensions,\n        VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)",
+            device,
+        )
+        self.assertNotIn(
+            "hasExtension(enabledExtensions,\n        VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)",
+            device,
+        )
+
     def test_ahb_storage_contract_is_probed_and_allocated_correctly(self) -> None:
         image = (ROOT / "src/mini/image.cpp").read_text(encoding="utf-8")
         device = (ROOT / "framegen/src/core/device.cpp").read_text(encoding="utf-8")
