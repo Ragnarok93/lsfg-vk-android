@@ -15,26 +15,28 @@ class AndroidSourcePacingContractTest(unittest.TestCase):
         self.assertIn('std::getenv("LSFG_SOURCE_FPS_LIMIT")', source)
         self.assertIn("conf.sourceFpsLimit", source)
 
-    def test_source_pacing_precedes_source_interval_measurement(self) -> None:
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+    def test_source_pacing_precedes_lsfg_present_and_interval_measurement(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn('#include "source_frame_pacer.hpp"', header)
-        self.assertIn("SourceFramePacer sourceFramePacer_", header)
+        self.assertIn('#include "source_frame_pacer.hpp"', hooks)
+        self.assertIn("SourceFramePacer sourceFramePacer", hooks)
 
-        present_start = source.index("VkResult LsContext::present")
-        android_start = source.index("#ifdef __ANDROID__", present_start)
-        pacing_config = source.index(
-            "sourceFramePacer_.configure(conf.sourceFpsLimit)", android_start
+        queue_present_start = hooks.index("VkResult myvkQueuePresentKHR")
+        pacing_config = hooks.index(
+            "sourceFramePacer.configure(conf.sourceFpsLimit)", queue_present_start
         )
-        pacing_delay = source.index("sourceFramePacer_.delayUntilNext", pacing_config)
-        pacing_sleep = source.index("std::this_thread::sleep_for(sourcePacingDelay)", pacing_delay)
-        cycle_start = source.index("const auto cycleStart", pacing_sleep)
-        adaptive_config = source.index("adaptiveScheduler_.configure", cycle_start)
+        pacing_delay = hooks.index("sourceFramePacer.delayUntilNext", pacing_config)
+        pacing_sleep = hooks.index("std::this_thread::sleep_for(sourcePacingDelay)", pacing_delay)
+        lsfg_present = hooks.index("swapchain.present", pacing_sleep)
+
+        context_present = context.index("VkResult LsContext::present")
+        cycle_start = context.index("const auto cycleStart", context_present)
+        adaptive_config = context.index("adaptiveScheduler_.configure", cycle_start)
 
         self.assertLess(pacing_config, pacing_delay)
         self.assertLess(pacing_delay, pacing_sleep)
-        self.assertLess(pacing_sleep, cycle_start)
+        self.assertLess(pacing_sleep, lsfg_present)
         self.assertLess(cycle_start, adaptive_config)
 
     def test_source_limit_hot_reload_does_not_recreate_swapchain(self) -> None:
