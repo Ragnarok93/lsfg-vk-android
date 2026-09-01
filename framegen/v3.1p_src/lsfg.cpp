@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <functional>
+#include <iostream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -88,7 +89,10 @@ void LSFG_3_1P::deleteContext(int32_t id) {
     if (it == contexts.end())
         throw LSFG::vulkan_error(VK_ERROR_DEVICE_LOST, "No such context");
 
-    vkDeviceWaitIdle(device->device.handle());
+    if (!it->second.waitForCompletion(*device)) {
+        std::cerr << "lsfg-vk: framegen teardown timed out; retaining context resources for safe bypass\n";
+        return;
+    }
     contexts.erase(it);
 }
 
@@ -96,7 +100,13 @@ void LSFG_3_1P::finalize() {
     if (!instance.has_value() || !device.has_value())
         return;
 
-    vkDeviceWaitIdle(device->device.handle());
+    for (auto& [id, context] : contexts) {
+        (void)id;
+        if (!context.waitForCompletion(*device)) {
+            std::cerr << "lsfg-vk: framegen finalize timed out; retaining Vulkan resources for safe bypass\n";
+            return;
+        }
+    }
     contexts.clear();
     device.reset();
     instance.reset();
@@ -123,6 +133,10 @@ int32_t LSFG_3_1P::createContextFromAHB(
 #ifdef __ANDROID__
 void LSFG_3_1P::waitIdle() {
     if (!device.has_value()) return;
-    vkDeviceWaitIdle(device->device.handle());
+    for (auto& [id, context] : contexts) {
+        (void)id;
+        if (!context.waitForCompletion(*device))
+            throw LSFG::vulkan_error(VK_TIMEOUT, "Framegen completion wait timed out");
+    }
 }
 #endif

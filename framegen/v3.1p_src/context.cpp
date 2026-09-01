@@ -10,9 +10,26 @@
 #include <algorithm>
 #include <optional>
 #include <cstdint>
+#include <cstdlib>
 
 using namespace LSFG;
 using namespace LSFG_3_1P;
+
+namespace {
+uint64_t framegenWaitTimeoutNs() {
+    constexpr uint64_t defaultMs = 250;
+    constexpr uint64_t maxMs = 5000;
+    const char* raw = std::getenv("LSFG_VK_WAIT_TIMEOUT_MS");
+    if (raw == nullptr || *raw == '\0')
+        return defaultMs * 1000000ULL;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(raw, &end, 10);
+    if (end == raw || *end != '\0' || parsed == 0)
+        return defaultMs * 1000000ULL;
+    const uint64_t boundedMs = parsed > maxMs ? maxMs : static_cast<uint64_t>(parsed);
+    return boundedMs * 1000000ULL;
+}
+}
 
 #ifdef __ANDROID__
 namespace {
@@ -214,7 +231,7 @@ void Context::present(Vulkan& vk,
     // 3. wait for completion of previous frame in this slot
     if (data.shouldWait)
         for (auto& fence : data.completionFences)
-            if (!fence.wait(vk.device, UINT64_MAX))
+            if (!fence.wait(vk.device, framegenWaitTimeoutNs()))
                 throw LSFG::vulkan_error(VK_TIMEOUT, "Fence wait timed out");
     data.shouldWait = true;
 
@@ -347,6 +364,19 @@ void Context::present(Vulkan& vk,
     }
 
     this->frameIdx++;
+}
+
+bool Context::waitForCompletion(Vulkan& vk) {
+    for (auto& renderData : this->data) {
+        if (!renderData.shouldWait)
+            continue;
+        for (auto& fence : renderData.completionFences) {
+            if (!fence.wait(vk.device, framegenWaitTimeoutNs()))
+                return false;
+        }
+        renderData.shouldWait = false;
+    }
+    return true;
 }
 
 #ifdef __ANDROID__

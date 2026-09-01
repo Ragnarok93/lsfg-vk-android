@@ -62,6 +62,10 @@ namespace LSFG_3_1P {
         void present(Vulkan& vk,
             int inSem, const std::vector<int>& outSem);
 
+        /// Wait only for this context's submitted fences, using the bounded
+        /// LSFG_VK_WAIT_TIMEOUT_MS budget. Returns false on timeout.
+        bool waitForCompletion(Vulkan& vk);
+
         // Trivially copyable, moveable and destructible
         Context(const Context&) = default;
         Context& operator=(const Context&) = default;

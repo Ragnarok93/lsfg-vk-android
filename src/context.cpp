@@ -31,6 +31,20 @@
 #ifdef __ANDROID__
 namespace {
 
+uint64_t runtimeWaitTimeoutNs() {
+    constexpr uint64_t defaultMs = 250;
+    constexpr uint64_t maxMs = 5000;
+    const char* raw = std::getenv("LSFG_VK_WAIT_TIMEOUT_MS");
+    if (raw == nullptr || *raw == '\0')
+        return defaultMs * 1000000ULL;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(raw, &end, 10);
+    if (end == raw || *end != '\0' || parsed == 0)
+        return defaultMs * 1000000ULL;
+    const uint64_t boundedMs = parsed > maxMs ? maxMs : static_cast<uint64_t>(parsed);
+    return boundedMs * 1000000ULL;
+}
+
 VkImageSubresourceRange colorSubresourceRange() {
     return VkImageSubresourceRange{
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -228,7 +242,7 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
         throw LSFG::vulkan_error(res, "Failed resetting Android AHB handoff fence");
 
     commandBuffer.submit(queue, waitSemaphores, signalSemaphores, fence);
-    res = waitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+    res = waitForFences(device, 1, &fence, VK_TRUE, runtimeWaitTimeoutNs());
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Failed waiting for Android AHB handoff copy");
 }
@@ -556,7 +570,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
-        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, UINT64_MAX,
+        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, runtimeWaitTimeoutNs(),
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowGeneratedPresentFailures++;
@@ -751,7 +765,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // 3. acquire next swapchain image
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
-        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, UINT64_MAX,
+        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, runtimeWaitTimeoutNs(),
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");

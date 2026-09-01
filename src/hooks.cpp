@@ -354,6 +354,23 @@ namespace {
         return modes.front();
     }
 
+    bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
+            VkFormat sharedFormat, VkFormat swapchainFormat) {
+        auto getFormatProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(
+            Layer::ovkGetInstanceProcAddr(layerInstance, "vkGetPhysicalDeviceFormatProperties"));
+        if (getFormatProperties == nullptr)
+            return false;
+
+        VkFormatProperties sharedProperties{};
+        VkFormatProperties swapchainProperties{};
+        getFormatProperties(physicalDevice, sharedFormat, &sharedProperties);
+        getFormatProperties(physicalDevice, swapchainFormat, &swapchainProperties);
+        constexpr VkFormatFeatureFlags required =
+            VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+        return (sharedProperties.optimalTilingFeatures & required) == required
+            && (swapchainProperties.optimalTilingFeatures & required) == required;
+    }
+
     VkResult myvkCreateSwapchainKHR(
             VkDevice device,
             const VkSwapchainCreateInfoKHR* pCreateInfo,
@@ -417,23 +434,43 @@ namespace {
         }
 
         VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;
-        const uint32_t maxImages = surfaceCapabilities.maxImageCount == 0
-            ? UINT32_MAX : surfaceCapabilities.maxImageCount;
-        // LSFG needs one additional image available while the game's acquired
-        // image is being transformed. Queue-family numbering is unrelated and
-        // is vendor-defined, so it must not influence swapchain sizing.
-        createInfo.minImageCount = pCreateInfo->minImageCount + 1;
-        if (createInfo.minImageCount > maxImages) {
-            createInfo.minImageCount = maxImages;
-            Utils::logLimitN("swapCount", 10,
-                "Requested image count (" +
-                    std::to_string(pCreateInfo->minImageCount) + ") "
-                "exceeds maximum allowed (" +
-                    std::to_string(maxImages) + "). "
-                "Continuing with maximum allowed image count. "
-                "This might lead to performance degradation.");
-        } else {
-            Utils::resetLimitN("swapCount");
+        const uint32_t requiredHeadroom = static_cast<uint32_t>(
+            std::max(1, activeConf.multiplier - 1));
+        const uint32_t maxImageCount = surfaceCapabilities.maxImageCount;
+        if (pCreateInfo->minImageCount > UINT32_MAX - requiredHeadroom) {
+            std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom minImageCount="
+                      << pCreateInfo->minImageCount
+                      << " maxImageCount=" << maxImageCount
+                      << " requiredHeadroom=" << requiredHeadroom
+                      << "; preserving original swapchain\n";
+            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+        }
+        const uint32_t requiredImageCount = pCreateInfo->minImageCount + requiredHeadroom;
+        std::cerr << "lsfg-vk: init stage=swapchain-capacity minImageCount="
+                  << pCreateInfo->minImageCount
+                  << " maxImageCount=" << maxImageCount
+                  << " requiredHeadroom=" << requiredHeadroom
+                  << " multiplier=" << activeConf.multiplier << "\n";
+        if (maxImageCount != 0 && requiredImageCount > maxImageCount) {
+            std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom minImageCount="
+                      << pCreateInfo->minImageCount
+                      << " maxImageCount=" << maxImageCount
+                      << " requiredHeadroom=" << requiredHeadroom
+                      << "; preserving original swapchain\n";
+            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+        }
+        createInfo.minImageCount = requiredImageCount;
+        Utils::resetLimitN("swapCount");
+
+        const VkFormat sharedFormat = activeConf.hdr
+            ? VK_FORMAT_R8G8B8A8_UNORM
+            : VK_FORMAT_R16G16B16A16_SFLOAT;
+        if (!supportsBidirectionalBlit(
+                deviceInfo.physicalDevice, sharedFormat, pCreateInfo->imageFormat)) {
+            std::cerr << "lsfg-vk: init stage=blit-format-unsupported sharedFormat="
+                      << sharedFormat << " swapchainFormat=" << pCreateInfo->imageFormat
+                      << "; preserving original swapchain\n";
+            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
         }
 
         createInfo.imageUsage |= requiredTransferUsage;
@@ -605,8 +642,10 @@ namespace {
             recordOutputFailure(*pPresentInfo->pSwapchains);
 #endif
             Utils::logLimitN("swapPresent", 5,
-                "An error occurred while presenting the swapchain:\n"
+                "An error occurred while presenting the swapchain; degrading to native presentation:\n"
                 "- " + std::string(e.what()));
+            swapchains.erase(*pPresentInfo->pSwapchains);
+            std::cerr << "lsfg-vk: runtime stage=context-degraded-bypass reason=present-error\n";
             return VK_ERROR_INITIALIZATION_FAILED;
         }
     }
