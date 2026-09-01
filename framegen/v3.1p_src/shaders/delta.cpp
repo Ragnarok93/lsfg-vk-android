@@ -101,11 +101,13 @@ Delta::Delta(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
         { extent.width, extent.height },
         VK_FORMAT_R16G16B16A16_SFLOAT);
 
-    // hook up shaders
-    for (size_t pass_idx = 0; pass_idx < vk.generationCount; pass_idx++) {
-        auto& pass = this->passes.emplace_back();
+    // Prebuild every interpolation timestamp denominator used by adaptive mode.
+    this->passesByGenerationCount.resize(vk.generationCount + 1);
+    for (size_t count = 1; count <= vk.generationCount; count++) {
+      for (size_t pass_idx = 0; pass_idx < count; pass_idx++) {
+        auto& pass = this->passesByGenerationCount.at(count).emplace_back();
         pass.buffer = vk.resources.getBuffer(vk.device,
-            static_cast<float>(pass_idx + 1) / static_cast<float>(vk.generationCount + 1),
+            static_cast<float>(pass_idx + 1) / static_cast<float>(count + 1),
             false, !this->optImg1.has_value());
         for (size_t i = 0; i < 3; i++) {
             pass.firstDescriptorSet.at(i) = Core::DescriptorSet(vk.device, vk.descriptorPool,
@@ -199,11 +201,13 @@ Delta::Delta(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
             .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, this->optImg3)
             .add(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, this->outImg2)
             .build();
+      }
     }
 }
 
-void Delta::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount, uint64_t pass_idx) {
-    auto& pass = this->passes.at(pass_idx);
+void Delta::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
+        uint64_t pass_idx, size_t activeGenerationCount) {
+    auto& pass = this->passesByGenerationCount.at(activeGenerationCount).at(pass_idx);
 
     // first shader
     const auto extent = this->tempImgs1.at(0).getExtent();

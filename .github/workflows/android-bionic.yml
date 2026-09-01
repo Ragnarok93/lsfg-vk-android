@@ -51,6 +51,12 @@ jobs:
             framegen/tests/capabilities_test.cpp \
             -o /tmp/lsfg-capabilities-test
           /tmp/lsfg-capabilities-test
+          g++ -std=c++20 -Wall -Wextra -Werror \
+            -Iinclude \
+            src/adaptive_scheduler.cpp \
+            tests/adaptive_scheduler_test.cpp \
+            -o /tmp/lsfg-adaptive-scheduler-test
+          /tmp/lsfg-adaptive-scheduler-test
 
   build:
     name: Build ${{ matrix.abi }}

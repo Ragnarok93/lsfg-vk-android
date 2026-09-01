@@ -47,6 +47,18 @@ namespace Layer {
 
 namespace {
 
+    bool requiresSwapchainRecreation(
+            const Config::Configuration& previous,
+            const Config::Configuration& next) {
+        return previous.enable != next.enable
+            || previous.dll != next.dll
+            || previous.multiplier != next.multiplier
+            || previous.flowScale != next.flowScale
+            || previous.performance != next.performance
+            || previous.hdr != next.hdr
+            || previous.e_present != next.e_present;
+    }
+
     bool supportsDeviceExtension(VkPhysicalDevice physicalDevice, const char* extensionName) {
         uint32_t count{};
         auto res = Layer::ovkEnumerateDeviceExtensionProperties(
@@ -207,7 +219,8 @@ namespace {
 
     void writeRuntimeStatsFile(const std::string& configFile,
             double outputFps, double sourceFps, double generatedFps,
-            const RuntimeOutputStats& stats, int multiplier, bool performance) {
+            const RuntimeOutputStats& stats, int multiplier, bool performance,
+            bool adaptive, uint32_t targetFps) {
         if (configFile.empty())
             return;
 
@@ -226,6 +239,8 @@ namespace {
                 << "generated_frames_total=" << stats.totalGeneratedFrames << '\n'
                 << "present_failures=" << stats.presentFailures << '\n'
                 << "multiplier=" << multiplier << '\n'
+                << "adaptive=" << (adaptive ? 1 : 0) << '\n'
+                << "target_fps=" << targetFps << '\n'
                 << "performance=" << (performance ? 1 : 0) << '\n';
             out.close();
             if (!out)
@@ -250,12 +265,11 @@ namespace {
     }
 
     void recordSuccessfulOutputCycle(VkSwapchainKHR swapchain,
-            const std::string& configFile, int multiplier, bool performance) {
+            const std::string& configFile, uint64_t generated,
+            int multiplier, bool performance, bool adaptive, uint32_t targetFps) {
         auto& stats = runtimeOutputStats[swapchain];
         stats.windowSourceFrames++;
         stats.totalSourceFrames++;
-        const uint64_t generated = multiplier > 1
-            ? static_cast<uint64_t>(multiplier - 1) : 0;
         stats.windowGeneratedFrames += generated;
         stats.totalGeneratedFrames += generated;
 
@@ -269,7 +283,7 @@ namespace {
         const double generatedFps = static_cast<double>(stats.windowGeneratedFrames) / elapsedSeconds;
         const double outputFps = sourceFps + generatedFps;
         writeRuntimeStatsFile(configFile, outputFps, sourceFps, generatedFps,
-            stats, multiplier, performance);
+            stats, multiplier, performance, adaptive, targetFps);
 
         stats.windowStart = now;
         stats.windowSourceFrames = 0;
@@ -519,7 +533,27 @@ namespace {
             Utils::logLimitN("swapCtxCreate", 5,
                 "An error occurred while creating the swapchain wrapper:\n"
                 "- " + std::string(e.what()));
-            return VK_SUCCESS;
+
+            // The handle above was created with LSFG-specific image count,
+            // usage, and present mode. Keeping it without an LsContext is not
+            // pass-through and can perturb the game's pacing. Replace it with
+            // a swapchain created from the game's untouched parameters.
+            const VkSwapchainKHR failedSwapchain = *pSwapchain;
+            eraseSwapchainState(failedSwapchain);
+            Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);
+            *pSwapchain = VK_NULL_HANDLE;
+
+            const auto fallbackRes = Layer::ovkCreateSwapchainKHR(
+                device, pCreateInfo, pAllocator, pSwapchain);
+            if (fallbackRes == VK_SUCCESS) {
+                swapchainToDeviceTable.emplace(*pSwapchain, device);
+                std::cerr << "lsfg-vk: init stage=swapchain-fallback-pass-through"
+                             " reason=ls-context-failed\n";
+                return VK_SUCCESS;
+            }
+            std::cerr << "lsfg-vk: init stage=swapchain-fallback-failed result="
+                      << fallbackRes << "\n";
+            return fallbackRes;
         }
         return VK_SUCCESS;
     }
@@ -558,23 +592,34 @@ namespace {
                       || conf.timestamp != std::filesystem::last_write_time(conf.config_file)
                 )) {
             const std::string configFile = conf.config_file;
+            const auto previousConf = conf;
+            bool recreateSwapchain = false;
             if (std::filesystem::exists(configFile)) {
                 try {
                     Config::updateConfig(configFile);
                     Config::activeConf = Config::getConfig(Utils::getProcessName());
+                    recreateSwapchain = requiresSwapchainRecreation(
+                        previousConf, Config::activeConf);
                     std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
                               << Config::activeConf.multiplier
+                              << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
+                              << " targetFps=" << Config::activeConf.fpsLimit
                               << " presentMode=" << Config::activeConf.e_present
                               << " enabled=" << (Config::activeConf.enable ? 1 : 0)
+                              << " recreateSwapchain=" << (recreateSwapchain ? 1 : 0)
                               << "\n";
                 } catch (const std::exception& e) {
                     Utils::logLimitN("configReload", 5,
-                        "Failed to hot-reload configuration; requesting swapchain recreation:\n- "
+                        "Failed to hot-reload configuration; preserving the active runtime:\n- "
                         + std::string(e.what()));
                 }
+            } else {
+                recreateSwapchain = true;
             }
-            Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-            return VK_ERROR_OUT_OF_DATE_KHR;
+            if (recreateSwapchain) {
+                Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
         }
 
         if (!conf.enable || conf.multiplier <= 1)
@@ -633,7 +678,9 @@ namespace {
 
 #ifdef __ANDROID__
             recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
-                conf.config_file, conf.multiplier, conf.performance);
+                conf.config_file, swapchain.lastGeneratedFrameCount(),
+                conf.multiplier, conf.performance,
+                conf.adaptiveFramegen, conf.fpsLimit);
 #endif
             Utils::resetLimitN("swapPresent");
             return res;
