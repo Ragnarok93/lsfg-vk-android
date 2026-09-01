@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 
 namespace {
 constexpr std::size_t kWarmupSamples = 6;
@@ -67,7 +68,37 @@ bool AdaptiveFrameScheduler::shouldRejectProbe(std::size_t probeLevel) const {
     return throughputRegressed || sourceFpsCollapsed;
 }
 
+AdaptiveFrameScheduler::Diagnostics AdaptiveFrameScheduler::diagnostics() const {
+    return Diagnostics{
+        .targetFps = targetFps_,
+        .smoothedSourceFps = lastSmoothedSourceFps_,
+        .requestedGeneratedFrames = lastRequestedGeneratedFrames_,
+        .generationCeiling = generationCeiling_,
+        .provenGenerationCeiling = provenGenerationCeiling_,
+        .lastGeneratedFrameCount = lastGeneratedFrameCount_,
+        .cooldownSamples = probeCooldownSamples_,
+        .probing = generationCeiling_ > provenGenerationCeiling_,
+        .lastProbeRejected = lastProbeRejected_,
+    };
+}
+
+void AdaptiveFrameScheduler::logControllerEvent(const char* event) const {
+    const auto state = diagnostics();
+    std::cerr << "lsfg-vk: adaptive"
+              << " event=" << event
+              << " target_fps=" << state.targetFps
+              << " source_fps=" << state.smoothedSourceFps
+              << " requested_generated=" << state.requestedGeneratedFrames
+              << " ceiling=" << state.generationCeiling
+              << " proven_ceiling=" << state.provenGenerationCeiling
+              << " last_generated=" << state.lastGeneratedFrameCount
+              << " probing=" << (state.probing ? 1 : 0)
+              << " cooldown_samples=" << state.cooldownSamples
+              << '\n';
+}
+
 std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval) {
+    lastProbeRejected_ = false;
     if (targetFps_ == 0 || maxGeneratedFrames_ == 0)
         return 0;
 
@@ -79,6 +110,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     // samples. Re-establish a clean source-only baseline instead of bursting.
     if (intervalSeconds >= 0.250) {
         reset();
+        logControllerEvent("stall-reset");
         return 0;
     }
 
@@ -94,18 +126,24 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     // attribute its source throughput to that previous generation level.
     recordSourceSample(lastGeneratedFrameCount_, 1.0 / intervalSeconds);
 
+    lastSmoothedSourceFps_ = 1.0 / smoothedSourceIntervalSeconds_;
+
     if (warmupSamplesRemaining_ > 0) {
         warmupSamplesRemaining_--;
         fractionalGeneratedBudget_ = 0.0;
+        lastRequestedGeneratedFrames_ = 0.0;
         lastGeneratedFrameCount_ = 0;
-        if (warmupSamplesRemaining_ == 0)
+        if (warmupSamplesRemaining_ == 0) {
             generationCeiling_ = std::min<std::size_t>(1, maxGeneratedFrames_);
+            if (generationCeiling_ > 0)
+                logControllerEvent("warmup-complete");
+        }
         return 0;
     }
 
-    const double smoothedSourceFps = 1.0 / smoothedSourceIntervalSeconds_;
-    if (smoothedSourceFps >= static_cast<double>(targetFps_) * kTargetSatisfiedRatio) {
+    if (lastSmoothedSourceFps_ >= static_cast<double>(targetFps_) * kTargetSatisfiedRatio) {
         fractionalGeneratedBudget_ = 0.0;
+        lastRequestedGeneratedFrames_ = 0.0;
         lastGeneratedFrameCount_ = 0;
         stableDeficitSamples_ = 0;
         return 0;
@@ -115,6 +153,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         static_cast<double>(targetFps_) * smoothedSourceIntervalSeconds_ - 1.0,
         0.0,
         static_cast<double>(maxGeneratedFrames_));
+    lastRequestedGeneratedFrames_ = rawWantedGenerated;
 
     // A ceiling above the proven level is a probe. Accept it only when it
     // improves useful output throughput without collapsing source rendering.
@@ -128,9 +167,12 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
             probeCooldownSamples_ = kRejectedProbeCooldownSamples;
             stableDeficitSamples_ = 0;
             fractionalGeneratedBudget_ = 0.0;
+            lastProbeRejected_ = true;
+            logControllerEvent("probe-rejected");
         } else {
             provenGenerationCeiling_ = probeLevel;
             stableDeficitSamples_ = 0;
+            logControllerEvent("probe-accepted");
         }
     }
 
@@ -148,6 +190,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
             if (stableDeficitSamples_ >= kStableSamplesBeforeProbe) {
                 generationCeiling_++;
                 stableDeficitSamples_ = 0;
+                logControllerEvent("probe-start");
             }
         }
     } else if (rawWantedGenerated <= static_cast<double>(generationCeiling_)
@@ -185,6 +228,8 @@ std::chrono::nanoseconds AdaptiveFrameScheduler::delayUntilNextSourceOutput(
 void AdaptiveFrameScheduler::reset() {
     fractionalGeneratedBudget_ = 0.0;
     smoothedSourceIntervalSeconds_ = 0.0;
+    lastSmoothedSourceFps_ = 0.0;
+    lastRequestedGeneratedFrames_ = 0.0;
     hasSmoothedInterval_ = false;
     generationCeiling_ = 0;
     provenGenerationCeiling_ = 0;
@@ -193,5 +238,6 @@ void AdaptiveFrameScheduler::reset() {
         ? kWarmupSamples : 0;
     stableDeficitSamples_ = 0;
     probeCooldownSamples_ = 0;
+    lastProbeRejected_ = false;
     levelStats_.assign(maxGeneratedFrames_ + 1, {});
 }
