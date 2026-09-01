@@ -11,6 +11,18 @@ class AdaptiveFrameScheduler {
 public:
     using Clock = std::chrono::steady_clock;
 
+    struct Diagnostics {
+        uint32_t targetFps{};
+        double smoothedSourceFps{};
+        double requestedGeneratedFrames{};
+        std::size_t generationCeiling{};
+        std::size_t provenGenerationCeiling{};
+        std::size_t lastGeneratedFrameCount{};
+        std::size_t cooldownSamples{};
+        bool probing{};
+        bool lastProbeRejected{};
+    };
+
     AdaptiveFrameScheduler() = default;
     AdaptiveFrameScheduler(uint32_t targetFps, std::size_t maxGeneratedFrames);
 
@@ -34,6 +46,7 @@ public:
     [[nodiscard]] std::size_t provenGenerationCeiling() const {
         return provenGenerationCeiling_;
     }
+    [[nodiscard]] Diagnostics diagnostics() const;
 
 private:
     struct LevelStats {
@@ -43,11 +56,14 @@ private:
 
     void recordSourceSample(std::size_t generationLevel, double sourceFps);
     [[nodiscard]] bool shouldRejectProbe(std::size_t probeLevel) const;
+    void logControllerEvent(const char* event) const;
 
     uint32_t targetFps_{};
     std::size_t maxGeneratedFrames_{};
     double fractionalGeneratedBudget_{};
     double smoothedSourceIntervalSeconds_{};
+    double lastSmoothedSourceFps_{};
+    double lastRequestedGeneratedFrames_{};
     bool hasSmoothedInterval_{false};
 
     std::size_t generationCeiling_{};
@@ -56,5 +72,6 @@ private:
     std::size_t warmupSamplesRemaining_{};
     std::size_t stableDeficitSamples_{};
     std::size_t probeCooldownSamples_{};
+    bool lastProbeRejected_{false};
     std::vector<LevelStats> levelStats_{};
 };
