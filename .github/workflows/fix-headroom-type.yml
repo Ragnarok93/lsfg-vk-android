@@ -1,0 +1,40 @@
+name: Apply headroom type compile fix
+
+on:
+  push:
+    branches:
+      - refactor/capability-driven-framegen-20260831
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: contains(github.event.head_commit.message, 'bootstrap headroom type fix')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fix multiplier headroom type
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/hooks.cpp')
+          text = path.read_text(encoding='utf-8')
+          old = 'std::max(1, activeConf.multiplier - 1)'
+          new = 'std::max<size_t>(1, activeConf.multiplier - 1)'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one headroom expression, got {text.count(old)}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          python3 tests/android_capability_architecture_test.py
+          rm -f .github/workflows/fix-headroom-type.yml .github/headroom-type-trigger
+      - name: Commit source fix
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(android): type multiplier-derived swapchain headroom"
+          git push origin HEAD:${GITHUB_REF_NAME}
