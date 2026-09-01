@@ -16,6 +16,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Align guarded patch with existing annotation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/apply_task1_capability_refactor.py')
+          s = p.read_text()
+          s = s.replace('std::pair<uint32_t, VkQueue> queue;\\n', 'std::pair<uint32_t, VkQueue> queue; // graphics family\\n')
+          p.write_text(s)
+          PY
       - name: Apply exact-driver capability refactor
         run: python3 scripts/apply_task1_capability_refactor.py
       - name: Commit generated source changes
