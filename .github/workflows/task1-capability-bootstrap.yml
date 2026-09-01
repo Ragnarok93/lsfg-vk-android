@@ -17,10 +17,30 @@ jobs:
         with:
           fetch-depth: 0
       - name: Apply exact-driver capability refactor
-        run: python3 scripts/apply_task1_capability_refactor.py
-      - name: Commit generated source changes
+        id: apply
+        shell: bash
+        run: |
+          set +e
+          python3 scripts/apply_task1_capability_refactor.py > bootstrap-task1.log 2>&1
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          cat bootstrap-task1.log
+          exit 0
+      - name: Commit bootstrap diagnostics on failure
+        if: steps.apply.outputs.status != '0'
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bootstrap-task1.log
+          git commit -m "chore: capture task1 bootstrap failure"
+          git push origin HEAD:${GITHUB_REF_NAME}
+          exit 1
+      - name: Commit generated source changes
+        if: steps.apply.outputs.status == '0'
+        run: |
+          set -euo pipefail
+          rm -f bootstrap-task1.log
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
