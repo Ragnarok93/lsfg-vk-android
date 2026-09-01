@@ -435,7 +435,7 @@ namespace {
 
         VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;
         const uint32_t requiredHeadroom = static_cast<uint32_t>(
-            std::max(1, activeConf.multiplier - 1));
+            std::max<size_t>(1, activeConf.multiplier - 1));
         const uint32_t maxImageCount = surfaceCapabilities.maxImageCount;
         if (pCreateInfo->minImageCount > UINT32_MAX - requiredHeadroom) {
             std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom minImageCount="
