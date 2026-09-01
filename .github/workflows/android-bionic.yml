@@ -64,6 +64,12 @@ jobs:
             tests/source_frame_pacer_test.cpp \
             -o /tmp/lsfg-source-frame-pacer-test
           /tmp/lsfg-source-frame-pacer-test
+          g++ -std=c++20 -Wall -Wextra -Werror \
+            -Iinclude \
+            src/output_frame_pacer.cpp \
+            tests/output_frame_pacer_test.cpp \
+            -o /tmp/lsfg-output-frame-pacer-test
+          /tmp/lsfg-output-frame-pacer-test
 
   build:
     name: Build ${{ matrix.abi }}

@@ -52,13 +52,8 @@ namespace {
     bool requiresSwapchainRecreation(
             const Config::Configuration& previous,
             const Config::Configuration& next) {
-        return previous.enable != next.enable
-            || previous.dll != next.dll
-            || previous.multiplier != next.multiplier
-            || previous.flowScale != next.flowScale
-            || previous.performance != next.performance
-            || previous.hdr != next.hdr
-            || previous.e_present != next.e_present;
+        return previous.dll != next.dll
+            || previous.hdr != next.hdr;
     }
 
     bool supportsDeviceExtension(VkPhysicalDevice physicalDevice, const char* extensionName) {
@@ -695,7 +690,7 @@ namespace {
         const auto configPollNow = RuntimeOutputStats::Clock::now();
         const bool shouldPollConfig = configPollNow >= runtimeStats.nextConfigPoll;
         if (shouldPollConfig)
-            runtimeStats.nextConfigPoll = configPollNow + std::chrono::milliseconds(250);
+            runtimeStats.nextConfigPoll = configPollNow + std::chrono::milliseconds(50);
 #else
         const bool shouldPollConfig = true;
 #endif
@@ -779,10 +774,12 @@ namespace {
         }
         #pragma clang diagnostic pop
 
-        if (configuredPresent != conf.e_present) {
-            Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-            return VK_ERROR_OUT_OF_DATE_KHR;
-        }
+        const bool presentModeChangePending = configuredPresent != conf.e_present;
+        if (presentModeChangePending)
+            Utils::logLimitN("presentModeDeferred", 1,
+                "Present-mode change deferred until the application's next natural swapchain creation");
+        else
+            Utils::resetLimitN("presentModeDeferred");
 
 #ifdef __ANDROID__
         auto& sourceFramePacer = runtimeStats.sourceFramePacer;

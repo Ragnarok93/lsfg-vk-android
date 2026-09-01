@@ -9,6 +9,7 @@
 
 #include "hooks.hpp"
 #include "adaptive_scheduler.hpp"
+#include "output_frame_pacer.hpp"
 #include "mini/commandbuffer.hpp"
 #include "mini/commandpool.hpp"
 #include "mini/image.hpp"
@@ -75,9 +76,11 @@ private:
     Mini::CommandPool cmdPool;
     uint64_t frameIdx{0};
     size_t lastGeneratedFrameCount_{0};
+    bool performanceMode_{false};
 
 #ifdef __ANDROID__
     AdaptiveFrameScheduler adaptiveScheduler_;
+    OutputFramePacer outputFramePacer_;
     bool requiresSourceHistoryWarmup_{false};
     bool previousSourceCopySignalValid_{false};
     struct RuntimeMetrics {

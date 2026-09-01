@@ -291,6 +291,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
         if (conf.multiplier <= 1) return;
     }
+    this->performanceMode_ = conf.performance;
+
     // we could take the format from the swapchain,
     // but honestly this is safer.
     const VkFormat format = conf.hdr
@@ -479,9 +481,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 #ifdef __ANDROID__
     auto& metrics = this->runtimeMetrics;
     const auto cycleStart = RuntimeMetrics::Clock::now();
+    const size_t generationCapacity = this->out_n.size();
+    const size_t configuredGenerationCount = std::min(
+        conf.multiplier > 1 ? static_cast<size_t>(conf.multiplier - 1) : 0,
+        generationCapacity);
     this->adaptiveScheduler_.configure(
         conf.adaptiveFramegen ? conf.fpsLimit : 0,
-        conf.multiplier > 1 ? static_cast<size_t>(conf.multiplier - 1) : 0);
+        configuredGenerationCount);
     std::chrono::nanoseconds sourceInterval{};
     if (metrics.hasLastSourcePresent) {
         sourceInterval = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -497,7 +503,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     metrics.hasLastSourcePresent = true;
     const size_t generatedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
-        : static_cast<size_t>(conf.multiplier - 1);
+        : configuredGenerationCount;
     const bool warmupSourceHistory =
         generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
     this->lastGeneratedFrameCount_ = generatedFrameCount;
@@ -508,7 +514,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << " multiplier=" << conf.multiplier
                   << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                   << " target_fps=" << conf.fpsLimit
-                  << " performance=" << (conf.performance ? 1 : 0) << "\n";
+                  << " performance=" << (this->performanceMode_ ? 1 : 0) << "\n";
     }
 
     const auto finishSourcePresent = [&](VkResult result, const char* sourceWait) -> VkResult {
@@ -569,7 +575,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " multiplier=" << conf.multiplier
                       << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                       << " target_fps=" << conf.fpsLimit
-                      << " performance=" << (conf.performance ? 1 : 0)
+                      << " performance=" << (this->performanceMode_ ? 1 : 0)
                       << "\n";
 
             metrics.windowStart = cycleEnd;
@@ -593,6 +599,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     };
 
     if (generatedFrameCount == 0) {
+        this->outputFramePacer_.configure(0);
         this->requiresSourceHistoryWarmup_ = true;
         this->previousSourceCopySignalValid_ = false;
         const auto delay = this->adaptiveScheduler_.delayUntilNextSourceOutput(
@@ -691,11 +698,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     std::vector<int> noOutSems;
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
-                  << (conf.performance ? "performance" : "quality")
+                  << (this->performanceMode_ ? "performance" : "quality")
                   << " generated=" << generatedFrameCount << "\n";
     }
     const auto dispatchStart = RuntimeMetrics::Clock::now();
-    if (conf.performance)
+    if (this->performanceMode_)
         LSFG_3_1P::presentContextWithCount(
             *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
     else
@@ -710,7 +717,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     //    before the game device acquires generated AHBs for readback/blit.
     const auto waitIdleStart = RuntimeMetrics::Clock::now();
     const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
-    const bool framegenReady = conf.performance
+    const bool framegenReady = this->performanceMode_
         ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
         : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
     metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
@@ -746,6 +753,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // copy submission signals two binary semaphores: one consumed by this
     // generated present, and one reserved for the next generated/source
     // present. A binary semaphore signal must not be consumed twice.
+    this->outputFramePacer_.configure(conf.fpsLimit);
+    const auto paceOutputPresent = [&]() {
+        const auto delay = this->outputFramePacer_.delayUntilNext(
+            OutputFramePacer::Clock::now());
+        if (delay > std::chrono::nanoseconds::zero())
+            std::this_thread::sleep_for(delay);
+    };
     for (size_t i = 0; i < generatedFrameCount; i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
@@ -787,6 +801,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pSwapchains = &this->swapchain,
             .pImageIndices = &imageIdx,
         };
+        paceOutputPresent();
         res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowGeneratedPresentFailures++;
@@ -818,6 +833,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .pSwapchains = &this->swapchain,
         .pImageIndices = &presentIdx,
     };
+    paceOutputPresent();
     auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
         metrics.windowSourcePresentFailures++;
@@ -859,7 +875,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     for (size_t i = 0; i < (conf.multiplier - 1); ++i)
         pass.renderSemaphores.at(i) = Mini::Semaphore(info.device, &renderSemaphoreFds.at(i));
 
-    if (conf.performance)
+    if (this->performanceMode_)
         LSFG_3_1P::presentContext(*this->lsfgCtxId,
             preCopySemaphoreFd,
             renderSemaphoreFds);

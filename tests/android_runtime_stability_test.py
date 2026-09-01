@@ -44,7 +44,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
     def test_present_hook_debounces_fs_and_reuses_wait_storage(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         self.assertIn("Clock::time_point nextConfigPoll", source)
-        self.assertIn("std::chrono::milliseconds(250)", source)
+        self.assertIn("std::chrono::milliseconds(50)", source)
         self.assertIn("std::vector<VkSemaphore> presentWaitSemaphores", source)
         self.assertIn("auto& semaphores = runtimeStats.presentWaitSemaphores", source)
 
@@ -188,6 +188,37 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         helper = source[helper_start:helper_end]
         self.assertNotIn("adaptiveFramegen", helper)
         self.assertNotIn("fpsLimit", helper)
+
+    def test_runtime_disable_is_inert_without_forcing_game_swapchain_recreation(self) -> None:
+        """Regression: LSFG off must bypass an existing context without OUT_OF_DATE churn."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        helper_start = source.index("bool requiresSwapchainRecreation")
+        helper_end = source.index("VkResult myvkCreateInstance", helper_start)
+        helper = source[helper_start:helper_end]
+
+        self.assertNotIn("previous.enable", helper)
+        self.assertNotIn("previous.multiplier", helper)
+        self.assertNotIn("previous.flowScale", helper)
+        self.assertNotIn("previous.performance", helper)
+        self.assertNotIn("previous.e_present", helper)
+        self.assertIn("if (!conf.enable || conf.multiplier <= 1)", source)
+        self.assertIn("std::chrono::milliseconds(50)", source)
+        self.assertNotIn("if (configuredPresent != conf.e_present)", source)
+
+    def test_generated_and_source_presents_are_output_cadence_spaced(self) -> None:
+        """Regression: mailbox presents queued back-to-back are replaced before scanout."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn('#include "output_frame_pacer.hpp"', header)
+        self.assertIn("OutputFramePacer outputFramePacer_", header)
+        self.assertIn("outputFramePacer_.configure(conf.fpsLimit)", source)
+        generated_present = source.index("Layer::ovkQueuePresentKHR(queue, &presentInfo)")
+        generated_pacing = source.rfind("paceOutputPresent", 0, generated_present)
+        source_present = source.index("Layer::ovkQueuePresentKHR(queue, &finalPresentInfo)")
+        source_pacing = source.rfind("paceOutputPresent", 0, source_present)
+        self.assertGreater(generated_pacing, source.index("for (size_t i = 0; i < generatedFrameCount"))
+        self.assertGreater(source_pacing, generated_present)
 
 
 if __name__ == "__main__":
