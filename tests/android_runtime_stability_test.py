@@ -2,6 +2,8 @@
 import unittest
 from pathlib import Path
 
+from android_lifecycle_regression_test import AndroidLifecycleRegressionTest  # noqa: F401
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -160,7 +162,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("ovkDestroySwapchainKHR", fallback)
         self.assertIn("eraseSwapchainState", fallback)
         self.assertIn("ovkCreateSwapchainKHR(", fallback)
-        self.assertIn("device, pCreateInfo, pAllocator, pSwapchain", fallback)
+        self.assertIn("fallbackCreateInfo", fallback)
         self.assertIn("swapchain-fallback-pass-through", fallback)
 
     def test_game_config_supports_explicit_disabled_state(self) -> None:
