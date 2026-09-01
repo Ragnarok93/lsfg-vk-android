@@ -158,9 +158,22 @@ namespace {
 #else
         const bool androidAhbSupported = true;
 #endif
+        auto getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+            Layer::ovkGetInstanceProcAddr(layerInstance, "vkGetPhysicalDeviceProperties2"));
+        if (getProperties2 == nullptr) {
+            getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+                Layer::ovkGetInstanceProcAddr(layerInstance, "vkGetPhysicalDeviceProperties2KHR"));
+        }
+        const auto identity = Utils::getDeviceIdentity(physicalDevice, getProperties2);
+        if (!identity.has_value()) {
+            Utils::logLimitN("deviceIdentity", 1,
+                "Physical-device ID properties unavailable; LSFG will fail open for this device.");
+        }
         deviceToInfo.emplace(*pDevice, DeviceInfo {
             .device = *pDevice,
             .physicalDevice = physicalDevice,
+            .identity = identity.value_or(LSFG::DeviceIdentity{}),
+            .identityValid = identity.has_value(),
             .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
             .androidAhbSupported = androidAhbSupported
         });

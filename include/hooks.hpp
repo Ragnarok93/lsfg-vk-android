@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vulkan/vulkan_core.h>
+#include "lsfg_backend.hpp"
 
 #include <cstdint>
 #include <unordered_map>
@@ -13,6 +14,8 @@ namespace Hooks {
     struct DeviceInfo {
         VkDevice device;
         VkPhysicalDevice physicalDevice;
+        LSFG::DeviceIdentity identity{};
+        bool identityValid{false};
         std::pair<uint32_t, VkQueue> queue; // graphics family
         bool androidAhbSupported{true};
     };

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vulkan/vulkan_core.h>
+#include "lsfg_backend.hpp"
 
 #include <functional>
 #include <cstdint>
@@ -25,7 +26,7 @@ namespace LSFG_3_1 {
     /// @throws LSFG::vulkan_error if Vulkan objects fail to initialize.
     ///
     __attribute__((visibility("default")))
-    void initialize(uint64_t deviceUUID,
+    void initialize(const LSFG::DeviceIdentity& identity, VkFormat sharedFormat,
         bool isHdr, float flowScale, uint64_t generationCount,
         const std::function<std::vector<uint8_t>(const std::string&)>& loader);
 

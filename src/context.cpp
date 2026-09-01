@@ -281,12 +281,33 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         ? VK_FORMAT_R8G8B8A8_UNORM
         : VK_FORMAT_R16G16B16A16_SFLOAT;
 
+    if (!info.identityValid)
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+            "Exact Vulkan device/driver UUID provenance is unavailable");
+
 #ifdef __ANDROID__
+    // Select and validate the exact framegen ICD before allocating any shared AHB.
+    auto* lsfgInitialize = LSFG_3_1::initialize;
+    auto* lsfgDeleteContext = LSFG_3_1::deleteContext;
+    if (conf.performance) {
+        lsfgInitialize = LSFG_3_1P::initialize;
+        lsfgDeleteContext = LSFG_3_1P::deleteContext;
+    }
+    setenv("DISABLE_LSFG", "1", 1); // NOLINT
+    lsfgInitialize(
+        info.identity, format,
+        conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
+        [](const std::string& name) {
+            auto dxbc = Extract::getShader(name);
+            auto spirv = Extract::translateShader(dxbc);
+            return spirv;
+        }
+    );
+
     // Android path: use AHardwareBuffer-backed images for sharing with framegen.
     // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL
     // ownership around every shared-image access, so this path is valid on
     // stock Android ICDs as well as wrapper/custom drivers.
-
     this->frame_0 = Mini::Image(info.device, info.physicalDevice,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
     this->frame_1 = Mini::Image(info.device, info.physicalDevice,
@@ -296,26 +317,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         this->out_n.emplace_back(info.device, info.physicalDevice,
             extent, format,
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-
-    // initialize lsfg
-    auto* lsfgInitialize = LSFG_3_1::initialize;
-    auto* lsfgDeleteContext = LSFG_3_1::deleteContext;
-    if (conf.performance) {
-        lsfgInitialize = LSFG_3_1P::initialize;
-        lsfgDeleteContext = LSFG_3_1P::deleteContext;
-    }
-
-    setenv("DISABLE_LSFG", "1", 1); // NOLINT
-
-    lsfgInitialize(
-        Utils::getDeviceUUID(info.physicalDevice),
-        conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
-        [](const std::string& name) {
-            auto dxbc = Extract::getShader(name);
-            auto spirv = Extract::translateShader(dxbc);
-            return spirv;
-        }
-    );
 
     // Create framegen context using AHB sharing
     std::vector<AHardwareBuffer*> outAhbs;
@@ -412,7 +413,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     setenv("DISABLE_LSFG", "1", 1); // NOLINT
 
     lsfgInitialize(
-        Utils::getDeviceUUID(info.physicalDevice),
+        info.identity, format,
         conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
         [](const std::string& name) {
             auto dxbc = Extract::getShader(name);

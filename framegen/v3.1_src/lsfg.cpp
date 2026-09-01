@@ -28,7 +28,7 @@ namespace {
     std::unordered_map<int32_t, Context> contexts;
 }
 
-void LSFG_3_1::initialize(uint64_t deviceUUID,
+void LSFG_3_1::initialize(const LSFG::DeviceIdentity& identity, VkFormat sharedFormat,
         bool isHdr, float flowScale, uint64_t generationCount,
         const std::function<std::vector<uint8_t>(const std::string&)>& loader) {
     if (instance.has_value() || device.has_value())
@@ -36,7 +36,7 @@ void LSFG_3_1::initialize(uint64_t deviceUUID,
 
     instance.emplace();
     device.emplace(Vulkan {
-        .device{*instance, deviceUUID},
+        .device{*instance, identity, sharedFormat},
         .generationCount = generationCount,
         .flowScale = flowScale,
         .isHdr = isHdr
