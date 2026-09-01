@@ -57,6 +57,12 @@ jobs:
             tests/adaptive_scheduler_test.cpp \
             -o /tmp/lsfg-adaptive-scheduler-test
           /tmp/lsfg-adaptive-scheduler-test
+          g++ -std=c++20 -Wall -Wextra -Werror \
+            -Iinclude \
+            src/source_frame_pacer.cpp \
+            tests/source_frame_pacer_test.cpp \
+            -o /tmp/lsfg-source-frame-pacer-test
+          /tmp/lsfg-source-frame-pacer-test
 
   build:
     name: Build ${{ matrix.abi }}
