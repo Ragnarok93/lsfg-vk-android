@@ -95,7 +95,12 @@ void Config::updateConfig(const std::string& file) {
 
         const std::string exe = toml::find<std::string>(gameTable, "exe");
         Configuration game{
-            .enable = toml::find_or(gameTable, "enabled", true),
+            // A matching GameNative target must keep the Vulkan layer's loader
+            // dispatch resident for the process lifetime. Runtime Off is the
+            // validated multiplier=1 pass-through state; the serialized enabled
+            // flag is UI intent and must not make the loader stop advertising
+            // already-installed WSI hooks before a later hot-enable.
+            .enable = true,
             .targeted = true,
             .dll = global.dll,
             .multiplier = toml::find_or(gameTable, "multiplier", 2U),
