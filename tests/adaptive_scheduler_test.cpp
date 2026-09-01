@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 
 using namespace std::chrono_literals;
@@ -12,6 +13,10 @@ int main() {
         AdaptiveFrameScheduler scheduler;
         for (int frame = 0; frame < 12; ++frame)
             assert(scheduler.plan(33ms) == 0);
+        const auto diagnostics = scheduler.diagnostics();
+        assert(diagnostics.targetFps == 0);
+        assert(diagnostics.generationCeiling == 0);
+        assert(!diagnostics.probing);
     }
 
     // A newly enabled controller establishes an unmodified source-FPS baseline
@@ -21,6 +26,10 @@ int main() {
         for (int frame = 0; frame < 6; ++frame)
             assert(scheduler.plan(20ms) == 0);
         assert(scheduler.generationCeiling() == 1);
+        const auto diagnostics = scheduler.diagnostics();
+        assert(diagnostics.targetFps == 60);
+        assert(std::abs(diagnostics.smoothedSourceFps - 50.0) < 0.5);
+        assert(diagnostics.probing);
     }
 
     // Fractional ratios remain fractional: 50 FPS -> 60 FPS should average
@@ -35,6 +44,14 @@ int main() {
             generated += scheduler.plan(20ms);
         assert(generated >= 9 && generated <= 11);
         assert(scheduler.generationCeiling() == 1);
+
+        const auto diagnostics = scheduler.diagnostics();
+        assert(std::abs(diagnostics.smoothedSourceFps - 50.0) < 0.5);
+        assert(std::abs(diagnostics.requestedGeneratedFrames - 0.2) < 0.05);
+        assert(diagnostics.generationCeiling == 1);
+        assert(diagnostics.provenGenerationCeiling == 1);
+        assert(diagnostics.cooldownSamples == 0);
+        assert(!diagnostics.probing);
     }
 
     // The adaptive target is an objective, not a source-frame limiter. A game
@@ -43,6 +60,9 @@ int main() {
         AdaptiveFrameScheduler scheduler(60, 3);
         for (int frame = 0; frame < 40; ++frame)
             assert(scheduler.plan(10ms) == 0);
+        const auto diagnostics = scheduler.diagnostics();
+        assert(diagnostics.requestedGeneratedFrames == 0.0);
+        assert(std::abs(diagnostics.smoothedSourceFps - 100.0) < 0.5);
     }
 
     // A sustained deficit that genuinely benefits from additional generation
@@ -57,6 +77,9 @@ int main() {
         assert(scheduler.provenGenerationCeiling() >= 2);
         assert(scheduler.generationCeiling() == 3);
         assert(sawThreeGenerated);
+        const auto diagnostics = scheduler.diagnostics();
+        assert(diagnostics.targetFps == 120);
+        assert(diagnostics.requestedGeneratedFrames > 2.9);
     }
 
     // If a higher FG level lowers useful output throughput, reject the probe,
@@ -78,8 +101,13 @@ int main() {
 
             previousGenerated = scheduler.plan(interval);
             reachedThree = reachedThree || previousGenerated == 3;
-            if (reachedThree && scheduler.generationCeiling() <= 2) {
+            const auto diagnostics = scheduler.diagnostics();
+            if (reachedThree && diagnostics.lastProbeRejected) {
                 rejectedThree = true;
+                assert(diagnostics.generationCeiling == 2);
+                assert(diagnostics.provenGenerationCeiling == 2);
+                assert(diagnostics.cooldownSamples > 0);
+                assert(!diagnostics.probing);
                 break;
             }
         }
@@ -102,6 +130,10 @@ int main() {
         for (int frame = 0; frame < 80; ++frame)
             scheduler.plan(33333333ns);
         assert(scheduler.plan(1s) == 0);
+        auto diagnostics = scheduler.diagnostics();
+        assert(diagnostics.smoothedSourceFps == 0.0);
+        assert(diagnostics.generationCeiling == 0);
+        assert(diagnostics.provenGenerationCeiling == 0);
         for (int frame = 0; frame < 6; ++frame)
             assert(scheduler.plan(33333333ns) == 0);
     }
@@ -114,6 +146,10 @@ int main() {
         scheduler.configure(90, 3);
         assert(scheduler.targetFps() == 90);
         assert(scheduler.provenGenerationCeiling() == 0);
+        auto diagnostics = scheduler.diagnostics();
+        assert(diagnostics.requestedGeneratedFrames == 0.0);
+        assert(diagnostics.cooldownSamples == 0);
+        assert(!diagnostics.probing);
         for (int frame = 0; frame < 6; ++frame)
             assert(scheduler.plan(33333333ns) == 0);
     }
