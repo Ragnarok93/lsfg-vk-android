@@ -79,6 +79,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
                 lifecycle_source,
                 "Framegen completion and teardown must use bounded context fences rather than an uninterruptible device-wide idle wait",
             )
+
     def test_adaptive_path_skips_unneeded_gpu_work_and_keeps_binary_signals_valid(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -165,10 +166,14 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("fallbackCreateInfo", fallback)
         self.assertIn("swapchain-fallback-pass-through", fallback)
 
-    def test_game_config_supports_explicit_disabled_state(self) -> None:
-        """Regression: pass-through must not be encoded as an enabled multiplier-one game."""
+    def test_game_config_keeps_target_resident_while_multiplier_one_is_off(self) -> None:
+        """GameNative Off remains a resident layer target; multiplier=1 is pass-through."""
         source = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
-        self.assertIn('.enable = toml::find_or(gameTable, "enabled", true)', source)
+        self.assertIn("Configuration game{\n            // A matching GameNative target", source)
+        self.assertIn(".enable = true", source)
+        self.assertIn(".targeted = true", source)
+        self.assertIn('toml::find_or(gameTable, "multiplier", 2U)', source)
+        self.assertNotIn('.enable = toml::find_or(gameTable, "enabled", true)', source)
 
     def test_adaptive_target_reload_does_not_recreate_the_swapchain(self) -> None:
         """Limiter adjustments must not create multi-second black transition windows."""
