@@ -4,6 +4,7 @@
 #include "utils/utils.hpp"
 #include "context.hpp"
 #include "layer.hpp"
+#include "source_frame_pacer.hpp"
 
 #include <vulkan/vulkan_core.h>
 
@@ -20,6 +21,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <thread>
 
 using namespace Hooks;
 
@@ -216,6 +218,7 @@ namespace {
         Clock::time_point windowStart{Clock::now()};
         Clock::time_point nextConfigPoll{};
         std::vector<VkSemaphore> presentWaitSemaphores;
+        SourceFramePacer sourceFramePacer;
         uint64_t windowSourceFrames{0};
         uint64_t windowGeneratedFrames{0};
         uint64_t totalSourceFrames{0};
@@ -249,6 +252,7 @@ namespace {
                 << "multiplier=" << multiplier << '\n'
                 << "adaptive=" << (adaptive ? 1 : 0) << '\n'
                 << "target_fps=" << targetFps << '\n'
+                << "source_limit_fps=" << Config::activeConf.sourceFpsLimit << '\n'
                 << "performance=" << (performance ? 1 : 0) << '\n';
             out.close();
             if (!out)
@@ -298,6 +302,7 @@ namespace {
                 << "multiplier=" << multiplier << '\n'
                 << "adaptive=" << (adaptive ? 1 : 0) << '\n'
                 << "target_fps=" << targetFps << '\n'
+                << "source_limit_fps=" << Config::activeConf.sourceFpsLimit << '\n'
                 << "performance=" << (performance ? 1 : 0) << '\n';
             out.close();
             if (!out)
@@ -712,6 +717,7 @@ namespace {
                               << Config::activeConf.multiplier
                               << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
                               << " targetFps=" << Config::activeConf.fpsLimit
+                              << " sourceFpsLimit=" << Config::activeConf.sourceFpsLimit
                               << " presentMode=" << Config::activeConf.e_present
                               << " enabled=" << (Config::activeConf.enable ? 1 : 0)
                               << " recreateSwapchain=" << (recreateSwapchain ? 1 : 0)
@@ -777,6 +783,15 @@ namespace {
             Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
+
+#ifdef __ANDROID__
+        auto& sourceFramePacer = runtimeStats.sourceFramePacer;
+        sourceFramePacer.configure(conf.sourceFpsLimit);
+        const auto sourcePacingDelay = sourceFramePacer.delayUntilNext(
+            SourceFramePacer::Clock::now());
+        if (sourcePacingDelay > std::chrono::nanoseconds::zero())
+            std::this_thread::sleep_for(sourcePacingDelay);
+#endif
 
         try {
 #ifdef __ANDROID__
