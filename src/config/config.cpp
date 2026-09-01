@@ -96,6 +96,7 @@ void Config::updateConfig(const std::string& file) {
         const std::string exe = toml::find<std::string>(gameTable, "exe");
         Configuration game{
             .enable = toml::find_or(gameTable, "enabled", true),
+            .targeted = true,
             .dll = global.dll,
             .multiplier = toml::find_or(gameTable, "multiplier", 2U),
             .flowScale = toml::find_or(gameTable, "flow_scale", 1.0F),
@@ -128,6 +129,7 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
     if (std::getenv("LSFG_LEGACY")) {
         Configuration conf{
             .enable = true,
+            .targeted = true,
             .multiplier = 2,
             .flowScale = 1.0F,
             .e_present = VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR
