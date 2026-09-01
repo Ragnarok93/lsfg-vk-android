@@ -64,7 +64,14 @@ namespace LSFG_3_1 {
         /// @throws LSFG::vulkan_error if the context fails to present.
         ///
         void present(Vulkan& vk,
-            int inSem, const std::vector<int>& outSem);
+            int inSem, const std::vector<int>& outSem,
+            size_t activeGenerationCount);
+
+        [[nodiscard]] bool waitForLastPresent(Vulkan& vk, uint64_t timeoutNs);
+
+        /// Wait only for this context's submitted fences, using the bounded
+        /// LSFG_VK_WAIT_TIMEOUT_MS budget. Returns false on timeout.
+        bool waitForCompletion(Vulkan& vk);
 
         // Trivially copyable, moveable and destructible
         Context(const Context&) = default;
@@ -73,7 +80,12 @@ namespace LSFG_3_1 {
         Context& operator=(Context&&) = default;
         ~Context() = default;
     private:
-        Core::Image inImg_0, inImg_1; // inImg_0 is next when fc % 2 == 0
+        Core::Image inImg_0, inImg_1; // private shader images in transport-only mode
+#ifdef __ANDROID__
+        bool transportOnly{false};
+        Core::Image sharedInImg_0, sharedInImg_1;
+        std::vector<Core::Image> sharedOutImages;
+#endif
         uint64_t frameIdx{0};
 
         struct RenderData {
@@ -86,6 +98,7 @@ namespace LSFG_3_1 {
             std::vector<Core::CommandBuffer> cmdBuffers2; // command buffers for second step
 
             bool shouldWait{false};
+            size_t generationCount{0};
         };
         std::array<RenderData, 8> data;
 

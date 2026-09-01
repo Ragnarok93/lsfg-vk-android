@@ -20,12 +20,13 @@ VulkanCapabilities base12() {
     return caps;
 }
 
-void vulkan11_is_rejected() {
+void vulkan11_uses_binary_fence_fallback() {
     auto caps = base12();
     caps.apiVersion = VK_API_VERSION_1_1;
+    caps.timelineSemaphore = false;
     const auto decision = evaluateCapabilities(caps);
-    assert(!decision.supported);
-    assert(decision.rejectionReason.find("1.2") != std::string::npos);
+    assert(decision.supported);
+    assert(decision.synchronizationPath == SynchronizationPath::LegacyPipelineBarrier);
 }
 
 void vulkan12_without_sync2_uses_legacy_barriers() {
@@ -82,10 +83,12 @@ void fp16_is_optional() {
     assert(evaluateCapabilities(caps).shaderPrecision == ShaderPrecision::Fp16);
 }
 
-void missing_timeline_is_rejected() {
+void missing_timeline_uses_binary_fence_fallback() {
     auto caps = base12();
     caps.timelineSemaphore = false;
-    assert(!evaluateCapabilities(caps).supported);
+    const auto decision = evaluateCapabilities(caps);
+    assert(decision.supported);
+    assert(decision.synchronizationPath == SynchronizationPath::LegacyPipelineBarrier);
 }
 
 void required_subgroup_masks_are_checked_exactly() {
@@ -109,14 +112,14 @@ void required_subgroup_masks_are_checked_exactly() {
 } // namespace
 
 int main() {
-    vulkan11_is_rejected();
+    vulkan11_uses_binary_fence_fallback();
     vulkan12_without_sync2_uses_legacy_barriers();
     vulkan12_with_khr_sync2_uses_extension_path();
     vulkan13_with_sync2_uses_core_path();
     ahb_absent_is_rejected();
     external_format_ahb_is_rejected_for_write_path();
     fp16_is_optional();
-    missing_timeline_is_rejected();
+    missing_timeline_uses_binary_fence_fallback();
     required_subgroup_masks_are_checked_exactly();
     return 0;
 }

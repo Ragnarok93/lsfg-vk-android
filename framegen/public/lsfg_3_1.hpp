@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vulkan/vulkan_core.h>
+#include "lsfg_backend.hpp"
 
 #include <functional>
 #include <cstdint>
@@ -25,9 +26,13 @@ namespace LSFG_3_1 {
     /// @throws LSFG::vulkan_error if Vulkan objects fail to initialize.
     ///
     __attribute__((visibility("default")))
-    void initialize(uint64_t deviceUUID,
+    void initialize(const LSFG::DeviceIdentity& identity, VkFormat sharedFormat,
         bool isHdr, float flowScale, uint64_t generationCount,
         const std::function<std::vector<uint8_t>(const std::string&)>& loader);
+
+    /// Return immutable capability/provenance diagnostics for the selected backend.
+    __attribute__((visibility("default")))
+    LSFG::BackendDiagnostics getBackendDiagnostics();
 
     ///
     /// Create a new LSFG context on a swapchain.
@@ -80,6 +85,19 @@ namespace LSFG_3_1 {
     __attribute__((visibility("default")))
     void presentContext(int32_t id, int inSem, const std::vector<int>& outSem);
 
+    /// Present only the requested subset of the output images. Used by the
+    /// adaptive Android path; the original API retains fixed-multiplier behavior.
+    __attribute__((visibility("default")))
+    void presentContextWithCount(int32_t id, int inSem,
+        const std::vector<int>& outSem, size_t activeGenerationCount);
+
+#ifdef __ANDROID__
+    /// Wait only for the most recent submissions belonging to this context.
+    /// Returns false when the timeout expires.
+    __attribute__((visibility("default")))
+    bool waitContext(int32_t id, uint64_t timeoutNs);
+#endif
+
     ///
     /// Delete an LSFG context.
     ///
@@ -93,15 +111,5 @@ namespace LSFG_3_1 {
     ///
     __attribute__((visibility("default")))
     void finalize();
-
-#ifdef __ANDROID__
-    /// Block until framegen's internal Vulkan device is idle. Used by the
-    /// Android wrapper to sync between its own device (which writes input
-    /// AHBs) and framegen's device (which reads them) — without an explicit
-    /// shared semaphore this is the only safe way to avoid a write-after-read
-    /// race on the shared AHardwareBuffer storage.
-    __attribute__((visibility("default")))
-    void waitIdle();
-#endif
 
 }

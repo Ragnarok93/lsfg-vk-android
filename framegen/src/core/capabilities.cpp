@@ -7,8 +7,8 @@ SupportDecision evaluateCapabilities(
         const SupportRequirements& requirements) {
     SupportDecision decision{};
 
-    if (caps.apiVersion < VK_API_VERSION_1_2) {
-        decision.rejectionReason = "Vulkan 1.2 or newer is required";
+    if (caps.apiVersion < VK_API_VERSION_1_1) {
+        decision.rejectionReason = "Vulkan 1.1 or newer is required";
         return decision;
     }
     if (requirements.requireAhb && !caps.androidHardwareBuffer) {
@@ -28,10 +28,8 @@ SupportDecision evaluateCapabilities(
             return decision;
         }
     }
-    if (!caps.timelineSemaphore) {
-        decision.rejectionReason = "timeline semaphore support is required";
-        return decision;
-    }
+    // Framegen submissions use binary semaphores and completion fences. Timeline
+    // semaphores are therefore an optional acceleration capability, not a correctness gate.
 
     if ((caps.subgroupStages & requirements.requiredSubgroupStages)
             != requirements.requiredSubgroupStages) {

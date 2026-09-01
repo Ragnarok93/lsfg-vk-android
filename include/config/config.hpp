@@ -5,14 +5,18 @@
 #include <filesystem>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace Config {
 
     /// lsfg-vk configuration
     struct Configuration {
-        /// Whether lsfg-vk should be loaded in the first place.
+        /// Whether frame generation is currently enabled for this target.
         bool enable{false};
+        /// Whether this executable matched an explicit LSFG game target and the
+        /// layer must stay resident even while frame generation is disabled.
+        bool targeted{false};
         /// Path to Lossless.dll.
         std::string dll;
 
@@ -24,6 +28,10 @@ namespace Config {
         bool performance{false};
         /// Whether HDR is enabled
         bool hdr{false};
+        /// Vary the generated frame count to approach fpsLimit.
+        bool adaptiveFramegen{false};
+        /// Final output FPS ceiling used by adaptive frame generation.
+        uint32_t fpsLimit{0};
 
         /// Experimental flag for overriding the synchronization method.
         VkPresentModeKHR e_present;

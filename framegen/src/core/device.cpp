@@ -6,12 +6,17 @@
 #include "core/image.hpp"
 #include "core/instance.hpp"
 #include "common/exception.hpp"
+#include "lsfg_backend.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -33,13 +38,75 @@ void requireExtension(const std::vector<VkExtensionProperties>& available,
     enabled.push_back(name);
 }
 
+LSFG::DeviceIdentity readIdentity(VkPhysicalDevice device) {
+    VkPhysicalDeviceIDProperties idProperties{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 properties{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &idProperties,
+    };
+    vkGetPhysicalDeviceProperties2(device, &properties);
+
+    LSFG::DeviceIdentity identity{};
+    std::copy_n(idProperties.deviceUUID, VK_UUID_SIZE, identity.deviceUUID.begin());
+    std::copy_n(idProperties.driverUUID, VK_UUID_SIZE, identity.driverUUID.begin());
+    return identity;
+}
+
+std::string uuidString(const std::array<uint8_t, VK_UUID_SIZE>& uuid) {
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (const auto byte : uuid)
+        out << std::setw(2) << static_cast<unsigned int>(byte);
+    return out.str();
+}
+
+bool probeAhbImageUsage(VkPhysicalDevice physicalDevice, VkFormat format,
+        VkImageUsageFlags usage) {
+#ifdef __ANDROID__
+    if (vkGetPhysicalDeviceImageFormatProperties2 == nullptr)
+        return false;
+    const VkPhysicalDeviceExternalImageFormatInfo externalInfo{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
+    };
+    const VkPhysicalDeviceImageFormatInfo2 imageInfo{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+        .pNext = &externalInfo,
+        .format = format,
+        .type = VK_IMAGE_TYPE_2D,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = usage,
+    };
+    VkExternalImageFormatProperties externalProperties{
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+    };
+    VkImageFormatProperties2 imageProperties{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+        .pNext = &externalProperties,
+    };
+    const auto result = vkGetPhysicalDeviceImageFormatProperties2(
+        physicalDevice, &imageInfo, &imageProperties);
+    return result == VK_SUCCESS
+        && (externalProperties.externalMemoryProperties.externalMemoryFeatures
+            & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0;
+#else
+    (void)physicalDevice;
+    (void)format;
+    (void)usage;
+    return true;
+#endif
+}
+
 } // namespace
 
 const Image& Device::getFallbackDescriptorImage() const {
     return *this->fallbackDescriptorImage;
 }
 
-Device::Device(const Instance& instance, uint64_t deviceUUID) {
+Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedIdentity,
+        VkFormat sharedFormat) {
     uint32_t deviceCount{};
     auto res = vkEnumeratePhysicalDevices(instance.handle(), &deviceCount, nullptr);
     if (res != VK_SUCCESS || deviceCount == 0)
@@ -49,47 +116,68 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Failed to get physical devices");
 
-    std::optional<VkPhysicalDevice> physicalDevice;
+    std::optional<VkPhysicalDevice> selectedPhysicalDevice;
     VkPhysicalDeviceProperties properties{};
-    for (const auto device : devices) {
-        VkPhysicalDeviceProperties candidate{};
-        vkGetPhysicalDeviceProperties(device, &candidate);
-        const uint64_t id = static_cast<uint64_t>(candidate.vendorID) << 32 | candidate.deviceID;
-        if (deviceUUID == id || deviceUUID == 0x1463ABAC) {
-            physicalDevice = device;
-            properties = candidate;
+    LSFG::DeviceIdentity selectedIdentity{};
+    for (const auto candidate : devices) {
+        const auto candidateIdentity = readIdentity(candidate);
+        if (candidateIdentity == requestedIdentity) {
+            selectedPhysicalDevice = candidate;
+            selectedIdentity = candidateIdentity;
+            vkGetPhysicalDeviceProperties(candidate, &properties);
             break;
         }
     }
-    if (!physicalDevice)
+    if (!selectedPhysicalDevice)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
-            "Could not find physical device selected by the game");
-    if (properties.apiVersion < VK_API_VERSION_1_2)
+            "Could not find the exact physical-device/driver UUID pair selected by the game");
+    if (properties.apiVersion < VK_API_VERSION_1_1)
         throw LSFG::vulkan_error(VK_ERROR_INCOMPATIBLE_DRIVER,
-            "Selected physical device does not expose Vulkan 1.2");
+            "Selected physical device does not expose Vulkan 1.1");
 
+    const auto physicalDevice = *selectedPhysicalDevice;
     uint32_t extensionCount{};
-    res = vkEnumerateDeviceExtensionProperties(*physicalDevice, nullptr, &extensionCount, nullptr);
+    res = vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, nullptr);
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Failed to enumerate device extensions");
     std::vector<VkExtensionProperties> availableExtensions(extensionCount);
-    res = vkEnumerateDeviceExtensionProperties(*physicalDevice, nullptr,
+    res = vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr,
         &extensionCount, availableExtensions.data());
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Failed to read device extensions");
 
+    const bool api12 = properties.apiVersion >= VK_API_VERSION_1_2;
     const bool api13 = properties.apiVersion >= VK_API_VERSION_1_3;
     const bool hasSync2Ext = hasExtension(availableExtensions,
         VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+    const bool hasFloat16Ext = hasExtension(availableExtensions,
+        VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+    const bool hasTimelineExt = hasExtension(availableExtensions,
+        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+    const bool hasDriverProperties = api12 || hasExtension(availableExtensions,
+        VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
+
+    VkPhysicalDeviceDriverProperties driverProperties{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+    };
+    VkPhysicalDeviceIDProperties idProperties{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+        .pNext = hasDriverProperties ? &driverProperties : nullptr,
+    };
+    VkPhysicalDeviceProperties2 properties2{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &idProperties,
+    };
+    vkGetPhysicalDeviceProperties2(physicalDevice, &properties2);
 
     VkPhysicalDeviceSubgroupProperties subgroup{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
     };
-    VkPhysicalDeviceProperties2 properties2{
+    VkPhysicalDeviceProperties2 subgroupProperties{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
         .pNext = &subgroup,
     };
-    vkGetPhysicalDeviceProperties2(*physicalDevice, &properties2);
+    vkGetPhysicalDeviceProperties2(physicalDevice, &subgroupProperties);
 
     VkPhysicalDeviceSynchronization2Features sync2Probe{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES,
@@ -100,7 +188,14 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
     VkPhysicalDeviceVulkan12Features features12Probe{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
     };
-    void* featureProbeHead = &features12Probe;
+    VkPhysicalDeviceShaderFloat16Int8FeaturesKHR float16Probe{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR,
+    };
+    VkPhysicalDeviceTimelineSemaphoreFeaturesKHR timelineProbe{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR,
+    };
+
+    void* featureProbeHead = nullptr;
     if (api13) {
         features13Probe.pNext = featureProbeHead;
         featureProbeHead = &features13Probe;
@@ -108,11 +203,24 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
         sync2Probe.pNext = featureProbeHead;
         featureProbeHead = &sync2Probe;
     }
+    if (api12) {
+        features12Probe.pNext = featureProbeHead;
+        featureProbeHead = &features12Probe;
+    } else {
+        if (hasFloat16Ext) {
+            float16Probe.pNext = featureProbeHead;
+            featureProbeHead = &float16Probe;
+        }
+        if (hasTimelineExt) {
+            timelineProbe.pNext = featureProbeHead;
+            featureProbeHead = &timelineProbe;
+        }
+    }
     VkPhysicalDeviceFeatures2 featuresProbe{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         .pNext = featureProbeHead,
     };
-    vkGetPhysicalDeviceFeatures2(*physicalDevice, &featuresProbe);
+    vkGetPhysicalDeviceFeatures2(physicalDevice, &featuresProbe);
 
     VulkanCapabilities caps{};
     caps.apiVersion = properties.apiVersion;
@@ -128,16 +236,16 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
         ? features13Probe.synchronization2 == VK_TRUE
         : (hasSync2Ext && sync2Probe.synchronization2 == VK_TRUE);
     caps.legacyPipelineBarrier = true;
-    caps.timelineSemaphore = features12Probe.timelineSemaphore == VK_TRUE;
-    caps.shaderFloat16 = features12Probe.shaderFloat16 == VK_TRUE;
+    caps.timelineSemaphore = api12
+        ? features12Probe.timelineSemaphore == VK_TRUE
+        : (hasTimelineExt && timelineProbe.timelineSemaphore == VK_TRUE);
+    caps.shaderFloat16 = api12
+        ? features12Probe.shaderFloat16 == VK_TRUE
+        : (hasFloat16Ext && float16Probe.shaderFloat16 == VK_TRUE);
     caps.subgroupStages = subgroup.supportedStages;
     caps.subgroupOperations = subgroup.supportedOperations;
     caps.subgroupSize = subgroup.subgroupSize;
 
-    // The audited LSFG 3.1/3.1P shaders are compute shaders, but the current
-    // DXBC/SPIR-V and precompiled FP16 shader paths do not emit Vulkan subgroup
-    // instructions. Keep the complete reported masks for diagnostics while
-    // requiring no subgroup operation category until the shader payload does.
     const SupportRequirements requirements{
 #ifdef __ANDROID__
         .requireAhb = true,
@@ -152,19 +260,55 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
         throw LSFG::vulkan_error(VK_ERROR_FEATURE_NOT_PRESENT,
             "LSFG capability check failed: " + decision.rejectionReason);
 
-    std::cerr << "lsfg-vk: capabilities api="
-              << VK_VERSION_MAJOR(caps.apiVersion) << '.' << VK_VERSION_MINOR(caps.apiVersion)
-              << " ahb=" << caps.androidHardwareBuffer
+    this->diagnostics.apiVersion = properties.apiVersion;
+    this->diagnostics.driverVersion = properties.driverVersion;
+    this->diagnostics.identity = selectedIdentity;
+    this->diagnostics.driverName = hasDriverProperties && driverProperties.driverName[0] != '\0'
+        ? driverProperties.driverName
+        : properties.deviceName;
+    this->diagnostics.driverInfo = hasDriverProperties ? driverProperties.driverInfo : "";
+#ifdef __ANDROID__
+    this->diagnostics.ahbR16fStorage = probeAhbImageUsage(physicalDevice,
+        VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    this->diagnostics.ahbR16fTransferSrc = probeAhbImageUsage(physicalDevice,
+        VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    this->diagnostics.ahbR16fTransferDst = probeAhbImageUsage(physicalDevice,
+        VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    this->diagnostics.ahbR8Storage = probeAhbImageUsage(physicalDevice,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    const bool directStorage = probeAhbImageUsage(physicalDevice, sharedFormat,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    const bool transferSrc = probeAhbImageUsage(physicalDevice, sharedFormat,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    const bool transferDst = probeAhbImageUsage(physicalDevice, sharedFormat,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    this->diagnostics.ahbTransportMode = directStorage
+        ? LSFG::AhbTransportMode::DirectStorage
+        : (transferSrc && transferDst
+            ? LSFG::AhbTransportMode::TransportOnly
+            : LSFG::AhbTransportMode::Unsupported);
+#else
+    this->diagnostics.ahbTransportMode = LSFG::AhbTransportMode::DirectStorage;
+#endif
+
+    std::cerr << "lsfg-vk: backend-init apiVersion="
+              << VK_VERSION_MAJOR(this->diagnostics.apiVersion) << '.'
+              << VK_VERSION_MINOR(this->diagnostics.apiVersion)
+              << " driverName=\"" << this->diagnostics.driverName << "\""
+              << " driverVersion=" << this->diagnostics.driverVersion
+              << " deviceUUID=" << uuidString(this->diagnostics.identity.deviceUUID)
+              << " driverUUID=" << uuidString(this->diagnostics.identity.driverUUID)
+              << " ahbR16fStorage=" << (this->diagnostics.ahbR16fStorage ? 1 : 0)
+              << " ahbMode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
               << " sync=" << synchronizationPathName(decision.synchronizationPath)
-              << " fp=" << shaderPrecisionName(decision.shaderPrecision)
-              << " subgroupStages=0x" << std::hex << caps.subgroupStages
-              << " subgroupOps=0x" << caps.subgroupOperations
-              << " subgroupSize=" << std::dec << caps.subgroupSize << '\n';
+              << " fp=" << shaderPrecisionName(decision.shaderPrecision) << '\n';
 
     uint32_t familyCount{};
-    vkGetPhysicalDeviceQueueFamilyProperties(*physicalDevice, &familyCount, nullptr);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
     std::vector<VkQueueFamilyProperties> queueFamilies(familyCount);
-    vkGetPhysicalDeviceQueueFamilyProperties(*physicalDevice, &familyCount, queueFamilies.data());
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, queueFamilies.data());
     std::optional<uint32_t> computeFamilyIdx;
     for (uint32_t i = 0; i < familyCount; ++i) {
         if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
@@ -187,6 +331,8 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
 #endif
     if (decision.synchronizationPath == SynchronizationPath::KhrSync2)
         enabledExtensions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+    if (!api12 && caps.shaderFloat16)
+        enabledExtensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
 
     const bool hasRobustness2 = hasExtension(availableExtensions,
         VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
@@ -198,7 +344,7 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
             .pNext = &robustnessProbe,
         };
-        vkGetPhysicalDeviceFeatures2(*physicalDevice, &probe);
+        vkGetPhysicalDeviceFeatures2(physicalDevice, &probe);
         if (robustnessProbe.nullDescriptor == VK_TRUE)
             enabledExtensions.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
     }
@@ -219,30 +365,42 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
     };
     VkPhysicalDeviceSynchronization2Features sync2Enable{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES,
-        .pNext = enableNullDescriptor ? &robustnessEnable : nullptr,
         .synchronization2 = decision.synchronizationPath == SynchronizationPath::KhrSync2,
     };
     VkPhysicalDeviceVulkan13Features features13Enable{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext = enableNullDescriptor ? &robustnessEnable : nullptr,
         .synchronization2 = decision.synchronizationPath == SynchronizationPath::Core13Sync2,
     };
     VkPhysicalDeviceVulkan12Features features12Enable{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-        .shaderFloat16 = caps.shaderFloat16 ? VK_TRUE : VK_FALSE,
-        .timelineSemaphore = VK_TRUE,
-        .vulkanMemoryModel = features12Probe.vulkanMemoryModel,
+        .shaderFloat16 = api12 && caps.shaderFloat16 ? VK_TRUE : VK_FALSE,
+        .timelineSemaphore = VK_FALSE,
+        .vulkanMemoryModel = api12 ? features12Probe.vulkanMemoryModel : VK_FALSE,
     };
-    if (decision.synchronizationPath == SynchronizationPath::Core13Sync2)
-        features12Enable.pNext = &features13Enable;
-    else if (decision.synchronizationPath == SynchronizationPath::KhrSync2)
-        features12Enable.pNext = &sync2Enable;
-    else if (enableNullDescriptor)
-        features12Enable.pNext = &robustnessEnable;
+    VkPhysicalDeviceShaderFloat16Int8FeaturesKHR float16Enable{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR,
+        .shaderFloat16 = !api12 && caps.shaderFloat16 ? VK_TRUE : VK_FALSE,
+    };
+
+    void* enableHead = enableNullDescriptor ? &robustnessEnable : nullptr;
+    if (decision.synchronizationPath == SynchronizationPath::Core13Sync2) {
+        features13Enable.pNext = enableHead;
+        enableHead = &features13Enable;
+    } else if (decision.synchronizationPath == SynchronizationPath::KhrSync2) {
+        sync2Enable.pNext = enableHead;
+        enableHead = &sync2Enable;
+    }
+    if (api12) {
+        features12Enable.pNext = enableHead;
+        enableHead = &features12Enable;
+    } else if (caps.shaderFloat16) {
+        float16Enable.pNext = enableHead;
+        enableHead = &float16Enable;
+    }
 
     VkPhysicalDeviceFeatures2 enabledFeatures2{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &features12Enable,
+        .pNext = enableHead,
         .features = enabledCore,
     };
     const float priority = 1.0F;
@@ -262,7 +420,7 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
     };
 
     VkDevice handle{};
-    res = vkCreateDevice(*physicalDevice, &createInfo, nullptr, &handle);
+    res = vkCreateDevice(physicalDevice, &createInfo, nullptr, &handle);
     if (res != VK_SUCCESS || handle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create capability-selected logical device");
     volkLoadDevice(handle);
@@ -278,7 +436,7 @@ Device::Device(const Instance& instance, uint64_t deviceUUID) {
     vkGetDeviceQueue(handle, *computeFamilyIdx, 0, &queue);
     this->computeQueue = queue;
     this->computeFamilyIdx = *computeFamilyIdx;
-    this->physicalDevice = *physicalDevice;
+    this->physicalDevice = physicalDevice;
     this->nullDescriptorSupported = enableNullDescriptor;
     this->device = std::shared_ptr<VkDevice>(
         new VkDevice(handle), [](VkDevice* device) { vkDestroyDevice(*device, nullptr); });

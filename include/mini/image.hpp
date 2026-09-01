@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vulkan/vulkan_core.h>
+#include "lsfg_backend.hpp"
 
 #ifdef __ANDROID__
 #include <android/hardware_buffer.h>
@@ -51,7 +52,8 @@ namespace Mini {
         /// @throws LSFG::vulkan_error if object creation fails.
         ///
         Image(VkDevice device, VkPhysicalDevice physicalDevice, VkExtent2D extent, VkFormat format,
-            VkImageUsageFlags usage, VkImageAspectFlags aspectFlags);
+            VkImageUsageFlags usage, VkImageAspectFlags aspectFlags,
+            LSFG::AhbTransportMode transportMode = LSFG::AhbTransportMode::DirectStorage);
 
         /// Get the AHardwareBuffer handle (Android only).
         [[nodiscard]] AHardwareBuffer* getAhb() const { return this->ahb; }

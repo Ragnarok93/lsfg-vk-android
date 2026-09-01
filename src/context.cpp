@@ -31,6 +31,20 @@
 #ifdef __ANDROID__
 namespace {
 
+uint64_t runtimeWaitTimeoutNs() {
+    constexpr uint64_t defaultMs = 250;
+    constexpr uint64_t maxMs = 5000;
+    const char* raw = std::getenv("LSFG_VK_WAIT_TIMEOUT_MS");
+    if (raw == nullptr || *raw == '\0')
+        return defaultMs * 1000000ULL;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(raw, &end, 10);
+    if (end == raw || *end != '\0' || parsed == 0)
+        return defaultMs * 1000000ULL;
+    const uint64_t boundedMs = parsed > maxMs ? maxMs : static_cast<uint64_t>(parsed);
+    return boundedMs * 1000000ULL;
+}
+
 VkImageSubresourceRange colorSubresourceRange() {
     return VkImageSubresourceRange{
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -228,7 +242,7 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
         throw LSFG::vulkan_error(res, "Failed resetting Android AHB handoff fence");
 
     commandBuffer.submit(queue, waitSemaphores, signalSemaphores, fence);
-    res = waitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+    res = waitForFences(device, 1, &fence, VK_TRUE, runtimeWaitTimeoutNs());
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Failed waiting for Android AHB handoff copy");
 }
@@ -271,6 +285,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         std::cerr << "  Flow Scale: " << conf.flowScale << '\n';
         std::cerr << "  Performance Mode: " << (conf.performance ? "Enabled" : "Disabled") << '\n';
         std::cerr << "  HDR Mode: " << (conf.hdr ? "Enabled" : "Disabled") << '\n';
+        std::cerr << "  Adaptive FrameGen: " << (conf.adaptiveFramegen ? "Enabled" : "Disabled") << '\n';
+        if (conf.adaptiveFramegen) std::cerr << "  Output FPS Cap: " << conf.fpsLimit << '\n';
         if (conf.e_present != 2) std::cerr << "  ! Present Mode: " << conf.e_present << '\n';
 
         if (conf.multiplier <= 1) return;
@@ -281,34 +297,21 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         ? VK_FORMAT_R8G8B8A8_UNORM
         : VK_FORMAT_R16G16B16A16_SFLOAT;
 
+    if (!info.identityValid)
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+            "Exact Vulkan device/driver UUID provenance is unavailable");
+
 #ifdef __ANDROID__
-    // Android path: use AHardwareBuffer-backed images for sharing with framegen.
-    // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL
-    // ownership around every shared-image access, so this path is valid on
-    // stock Android ICDs as well as wrapper/custom drivers.
-
-    this->frame_0 = Mini::Image(info.device, info.physicalDevice,
-        extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-    this->frame_1 = Mini::Image(info.device, info.physicalDevice,
-        extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-
-    for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); ++i)
-        this->out_n.emplace_back(info.device, info.physicalDevice,
-            extent, format,
-            VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-
-    // initialize lsfg
+    // Select and validate the exact framegen ICD before allocating any shared AHB.
     auto* lsfgInitialize = LSFG_3_1::initialize;
     auto* lsfgDeleteContext = LSFG_3_1::deleteContext;
     if (conf.performance) {
         lsfgInitialize = LSFG_3_1P::initialize;
         lsfgDeleteContext = LSFG_3_1P::deleteContext;
     }
-
     setenv("DISABLE_LSFG", "1", 1); // NOLINT
-
     lsfgInitialize(
-        Utils::getDeviceUUID(info.physicalDevice),
+        info.identity, format,
         conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
         [](const std::string& name) {
             auto dxbc = Extract::getShader(name);
@@ -316,6 +319,31 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             return spirv;
         }
     );
+
+    const LSFG::BackendDiagnostics backendDiagnostics = conf.performance
+        ? LSFG_3_1P::getBackendDiagnostics()
+        : LSFG_3_1::getBackendDiagnostics();
+    const auto ahbTransportMode = backendDiagnostics.ahbTransportMode;
+    if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported)
+        throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
+            "Exact game/framegen ICD has no supported AHB image transport for LSFG format");
+
+    // Android path: use AHardwareBuffer-backed images for sharing with framegen.
+    // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL
+    // ownership around every shared-image access, so this path is valid on
+    // stock Android ICDs as well as wrapper/custom drivers.
+    this->frame_0 = Mini::Image(info.device, info.physicalDevice,
+        extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+        ahbTransportMode);
+    this->frame_1 = Mini::Image(info.device, info.physicalDevice,
+        extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+        ahbTransportMode);
+
+    for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); ++i)
+        this->out_n.emplace_back(info.device, info.physicalDevice,
+            extent, format,
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+            ahbTransportMode);
 
     // Create framegen context using AHB sharing
     std::vector<AHardwareBuffer*> outAhbs;
@@ -412,7 +440,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     setenv("DISABLE_LSFG", "1", 1); // NOLINT
 
     lsfgInitialize(
-        Utils::getDeviceUUID(info.physicalDevice),
+        info.identity, format,
         conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
         [](const std::string& name) {
             auto dxbc = Extract::getShader(name);
@@ -451,9 +479,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 #ifdef __ANDROID__
     auto& metrics = this->runtimeMetrics;
     const auto cycleStart = RuntimeMetrics::Clock::now();
+    this->adaptiveScheduler_.configure(
+        conf.adaptiveFramegen ? conf.fpsLimit : 0,
+        conf.multiplier > 1 ? static_cast<size_t>(conf.multiplier - 1) : 0);
+    std::chrono::nanoseconds sourceInterval{};
     if (metrics.hasLastSourcePresent) {
+        sourceInterval = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            cycleStart - metrics.lastSourcePresent);
         const double sourceIntervalMs = std::chrono::duration<double, std::milli>(
-            cycleStart - metrics.lastSourcePresent).count();
+            sourceInterval).count();
         metrics.windowSourceIntervalMs += sourceIntervalMs;
         if (sourceIntervalMs > metrics.windowSourceIntervalMaxMs)
             metrics.windowSourceIntervalMaxMs = sourceIntervalMs;
@@ -461,12 +495,129 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
     metrics.lastSourcePresent = cycleStart;
     metrics.hasLastSourcePresent = true;
+    const size_t generatedFrameCount = conf.adaptiveFramegen
+        ? this->adaptiveScheduler_.plan(sourceInterval)
+        : static_cast<size_t>(conf.multiplier - 1);
+    const bool warmupSourceHistory =
+        generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
+    this->lastGeneratedFrameCount_ = generatedFrameCount;
 
     const bool firstPresentDiagnostic = this->frameIdx == 0;
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=first-present-enter image=" << presentIdx
                   << " multiplier=" << conf.multiplier
+                  << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
+                  << " target_fps=" << conf.fpsLimit
                   << " performance=" << (conf.performance ? 1 : 0) << "\n";
+    }
+
+    const auto finishSourcePresent = [&](VkResult result, const char* sourceWait) -> VkResult {
+        metrics.windowSourceFrames++;
+        metrics.totalSourceFrames++;
+        if (firstPresentDiagnostic) {
+            std::cerr << "lsfg-vk: runtime stage=present-sync-ready generatedSignals="
+                      << generatedFrameCount << " sourceWait=" << sourceWait << "\n";
+            std::cerr << "lsfg-vk: runtime stage=first-present-cycle-ready result=" << result
+                      << " generated=" << generatedFrameCount << "\n";
+        }
+
+        const auto cycleEnd = RuntimeMetrics::Clock::now();
+        const double cycleMs = std::chrono::duration<double, std::milli>(
+            cycleEnd - cycleStart).count();
+        metrics.windowCycleMs += cycleMs;
+        if (cycleMs > metrics.windowCycleMaxMs)
+            metrics.windowCycleMaxMs = cycleMs;
+
+        const double elapsedSeconds = std::chrono::duration<double>(
+            cycleEnd - metrics.windowStart).count();
+        if (elapsedSeconds >= 1.0) {
+            const double sourceCount = static_cast<double>(metrics.windowSourceFrames);
+            const double generatedCount = static_cast<double>(metrics.windowGeneratedFrames);
+            const double sourceFps = sourceCount / elapsedSeconds;
+            const double generatedFps = generatedCount / elapsedSeconds;
+            const double outputFps = (sourceCount + generatedCount) / elapsedSeconds;
+            const double cycleAvgMs = sourceCount > 0.0 ? metrics.windowCycleMs / sourceCount : 0.0;
+            const double handoffAvgMs = sourceCount > 0.0 ? metrics.windowHandoffMs / sourceCount : 0.0;
+            const double dispatchAvgMs = sourceCount > 0.0 ? metrics.windowDispatchMs / sourceCount : 0.0;
+            const double waitIdleAvgMs = sourceCount > 0.0 ? metrics.windowWaitIdleMs / sourceCount : 0.0;
+            const double generatedPresentAvgMs = generatedCount > 0.0
+                ? metrics.windowGeneratedPresentMs / generatedCount : 0.0;
+            const double sourceIntervalAvgMs = metrics.windowSourceIntervals > 0
+                ? metrics.windowSourceIntervalMs / static_cast<double>(metrics.windowSourceIntervals)
+                : 0.0;
+
+            std::cerr << "lsfg-vk: metrics"
+                      << " source_fps=" << sourceFps
+                      << " generated_fps=" << generatedFps
+                      << " output_fps=" << outputFps
+                      << " source_frames=" << metrics.windowSourceFrames
+                      << " generated_frames=" << metrics.windowGeneratedFrames
+                      << " source_frames_total=" << metrics.totalSourceFrames
+                      << " generated_frames_total=" << metrics.totalGeneratedFrames
+                      << " source_present_failures=" << metrics.windowSourcePresentFailures
+                      << " generated_present_failures=" << metrics.windowGeneratedPresentFailures
+                      << " source_present_failures_total=" << metrics.totalSourcePresentFailures
+                      << " generated_present_failures_total=" << metrics.totalGeneratedPresentFailures
+                      << " cycle_avg_ms=" << cycleAvgMs
+                      << " cycle_max_ms=" << metrics.windowCycleMaxMs
+                      << " ahb_handoff_avg_ms=" << handoffAvgMs
+                      << " framegen_dispatch_avg_ms=" << dispatchAvgMs
+                      << " framegen_wait_avg_ms=" << waitIdleAvgMs
+                      << " generated_present_avg_ms=" << generatedPresentAvgMs
+                      << " source_interval_avg_ms=" << sourceIntervalAvgMs
+                      << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
+                      << " multiplier=" << conf.multiplier
+                      << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
+                      << " target_fps=" << conf.fpsLimit
+                      << " performance=" << (conf.performance ? 1 : 0)
+                      << "\n";
+
+            metrics.windowStart = cycleEnd;
+            metrics.windowSourceFrames = 0;
+            metrics.windowGeneratedFrames = 0;
+            metrics.windowSourcePresentFailures = 0;
+            metrics.windowGeneratedPresentFailures = 0;
+            metrics.windowCycleMs = 0.0;
+            metrics.windowCycleMaxMs = 0.0;
+            metrics.windowHandoffMs = 0.0;
+            metrics.windowDispatchMs = 0.0;
+            metrics.windowWaitIdleMs = 0.0;
+            metrics.windowGeneratedPresentMs = 0.0;
+            metrics.windowSourceIntervalMs = 0.0;
+            metrics.windowSourceIntervalMaxMs = 0.0;
+            metrics.windowSourceIntervals = 0;
+        }
+
+        this->frameIdx++;
+        return result;
+    };
+
+    if (generatedFrameCount == 0) {
+        this->requiresSourceHistoryWarmup_ = true;
+        this->previousSourceCopySignalValid_ = false;
+        const auto delay = this->adaptiveScheduler_.delayUntilNextSourceOutput(
+            AdaptiveFrameScheduler::Clock::now());
+        if (delay > std::chrono::nanoseconds::zero())
+            std::this_thread::sleep_for(delay);
+
+        const VkPresentInfoKHR directPresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = pNext,
+            .waitSemaphoreCount = static_cast<uint32_t>(gameRenderSemaphores.size()),
+            .pWaitSemaphores = gameRenderSemaphores.data(),
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        const auto directResult = Layer::ovkQueuePresentKHR(queue, &directPresentInfo);
+        if (directResult != VK_SUCCESS && directResult != VK_SUBOPTIMAL_KHR) {
+            metrics.windowSourcePresentFailures++;
+            metrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(directResult, "Failed to present source frame directly");
+        }
+        if (firstPresentDiagnostic)
+            std::cerr << "lsfg-vk: runtime stage=source-direct-present\n";
+        return finishSourcePresent(directResult, "game-render");
     }
 
     // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
@@ -475,6 +626,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     // 1. Copy the game swapchain image into frame_0/frame_1, then release the
     //    AHB to VK_QUEUE_FAMILY_EXTERNAL for framegen.
+    pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
     pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
     pass.preCopyBuf.begin();
@@ -488,7 +640,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     pass.preCopyBuf.end();
 
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
-    if (this->frameIdx > 0)
+    if (this->previousSourceCopySignalValid_)
         gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
             .preCopySemaphores.at(1).handle());
 
@@ -496,15 +648,43 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // game-device release barrier/copy to complete before the framegen VkDevice
     // performs its matching external acquire.
     const auto handoffStart = RuntimeMetrics::Clock::now();
+    std::vector<VkSemaphore> preCopySignals{
+        pass.preCopySemaphores.at(0).handle(),
+        pass.preCopySemaphores.at(1).handle(),
+    };
     submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
-        gameRenderSemaphores2,
-        { pass.preCopySemaphores.at(1).handle() },
+        gameRenderSemaphores2, preCopySignals,
         *this->ahbHandoffFence, this->resetHandoffFences,
         this->waitHandoffFences);
+    this->previousSourceCopySignalValid_ = true;
     metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - handoffStart).count();
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\n";
+
+    if (warmupSourceHistory) {
+        this->requiresSourceHistoryWarmup_ = false;
+        this->lastGeneratedFrameCount_ = 0;
+        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+        const VkPresentInfoKHR warmupPresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = pNext,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &sourceReady,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        const auto warmupResult = Layer::ovkQueuePresentKHR(queue, &warmupPresentInfo);
+        if (warmupResult != VK_SUCCESS && warmupResult != VK_SUBOPTIMAL_KHR) {
+            metrics.windowSourcePresentFailures++;
+            metrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(warmupResult,
+                "Failed to present source-history warmup frame");
+        }
+        std::cerr << "lsfg-vk: runtime stage=source-history-warmup\n";
+        return finishSourcePresent(warmupResult, "pre-copy-warmup");
+    }
 
     // 2. Tell framegen to generate intermediary frames. It acquires the input
     //    and output AHBs from EXTERNAL and releases them back to EXTERNAL.
@@ -512,13 +692,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
                   << (conf.performance ? "performance" : "quality")
-                  << " generated=" << (conf.multiplier - 1) << "\n";
+                  << " generated=" << generatedFrameCount << "\n";
     }
     const auto dispatchStart = RuntimeMetrics::Clock::now();
     if (conf.performance)
-        LSFG_3_1P::presentContext(*this->lsfgCtxId, -1, noOutSems);
+        LSFG_3_1P::presentContextWithCount(
+            *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
     else
-        LSFG_3_1::presentContext(*this->lsfgCtxId, -1, noOutSems);
+        LSFG_3_1::presentContextWithCount(
+            *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)
@@ -527,12 +709,36 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // 3. Ensure framegen's separate VkDevice has completed its release barriers
     //    before the game device acquires generated AHBs for readback/blit.
     const auto waitIdleStart = RuntimeMetrics::Clock::now();
-    if (conf.performance)
-        LSFG_3_1P::waitIdle();
-    else
-        LSFG_3_1::waitIdle();
+    const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
+    const bool framegenReady = conf.performance
+        ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
+        : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
     metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    if (!framegenReady) {
+        this->lastGeneratedFrameCount_ = 0;
+        std::cerr << "lsfg-vk: runtime stage=framegen-completion-timeout timeout_ms="
+                  << (framegenCompletionTimeoutNs / 1'000'000ULL)
+                  << "; presenting source and requesting swapchain recreation\n";
+        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+        const VkPresentInfoKHR timeoutPresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = pNext,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &sourceReady,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        const auto timeoutPresentResult = Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
+        if (timeoutPresentResult != VK_SUCCESS && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
+            metrics.windowSourcePresentFailures++;
+            metrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(timeoutPresentResult,
+                "Failed to present source frame after framegen timeout");
+        }
+        return finishSourcePresent(VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-timeout");
+    }
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
 
@@ -540,11 +746,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // copy submission signals two binary semaphores: one consumed by this
     // generated present, and one reserved for the next generated/source
     // present. A binary semaphore signal must not be consumed twice.
-    for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); i++) {
+    for (size_t i = 0; i < generatedFrameCount; i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
-        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, UINT64_MAX,
+        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, runtimeWaitTimeoutNs(),
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowGeneratedPresentFailures++;
@@ -600,10 +806,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // 5. Present the actual game frame after generated frames using the signal
     // reserved for this present, rather than waiting a second time on the
     // generated-present semaphore.
-    VkSemaphore lastPrevPostCopySemaphore =
-        pass.prevPostCopySemaphores.at(conf.multiplier - 1 - 1).handle();
+    VkSemaphore lastPrevPostCopySemaphore = generatedFrameCount > 0
+        ? pass.prevPostCopySemaphores.at(generatedFrameCount - 1).handle()
+        : pass.preCopySemaphores.at(0).handle();
     const VkPresentInfoKHR finalPresentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .pNext = generatedFrameCount == 0 ? pNext : nullptr,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &lastPrevPostCopySemaphore,
         .swapchainCount = 1,
@@ -616,82 +824,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.totalSourcePresentFailures++;
         throw LSFG::vulkan_error(res, "Failed to present swapchain image");
     }
-    metrics.windowSourceFrames++;
-    metrics.totalSourceFrames++;
-    if (firstPresentDiagnostic) {
-        std::cerr << "lsfg-vk: runtime stage=present-sync-ready generatedSignals="
-                  << (conf.multiplier - 1) << " sourceWait=prev-post-copy\n";
-        std::cerr << "lsfg-vk: runtime stage=first-present-cycle-ready result=" << res
-                  << " generated=" << (conf.multiplier - 1) << "\n";
-    }
-
-    const auto cycleEnd = RuntimeMetrics::Clock::now();
-    const double cycleMs = std::chrono::duration<double, std::milli>(
-        cycleEnd - cycleStart).count();
-    metrics.windowCycleMs += cycleMs;
-    if (cycleMs > metrics.windowCycleMaxMs)
-        metrics.windowCycleMaxMs = cycleMs;
-
-    const double elapsedSeconds = std::chrono::duration<double>(
-        cycleEnd - metrics.windowStart).count();
-    if (elapsedSeconds >= 1.0) {
-        const double sourceCount = static_cast<double>(metrics.windowSourceFrames);
-        const double generatedCount = static_cast<double>(metrics.windowGeneratedFrames);
-        const double sourceFps = sourceCount / elapsedSeconds;
-        const double generatedFps = generatedCount / elapsedSeconds;
-        const double outputFps = (sourceCount + generatedCount) / elapsedSeconds;
-        const double cycleAvgMs = sourceCount > 0.0 ? metrics.windowCycleMs / sourceCount : 0.0;
-        const double handoffAvgMs = sourceCount > 0.0 ? metrics.windowHandoffMs / sourceCount : 0.0;
-        const double dispatchAvgMs = sourceCount > 0.0 ? metrics.windowDispatchMs / sourceCount : 0.0;
-        const double waitIdleAvgMs = sourceCount > 0.0 ? metrics.windowWaitIdleMs / sourceCount : 0.0;
-        const double generatedPresentAvgMs = generatedCount > 0.0
-            ? metrics.windowGeneratedPresentMs / generatedCount : 0.0;
-        const double sourceIntervalAvgMs = metrics.windowSourceIntervals > 0
-            ? metrics.windowSourceIntervalMs / static_cast<double>(metrics.windowSourceIntervals)
-            : 0.0;
-
-        std::cerr << "lsfg-vk: metrics"
-                  << " source_fps=" << sourceFps
-                  << " generated_fps=" << generatedFps
-                  << " output_fps=" << outputFps
-                  << " source_frames=" << metrics.windowSourceFrames
-                  << " generated_frames=" << metrics.windowGeneratedFrames
-                  << " source_frames_total=" << metrics.totalSourceFrames
-                  << " generated_frames_total=" << metrics.totalGeneratedFrames
-                  << " source_present_failures=" << metrics.windowSourcePresentFailures
-                  << " generated_present_failures=" << metrics.windowGeneratedPresentFailures
-                  << " source_present_failures_total=" << metrics.totalSourcePresentFailures
-                  << " generated_present_failures_total=" << metrics.totalGeneratedPresentFailures
-                  << " cycle_avg_ms=" << cycleAvgMs
-                  << " cycle_max_ms=" << metrics.windowCycleMaxMs
-                  << " ahb_handoff_avg_ms=" << handoffAvgMs
-                  << " framegen_dispatch_avg_ms=" << dispatchAvgMs
-                  << " framegen_wait_avg_ms=" << waitIdleAvgMs
-                  << " generated_present_avg_ms=" << generatedPresentAvgMs
-                  << " source_interval_avg_ms=" << sourceIntervalAvgMs
-                  << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
-                  << " multiplier=" << conf.multiplier
-                  << " performance=" << (conf.performance ? 1 : 0)
-                  << "\n";
-
-        metrics.windowStart = cycleEnd;
-        metrics.windowSourceFrames = 0;
-        metrics.windowGeneratedFrames = 0;
-        metrics.windowSourcePresentFailures = 0;
-        metrics.windowGeneratedPresentFailures = 0;
-        metrics.windowCycleMs = 0.0;
-        metrics.windowCycleMaxMs = 0.0;
-        metrics.windowHandoffMs = 0.0;
-        metrics.windowDispatchMs = 0.0;
-        metrics.windowWaitIdleMs = 0.0;
-        metrics.windowGeneratedPresentMs = 0.0;
-        metrics.windowSourceIntervalMs = 0.0;
-        metrics.windowSourceIntervalMaxMs = 0.0;
-        metrics.windowSourceIntervals = 0;
-    }
-
-    this->frameIdx++;
-    return res;
+    return finishSourcePresent(res, "prev-post-copy");
 
 #else
     // Desktop Linux path: OPAQUE_FD semaphore-based synchronization
@@ -739,7 +872,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // 3. acquire next swapchain image
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
-        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, UINT64_MAX,
+        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, runtimeWaitTimeoutNs(),
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");

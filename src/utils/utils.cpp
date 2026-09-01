@@ -54,11 +54,24 @@ std::pair<uint32_t, VkQueue> Utils::findQueue(VkDevice device, VkPhysicalDevice 
     return { *idx, queue };
 }
 
-uint64_t Utils::getDeviceUUID(VkPhysicalDevice physicalDevice) {
-    VkPhysicalDeviceProperties properties{};
-    Layer::ovkGetPhysicalDeviceProperties(physicalDevice, &properties);
+std::optional<LSFG::DeviceIdentity> Utils::getDeviceIdentity(
+        VkPhysicalDevice physicalDevice, PFN_vkGetPhysicalDeviceProperties2 getProperties2) {
+    if (getProperties2 == nullptr)
+        return std::nullopt;
 
-    return static_cast<uint64_t>(properties.vendorID) << 32 | properties.deviceID;
+    VkPhysicalDeviceIDProperties idProperties{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 properties{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &idProperties,
+    };
+    getProperties2(physicalDevice, &properties);
+
+    LSFG::DeviceIdentity identity{};
+    std::copy_n(idProperties.deviceUUID, VK_UUID_SIZE, identity.deviceUUID.begin());
+    std::copy_n(idProperties.driverUUID, VK_UUID_SIZE, identity.driverUUID.begin());
+    return identity;
 }
 
 uint32_t Utils::getMaxImageCount(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface) {

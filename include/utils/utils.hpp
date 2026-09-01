@@ -1,10 +1,12 @@
 #pragma once
 
 #include <vulkan/vulkan_core.h>
+#include "lsfg_backend.hpp"
 
 #include <cstdint>
 #include <cstddef>
 #include <utility>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,12 +27,14 @@ namespace Utils {
         VkDeviceCreateInfo* desc, VkQueueFlags flags);
 
     ///
-    /// Get the UUID of the physical device.
+    /// Get the Vulkan physical-device and driver UUID pair used for external-object compatibility.
     ///
-    /// @param physicalDevice The physical device to get the UUID from.
-    /// @return The UUID of the physical device.
+    /// @param physicalDevice The game physical device.
+    /// @param getProperties2 The downstream properties2 entrypoint for the game VkInstance.
+    /// @return Exact device/driver identity, or nullopt when properties2 is unavailable.
     ///
-    uint64_t getDeviceUUID(VkPhysicalDevice physicalDevice);
+    std::optional<LSFG::DeviceIdentity> getDeviceIdentity(
+        VkPhysicalDevice physicalDevice, PFN_vkGetPhysicalDeviceProperties2 getProperties2);
 
     ///
     /// Get the max image count for a swapchain.

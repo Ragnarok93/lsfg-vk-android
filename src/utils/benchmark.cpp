@@ -8,16 +8,50 @@
 #include <lsfg_3_1p.hpp>
 #include <unistd.h>
 
-#include <iostream>
-#include <cstdlib>
-#include <cstdint>
-#include <iomanip>
-#include <thread>
+#include <array>
 #include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Benchmark;
+
+namespace {
+
+uint8_t parseHexNibble(char value) {
+    if (value >= '0' && value <= '9') return static_cast<uint8_t>(value - '0');
+    if (value >= 'a' && value <= 'f') return static_cast<uint8_t>(value - 'a' + 10);
+    if (value >= 'A' && value <= 'F') return static_cast<uint8_t>(value - 'A' + 10);
+    throw std::runtime_error("Invalid hexadecimal Vulkan UUID");
+}
+
+std::array<uint8_t, VK_UUID_SIZE> parseUuid(const char* envName) {
+    const char* value = std::getenv(envName);
+    if (value == nullptr)
+        throw std::runtime_error(std::string("Benchmark requires ") + envName);
+
+    std::string compact;
+    compact.reserve(VK_UUID_SIZE * 2);
+    for (const char ch : std::string(value)) {
+        if (ch != '-') compact.push_back(ch);
+    }
+    if (compact.size() != VK_UUID_SIZE * 2)
+        throw std::runtime_error(std::string(envName) + " must contain exactly 16 UUID bytes");
+
+    std::array<uint8_t, VK_UUID_SIZE> uuid{};
+    for (size_t i = 0; i < uuid.size(); ++i) {
+        uuid[i] = static_cast<uint8_t>((parseHexNibble(compact[i * 2]) << 4U)
+            | parseHexNibble(compact[i * 2 + 1]));
+    }
+    return uuid;
+}
+
+} // namespace
 
 void Benchmark::run(uint32_t width, uint32_t height) {
     const auto& conf = Config::activeConf;
@@ -31,16 +65,22 @@ void Benchmark::run(uint32_t width, uint32_t height) {
         lsfgPresentContext = LSFG_3_1P::presentContext;
     }
 
-    // create the benchmark context
-    const char* lsfgDeviceUUID = std::getenv("LSFG_DEVICE_UUID");
-    const uint64_t deviceUUID = lsfgDeviceUUID
-        ? std::stoull(std::string(lsfgDeviceUUID), nullptr, 16) : 0x1463ABAC;
+    // Exact Vulkan provenance is required here for the same reason it is required
+    // in the layer: a vendor/device ID cannot disambiguate Turnip from a proprietary
+    // ICD exposing the same physical GPU.
+    const LSFG::DeviceIdentity identity{
+        .deviceUUID = parseUuid("LSFG_DEVICE_UUID"),
+        .driverUUID = parseUuid("LSFG_DRIVER_UUID"),
+    };
+    const VkFormat format = conf.hdr
+        ? VK_FORMAT_R16G16B16A16_SFLOAT
+        : VK_FORMAT_R8G8B8A8_UNORM;
 
     setenv("DISABLE_LSFG", "1", 1); // NOLINT
 
     Extract::extractShaders();
     lsfgInitialize(
-        deviceUUID, // some magic number if not given
+        identity, format,
         conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
         [](const std::string& name) -> std::vector<uint8_t> {
             auto dxbc = Extract::getShader(name);
@@ -49,8 +89,7 @@ void Benchmark::run(uint32_t width, uint32_t height) {
         }
     );
     const int32_t ctx = lsfgCreateContext(-1, -1, {},
-        { .width = width, .height = height },
-        conf.hdr ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM
+        { .width = width, .height = height }, format
     );
 
     unsetenv("DISABLE_LSFG"); // NOLINT

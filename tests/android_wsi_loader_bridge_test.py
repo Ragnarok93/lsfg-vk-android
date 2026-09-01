@@ -198,7 +198,8 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
         self.assertIn("if (!activeConf.enable || activeConf.multiplier <= 1)", hooks)
-        self.assertIn("init stage=swapchain-pass-through enabled=", hooks)
+        self.assertIn("init stage=swapchain-pass-through reason=", hooks)
+        self.assertIn("enabled=", hooks)
         self.assertIn("swapchainToDeviceTable.emplace(*pSwapchain, device)", hooks)
         self.assertIn("if (!conf.enable || conf.multiplier <= 1)", hooks)
 
