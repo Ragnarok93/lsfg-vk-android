@@ -40,8 +40,8 @@ namespace {
         }
 
         // Unmatched processes may unload silently. Explicitly targeted GameNative
-        // executables must stay resident even with enabled=false so conf.toml can
-        // hot-enable frame generation without restarting the Wine process.
+        // executables keep the loader dispatch resident; multiplier=1 is their
+        // runtime Off/pass-through state and remains hot-enableable.
         auto& conf = Config::activeConf;
         if (!conf.targeted && !conf.enable && name.second != "benchmark")
             return;
@@ -49,7 +49,8 @@ namespace {
         // print config
         std::cerr << "lsfg-vk: Loaded configuration for " << name.second << ":\n";
         std::cerr << "  Targeted: " << (conf.targeted ? "Yes" : "No") << '\n';
-        std::cerr << "  Frame Generation: " << (conf.enable ? "Enabled" : "Resident/Off") << '\n';
+        std::cerr << "  Frame Generation: "
+                  << (conf.multiplier > 1 ? "Enabled" : "Resident/Off") << '\n';
         if (!conf.dll.empty()) std::cerr << "  Using DLL from: " << conf.dll << '\n';
         std::cerr << "  Multiplier: " << conf.multiplier << '\n';
         std::cerr << "  Flow Scale: " << conf.flowScale << '\n';
