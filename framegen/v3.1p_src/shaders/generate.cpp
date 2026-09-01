@@ -38,11 +38,13 @@ Generate::Generate(Vulkan& vk,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT, fds.empty() ? -1 : fds.at(i));
 
-    // hook up shaders
-    for (size_t i = 0; i < vk.generationCount; i++) {
-        auto& pass = this->passes.emplace_back();
+    // Prebuild each valid interpolation denominator for adaptive mode.
+    this->passesByGenerationCount.resize(vk.generationCount + 1);
+    for (size_t count = 1; count <= vk.generationCount; count++) {
+      for (size_t i = 0; i < count; i++) {
+        auto& pass = this->passesByGenerationCount.at(count).emplace_back();
         pass.buffer = vk.resources.getBuffer(vk.device,
-            static_cast<float>(i + 1) / static_cast<float>(vk.generationCount + 1));
+            static_cast<float>(i + 1) / static_cast<float>(count + 1));
         for (size_t j = 0; j < 2; j++) {
             pass.descriptorSet.at(j) = Core::DescriptorSet(vk.device, vk.descriptorPool,
                 this->shaderModule);
@@ -57,11 +59,13 @@ Generate::Generate(Vulkan& vk,
                 .add(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, this->outImgs.at(i))
                 .build();
         }
+      }
     }
 }
 
-void Generate::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount, uint64_t pass_idx) {
-    auto& pass = this->passes.at(pass_idx);
+void Generate::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
+        uint64_t pass_idx, size_t activeGenerationCount) {
+    auto& pass = this->passesByGenerationCount.at(activeGenerationCount).at(pass_idx);
 
     // first pass
     const auto extent = this->inImg1.getExtent();
@@ -100,10 +104,12 @@ Generate::Generate(Vulkan& vk,
     this->samplers.at(1) = vk.resources.getSampler(vk.device,
         VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_COMPARE_OP_ALWAYS);
 
-    for (size_t i = 0; i < vk.generationCount; i++) {
-        auto& pass = this->passes.emplace_back();
+    this->passesByGenerationCount.resize(vk.generationCount + 1);
+    for (size_t count = 1; count <= vk.generationCount; count++) {
+      for (size_t i = 0; i < count; i++) {
+        auto& pass = this->passesByGenerationCount.at(count).emplace_back();
         pass.buffer = vk.resources.getBuffer(vk.device,
-            static_cast<float>(i + 1) / static_cast<float>(vk.generationCount + 1));
+            static_cast<float>(i + 1) / static_cast<float>(count + 1));
         for (size_t j = 0; j < 2; j++) {
             pass.descriptorSet.at(j) = Core::DescriptorSet(vk.device, vk.descriptorPool,
                 this->shaderModule);
@@ -118,5 +124,6 @@ Generate::Generate(Vulkan& vk,
                 .add(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, this->outImgs.at(i))
                 .build();
         }
+      }
     }
 }

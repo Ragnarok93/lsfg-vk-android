@@ -60,7 +60,10 @@ namespace LSFG_3_1P {
         /// @throws LSFG::vulkan_error if the context fails to present.
         ///
         void present(Vulkan& vk,
-            int inSem, const std::vector<int>& outSem);
+            int inSem, const std::vector<int>& outSem,
+            size_t activeGenerationCount);
+
+        [[nodiscard]] bool waitForLastPresent(Vulkan& vk, uint64_t timeoutNs);
 
         /// Wait only for this context's submitted fences, using the bounded
         /// LSFG_VK_WAIT_TIMEOUT_MS budget. Returns false on timeout.
@@ -91,6 +94,7 @@ namespace LSFG_3_1P {
             std::vector<Core::CommandBuffer> cmdBuffers2; // command buffers for second step
 
             bool shouldWait{false};
+            size_t generationCount{0};
         };
         std::array<RenderData, 8> data;
 

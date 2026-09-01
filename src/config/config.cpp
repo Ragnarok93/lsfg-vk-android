@@ -95,12 +95,20 @@ void Config::updateConfig(const std::string& file) {
 
         const std::string exe = toml::find<std::string>(gameTable, "exe");
         Configuration game{
+            // A matching GameNative target must keep the Vulkan layer's loader
+            // dispatch resident for the process lifetime. Runtime Off is the
+            // validated multiplier=1 pass-through state; the serialized enabled
+            // flag is UI intent and must not make the loader stop advertising
+            // already-installed WSI hooks before a later hot-enable.
             .enable = true,
+            .targeted = true,
             .dll = global.dll,
             .multiplier = toml::find_or(gameTable, "multiplier", 2U),
             .flowScale = toml::find_or(gameTable, "flow_scale", 1.0F),
             .performance = toml::find_or(gameTable, "performance_mode", false),
             .hdr = toml::find_or(gameTable, "hdr_mode", false),
+            .adaptiveFramegen = toml::find_or(gameTable, "adaptive_framegen", false),
+            .fpsLimit = toml::find_or(gameTable, "fps_limit", 0U),
             .e_present =   into_present(toml::find_or(gameTable, "experimental_present_mode", "")),
             .config_file = file,
             .timestamp = global.timestamp
@@ -111,6 +119,8 @@ void Config::updateConfig(const std::string& file) {
             throw std::runtime_error("Multiplier cannot be less than 1");
         if (game.flowScale < 0.25F || game.flowScale > 1.0F)
             throw std::runtime_error("Flow scale must be between 0.25 and 1.0");
+        if (game.adaptiveFramegen && game.fpsLimit == 0)
+            throw std::runtime_error("Adaptive frame generation requires a positive fps_limit");
         games[exe] = std::move(game);
     }
 
@@ -124,6 +134,7 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
     if (std::getenv("LSFG_LEGACY")) {
         Configuration conf{
             .enable = true,
+            .targeted = true,
             .multiplier = 2,
             .flowScale = 1.0F,
             .e_present = VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR
@@ -139,6 +150,10 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
         if (performance) conf.performance = std::string(performance) == "1";
         const char* hdr = std::getenv("LSFG_HDR_MODE");
         if (hdr) conf.hdr = std::string(hdr) == "1";
+        const char* adaptive = std::getenv("LSFG_ADAPTIVE_FRAMEGEN");
+        if (adaptive) conf.adaptiveFramegen = std::string(adaptive) == "1";
+        const char* fpsLimit = std::getenv("LSFG_FPS_LIMIT");
+        if (fpsLimit) conf.fpsLimit = std::stoul(fpsLimit);
         const char* e_present = std::getenv("LSFG_EXPERIMENTAL_PRESENT_MODE");
         if (e_present) conf.e_present = into_present(std::string(e_present));
 

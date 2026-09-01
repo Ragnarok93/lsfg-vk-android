@@ -45,7 +45,8 @@ namespace LSFG_3_1::Shaders {
         ///
         /// Dispatch the shaderchain.
         ///
-        void Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount, uint64_t pass_idx);
+        void Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
+            uint64_t pass_idx, size_t activeGenerationCount);
 
         /// Get the first output image
         [[nodiscard]] const auto& getOutImage1() const { return this->outImg1; }
@@ -68,7 +69,7 @@ namespace LSFG_3_1::Shaders {
             std::array<Core::DescriptorSet, 8> descriptorSets;
             std::array<Core::DescriptorSet, 3> sixthDescriptorSet;
         };
-        std::vector<DeltaPass> passes;
+        std::vector<std::vector<DeltaPass>> passesByGenerationCount;
 
         std::array<std::array<Core::Image, 4>, 3> inImgs1;
         Core::Image inImg2;

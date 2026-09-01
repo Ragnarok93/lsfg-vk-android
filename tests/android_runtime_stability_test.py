@@ -2,6 +2,8 @@
 import unittest
 from pathlib import Path
 
+from android_lifecycle_regression_test import AndroidLifecycleRegressionTest  # noqa: F401
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -52,8 +54,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         desktop_start = wrapper.index("#else", android_start)
         android_present = wrapper[android_start:desktop_start]
         self.assertIn("submitAndWaitForAhbHandoff", android_present)
-        self.assertIn("LSFG_3_1P::waitIdle();", android_present)
-        self.assertIn("LSFG_3_1::waitIdle();", android_present)
+        self.assertIn("waitContext", android_present)
+        self.assertIn("runtimeWaitTimeoutNs()", android_present)
+        self.assertNotIn("LSFG_3_1P::waitIdle();", android_present)
+        self.assertNotIn("LSFG_3_1::waitIdle();", android_present)
 
         for relative in (
             "framegen/v3.1_src/context.cpp",
@@ -75,6 +79,115 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
                 lifecycle_source,
                 "Framegen completion and teardown must use bounded context fences rather than an uninterruptible device-wide idle wait",
             )
+
+    def test_adaptive_path_skips_unneeded_gpu_work_and_keeps_binary_signals_valid(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("AdaptiveFrameScheduler adaptiveScheduler_", header)
+        self.assertIn("lastGeneratedFrameCount", header)
+        for token in (
+            "adaptiveScheduler_.configure",
+            "adaptiveScheduler_.plan(sourceInterval)",
+            "presentContextWithCount",
+            "if (generatedFrameCount == 0)",
+            "pass.preCopySemaphores.at(0).handle(),",
+            "pass.preCopySemaphores.at(1).handle(),",
+            "return finishSourcePresent(directResult, \"game-render\")",
+        ):
+            self.assertIn(token, source)
+
+        self.assertIn("swapchain.lastGeneratedFrameCount()", hooks)
+        self.assertIn('"adaptive="', hooks)
+        self.assertIn('"target_fps="', hooks)
+
+    def test_framegen_runtime_reconfigures_instead_of_reusing_incompatible_outputs(self) -> None:
+        """Regression: adaptive 4x left generationCount=3 active for fixed 2x's one AHB."""
+        for backend in ("v3.1_src", "v3.1p_src"):
+            source = (ROOT / "framegen" / backend / "lsfg.cpp").read_text(encoding="utf-8")
+
+            self.assertIn("RuntimeSignature", source)
+            self.assertIn("requestedSignature == activeSignature", source)
+            self.assertIn("contexts.empty()", source)
+            self.assertNotIn(
+                "if (instance.has_value() || device.has_value())\n        return;",
+                source,
+            )
+            self.assertIn("output-count mismatch", source)
+            self.assertIn("active generation count exceeds runtime capacity", source)
+
+    def test_last_context_release_clears_framegen_runtime(self) -> None:
+        """Regression: disabling LSFG must not leave its VkDevice/resources resident."""
+        for backend in ("v3.1_src", "v3.1p_src"):
+            source = (ROOT / "framegen" / backend / "lsfg.cpp").read_text(encoding="utf-8")
+
+            delete_start = source.index(f"void LSFG_3_1{'P' if 'v3.1p' in backend else ''}::deleteContext")
+            finalize_start = source.index(f"void LSFG_3_1{'P' if 'v3.1p' in backend else ''}::finalize", delete_start)
+            delete_body = source[delete_start:finalize_start]
+            self.assertIn("if (contexts.empty())", delete_body)
+            self.assertIn("resetRuntime", delete_body)
+
+    def test_zero_generation_uses_direct_source_present(self) -> None:
+        """Regression: target-matched adaptive frames must not cross the AHB boundary."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        present_start = source.index("VkResult LsContext::present")
+        handoff_start = source.index("submitAndWaitForAhbHandoff", present_start)
+        before_handoff = source[present_start:handoff_start]
+
+        self.assertIn("if (generatedFrameCount == 0)", before_handoff)
+        self.assertIn("source-direct-present", before_handoff)
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, &directPresentInfo)", before_handoff)
+        self.assertIn("return finishSourcePresent", before_handoff)
+
+    def test_generation_resumes_only_after_source_history_warmup(self) -> None:
+        """Regression: a direct-present run must not interpolate against stale AHB input."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("requiresSourceHistoryWarmup_", header)
+        self.assertIn("previousSourceCopySignalValid_", header)
+        self.assertIn("requiresSourceHistoryWarmup_ = true", source)
+        self.assertIn("const bool warmupSourceHistory", source)
+        self.assertIn("if (this->previousSourceCopySignalValid_)", source)
+        self.assertIn("stage=source-history-warmup", source)
+        self.assertIn("return finishSourcePresent", source)
+
+    def test_context_creation_failure_recreates_original_swapchain(self) -> None:
+        """Regression: failed LSFG setup must not leave a modified swapchain contextless."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        catch_start = source.index("init stage=ls-context-failed")
+        catch_end = source.index("return VK_SUCCESS;", catch_start) + len("return VK_SUCCESS;")
+        fallback = source[catch_start:catch_end]
+
+        self.assertIn("ovkDestroySwapchainKHR", fallback)
+        self.assertIn("eraseSwapchainState", fallback)
+        self.assertIn("ovkCreateSwapchainKHR(", fallback)
+        self.assertIn("fallbackCreateInfo", fallback)
+        self.assertIn("swapchain-fallback-pass-through", fallback)
+
+    def test_game_config_keeps_target_resident_while_multiplier_one_is_off(self) -> None:
+        """GameNative Off remains a resident layer target; multiplier=1 is pass-through."""
+        source = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
+        self.assertIn("Configuration game{\n            // A matching GameNative target", source)
+        self.assertIn(".enable = true", source)
+        self.assertIn(".targeted = true", source)
+        self.assertIn('toml::find_or(gameTable, "multiplier", 2U)', source)
+        self.assertNotIn('.enable = toml::find_or(gameTable, "enabled", true)', source)
+
+    def test_adaptive_target_reload_does_not_recreate_the_swapchain(self) -> None:
+        """Limiter adjustments must not create multi-second black transition windows."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        self.assertIn("requiresSwapchainRecreation", source)
+        self.assertIn("const auto previousConf = conf", source)
+        self.assertIn("recreateSwapchain = requiresSwapchainRecreation", source)
+        self.assertIn("if (recreateSwapchain)", source)
+
+        helper_start = source.index("bool requiresSwapchainRecreation")
+        helper_end = source.index("VkResult myvkCreateInstance", helper_start)
+        helper = source[helper_start:helper_end]
+        self.assertNotIn("adaptiveFramegen", helper)
+        self.assertNotIn("fpsLimit", helper)
 
 
 if __name__ == "__main__":

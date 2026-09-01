@@ -39,18 +39,25 @@ namespace {
             return; // default configuration will unload
         }
 
-        // exit silently if not enabled
+        // Unmatched processes may unload silently. Explicitly targeted GameNative
+        // executables keep the loader dispatch resident; multiplier=1 is their
+        // runtime Off/pass-through state and remains hot-enableable.
         auto& conf = Config::activeConf;
-        if (!conf.enable && name.second != "benchmark")
-            return; // default configuration will unload
+        if (!conf.targeted && !conf.enable && name.second != "benchmark")
+            return;
 
         // print config
         std::cerr << "lsfg-vk: Loaded configuration for " << name.second << ":\n";
+        std::cerr << "  Targeted: " << (conf.targeted ? "Yes" : "No") << '\n';
+        std::cerr << "  Frame Generation: "
+                  << (conf.multiplier > 1 ? "Enabled" : "Resident/Off") << '\n';
         if (!conf.dll.empty()) std::cerr << "  Using DLL from: " << conf.dll << '\n';
         std::cerr << "  Multiplier: " << conf.multiplier << '\n';
         std::cerr << "  Flow Scale: " << conf.flowScale << '\n';
         std::cerr << "  Performance Mode: " << (conf.performance ? "Enabled" : "Disabled") << '\n';
         std::cerr << "  HDR Mode: " << (conf.hdr ? "Enabled" : "Disabled") << '\n';
+        std::cerr << "  Adaptive FrameGen: " << (conf.adaptiveFramegen ? "Enabled" : "Disabled") << '\n';
+        if (conf.adaptiveFramegen) std::cerr << "  Output FPS Cap: " << conf.fpsLimit << '\n';
         if (conf.e_present != 2) std::cerr << "  ! Present Mode: " << conf.e_present << '\n';
 
         // remove mesa var in favor of config
