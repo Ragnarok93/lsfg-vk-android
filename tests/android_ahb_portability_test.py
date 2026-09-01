@@ -47,7 +47,7 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         self.assertIn("copySwapchainToExternalAhb", source)
         self.assertIn("copyExternalAhbToSwapchain", source)
 
-    def test_android_pre_copy_has_real_completion_wait(self) -> None:
+    def test_android_pre_copy_has_real_bounded_completion_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertNotIn(
             "Layer::ovkQueueSubmit(info.queue.second, 0, nullptr, VK_NULL_HANDLE)",
@@ -56,7 +56,17 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         )
         self.assertIn("PFN_vkWaitForFences", source)
         self.assertIn("submitAndWaitForAhbHandoff", source)
-        self.assertIn("waitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX)", source)
+        self.assertIn("LSFG_VK_WAIT_TIMEOUT_MS", source)
+        self.assertIn(
+            "waitForFences(device, 1, &fence, VK_TRUE, runtimeWaitTimeoutNs())",
+            source,
+            "Cross-device AHB handoff must remain a real fence wait while using a finite timeout",
+        )
+        self.assertNotIn(
+            "waitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX)",
+            source,
+            "A stuck ICD must not be able to block the frame-generation handoff forever",
+        )
 
     def test_generated_ahb_uses_external_ownership_copy_path(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -142,7 +152,7 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         self.assertIn("Layer::ovkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice)", device_pre)
         self.assertIn("androidAhbSupported", hooks)
 
-    def test_swapchain_size_is_not_derived_from_queue_family_index(self) -> None:
+    def test_swapchain_size_is_multiplier_driven_not_queue_family_driven(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         swapchain = hooks.split("VkResult myvkCreateSwapchainKHR", 1)[1].split(
             "VkResult myvkQueuePresentKHR", 1
@@ -152,7 +162,16 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             swapchain,
             "Queue-family numbering is vendor-specific and must never affect swapchain image count",
         )
-        self.assertIn("pCreateInfo->minImageCount + 1", swapchain)
+        self.assertIn("requiredHeadroom", swapchain)
+        self.assertIn("activeConf.multiplier - 1", swapchain)
+        self.assertIn("pCreateInfo->minImageCount + requiredHeadroom", swapchain)
+        self.assertIn("requiredImageCount > maxImageCount", swapchain)
+        self.assertIn("stage=swapchain-insufficient-headroom", swapchain)
+        self.assertNotIn(
+            "pCreateInfo->minImageCount + 1",
+            swapchain,
+            "3x/4x modes require headroom derived from the configured generation multiplier",
+        )
 
     def test_swapchain_transfer_usage_is_capability_gated_and_fails_open(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
