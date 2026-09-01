@@ -36,6 +36,14 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         self.assertIn("VK_IMAGE_USAGE_STORAGE_BIT", device)
         self.assertIn("VK_IMAGE_USAGE_TRANSFER_SRC_BIT", device)
         self.assertIn("VK_IMAGE_USAGE_TRANSFER_DST_BIT", device)
+        quality = (ROOT / "framegen/v3.1_src/context.cpp").read_text(encoding="utf-8")
+        performance = (ROOT / "framegen/v3.1p_src/context.cpp").read_text(encoding="utf-8")
+        for source in (quality, performance):
+            self.assertIn("transportOnly", source)
+            self.assertIn("sharedOutImages", source)
+            self.assertIn("vkCmdCopyImage", source)
+            self.assertIn("VK_IMAGE_USAGE_TRANSFER_SRC_BIT", source)
+            self.assertIn("VK_IMAGE_USAGE_TRANSFER_DST_BIT", source)
 
     def test_swapchain_capacity_is_multiplier_driven_and_fails_open(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")

@@ -69,7 +69,12 @@ namespace LSFG_3_1P {
         Context& operator=(Context&&) = default;
         ~Context() = default;
     private:
-        Core::Image inImg_0, inImg_1; // inImg_0 is next when fc % 2 == 0
+        Core::Image inImg_0, inImg_1; // private shader images in transport-only mode
+#ifdef __ANDROID__
+        bool transportOnly{false};
+        Core::Image sharedInImg_0, sharedInImg_1;
+        std::vector<Core::Image> sharedOutImages;
+#endif
         uint64_t frameIdx{0};
 
         struct RenderData {

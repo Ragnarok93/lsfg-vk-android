@@ -52,6 +52,12 @@ void LSFG_3_1::initialize(const LSFG::DeviceIdentity& identity, VkFormat sharedF
     std::srand(static_cast<uint32_t>(std::time(nullptr)));
 }
 
+LSFG::BackendDiagnostics LSFG_3_1::getBackendDiagnostics() {
+    if (!device.has_value())
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    return device->device.getDiagnostics();
+}
+
 int32_t LSFG_3_1::createContext(
         int in0, int in1, const std::vector<int>& outN,
         VkExtent2D extent, VkFormat format) {

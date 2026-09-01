@@ -120,7 +120,8 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
 #ifdef __ANDROID__
 Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
         VkExtent2D extent, VkFormat format,
-        VkImageUsageFlags usage, VkImageAspectFlags aspectFlags)
+        VkImageUsageFlags usage, VkImageAspectFlags aspectFlags,
+        LSFG::AhbTransportMode transportMode)
         : extent(extent), format(format), aspectFlags(aspectFlags) {
     // Convert VkFormat to AHardwareBuffer format.
     uint32_t ahbFormat = 0;
@@ -142,7 +143,9 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
         .layers = 1,
         .format = ahbFormat,
         .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
-               | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT,
+               | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT
+               | (transportMode == LSFG::AhbTransportMode::DirectStorage
+                    ? AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER : 0ULL),
         .stride = 0,
         .rfu0 = 0,
         .rfu1 = 0,

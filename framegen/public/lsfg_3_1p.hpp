@@ -30,6 +30,10 @@ namespace LSFG_3_1P {
         bool isHdr, float flowScale, uint64_t generationCount,
         const std::function<std::vector<uint8_t>(const std::string&)>& loader);
 
+    /// Return immutable capability/provenance diagnostics for the selected backend.
+    __attribute__((visibility("default")))
+    LSFG::BackendDiagnostics getBackendDiagnostics();
+
     ///
     /// Create a new LSFG context on a swapchain.
     ///

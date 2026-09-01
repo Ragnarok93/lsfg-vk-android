@@ -304,19 +304,30 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         }
     );
 
+    const LSFG::BackendDiagnostics backendDiagnostics = conf.performance
+        ? LSFG_3_1P::getBackendDiagnostics()
+        : LSFG_3_1::getBackendDiagnostics();
+    const auto ahbTransportMode = backendDiagnostics.ahbTransportMode;
+    if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported)
+        throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
+            "Exact game/framegen ICD has no supported AHB image transport for LSFG format");
+
     // Android path: use AHardwareBuffer-backed images for sharing with framegen.
     // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL
     // ownership around every shared-image access, so this path is valid on
     // stock Android ICDs as well as wrapper/custom drivers.
     this->frame_0 = Mini::Image(info.device, info.physicalDevice,
-        extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+        ahbTransportMode);
     this->frame_1 = Mini::Image(info.device, info.physicalDevice,
-        extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+        ahbTransportMode);
 
     for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); ++i)
         this->out_n.emplace_back(info.device, info.physicalDevice,
             extent, format,
-            VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+            ahbTransportMode);
 
     // Create framegen context using AHB sharing
     std::vector<AHardwareBuffer*> outAhbs;

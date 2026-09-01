@@ -77,6 +77,85 @@ void emit_external_barriers(const Core::CommandBuffer& buf,
     LSFG::Utils::cmdPipelineBarrier2(buf.handle(), &dependencyInfo);
 }
 
+
+void add_external_transfer_acquire(std::vector<VkImageMemoryBarrier2>& barriers,
+        Vulkan& vk, Core::Image& image, VkImageLayout newLayout,
+        VkAccessFlags2 dstAccessMask) {
+    if (!image.isExternalShared()) return;
+    barriers.emplace_back(VkImageMemoryBarrier2{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        .srcAccessMask = 0,
+        .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        .dstAccessMask = dstAccessMask,
+        .oldLayout = image.getLayout(),
+        .newLayout = newLayout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+        .dstQueueFamilyIndex = vk.device.getComputeFamilyIdx(),
+        .image = image.handle(),
+        .subresourceRange = {
+            .aspectMask = image.getAspectFlags(), .levelCount = 1, .layerCount = 1,
+        },
+    });
+    image.setLayout(newLayout);
+}
+
+void add_external_transfer_release(std::vector<VkImageMemoryBarrier2>& barriers,
+        Vulkan& vk, Core::Image& image, VkImageLayout oldLayout,
+        VkAccessFlags2 srcAccessMask) {
+    if (!image.isExternalShared()) return;
+    barriers.emplace_back(VkImageMemoryBarrier2{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        .srcAccessMask = srcAccessMask,
+        .dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+        .dstAccessMask = 0,
+        .oldLayout = oldLayout,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = vk.device.getComputeFamilyIdx(),
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+        .image = image.handle(),
+        .subresourceRange = {
+            .aspectMask = image.getAspectFlags(), .levelCount = 1, .layerCount = 1,
+        },
+    });
+    image.setLayout(VK_IMAGE_LAYOUT_GENERAL);
+}
+
+void add_local_transition(std::vector<VkImageMemoryBarrier2>& barriers,
+        Core::Image& image, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+        VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess,
+        VkImageLayout newLayout) {
+    barriers.emplace_back(VkImageMemoryBarrier2{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = srcStage,
+        .srcAccessMask = srcAccess,
+        .dstStageMask = dstStage,
+        .dstAccessMask = dstAccess,
+        .oldLayout = image.getLayout(),
+        .newLayout = newLayout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image.handle(),
+        .subresourceRange = {
+            .aspectMask = image.getAspectFlags(), .levelCount = 1, .layerCount = 1,
+        },
+    });
+    image.setLayout(newLayout);
+}
+
+void copy_same_format(const Core::CommandBuffer& buf,
+        Core::Image& src, Core::Image& dst) {
+    const VkExtent2D extent = src.getExtent();
+    const VkImageCopy region{
+        .srcSubresource = { .aspectMask = src.getAspectFlags(), .layerCount = 1 },
+        .dstSubresource = { .aspectMask = dst.getAspectFlags(), .layerCount = 1 },
+        .extent = { extent.width, extent.height, 1 },
+    };
+    vkCmdCopyImage(buf.handle(), src.handle(), src.getLayout(),
+        dst.handle(), dst.getLayout(), 1, &region);
+}
+
 } // namespace
 #endif
 
@@ -147,7 +226,35 @@ void Context::present(Vulkan& vk,
     data.cmdBuffer1.begin();
 
 #ifdef __ANDROID__
-    {
+    if (this->transportOnly) {
+        std::vector<VkImageMemoryBarrier2> barriers;
+        barriers.reserve(4);
+        add_external_transfer_acquire(barriers, vk, this->sharedInImg_0,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        add_external_transfer_acquire(barriers, vk, this->sharedInImg_1,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        add_local_transition(barriers, this->inImg_0, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        add_local_transition(barriers, this->inImg_1, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        emit_external_barriers(data.cmdBuffer1, barriers);
+        copy_same_format(data.cmdBuffer1, this->sharedInImg_0, this->inImg_0);
+        copy_same_format(data.cmdBuffer1, this->sharedInImg_1, this->inImg_1);
+        barriers.clear();
+        add_local_transition(barriers, this->inImg_0, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+        add_local_transition(barriers, this->inImg_1, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+        add_external_transfer_release(barriers, vk, this->sharedInImg_0,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        add_external_transfer_release(barriers, vk, this->sharedInImg_1,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        emit_external_barriers(data.cmdBuffer1, barriers);
+    } else {
         std::vector<VkImageMemoryBarrier2> acquireBarriers;
         acquireBarriers.reserve(2);
         add_external_acquire(acquireBarriers, vk, this->inImg_0, VK_ACCESS_2_SHADER_READ_BIT);
@@ -181,7 +288,7 @@ void Context::present(Vulkan& vk,
         buf2.begin();
 
 #ifdef __ANDROID__
-        {
+        if (!this->transportOnly) {
             std::vector<VkImageMemoryBarrier2> acquireBarriers;
             acquireBarriers.reserve(1);
             add_external_acquire(acquireBarriers, vk, this->generate.getOutImages().at(pass),
@@ -198,7 +305,26 @@ void Context::present(Vulkan& vk,
         this->generate.Dispatch(buf2, this->frameIdx, pass);
 
 #ifdef __ANDROID__
-        {
+        if (this->transportOnly) {
+            auto& localOut = this->generate.getOutImages().at(pass);
+            auto& sharedOut = this->sharedOutImages.at(pass);
+            std::vector<VkImageMemoryBarrier2> barriers;
+            barriers.reserve(2);
+            add_local_transition(barriers, localOut, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            add_external_transfer_acquire(barriers, vk, sharedOut,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            emit_external_barriers(buf2, barriers);
+            copy_same_format(buf2, localOut, sharedOut);
+            barriers.clear();
+            add_local_transition(barriers, localOut, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            add_external_transfer_release(barriers, vk, sharedOut,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            emit_external_barriers(buf2, barriers);
+        } else {
             std::vector<VkImageMemoryBarrier2> releaseBarriers;
             releaseBarriers.reserve(pass + 1 == vk.generationCount ? 3 : 1);
             add_external_release(releaseBarriers, vk, this->generate.getOutImages().at(pass),
@@ -230,25 +356,44 @@ Context::Context(Vulkan& vk,
         AHardwareBuffer* in0, AHardwareBuffer* in1,
         const std::vector<AHardwareBuffer*>& outN,
         VkExtent2D extent, VkFormat format) {
-    // import inputs from AHB
-    this->inImg_0 = Core::Image(vk.device, extent, format,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, in0);
-    this->inImg_1 = Core::Image(vk.device, extent, format,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, in1);
+    this->transportOnly = vk.device.getAhbTransportMode() == LSFG::AhbTransportMode::TransportOnly;
+    if (vk.device.getAhbTransportMode() == LSFG::AhbTransportMode::Unsupported)
+        throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
+            "No compatible AHardwareBuffer transport path for framegen format");
 
-    // import outputs from AHB into Core::Image instances; we'll hand them to
-    // Generate's from-images ctor below.
     std::vector<Core::Image> outImgs;
     outImgs.reserve(outN.size());
-    for (auto* ahb : outN) {
-        outImgs.emplace_back(vk.device, extent, format,
+    if (this->transportOnly) {
+        this->sharedInImg_0 = Core::Image(vk.device, extent, format,
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, in0);
+        this->sharedInImg_1 = Core::Image(vk.device, extent, format,
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, in1);
+        this->sharedOutImages.reserve(outN.size());
+        for (auto* ahb : outN)
+            this->sharedOutImages.emplace_back(vk.device, extent, format,
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, ahb);
+
+        this->inImg_0 = Core::Image(vk.device, extent, format,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        this->inImg_1 = Core::Image(vk.device, extent, format,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        for (size_t i = 0; i < outN.size(); ++i)
+            outImgs.emplace_back(vk.device, extent, format,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    } else {
+        // Fast path: exactly the established direct shader-storage AHB binding.
+        this->inImg_0 = Core::Image(vk.device, extent, format,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT, ahb);
+            VK_IMAGE_ASPECT_COLOR_BIT, in0);
+        this->inImg_1 = Core::Image(vk.device, extent, format,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT, in1);
+        for (auto* ahb : outN)
+            outImgs.emplace_back(vk.device, extent, format,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT, ahb);
     }
 
-    // prepare render data
     for (size_t i = 0; i < 8; i++) {
         auto& data = this->data.at(i);
         data.internalSemaphores.resize(vk.generationCount);
@@ -257,8 +402,6 @@ Context::Context(Vulkan& vk,
         data.cmdBuffers2.resize(vk.generationCount);
     }
 
-    // build the same shader chain as the FD ctor — only Generate differs
-    // (it now takes pre-built outImgs instead of FDs).
     this->mipmaps = Shaders::Mipmaps(vk, this->inImg_0, this->inImg_1);
     for (size_t i = 0; i < 7; i++)
         this->alpha.at(i) = Shaders::Alpha(vk, this->mipmaps.getOutImages().at(i));
@@ -269,7 +412,6 @@ Context::Context(Vulkan& vk,
             this->beta.getOutImages().at(std::min<size_t>(6 - i, 5)),
             (i == 0) ? std::nullopt : std::make_optional(this->gamma.at(i - 1).getOutImage()));
         if (i < 4) continue;
-
         this->delta.at(i - 4) = Shaders::Delta(vk,
             this->alpha.at(6 - i).getOutImages(),
             this->beta.getOutImages().at(6 - i),
