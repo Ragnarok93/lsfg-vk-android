@@ -32,6 +32,8 @@ namespace Config {
         bool adaptiveFramegen{false};
         /// Final output FPS ceiling used by adaptive frame generation.
         uint32_t fpsLimit{0};
+        /// Real/source Vulkan present ceiling applied before frame generation.
+        uint32_t sourceFpsLimit{0};
 
         /// Experimental flag for overriding the synchronization method.
         VkPresentModeKHR e_present;
