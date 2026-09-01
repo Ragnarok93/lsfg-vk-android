@@ -83,29 +83,28 @@ jobs:
               )
 
           if 'sourceFramePacer.configure(conf.sourceFpsLimit)' not in source:
-              pacing_anchor = '''        if (configuredPresent != conf.e_present) {
-            Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-            return VK_ERROR_OUT_OF_DATE_KHR;
-        }
-
-        try {
-'''
-              pacing_block = '''        if (configuredPresent != conf.e_present) {
-            Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-            return VK_ERROR_OUT_OF_DATE_KHR;
-        }
-
-#ifdef __ANDROID__
-        auto& sourceFramePacer = runtimeStats.sourceFramePacer;
-        sourceFramePacer.configure(conf.sourceFpsLimit);
-        const auto sourcePacingDelay = sourceFramePacer.delayUntilNext(
-            SourceFramePacer::Clock::now());
-        if (sourcePacingDelay > std::chrono::nanoseconds::zero())
-            std::this_thread::sleep_for(sourcePacingDelay);
-#endif
-
-        try {
-'''
+              pacing_anchor = (
+                  '        if (configuredPresent != conf.e_present) {\n'
+                  '            Layer::ovkQueuePresentKHR(queue, pPresentInfo);\n'
+                  '            return VK_ERROR_OUT_OF_DATE_KHR;\n'
+                  '        }\n\n'
+                  '        try {\n'
+              )
+              pacing_block = (
+                  '        if (configuredPresent != conf.e_present) {\n'
+                  '            Layer::ovkQueuePresentKHR(queue, pPresentInfo);\n'
+                  '            return VK_ERROR_OUT_OF_DATE_KHR;\n'
+                  '        }\n\n'
+                  '#ifdef __ANDROID__\n'
+                  '        auto& sourceFramePacer = runtimeStats.sourceFramePacer;\n'
+                  '        sourceFramePacer.configure(conf.sourceFpsLimit);\n'
+                  '        const auto sourcePacingDelay = sourceFramePacer.delayUntilNext(\n'
+                  '            SourceFramePacer::Clock::now());\n'
+                  '        if (sourcePacingDelay > std::chrono::nanoseconds::zero())\n'
+                  '            std::this_thread::sleep_for(sourcePacingDelay);\n'
+                  '#endif\n\n'
+                  '        try {\n'
+              )
               replace_once(pacing_anchor, pacing_block)
 
           path.write_text(source, encoding='utf-8')
@@ -197,7 +196,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-build-log-${{ matrix.abi }}
-          path: android-build-${{ matrix.abi }}.log
+          path: android-build-${ANDROID_ABI}.log
           if-no-files-found: warn
 
       - name: Inspect ${{ matrix.abi }} artifact
