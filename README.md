@@ -1,4 +1,4 @@
-lsfg-vk-android
+::lsfg-vk-android-compat::
 
 A performance- and portability-focused Android fork of lsfg-vk, developed for integration with GameNative and native Vulkan frame generation on Android.
 
