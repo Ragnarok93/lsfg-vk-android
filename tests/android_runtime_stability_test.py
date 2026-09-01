@@ -34,6 +34,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("std::shared_ptr<VkFence> ahbHandoffFence", header)
         self.assertIn("PFN_vkResetFences resetHandoffFences", header)
         self.assertIn("resetFences(device, 1, &fence)", helper)
+        self.assertIn("runtimeWaitTimeoutNs()", helper)
         self.assertNotIn("UINT64_MAX", helper)
         self.assertNotIn('"vkCreateFence"', helper)
         self.assertNotIn('"vkDestroyFence"', helper)
@@ -45,14 +46,35 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("std::vector<VkSemaphore> presentWaitSemaphores", source)
         self.assertIn("auto& semaphores = runtimeStats.presentWaitSemaphores", source)
 
-    def test_cross_device_ahb_completion_does_not_use_device_wait_idle(self) -> None:
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        android_start = source.index("#ifdef __ANDROID__", source.index("VkResult LsContext::present"))
-        desktop_start = source.index("#else", android_start)
-        android = source[android_start:desktop_start]
-        self.assertIn("submitAndWaitForAhbHandoff", android)
-        self.assertNotIn("LSFG_3_1P::waitIdle();", android)
-        self.assertNotIn("LSFG_3_1::waitIdle();", android)
+    def test_cross_device_framegen_completion_is_bounded_without_device_wait_idle(self) -> None:
+        wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        android_start = wrapper.index("#ifdef __ANDROID__", wrapper.index("VkResult LsContext::present"))
+        desktop_start = wrapper.index("#else", android_start)
+        android_present = wrapper[android_start:desktop_start]
+        self.assertIn("submitAndWaitForAhbHandoff", android_present)
+        self.assertIn("LSFG_3_1P::waitIdle();", android_present)
+        self.assertIn("LSFG_3_1::waitIdle();", android_present)
+
+        for relative in (
+            "framegen/v3.1_src/context.cpp",
+            "framegen/v3.1p_src/context.cpp",
+        ):
+            context_source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("framegenWaitTimeoutNs()", context_source)
+            self.assertIn("bool Context::waitForCompletion", context_source)
+            self.assertNotIn("UINT64_MAX", context_source)
+
+        for relative in (
+            "framegen/v3.1_src/lsfg.cpp",
+            "framegen/v3.1p_src/lsfg.cpp",
+        ):
+            lifecycle_source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("waitForCompletion(*device)", lifecycle_source)
+            self.assertNotIn(
+                "vkDeviceWaitIdle",
+                lifecycle_source,
+                "Framegen completion and teardown must use bounded context fences rather than an uninterruptible device-wide idle wait",
+            )
 
 
 if __name__ == "__main__":
