@@ -8,6 +8,7 @@
 #endif
 
 #include "hooks.hpp"
+#include "adaptive_frame_scheduler.hpp"
 #include "mini/commandbuffer.hpp"
 #include "mini/commandpool.hpp"
 #include "mini/image.hpp"
@@ -17,6 +18,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 ///
@@ -52,6 +54,8 @@ public:
     VkResult present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx);
 
+    size_t generatedFramesLastPresent() const { return this->lastGeneratedFrames; }
+
     // Non-copyable, trivially moveable and destructible
     LsContext(const LsContext&) = delete;
     LsContext& operator=(const LsContext&) = delete;
@@ -69,8 +73,14 @@ private:
 
     Mini::CommandPool cmdPool;
     uint64_t frameIdx{0};
+    size_t generationCapacity{0};
+    size_t lastGeneratedFrames{0};
 
 #ifdef __ANDROID__
+    bool previousPreCopySignalPending{false};
+    std::optional<AdaptiveFrameScheduler> adaptiveScheduler;
+    bool schedulerAdaptive{false};
+    uint32_t schedulerFpsLimit{0};
     struct RuntimeMetrics {
         using Clock = std::chrono::steady_clock;
 

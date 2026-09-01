@@ -294,6 +294,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     const VkFormat format = conf.hdr
         ? VK_FORMAT_R8G8B8A8_UNORM
         : VK_FORMAT_R16G16B16A16_SFLOAT;
+    this->generationCapacity = conf.multiplier > 1 ? conf.multiplier - 1 : 0;
 
     if (!info.identityValid)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
@@ -310,7 +311,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     setenv("DISABLE_LSFG", "1", 1); // NOLINT
     lsfgInitialize(
         info.identity, format,
-        conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
+        conf.hdr, 1.0F / conf.flowScale, this->generationCapacity,
         [](const std::string& name) {
             auto dxbc = Extract::getShader(name);
             auto spirv = Extract::translateShader(dxbc);
@@ -337,7 +338,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
         ahbTransportMode);
 
-    for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); ++i)
+    for (size_t i = 0; i < this->generationCapacity; ++i)
         this->out_n.emplace_back(info.device, info.physicalDevice,
             extent, format,
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -345,8 +346,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     // Create framegen context using AHB sharing
     std::vector<AHardwareBuffer*> outAhbs;
-    outAhbs.reserve(conf.multiplier - 1);
-    for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); ++i)
+    outAhbs.reserve(this->generationCapacity);
+    for (size_t i = 0; i < this->generationCapacity; ++i)
         outAhbs.push_back(this->out_n.at(i).getAhb());
 
     int32_t ctxId;
@@ -418,8 +419,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
         &fds.at(1));
 
-    std::vector<int> outFds(conf.multiplier - 1);
-    for (size_t i = 0; i < (conf.multiplier - 1); ++i)
+    std::vector<int> outFds(this->generationCapacity);
+    for (size_t i = 0; i < this->generationCapacity; ++i)
         this->out_n.emplace_back(info.device, info.physicalDevice,
             extent, format,
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -439,7 +440,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     lsfgInitialize(
         info.identity, format,
-        conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
+        conf.hdr, 1.0F / conf.flowScale, this->generationCapacity,
         [](const std::string& name) {
             auto dxbc = Extract::getShader(name);
             auto spirv = Extract::translateShader(dxbc);
@@ -461,11 +462,11 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->cmdPool = Mini::CommandPool(info.device, info.queue.first);
     for (size_t i = 0; i < 8; i++) {
         auto& pass = this->passInfos.at(i);
-        pass.renderSemaphores.resize(conf.multiplier - 1);
-        pass.acquireSemaphores.resize(conf.multiplier - 1);
-        pass.postCopyBufs.resize(conf.multiplier - 1);
-        pass.postCopySemaphores.resize(conf.multiplier - 1);
-        pass.prevPostCopySemaphores.resize(conf.multiplier - 1);
+        pass.renderSemaphores.resize(this->generationCapacity);
+        pass.acquireSemaphores.resize(this->generationCapacity);
+        pass.postCopyBufs.resize(this->generationCapacity);
+        pass.postCopySemaphores.resize(this->generationCapacity);
+        pass.prevPostCopySemaphores.resize(this->generationCapacity);
     }
 }
 
@@ -477,6 +478,32 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 #ifdef __ANDROID__
     auto& metrics = this->runtimeMetrics;
     const auto cycleStart = RuntimeMetrics::Clock::now();
+    const auto cycleStartNs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            cycleStart.time_since_epoch()).count());
+    size_t generatedFrameCount = this->generationCapacity;
+    if (conf.adaptiveFrameGen && conf.fpsLimit > 0) {
+        if (!this->adaptiveScheduler.has_value()
+                || !this->schedulerAdaptive
+                || this->schedulerFpsLimit != conf.fpsLimit) {
+            this->adaptiveScheduler.emplace(
+                true, conf.fpsLimit, this->generationCapacity);
+            this->schedulerAdaptive = true;
+            this->schedulerFpsLimit = conf.fpsLimit;
+        }
+        generatedFrameCount = this->adaptiveScheduler->generatedFrames(cycleStartNs);
+    } else {
+        this->adaptiveScheduler.reset();
+        this->schedulerAdaptive = false;
+        this->schedulerFpsLimit = 0;
+        // The second input AHB has not been populated on the first cycle.
+        // Generate internally to advance LSFG's parity, but never expose that
+        // undefined output to the swapchain.
+        if (this->frameIdx == 0) generatedFrameCount = 0;
+    }
+    const auto generatedFrameIndices = selectGeneratedFrameIndices(
+        this->generationCapacity, generatedFrameCount);
+    this->lastGeneratedFrames = generatedFrameIndices.size();
     if (metrics.hasLastSourcePresent) {
         const double sourceIntervalMs = std::chrono::duration<double, std::milli>(
             cycleStart - metrics.lastSourcePresent).count();
@@ -514,7 +541,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     pass.preCopyBuf.end();
 
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
-    if (this->frameIdx > 0)
+    if (this->frameIdx > 0 && this->previousPreCopySignalPending)
         gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
             .preCopySemaphores.at(1).handle());
 
@@ -538,7 +565,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
                   << (conf.performance ? "performance" : "quality")
-                  << " generated=" << (conf.multiplier - 1) << "\n";
+                  << " generated=" << generatedFrameIndices.size()
+                  << " provisioned=" << this->generationCapacity << "\n";
     }
     const auto dispatchStart = RuntimeMetrics::Clock::now();
     if (conf.performance)
@@ -566,7 +594,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // copy submission signals two binary semaphores: one consumed by this
     // generated present, and one reserved for the next generated/source
     // present. A binary semaphore signal must not be consumed twice.
-    for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); i++) {
+    for (size_t selectedPosition = 0;
+            selectedPosition < generatedFrameIndices.size(); ++selectedPosition) {
+        const size_t i = generatedFrameIndices.at(selectedPosition);
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
@@ -596,11 +626,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
               pass.prevPostCopySemaphores.at(i).handle() });
 
         std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
-        if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());
+        if (selectedPosition != 0) {
+            const size_t previousIndex = generatedFrameIndices.at(selectedPosition - 1);
+            waitSemaphores.emplace_back(
+                pass.prevPostCopySemaphores.at(previousIndex).handle());
+        }
 
         const VkPresentInfoKHR presentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = i == 0 ? pNext : nullptr,
+            .pNext = selectedPosition == 0 ? pNext : nullptr,
             .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
             .pWaitSemaphores = waitSemaphores.data(),
             .swapchainCount = 1,
@@ -617,7 +651,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.totalGeneratedFrames++;
         metrics.windowGeneratedPresentMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - generatedPresentStart).count();
-        if (firstPresentDiagnostic && i == 0) {
+        if (firstPresentDiagnostic && selectedPosition == 0) {
             std::cerr << "lsfg-vk: runtime stage=generated-present-ready image=" << imageIdx
                       << " result=" << res << "\n";
         }
@@ -626,12 +660,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // 5. Present the actual game frame after generated frames using the signal
     // reserved for this present, rather than waiting a second time on the
     // generated-present semaphore.
-    VkSemaphore lastPrevPostCopySemaphore =
-        pass.prevPostCopySemaphores.at(conf.multiplier - 1 - 1).handle();
+    VkSemaphore sourceWaitSemaphore = generatedFrameIndices.empty()
+        ? pass.preCopySemaphores.at(1).handle()
+        : pass.prevPostCopySemaphores.at(generatedFrameIndices.back()).handle();
     const VkPresentInfoKHR finalPresentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .pNext = generatedFrameIndices.empty() ? pNext : nullptr,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &lastPrevPostCopySemaphore,
+        .pWaitSemaphores = &sourceWaitSemaphore,
         .swapchainCount = 1,
         .pSwapchains = &this->swapchain,
         .pImageIndices = &presentIdx,
@@ -644,11 +680,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
     metrics.windowSourceFrames++;
     metrics.totalSourceFrames++;
+    this->previousPreCopySignalPending = !generatedFrameIndices.empty();
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=present-sync-ready generatedSignals="
-                  << (conf.multiplier - 1) << " sourceWait=prev-post-copy\n";
+                  << generatedFrameIndices.size() << " sourceWait="
+                  << (generatedFrameIndices.empty() ? "pre-copy" : "prev-post-copy") << "\n";
         std::cerr << "lsfg-vk: runtime stage=first-present-cycle-ready result=" << res
-                  << " generated=" << (conf.multiplier - 1) << "\n";
+                  << " generated=" << generatedFrameIndices.size() << "\n";
     }
 
     const auto cycleEnd = RuntimeMetrics::Clock::now();
@@ -697,6 +735,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << " source_interval_avg_ms=" << sourceIntervalAvgMs
                   << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
                   << " multiplier=" << conf.multiplier
+                  << " adaptive=" << (conf.adaptiveFrameGen ? 1 : 0)
+                  << " fps_limit=" << conf.fpsLimit
                   << " performance=" << (conf.performance ? 1 : 0)
                   << "\n";
 

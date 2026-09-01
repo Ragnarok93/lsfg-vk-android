@@ -190,6 +190,18 @@ namespace {
     std::unordered_map<VkSwapchainKHR, VkPresentModeKHR> swapchainToPresent;
     std::unordered_map<VkSwapchainKHR, VkPresentModeKHR> swapchainToConfiguredPresent;
 
+    bool requiresSwapchainRecreation(
+            const Config::Configuration& previous,
+            const Config::Configuration& next) {
+        return previous.enable != next.enable
+            || previous.dll != next.dll
+            || previous.multiplier != next.multiplier
+            || previous.flowScale != next.flowScale
+            || previous.performance != next.performance
+            || previous.hdr != next.hdr
+            || previous.e_present != next.e_present;
+    }
+
 #ifdef __ANDROID__
     struct RuntimeOutputStats {
         using Clock = std::chrono::steady_clock;
@@ -250,12 +262,11 @@ namespace {
     }
 
     void recordSuccessfulOutputCycle(VkSwapchainKHR swapchain,
-            const std::string& configFile, int multiplier, bool performance) {
+            const std::string& configFile, uint64_t generated,
+            int multiplier, bool performance) {
         auto& stats = runtimeOutputStats[swapchain];
         stats.windowSourceFrames++;
         stats.totalSourceFrames++;
-        const uint64_t generated = multiplier > 1
-            ? static_cast<uint64_t>(multiplier - 1) : 0;
         stats.windowGeneratedFrames += generated;
         stats.totalGeneratedFrames += generated;
 
@@ -558,23 +569,34 @@ namespace {
                       || conf.timestamp != std::filesystem::last_write_time(conf.config_file)
                 )) {
             const std::string configFile = conf.config_file;
+            bool recreateSwapchain = !std::filesystem::exists(configFile);
             if (std::filesystem::exists(configFile)) {
                 try {
+                    const auto previousConf = conf;
                     Config::updateConfig(configFile);
                     Config::activeConf = Config::getConfig(Utils::getProcessName());
+                    recreateSwapchain = requiresSwapchainRecreation(
+                        previousConf, Config::activeConf);
                     std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
                               << Config::activeConf.multiplier
                               << " presentMode=" << Config::activeConf.e_present
                               << " enabled=" << (Config::activeConf.enable ? 1 : 0)
+                              << " adaptive="
+                              << (Config::activeConf.adaptiveFrameGen ? 1 : 0)
+                              << " fpsLimit=" << Config::activeConf.fpsLimit
+                              << " recreate=" << (recreateSwapchain ? 1 : 0)
                               << "\n";
                 } catch (const std::exception& e) {
                     Utils::logLimitN("configReload", 5,
-                        "Failed to hot-reload configuration; requesting swapchain recreation:\n- "
+                        "Failed to hot-reload configuration; preserving active runtime:\n- "
                         + std::string(e.what()));
+                    recreateSwapchain = false;
                 }
             }
-            Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-            return VK_ERROR_OUT_OF_DATE_KHR;
+            if (recreateSwapchain) {
+                Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
         }
 
         if (!conf.enable || conf.multiplier <= 1)
@@ -633,7 +655,8 @@ namespace {
 
 #ifdef __ANDROID__
             recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
-                conf.config_file, conf.multiplier, conf.performance);
+                conf.config_file, swapchain.generatedFramesLastPresent(),
+                conf.multiplier, conf.performance);
 #endif
             Utils::resetLimitN("swapPresent");
             return res;

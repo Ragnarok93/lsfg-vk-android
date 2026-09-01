@@ -187,12 +187,30 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
             android,
         )
         self.assertIn(
-            "if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());",
+            "pass.prevPostCopySemaphores.at(previousIndex).handle()",
             android,
         )
-        self.assertIn("VkSemaphore lastPrevPostCopySemaphore =", android)
+        self.assertIn("VkSemaphore sourceWaitSemaphore =", android)
+        self.assertIn("pass.prevPostCopySemaphores.at(generatedFrameIndices.back()).handle()", android)
         self.assertNotIn("VkSemaphore lastPostCopySem =", android)
         self.assertIn("runtime stage=present-sync-ready", android)
+
+    def test_adaptive_config_is_consumed_and_cap_changes_do_not_rebuild(self) -> None:
+        header = (ROOT / "include/config/config.hpp").read_text(encoding="utf-8")
+        config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("bool adaptiveFrameGen{false}", header)
+        self.assertIn("uint32_t fpsLimit{0}", header)
+        self.assertIn('"adaptive_framegen", false', config)
+        self.assertIn('"fps_limit", 0U', config)
+        self.assertIn('"enabled", true', config)
+        recreation = hooks[
+            hooks.index("bool requiresSwapchainRecreation"):
+            hooks.index("#ifdef __ANDROID__", hooks.index("bool requiresSwapchainRecreation"))
+        ]
+        self.assertNotIn("adaptiveFrameGen", recreation)
+        self.assertNotIn("fpsLimit", recreation)
 
     def test_runtime_disable_recreates_a_tracked_pass_through_swapchain(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
