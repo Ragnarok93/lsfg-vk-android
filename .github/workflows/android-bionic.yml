@@ -83,7 +83,18 @@ jobs:
         env:
           ANDROID_ABI: ${{ matrix.abi }}
           HOST_TAG: linux-x86_64
-        run: bash ./scripts/build/android.sh Release
+        shell: bash
+        run: |
+          set -o pipefail
+          bash ./scripts/build/android.sh Release 2>&1 | tee "android-build-${ANDROID_ABI}.log"
+
+      - name: Upload ${{ matrix.abi }} build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-log-${{ matrix.abi }}
+          path: android-build-${{ matrix.abi }}.log
+          if-no-files-found: warn
 
       - name: Inspect ${{ matrix.abi }} artifact
         run: |
