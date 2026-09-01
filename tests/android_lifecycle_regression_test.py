@@ -23,7 +23,8 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
         self.assertIn("const bool recreatingExistingSwapchain", hooks)
-        self.assertIn("recreatingExistingSwapchain ? pCreateInfo->presentMode", hooks)
+        self.assertIn("createInfo.presentMode = recreatingExistingSwapchain", hooks)
+        self.assertIn("? pCreateInfo->presentMode", hooks)
         self.assertIn("stage=swapchain-blit-check-begin", hooks)
         self.assertIn("stage=swapchain-blit-check-ready", hooks)
         self.assertIn("stage=swapchain-downstream-create-begin", hooks)
