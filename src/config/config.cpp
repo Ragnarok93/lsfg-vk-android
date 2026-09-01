@@ -109,6 +109,7 @@ void Config::updateConfig(const std::string& file) {
             .hdr = toml::find_or(gameTable, "hdr_mode", false),
             .adaptiveFramegen = toml::find_or(gameTable, "adaptive_framegen", false),
             .fpsLimit = toml::find_or(gameTable, "fps_limit", 0U),
+            .sourceFpsLimit = toml::find_or(gameTable, "source_fps_limit", 0U),
             .e_present =   into_present(toml::find_or(gameTable, "experimental_present_mode", "")),
             .config_file = file,
             .timestamp = global.timestamp
@@ -154,6 +155,8 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
         if (adaptive) conf.adaptiveFramegen = std::string(adaptive) == "1";
         const char* fpsLimit = std::getenv("LSFG_FPS_LIMIT");
         if (fpsLimit) conf.fpsLimit = std::stoul(fpsLimit);
+        const char* sourceFpsLimit = std::getenv("LSFG_SOURCE_FPS_LIMIT");
+        if (sourceFpsLimit) conf.sourceFpsLimit = std::stoul(sourceFpsLimit);
         const char* e_present = std::getenv("LSFG_EXPERIMENTAL_PRESENT_MODE");
         if (e_present) conf.e_present = into_present(std::string(e_present));
 
