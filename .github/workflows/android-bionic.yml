@@ -35,6 +35,7 @@ jobs:
           python3 tests/android_wsi_loader_bridge_test.py
           python3 tests/android_wsi_provenance_test.py
           python3 tests/android_runtime_stability_test.py
+          python3 tests/android_hot_reload_capability_cache_test.py
           python3 tests/android_capability_architecture_test.py
           python3 tests/android_source_pacing_test.py
 
