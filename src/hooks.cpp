@@ -700,22 +700,74 @@ namespace {
         return modes.front();
     }
 
-    bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
-            VkFormat sharedFormat, VkFormat swapchainFormat) {
-        auto getFormatProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(
-            Layer::ovkGetInstanceProcAddr(layerInstance, "vkGetPhysicalDeviceFormatProperties"));
-        if (getFormatProperties == nullptr)
-            return false;
+    struct BlitCapabilityKey {
+    VkPhysicalDevice physicalDevice{};
+    VkFormat sharedFormat{};
+    VkFormat swapchainFormat{};
 
-        VkFormatProperties sharedProperties{};
-        VkFormatProperties swapchainProperties{};
-        getFormatProperties(physicalDevice, sharedFormat, &sharedProperties);
-        getFormatProperties(physicalDevice, swapchainFormat, &swapchainProperties);
-        constexpr VkFormatFeatureFlags required =
-            VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
-        return (sharedProperties.optimalTilingFeatures & required) == required
-            && (swapchainProperties.optimalTilingFeatures & required) == required;
+    bool operator==(const BlitCapabilityKey& other) const noexcept {
+        return physicalDevice == other.physicalDevice
+      && sharedFormat == other.sharedFormat
+      && swapchainFormat == other.swapchainFormat;
     }
+};
+
+struct BlitCapabilityKeyHash {
+    std::size_t operator()(const BlitCapabilityKey& key) const noexcept {
+        auto seed = std::hash<std::uintptr_t>{}(
+      reinterpret_cast<std::uintptr_t>(key.physicalDevice));
+        seed ^= std::hash<uint32_t>{}(static_cast<uint32_t>(key.sharedFormat))
+      + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<uint32_t>{}(static_cast<uint32_t>(key.swapchainFormat))
+      + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+        return seed;
+    }
+};
+
+std::mutex blitCapabilityMutex;
+std::unordered_map<BlitCapabilityKey, bool, BlitCapabilityKeyHash> blitCapabilityCache;
+
+bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
+        VkFormat sharedFormat, VkFormat swapchainFormat) {
+    const BlitCapabilityKey key {
+        .physicalDevice = physicalDevice,
+        .sharedFormat = sharedFormat,
+        .swapchainFormat = swapchainFormat,
+    };
+
+    // Format capabilities are immutable for a physical device. Resolve
+    // the pair once while dispatch is known-good, then reuse it across
+    // hot swapchain recreation instead of re-entering mutable instance
+    // dispatch on every settings transition.
+    std::lock_guard lock(blitCapabilityMutex);
+    const auto cached = blitCapabilityCache.find(key);
+    if (cached != blitCapabilityCache.end()) {
+        std::cerr << "lsfg-vk: init stage=blit-capability-cache-hit sharedFormat="
+            << sharedFormat << " swapchainFormat=" << swapchainFormat
+            << " supported=" << (cached->second ? 1 : 0) << "\n";
+        return cached->second;
+    }
+
+    const VkInstance instance = layerInstance;
+    if (instance == VK_NULL_HANDLE)
+        return false;
+    auto getFormatProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(
+        Layer::ovkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFormatProperties"));
+    if (getFormatProperties == nullptr)
+        return false;
+
+    VkFormatProperties sharedProperties{};
+    VkFormatProperties swapchainProperties{};
+    getFormatProperties(physicalDevice, sharedFormat, &sharedProperties);
+    getFormatProperties(physicalDevice, swapchainFormat, &swapchainProperties);
+    constexpr VkFormatFeatureFlags required =
+        VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    const bool supported =
+        (sharedProperties.optimalTilingFeatures & required) == required
+        && (swapchainProperties.optimalTilingFeatures & required) == required;
+    blitCapabilityCache.emplace(key, supported);
+    return supported;
+}
 
     VkResult myvkCreateSwapchainKHR(
             VkDevice device,
