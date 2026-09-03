@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 /// Stateful adaptive frame-generation policy. The target is an output objective,
@@ -11,16 +12,34 @@ class AdaptiveFrameScheduler {
 public:
     using Clock = std::chrono::steady_clock;
 
+    /// Cost measured for the previous LSFG cycle. These are deliberately
+    /// vendor-neutral stage measurements; policy compares them to the measured
+    /// source/game-work budget rather than to an Xclipse- or A6xx-specific ms cap.
+    struct StageCosts {
+        double handoffMs{};
+        double dispatchMs{};
+        double waitIdleMs{};
+        double generatedPresentMs{};
+
+        [[nodiscard]] double totalMs() const noexcept {
+            return handoffMs + dispatchMs + waitIdleMs + generatedPresentMs;
+        }
+    };
+
     struct Diagnostics {
         uint32_t targetFps{};
         double smoothedSourceFps{};
         double requestedGeneratedFrames{};
+        double lastStageCostMs{};
+        double lastStageCostRatio{};
         std::size_t generationCeiling{};
         std::size_t provenGenerationCeiling{};
         std::size_t lastGeneratedFrameCount{};
         std::size_t cooldownSamples{};
+        std::size_t probeSamplesRequired{};
         bool probing{};
         bool lastProbeRejected{};
+        const char* lastDecisionReason{"none"};
     };
 
     AdaptiveFrameScheduler() = default;
@@ -30,12 +49,15 @@ public:
     /// baseline, probe and cooldown state so the old policy cannot leak through.
     void configure(uint32_t targetFps, std::size_t maxGeneratedFrames);
 
-    /// Observe the source interval produced after the previous plan and return
-    /// the generated-frame count for the next source interval.
-    std::size_t plan(std::chrono::nanoseconds sourceInterval);
+    /// Observe pure source/game cadence produced after the previous plan plus
+    /// the LSFG stage cost incurred by that previous plan, then return the
+    /// generated-frame count for the next source interval.
+    std::size_t plan(
+        std::chrono::nanoseconds sourceInterval,
+        const StageCosts& priorStageCosts = {});
 
     /// Compatibility shim for the existing Android present path. Adaptive FPS
-    /// is now an objective rather than a source limiter, so this always returns
+    /// is an objective rather than a source limiter, so this always returns
     /// zero and never intentionally sleeps the game's real-frame presentation.
     std::chrono::nanoseconds delayUntilNextSourceOutput(Clock::time_point now);
 
@@ -51,12 +73,23 @@ public:
 private:
     struct LevelStats {
         double sourceFps{};
+        double stageCostMs{};
+        double stageCostRatio{};
         std::size_t samples{};
     };
 
-    void recordSourceSample(std::size_t generationLevel, double sourceFps);
-    [[nodiscard]] bool shouldRejectProbe(std::size_t probeLevel) const;
-    void logControllerEvent(const char* event) const;
+    void recordSourceSample(
+        std::size_t generationLevel,
+        double sourceFps,
+        double sourceIntervalMs,
+        const StageCosts& stageCosts);
+    [[nodiscard]] bool shouldRejectProbe(
+        std::size_t probeLevel,
+        const char** reason) const;
+    [[nodiscard]] std::size_t probeSamplesRequired() const noexcept;
+    [[nodiscard]] std::size_t stableSamplesRequired() const noexcept;
+    [[nodiscard]] std::size_t rejectedCooldownSamples() const noexcept;
+    void logControllerEvent(const char* event, const char* reason = "none") const;
 
     uint32_t targetFps_{};
     std::size_t maxGeneratedFrames_{};
@@ -64,6 +97,8 @@ private:
     double smoothedSourceIntervalSeconds_{};
     double lastSmoothedSourceFps_{};
     double lastRequestedGeneratedFrames_{};
+    double lastStageCostMs_{};
+    double lastStageCostRatio_{};
     bool hasSmoothedInterval_{false};
 
     std::size_t generationCeiling_{};
@@ -73,5 +108,6 @@ private:
     std::size_t stableDeficitSamples_{};
     std::size_t probeCooldownSamples_{};
     bool lastProbeRejected_{false};
+    const char* lastDecisionReason_{"none"};
     std::vector<LevelStats> levelStats_{};
 };
