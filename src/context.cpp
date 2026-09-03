@@ -510,6 +510,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     const size_t generatedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval, this->lastStageCosts_)
         : configuredGenerationCount;
+    const auto plannedAdaptiveDiagnostics = this->adaptiveScheduler_.diagnostics();
+    const bool preserveAdaptiveSourceHistory = conf.adaptiveFramegen
+        && generatedFrameCount == 0
+        && plannedAdaptiveDiagnostics.requestedGeneratedFrames > 0.0;
     const bool warmupSourceHistory =
         generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
     this->lastGeneratedFrameCount_ = generatedFrameCount;
@@ -624,29 +628,35 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return result;
     };
 
-    if (generatedFrameCount == 0) {
-        this->outputFramePacer_.configure(0);
+    const auto invalidateSourceHistoryForDirectPresent = [&]() {
         this->requiresSourceHistoryWarmup_ = true;
         this->previousSourceCopySignalValid_ = false;
+    };
 
-        const VkPresentInfoKHR directPresentInfo{
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = pNext,
-            .waitSemaphoreCount = static_cast<uint32_t>(gameRenderSemaphores.size()),
-            .pWaitSemaphores = gameRenderSemaphores.data(),
-            .swapchainCount = 1,
-            .pSwapchains = &this->swapchain,
-            .pImageIndices = &presentIdx,
-        };
-        const auto directResult = Layer::ovkQueuePresentKHR(queue, &directPresentInfo);
-        if (directResult != VK_SUCCESS && directResult != VK_SUBOPTIMAL_KHR) {
-            metrics.windowSourcePresentFailures++;
-            metrics.totalSourcePresentFailures++;
-            throw LSFG::vulkan_error(directResult, "Failed to present source frame directly");
+    if (generatedFrameCount == 0) {
+        if (!preserveAdaptiveSourceHistory) {
+            this->outputFramePacer_.configure(0);
+            invalidateSourceHistoryForDirectPresent();
+
+            const VkPresentInfoKHR directPresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = pNext,
+                .waitSemaphoreCount = static_cast<uint32_t>(gameRenderSemaphores.size()),
+                .pWaitSemaphores = gameRenderSemaphores.data(),
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto directResult = Layer::ovkQueuePresentKHR(queue, &directPresentInfo);
+            if (directResult != VK_SUCCESS && directResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(directResult, "Failed to present source frame directly");
+            }
+            if (firstPresentDiagnostic)
+                std::cerr << "lsfg-vk: runtime stage=source-direct-present\n";
+            return finishSourcePresent(directResult, "game-render");
         }
-        if (firstPresentDiagnostic)
-            std::cerr << "lsfg-vk: runtime stage=source-direct-present\n";
-        return finishSourcePresent(directResult, "game-render");
     }
 
     // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
@@ -698,6 +708,39 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     metrics.windowHandoffMs += handoffMs;
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\n";
+
+    if (preserveAdaptiveSourceHistory) {
+        const bool historyWasInvalid = this->requiresSourceHistoryWarmup_;
+        this->requiresSourceHistoryWarmup_ = false;
+        this->lastGeneratedFrameCount_ = 0;
+        this->adaptiveScheduler_.noteActualGenerationCount(0);
+
+        if (historyWasInvalid || firstPresentDiagnostic) {
+            std::cerr << "lsfg-vk: runtime stage=source-history-maintained"
+                      << " requested_generated="
+                      << plannedAdaptiveDiagnostics.requestedGeneratedFrames
+                      << "\n";
+        }
+
+        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+        const VkPresentInfoKHR historyPresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = pNext,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &sourceReady,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        const auto historyResult = Layer::ovkQueuePresentKHR(queue, &historyPresentInfo);
+        if (historyResult != VK_SUCCESS && historyResult != VK_SUBOPTIMAL_KHR) {
+            metrics.windowSourcePresentFailures++;
+            metrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(historyResult,
+                "Failed to present fractional source-history frame");
+        }
+        return finishSourcePresent(historyResult, "pre-copy-history");
+    }
 
     if (warmupSourceHistory) {
         this->requiresSourceHistoryWarmup_ = false;
