@@ -335,6 +335,60 @@ namespace {
         }
     }
 
+    void writeRuntimeDiagnosticTimelineNow(const RuntimeStatsSnapshot& snapshot) {
+        if (snapshot.configFile.empty())
+            return;
+
+        constexpr std::uintmax_t maxDiagnosticBytes = 4u * 1024u * 1024u;
+        const auto directory = std::filesystem::path(snapshot.configFile).parent_path();
+        const auto diagnosticPath = directory / "diagnostics.log";
+        const auto rotatedPath = directory / "diagnostics.log.1";
+        try {
+            std::error_code ec;
+            std::filesystem::create_directories(directory, ec);
+            ec.clear();
+            if (std::filesystem::exists(diagnosticPath, ec) && !ec
+                    && std::filesystem::file_size(diagnosticPath, ec) >= maxDiagnosticBytes) {
+                std::filesystem::remove(rotatedPath, ec);
+                ec.clear();
+                std::filesystem::rename(diagnosticPath, rotatedPath, ec);
+                if (ec) {
+                    ec.clear();
+                    std::ofstream truncate(diagnosticPath, std::ios::trunc);
+                }
+            }
+
+            const auto timestampMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            std::ofstream out(diagnosticPath, std::ios::app);
+            if (!out)
+                throw std::runtime_error("unable to open diagnostics.log");
+            out << std::fixed << std::setprecision(3)
+                << "timestamp_ms=" << timestampMs
+                << " event=runtime-state"
+                << " active=" << (snapshot.active ? 1 : 0)
+                << " generation_ready=" << (snapshot.generationReady ? 1 : 0)
+                << " source_fps=" << snapshot.sourceFps
+                << " generated_fps=" << snapshot.generatedFps
+                << " output_fps=" << snapshot.outputFps
+                << " source_frames_total=" << snapshot.totalSourceFrames
+                << " generated_frames_total=" << snapshot.totalGeneratedFrames
+                << " present_failures=" << snapshot.presentFailures
+                << " multiplier=" << snapshot.multiplier
+                << " adaptive=" << (snapshot.adaptive ? 1 : 0)
+                << " target_fps=" << snapshot.targetFps
+                << " source_limit_fps=" << snapshot.sourceLimitFps
+                << " performance=" << (snapshot.performance ? 1 : 0)
+                << '\n';
+            if (!out)
+                throw std::runtime_error("failed to append diagnostics.log");
+            Utils::resetLimitN("diagWrite");
+        } catch (const std::exception& e) {
+            Utils::logLimitN("diagWrite", 5,
+                "Failed to append Android runtime diagnostics: " + std::string(e.what()));
+        }
+    }
+
     void runtimeIoWorker() {
         auto& state = runtimeIoState();
         for (;;) {
@@ -358,8 +412,10 @@ namespace {
                 appliedConf = state.appliedConf;
             }
 
-            if (statsSnapshot.has_value())
+            if (statsSnapshot.has_value()) {
                 writeRuntimeStatsSnapshotNow(*statsSnapshot);
+                writeRuntimeDiagnosticTimelineNow(*statsSnapshot);
+            }
 
             if (!watcherArmed || configFile.empty())
                 continue;
