@@ -59,7 +59,10 @@ public:
     /// Tell the policy when the presentation path could not execute the planned
     /// count (history warmup, timeout/fail-open). This keeps the next sample from
     /// being attributed to work that never actually ran.
-    void noteActualGenerationCount(std::size_t count) noexcept;
+    void noteActualGenerationCount(std::size_t count) noexcept {
+        lastGeneratedFrameCount_ = count > maxGeneratedFrames_
+            ? maxGeneratedFrames_ : count;
+    }
 
     /// Compatibility shim for the existing Android present path. Adaptive FPS
     /// is an objective rather than a source limiter, so this always returns
