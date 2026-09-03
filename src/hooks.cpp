@@ -66,6 +66,7 @@ namespace {
         return previous.dll != next.dll
             || previous.hdr != next.hdr
             || previous.multiplier != next.multiplier
+            || previous.performance != next.performance
             || previous.e_present != next.e_present;
     }
 
@@ -236,6 +237,18 @@ namespace {
     };
     std::unordered_map<VkSwapchainKHR, SwapchainWsiProvenance> swapchainWsiProvenance;
 
+    struct PassThroughSwapchainState {
+        std::string reason;
+        bool capabilityBlocked{};
+    };
+    std::unordered_map<VkSwapchainKHR, PassThroughSwapchainState> passThroughSwapchains;
+
+    bool isStructuralCapabilityBlock(const std::string& reason) {
+        return reason == "ahb-unavailable"
+            || reason == "unsupported-usage"
+            || reason == "blit-unsupported";
+    }
+
 #ifdef __ANDROID__
     struct RuntimeOutputStats {
         using Clock = std::chrono::steady_clock;
@@ -264,6 +277,8 @@ namespace {
         uint32_t targetFps{};
         uint32_t sourceLimitFps{};
         bool performance{};
+        bool capabilityBlocked{};
+        std::string capabilityReason;
     };
 
     struct RuntimeIoState {
@@ -314,7 +329,9 @@ namespace {
                 << "adaptive=" << (snapshot.adaptive ? 1 : 0) << '\n'
                 << "target_fps=" << snapshot.targetFps << '\n'
                 << "source_limit_fps=" << snapshot.sourceLimitFps << '\n'
-                << "performance=" << (snapshot.performance ? 1 : 0) << '\n';
+                << "performance=" << (snapshot.performance ? 1 : 0) << '\n'
+                << "capability_blocked=" << (snapshot.capabilityBlocked ? 1 : 0) << '\n'
+                << "capability_reason=" << snapshot.capabilityReason << '\n';
             out.close();
             if (!out)
                 throw std::runtime_error("failed to flush temporary stats file");
@@ -381,6 +398,8 @@ namespace {
                 << " target_fps=" << snapshot.targetFps
                 << " source_limit_fps=" << snapshot.sourceLimitFps
                 << " performance=" << (snapshot.performance ? 1 : 0)
+                << " capability_blocked=" << (snapshot.capabilityBlocked ? 1 : 0)
+                << " capability_reason=" << snapshot.capabilityReason
                 << '\n';
             if (!out)
                 throw std::runtime_error("failed to append diagnostics.log");
@@ -580,7 +599,9 @@ namespace {
 
     void publishRuntimeState(const std::string& configFile,
             bool active, bool generationReady, int multiplier,
-            bool performance, bool adaptive, uint32_t targetFps) {
+            bool performance, bool adaptive, uint32_t targetFps,
+            bool capabilityBlocked = false,
+            const std::string& capabilityReason = {}) {
         queueRuntimeStats(RuntimeStatsSnapshot {
             .configFile = configFile,
             .active = active,
@@ -590,6 +611,8 @@ namespace {
             .targetFps = targetFps,
             .sourceLimitFps = Config::activeConf.sourceFpsLimit,
             .performance = performance,
+            .capabilityBlocked = capabilityBlocked,
+            .capabilityReason = capabilityReason,
         });
     }
 
@@ -647,6 +670,7 @@ namespace {
         swapchainToPresent.erase(swapchain);
         swapchainToConfiguredPresent.erase(swapchain);
         swapchainWsiProvenance.erase(swapchain);
+        passThroughSwapchains.erase(swapchain);
 #ifdef __ANDROID__
         runtimeOutputStats.erase(swapchain);
 #endif
@@ -820,10 +844,16 @@ bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
                     .effectivePresentMode = pCreateInfo->presentMode,
                     .fgModified = false,
                 });
+                const bool capabilityBlocked = isStructuralCapabilityBlock(reason);
+                passThroughSwapchains.insert_or_assign(*pSwapchain, PassThroughSwapchainState {
+                    .reason = reason,
+                    .capabilityBlocked = capabilityBlocked,
+                });
 #ifdef __ANDROID__
                 publishRuntimeState(activeConf.config_file, false, false,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
-                    activeConf.adaptiveFramegen, activeConf.fpsLimit);
+                    activeConf.adaptiveFramegen, activeConf.fpsLimit,
+                    capabilityBlocked, reason);
 #endif
                 std::cerr << "lsfg-vk: init stage=swapchain-pass-through reason="
                           << reason
@@ -979,6 +1009,7 @@ bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
                 eraseSwapchainState(pCreateInfo->oldSwapchain);
 
             swapchainToDeviceTable.emplace(*pSwapchain, device);
+            passThroughSwapchains.erase(*pSwapchain);
             std::cerr << "lsfg-vk: init stage=ls-context-begin images=" << imageCount
                       << " selectedPresentMode=" << createInfo.presentMode << "\n";
             swapchains.emplace(*pSwapchain, LsContext(
@@ -1026,10 +1057,15 @@ bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
                     .effectivePresentMode = pCreateInfo->presentMode,
                     .fgModified = false,
                 });
+                passThroughSwapchains.insert_or_assign(*pSwapchain, PassThroughSwapchainState {
+                    .reason = "ls-context-failed",
+                    .capabilityBlocked = false,
+                });
 #ifdef __ANDROID__
                 publishRuntimeState(activeConf.config_file, false, false,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
-                    activeConf.adaptiveFramegen, activeConf.fpsLimit);
+                    activeConf.adaptiveFramegen, activeConf.fpsLimit,
+                    false, "ls-context-failed");
 #endif
                 std::cerr << "lsfg-vk: init stage=swapchain-fallback-pass-through"
                              " reason=ls-context-failed\n";
@@ -1080,6 +1116,13 @@ bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
         // file I/O or generated semaphore handling. The resident hook exists
         // only so a background config change can request a future recreation.
         if (!conf.enable || conf.multiplier <= 1)
+            return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+
+        // An explicitly tracked pass-through swapchain is valid native WSI, not
+        // a missing LSFG context. Keep it downstream-only until a future config
+        // transition requests one serialized recreation attempt.
+        auto passThroughIt = passThroughSwapchains.find(*pPresentInfo->pSwapchains);
+        if (passThroughIt != passThroughSwapchains.end())
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
 
 #ifdef __ANDROID__
