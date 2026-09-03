@@ -7,8 +7,11 @@
 #include <filesystem>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -70,9 +73,43 @@ const std::unordered_map<std::string, uint32_t> nameIdxTable = {{
 }};
 
 namespace {
+    constexpr uint32_t kFirstDxbcResource = 255;
+    constexpr uint32_t kLastDxbcResource = 302;
+    constexpr uint32_t kFp16ResourceOffset = 49;
+    constexpr uint32_t kFp32ResourceOffset = 98;
+
     auto& shaders() {
         static std::unordered_map<uint32_t, std::vector<uint8_t>> shaderData;
         return shaderData;
+    }
+
+    bool isSpirvResource(const std::vector<uint8_t>& data) {
+        static constexpr uint8_t magic[] = {0x03, 0x02, 0x23, 0x07};
+        return data.size() >= sizeof(magic)
+            && std::memcmp(data.data(), magic, sizeof(magic)) == 0;
+    }
+
+    uint32_t resourceOffset(ShaderVariant variant) {
+        switch (variant) {
+            case ShaderVariant::Dxbc: return 0;
+            case ShaderVariant::PrecompiledFp16: return kFp16ResourceOffset;
+            case ShaderVariant::PrecompiledFp32: return kFp32ResourceOffset;
+        }
+        return 0;
+    }
+
+    bool completeVariantAvailable(ShaderVariant variant) {
+        if (shaders().empty())
+            return false;
+        const uint32_t offset = resourceOffset(variant);
+        for (uint32_t id = kFirstDxbcResource; id <= kLastDxbcResource; ++id) {
+            const auto hit = shaders().find(id + offset);
+            if (hit == shaders().end())
+                return false;
+            if (variant != ShaderVariant::Dxbc && !isSpirvResource(hit->second))
+                return false;
+        }
+        return true;
     }
 
     int on_resource(void*, const peparse::resource& res) {
@@ -80,7 +117,7 @@ namespace {
             return 0;
         std::vector<uint8_t> resource_data(res.buf->bufLen);
         std::copy_n(res.buf->buf, res.buf->bufLen, resource_data.data());
-        shaders()[res.name] = resource_data;
+        shaders()[res.name] = std::move(resource_data);
         return 0;
     }
 
@@ -93,16 +130,12 @@ namespace {
     }};
 
     std::string getDllPath() {
-        // overriden path
         std::string dllPath = Config::activeConf.dll;
         if (!dllPath.empty())
             return dllPath;
-        // direct Unix path from the host (GameNative / Wine-on-Android resolves the
-        // Wine-prefix path on the Java side and passes it in here).
         const char* directPath = getenv("LSFG_DLL_PATH_UNIX");
         if (directPath && *directPath != '\0' && std::filesystem::exists(directPath))
             return std::string(directPath);
-        // Wine prefix: try Steam's default install locations inside drive_c.
         const char* winePrefix = getenv("WINEPREFIX");
         if (winePrefix && *winePrefix != '\0') {
             const std::vector<std::filesystem::path> WINE_PATHS{{
@@ -115,7 +148,6 @@ namespace {
                     return path.string();
             }
         }
-        // home based paths
         const char* home = getenv("HOME");
         const std::string homeStr = home ? home : "";
         for (const auto& base : PATHS) {
@@ -124,11 +156,9 @@ namespace {
             if (std::filesystem::exists(path))
                 return path.string();
         }
-        // xdg home
         const char* dataDir = getenv("XDG_DATA_HOME");
         if (dataDir && *dataDir != '\0')
             return std::string(dataDir) + "/Steam/steamapps/common/Lossless Scaling/Lossless.dll";
-        // final fallback
         return "Lossless.dll";
     }
 }
@@ -137,30 +167,85 @@ void Extract::extractShaders() {
     if (!shaders().empty())
         return;
 
-    // parse the dll
     peparse::parsed_pe* dll = peparse::ParsePEFromFile(getDllPath().c_str());
     if (!dll)
         throw std::runtime_error("Unable to read Lossless.dll, is it installed?");
     peparse::IterRsrc(dll, on_resource, nullptr);
     peparse::DestructParsedPE(dll);
 
-    // ensure all shaders are present
     for (const auto& [name, idx] : nameIdxTable)
         if (shaders().find(idx) == shaders().end())
             throw std::runtime_error("Shader not found: " + name + ".\n- Is Lossless Scaling up to date?");
 }
 
-std::vector<uint8_t> Extract::getShader(const std::string& name) {
+bool Extract::shaderVariantAvailable(ShaderVariant variant) {
+    return completeVariantAvailable(variant);
+}
+
+const char* Extract::shaderVariantName(ShaderVariant variant) {
+    switch (variant) {
+        case ShaderVariant::Dxbc: return "dxbc";
+        case ShaderVariant::PrecompiledFp16: return "spirv-fp16";
+        case ShaderVariant::PrecompiledFp32: return "spirv-fp32";
+    }
+    return "unknown";
+}
+
+ShaderVariant Extract::selectShaderVariant() {
+    const char* raw = std::getenv("LSFG_VK_SHADER_ROUTE");
+    const std::string_view preference = raw != nullptr ? std::string_view(raw) : std::string_view("auto");
+
+    if (preference == "dxbc")
+        return ShaderVariant::Dxbc;
+    if (preference == "spirv-fp16") {
+        if (completeVariantAvailable(ShaderVariant::PrecompiledFp16))
+            return ShaderVariant::PrecompiledFp16;
+        if (completeVariantAvailable(ShaderVariant::PrecompiledFp32))
+            return ShaderVariant::PrecompiledFp32;
+        return ShaderVariant::Dxbc;
+    }
+    if (preference == "spirv-fp32") {
+        if (completeVariantAvailable(ShaderVariant::PrecompiledFp32))
+            return ShaderVariant::PrecompiledFp32;
+        return ShaderVariant::Dxbc;
+    }
+
+#ifdef __ANDROID__
+    if (completeVariantAvailable(ShaderVariant::PrecompiledFp32))
+        return ShaderVariant::PrecompiledFp32;
+#endif
+    return ShaderVariant::Dxbc;
+}
+
+std::vector<uint8_t> Extract::getShader(const std::string& name, ShaderVariant variant) {
     if (shaders().empty())
         throw std::runtime_error("Shaders are not loaded.");
 
-    auto hit = nameIdxTable.find(name);
-    if (hit == nameIdxTable.end())
+    const auto nameHit = nameIdxTable.find(name);
+    if (nameHit == nameIdxTable.end())
         throw std::runtime_error("Shader hash not found: " + name);
 
-    auto sit = shaders().find(hit->second);
-    if (sit == shaders().end())
-        throw std::runtime_error("Shader not found: " + name);
+    const uint32_t resourceId = nameHit->second + resourceOffset(variant);
+    const auto shaderHit = shaders().find(resourceId);
+    if (shaderHit == shaders().end())
+        throw std::runtime_error("Shader variant not found: " + name);
+    if (variant != ShaderVariant::Dxbc && !isSpirvResource(shaderHit->second))
+        throw std::runtime_error("Precompiled shader resource is not valid SPIR-V: " + name);
 
-    return sit->second;
+    return shaderHit->second;
+}
+
+std::vector<uint8_t> Extract::getShader(const std::string& name) {
+    const ShaderVariant variant = selectShaderVariant();
+    static ShaderVariant loggedVariant = static_cast<ShaderVariant>(0xff);
+    if (variant != loggedVariant) {
+        std::cerr << "lsfg-vk: shader-route=" << shaderVariantName(variant)
+                  << " fp32Available="
+                  << (completeVariantAvailable(ShaderVariant::PrecompiledFp32) ? 1 : 0)
+                  << " fp16Available="
+                  << (completeVariantAvailable(ShaderVariant::PrecompiledFp16) ? 1 : 0)
+                  << '\n';
+        loggedVariant = variant;
+    }
+    return getShader(name, variant);
 }

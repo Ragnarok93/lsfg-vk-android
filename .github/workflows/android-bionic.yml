@@ -70,6 +70,12 @@ jobs:
             tests/output_frame_pacer_test.cpp \
             -o /tmp/lsfg-output-frame-pacer-test
           /tmp/lsfg-output-frame-pacer-test
+          g++ -std=c++20 -Wall -Wextra -Werror \
+            -Iinclude \
+            src/extract/spirv_compat.cpp \
+            tests/shader_compat_test.cpp \
+            -o /tmp/lsfg-shader-compat-test
+          /tmp/lsfg-shader-compat-test
 
   build:
     name: Build ${{ matrix.abi }}
