@@ -25,26 +25,14 @@ jobs:
 
           path = Path('src/hooks.cpp')
           text = path.read_text()
-          old = '''    bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
-                  VkFormat sharedFormat, VkFormat swapchainFormat) {
-              auto getFormatProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(
-                  Layer::ovkGetInstanceProcAddr(layerInstance, "vkGetPhysicalDeviceFormatProperties"));
-              if (getFormatProperties == nullptr)
-                  return false;
+          start = text.index('    bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,')
+          end = text.index('    VkResult myvkCreateSwapchainKHR(', start)
+          old = text[start:end]
+          if 'blitCapabilityCache' in old:
+              raise SystemExit('cache already present; refusing duplicate patch')
+          if 'vkGetPhysicalDeviceFormatProperties' not in old:
+              raise SystemExit('unexpected blit capability function; refusing unsafe patch')
 
-              VkFormatProperties sharedProperties{};
-              VkFormatProperties swapchainProperties{};
-              getFormatProperties(physicalDevice, sharedFormat, &sharedProperties);
-              getFormatProperties(physicalDevice, swapchainFormat, &swapchainProperties);
-              constexpr VkFormatFeatureFlags required =
-                  VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
-              return (sharedProperties.optimalTilingFeatures & required) == required
-                  && (swapchainProperties.optimalTilingFeatures & required) == required;
-          }
-          '''
-          # The source uses four-space indentation. Normalize the literal above
-          # rather than allowing a fuzzy patch.
-          old = old.replace('              ', '        ').replace('          }\n', '    }\n')
           new = '''    struct BlitCapabilityKey {
               VkPhysicalDevice physicalDevice{};
               VkFormat sharedFormat{};
@@ -113,11 +101,10 @@ jobs:
               blitCapabilityCache.emplace(key, supported);
               return supported;
           }
+
           '''
           new = new.replace('          ', '    ')
-          if old not in text:
-              raise SystemExit('supportsBidirectionalBlit baseline did not match; refusing unsafe patch')
-          path.write_text(text.replace(old, new, 1))
+          path.write_text(text[:start] + new + text[end:])
           PY
       - name: Run focused regression
         run: python3 tests/android_hot_reload_capability_cache_test.py
