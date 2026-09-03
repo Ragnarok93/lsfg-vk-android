@@ -49,10 +49,6 @@ struct BindingSite {
     DescriptorKind kind{DescriptorKind::Unknown};
 };
 
-uint32_t instructionHeader(uint16_t wordCount, uint16_t opcode) {
-    return (static_cast<uint32_t>(wordCount) << 16) | opcode;
-}
-
 } // namespace
 
 bool Extract::isSpirvBytecode(const std::vector<uint8_t>& bytecode) {
