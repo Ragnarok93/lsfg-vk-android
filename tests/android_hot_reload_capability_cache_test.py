@@ -4,6 +4,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# These contracts intentionally cover process-lifetime WSI residency and explicit
+# fail-open swapchain state because both are prerequisites for safe runtime toggles.
+
 
 class AndroidHotReloadCapabilityCacheTest(unittest.TestCase):
     def test_successful_blit_capability_is_reused_across_wsi_recreation(self) -> None:
