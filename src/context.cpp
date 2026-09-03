@@ -264,7 +264,8 @@ void waitForFineOutputDeadline(std::chrono::nanoseconds delay) {
 } // namespace
 
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
-        VkExtent2D extent, const std::vector<VkImage>& swapchainImages)
+        VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
+        VkFormat sharedFormat)
         : swapchain(swapchain), swapchainImages(swapchainImages),
           extent(extent) {
     // hooks.cpp owns hot reload and only constructs LsContext after applying the
@@ -276,11 +277,14 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             "LSFG context creation requested while frame generation is disabled");
     this->performanceMode_ = conf.performance;
 
-    // we could take the format from the swapchain,
-    // but honestly this is safer.
-    const VkFormat format = conf.hdr
-        ? VK_FORMAT_R8G8B8A8_UNORM
-        : VK_FORMAT_R16G16B16A16_SFLOAT;
+    // The WSI hook selects an exchange format that both the game device and
+    // framegen device can transport. On Android this may intentionally fall
+    // back from RGBA16F to RGBA8 when the stock ICD cannot blit the float
+    // format to the game's swapchain format.
+    if (sharedFormat == VK_FORMAT_UNDEFINED)
+        throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
+            "No compatible LSFG exchange format was selected");
+    const VkFormat format = sharedFormat;
 
     if (!info.identityValid)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,

@@ -806,6 +806,30 @@ bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
     return supported;
 }
 
+VkFormat selectSharedFormatForSwapchain(VkPhysicalDevice physicalDevice,
+        VkFormat swapchainFormat, bool hdr) {
+    const VkFormat preferred = hdr
+        ? VK_FORMAT_R8G8B8A8_UNORM
+        : VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (supportsBidirectionalBlit(physicalDevice, preferred, swapchainFormat))
+        return preferred;
+
+#ifdef __ANDROID__
+    // The Android AHB backend explicitly supports/probes RGBA8 as a storage or
+    // transport image. Use it as a lower-precision SDR exchange format when a
+    // stock ICD cannot bidirectionally blit RGBA16F to the game swapchain.
+    if (!hdr && preferred != VK_FORMAT_R8G8B8A8_UNORM
+            && supportsBidirectionalBlit(physicalDevice,
+                VK_FORMAT_R8G8B8A8_UNORM, swapchainFormat)) {
+        std::cerr << "lsfg-vk: init stage=exchange-format-fallback preferred="
+                  << preferred << " selected=" << VK_FORMAT_R8G8B8A8_UNORM
+                  << " swapchainFormat=" << swapchainFormat << "\n";
+        return VK_FORMAT_R8G8B8A8_UNORM;
+    }
+#endif
+    return VK_FORMAT_UNDEFINED;
+}
+
     VkResult myvkCreateSwapchainKHR(
             VkDevice device,
             const VkSwapchainCreateInfoKHR* pCreateInfo,
@@ -927,19 +951,21 @@ bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
         createInfo.minImageCount = requiredImageCount;
         Utils::resetLimitN("swapCount");
 
-        const VkFormat sharedFormat = activeConf.hdr
-            ? VK_FORMAT_R8G8B8A8_UNORM
-            : VK_FORMAT_R16G16B16A16_SFLOAT;
+        const VkFormat sharedFormat = selectSharedFormatForSwapchain(
+            deviceInfo.physicalDevice, pCreateInfo->imageFormat, activeConf.hdr);
         std::cerr << "lsfg-vk: init stage=swapchain-blit-check-begin sharedFormat="
                   << sharedFormat << " swapchainFormat=" << pCreateInfo->imageFormat << "\n";
-        if (!supportsBidirectionalBlit(
-                deviceInfo.physicalDevice, sharedFormat, pCreateInfo->imageFormat)) {
+        if (sharedFormat == VK_FORMAT_UNDEFINED) {
+            const VkFormat preferredSharedFormat = activeConf.hdr
+                ? VK_FORMAT_R8G8B8A8_UNORM
+                : VK_FORMAT_R16G16B16A16_SFLOAT;
             std::cerr << "lsfg-vk: init stage=blit-format-unsupported sharedFormat="
-                      << sharedFormat << " swapchainFormat=" << pCreateInfo->imageFormat
+                      << preferredSharedFormat << " swapchainFormat=" << pCreateInfo->imageFormat
                       << "; preserving original swapchain\n";
             return createPassThrough("blit-unsupported");
         }
-        std::cerr << "lsfg-vk: init stage=swapchain-blit-check-ready\n";
+        std::cerr << "lsfg-vk: init stage=swapchain-blit-check-ready sharedFormat="
+                  << sharedFormat << "\n";
 
         createInfo.imageUsage |= requiredTransferUsage;
 
@@ -1014,7 +1040,7 @@ bool supportsBidirectionalBlit(VkPhysicalDevice physicalDevice,
                       << " selectedPresentMode=" << createInfo.presentMode << "\n";
             swapchains.emplace(*pSwapchain, LsContext(
                 deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
-                swapchainImages
+                swapchainImages, sharedFormat
             ));
             std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 #ifdef __ANDROID__

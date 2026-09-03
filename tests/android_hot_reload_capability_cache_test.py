@@ -52,6 +52,18 @@ class AndroidHotReloadCapabilityCacheTest(unittest.TestCase):
         self.assertIn("capability_reason=", source)
         self.assertIn("blit-unsupported", source)
 
+    def test_android_exchange_format_falls_back_to_rgba8_when_float_blit_is_unavailable(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        context_h = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        context_cpp = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("selectSharedFormatForSwapchain", hooks)
+        self.assertIn("VK_FORMAT_R16G16B16A16_SFLOAT", hooks)
+        self.assertIn("VK_FORMAT_R8G8B8A8_UNORM", hooks)
+        self.assertIn("exchange-format-fallback", hooks)
+        self.assertIn("VkFormat sharedFormat", context_h)
+        self.assertIn("const VkFormat format = sharedFormat", context_cpp)
+
     def test_performance_backend_toggle_requires_context_recreation(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         start = source.index("bool requiresSwapchainRecreation")

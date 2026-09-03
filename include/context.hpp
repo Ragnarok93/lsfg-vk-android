@@ -27,7 +27,8 @@
 class LsContext {
 public:
     LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
-        VkExtent2D extent, const std::vector<VkImage>& swapchainImages);
+        VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
+        VkFormat sharedFormat);
 
     VkResult present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx);
