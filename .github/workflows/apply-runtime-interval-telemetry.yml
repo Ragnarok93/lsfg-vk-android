@@ -1,0 +1,80 @@
+name: Apply runtime interval telemetry
+
+on:
+  push:
+    branches:
+      - Adaptive-Frame-Generation
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: contains(github.event.head_commit.message, 'stage runtime interval telemetry')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Adaptive-Frame-Generation
+          fetch-depth: 0
+
+      - name: Add interval generation telemetry and contracts
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          hooks_path = Path('src/hooks.cpp')
+          hooks = hooks_path.read_text()
+
+          old_snapshot = '''        double generatedFps{};\n        uint64_t totalSourceFrames{};\n        uint64_t totalGeneratedFrames{};'''
+          new_snapshot = '''        double generatedFps{};\n        uint64_t windowSourceFrames{};\n        uint64_t windowGeneratedFrames{};\n        double generatedPerSource{};\n        uint64_t totalSourceFrames{};\n        uint64_t totalGeneratedFrames{};'''
+          if old_snapshot not in hooks:
+              raise SystemExit('RuntimeStatsSnapshot anchor not found')
+          hooks = hooks.replace(old_snapshot, new_snapshot, 1)
+
+          old_stats = '''                << "generated_fps=" << snapshot.generatedFps << '\\n'\n                << "source_frames_total=" << snapshot.totalSourceFrames << '\\n                << "generated_frames_total=" << snapshot.totalGeneratedFrames << '\\n'''
+          new_stats = '''                << "generated_fps=" << snapshot.generatedFps << '\\n'\n                << "source_frames=" << snapshot.windowSourceFrames << '\\n'\n                << "generated_frames=" << snapshot.windowGeneratedFrames << '\\n'\n                << "generated_per_source=" << snapshot.generatedPerSource << '\\n'\n                << "source_frames_total=" << snapshot.totalSourceFrames << '\\n'\n                << "generated_frames_total=" << snapshot.totalGeneratedFrames << '\\n'''
+          if old_stats not in hooks:
+              raise SystemExit('stats writer anchor not found')
+          hooks = hooks.replace(old_stats, new_stats, 1)
+
+          old_diag = '''                << " generated_fps=" << snapshot.generatedFps\n                << " output_fps=" << snapshot.outputFps\n                << " source_frames_total=" << snapshot.totalSourceFrames\n'''
+          new_diag = '''                << " generated_fps=" << snapshot.generatedFps\n                << " output_fps=" << snapshot.outputFps\n                << " source_frames=" << snapshot.windowSourceFrames\n                << " generated_frames=" << snapshot.windowGeneratedFrames\n                << " generated_per_source=" << snapshot.generatedPerSource\n                << " source_frames_total=" << snapshot.totalSourceFrames\n'''
+          if old_diag not in hooks:
+              raise SystemExit('diagnostic writer anchor not found')
+          hooks = hooks.replace(old_diag, new_diag, 1)
+
+          old_queue = '''            .outputFps = outputFps,\n            .sourceFps = sourceFps,\n            .generatedFps = generatedFps,\n            .totalSourceFrames = stats.totalSourceFrames,\n'''
+          new_queue = '''            .outputFps = outputFps,\n            .sourceFps = sourceFps,\n            .generatedFps = generatedFps,\n            .windowSourceFrames = stats.windowSourceFrames,\n            .windowGeneratedFrames = stats.windowGeneratedFrames,\n            .generatedPerSource = stats.windowSourceFrames > 0\n                ? static_cast<double>(stats.windowGeneratedFrames)\n                    / static_cast<double>(stats.windowSourceFrames)\n                : 0.0,\n            .totalSourceFrames = stats.totalSourceFrames,\n'''
+          if old_queue not in hooks:
+              raise SystemExit('runtime snapshot queue anchor not found')
+          hooks = hooks.replace(old_queue, new_queue, 1)
+          hooks_path.write_text(hooks)
+
+          test_path = Path('tests/android_runtime_stability_test.py')
+          tests = test_path.read_text()
+          marker = '''    def test_source_interval_excludes_previous_lsfg_cycle(self) -> None:\n'''
+          new_test = '''    def test_runtime_stats_export_real_interval_generation_counts(self) -> None:\n        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")\n        for token in (\n            "uint64_t windowSourceFrames{}",\n            "uint64_t windowGeneratedFrames{}",\n            "double generatedPerSource{}",\n            '\"source_frames=\" << snapshot.windowSourceFrames',\n            '\"generated_frames=\" << snapshot.windowGeneratedFrames',\n            '\"generated_per_source=\" << snapshot.generatedPerSource',\n            ".windowSourceFrames = stats.windowSourceFrames",\n            ".windowGeneratedFrames = stats.windowGeneratedFrames",\n        ):\n            self.assertIn(token, source)\n\n        present_start = source.index("VkResult myvkQueuePresentKHR")\n        present_end = source.index("void myvkDestroySwapchainKHR", present_start)\n        present = source[present_start:present_end]\n        self.assertNotIn("std::ofstream", present)\n        self.assertNotIn("stats.txt", present)\n\n'''
+          if 'test_runtime_stats_export_real_interval_generation_counts' not in tests:
+              if marker not in tests:
+                  raise SystemExit('test insertion anchor not found')
+              tests = tests.replace(marker, new_test + marker, 1)
+          test_path.write_text(tests)
+          PY
+
+      - name: Run focused native contracts
+        run: |
+          python3 tests/android_runtime_stability_test.py
+          python3 tests/android_hot_reload_capability_cache_test.py
+          python3 tests/android_ahb_portability_test.py
+
+      - name: Commit interval telemetry
+        shell: bash
+        run: |
+          rm .github/workflows/apply-runtime-interval-telemetry.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "feat(android): export measured generation interval telemetry"
+          git push origin HEAD:Adaptive-Frame-Generation
