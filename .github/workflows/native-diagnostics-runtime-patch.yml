@@ -23,80 +23,17 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
+          import base64
           from pathlib import Path
-
           path = Path('src/hooks.cpp')
           text = path.read_text()
-
-          marker = '''    void runtimeIoWorker() {
-          '''
-          insert = r'''    void writeRuntimeDiagnosticTimelineNow(const RuntimeStatsSnapshot& snapshot) {
-        if (snapshot.configFile.empty())
-            return;
-
-        constexpr std::uintmax_t maxDiagnosticBytes = 4u * 1024u * 1024u;
-        const auto directory = std::filesystem::path(snapshot.configFile).parent_path();
-        const auto diagnosticPath = directory / "diagnostics.log";
-        const auto rotatedPath = directory / "diagnostics.log.1";
-        try {
-            std::error_code ec;
-            std::filesystem::create_directories(directory, ec);
-            ec.clear();
-            if (std::filesystem::exists(diagnosticPath, ec) && !ec
-                    && std::filesystem::file_size(diagnosticPath, ec) >= maxDiagnosticBytes) {
-                std::filesystem::remove(rotatedPath, ec);
-                ec.clear();
-                std::filesystem::rename(diagnosticPath, rotatedPath, ec);
-                if (ec) {
-                    ec.clear();
-                    std::ofstream truncate(diagnosticPath, std::ios::trunc);
-                }
-            }
-
-            const auto timestampMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            std::ofstream out(diagnosticPath, std::ios::app);
-            if (!out)
-                throw std::runtime_error("unable to open diagnostics.log");
-            out << std::fixed << std::setprecision(3)
-                << "timestamp_ms=" << timestampMs
-                << " event=runtime-state"
-                << " active=" << (snapshot.active ? 1 : 0)
-                << " generation_ready=" << (snapshot.generationReady ? 1 : 0)
-                << " source_fps=" << snapshot.sourceFps
-                << " generated_fps=" << snapshot.generatedFps
-                << " output_fps=" << snapshot.outputFps
-                << " source_frames_total=" << snapshot.totalSourceFrames
-                << " generated_frames_total=" << snapshot.totalGeneratedFrames
-                << " present_failures=" << snapshot.presentFailures
-                << " multiplier=" << snapshot.multiplier
-                << " adaptive=" << (snapshot.adaptive ? 1 : 0)
-                << " target_fps=" << snapshot.targetFps
-                << " source_limit_fps=" << snapshot.sourceLimitFps
-                << " performance=" << (snapshot.performance ? 1 : 0)
-                << '\n';
-            if (!out)
-                throw std::runtime_error("failed to append diagnostics.log");
-            Utils::resetLimitN("diagWrite");
-        } catch (const std::exception& e) {
-            Utils::logLimitN("diagWrite", 5,
-                "Failed to append Android runtime diagnostics: " + std::string(e.what()));
-        }
-    }
-
-'''
+          insert = base64.b64decode('ICAgIHZvaWQgd3JpdGVSdW50aW1lRGlhZ25vc3RpY1RpbWVsaW5lTm93KGNvbnN0IFJ1bnRpbWVTdGF0c1NuYXBzaG90JiBzbmFwc2hvdCkgewogICAgICAgIGlmIChzbmFwc2hvdC5jb25maWdGaWxlLmVtcHR5KCkpCiAgICAgICAgICAgIHJldHVybjsKCiAgICAgICAgY29uc3RleHByIHN0ZDo6dWludG1heF90IG1heERpYWdub3N0aWNCeXRlcyA9IDR1ICogMTAyNHUgKiAxMDI0dTsKICAgICAgICBjb25zdCBhdXRvIGRpcmVjdG9yeSA9IHN0ZDo6ZmlsZXN5c3RlbTo6cGF0aChzbmFwc2hvdC5jb25maWdGaWxlKS5wYXJlbnRfcGF0aCgpOwogICAgICAgIGNvbnN0IGF1dG8gZGlhZ25vc3RpY1BhdGggPSBkaXJlY3RvcnkgLyAiZGlhZ25vc3RpY3MubG9nIjsKICAgICAgICBjb25zdCBhdXRvIHJvdGF0ZWRQYXRoID0gZGlyZWN0b3J5IC8gImRpYWdub3N0aWNzLmxvZy4xIjsKICAgICAgICB0cnkgewogICAgICAgICAgICBzdGQ6OmVycm9yX2NvZGUgZWM7CiAgICAgICAgICAgIHN0ZDo6ZmlsZXN5c3RlbTo6Y3JlYXRlX2RpcmVjdG9yaWVzKGRpcmVjdG9yeSwgZWMpOwogICAgICAgICAgICBlYy5jbGVhcigpOwogICAgICAgICAgICBpZiAoc3RkOjpmaWxlc3lzdGVtOjpleGlzdHMoZGlhZ25vc3RpY1BhdGgsIGVjKSAmJiAhZWMKICAgICAgICAgICAgICAgICAgICAmJiBzdGQ6OmZpbGVzeXN0ZW06OmZpbGVfc2l6ZShkaWFnbm9zdGljUGF0aCwgZWMpID49IG1heERpYWdub3N0aWNCeXRlcykgewogICAgICAgICAgICAgICAgc3RkOjpmaWxlc3lzdGVtOjpyZW1vdmUocm90YXRlZFBhdGgsIGVjKTsKICAgICAgICAgICAgICAgIGVjLmNsZWFyKCk7CiAgICAgICAgICAgICAgICBzdGQ6OmZpbGVzeXN0ZW06OnJlbmFtZShkaWFnbm9zdGljUGF0aCwgcm90YXRlZFBhdGgsIGVjKTsKICAgICAgICAgICAgICAgIGlmIChlYykgewogICAgICAgICAgICAgICAgICAgIGVjLmNsZWFyKCk7CiAgICAgICAgICAgICAgICAgICAgc3RkOjpvZnN0cmVhbSB0cnVuY2F0ZShkaWFnbm9zdGljUGF0aCwgc3RkOjppb3M6OnRydW5jKTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgfQoKICAgICAgICAgICAgY29uc3QgYXV0byB0aW1lc3RhbXBNcyA9IHN0ZDo6Y2hyb25vOjpkdXJhdGlvbl9jYXN0PHN0ZDo6Y2hyb25vOjptaWxsaXNlY29uZHM+KAogICAgICAgICAgICAgICAgc3RkOjpjaHJvbm86OnN5c3RlbV9jbG9jazo6bm93KCkudGltZV9zaW5jZV9lcG9jaCgpKS5jb3VudCgpOwogICAgICAgICAgICBzdGQ6Om9mc3RyZWFtIG91dChkaWFnbm9zdGljUGF0aCwgc3RkOjppb3M6OmFwcCk7CiAgICAgICAgICAgIGlmICghb3V0KQogICAgICAgICAgICAgICAgdGhyb3cgc3RkOjpydW50aW1lX2Vycm9yKCJ1bmFibGUgdG8gb3BlbiBkaWFnbm9zdGljcy5sb2ciKTsKICAgICAgICAgICAgb3V0IDw8IHN0ZDo6Zml4ZWQgPDwgc3RkOjpzZXRwcmVjaXNpb24oMykKICAgICAgICAgICAgICAgIDw8ICJ0aW1lc3RhbXBfbXM9IiA8PCB0aW1lc3RhbXBNcwogICAgICAgICAgICAgICAgPDwgIiBldmVudD1ydW50aW1lLXN0YXRlIgogICAgICAgICAgICAgICAgPDwgIiBhY3RpdmU9IiA8PCAoc25hcHNob3QuYWN0aXZlID8gMSA6IDApCiAgICAgICAgICAgICAgICA8PCAiIGdlbmVyYXRpb25fcmVhZHk9IiA8PCAoc25hcHNob3QuZ2VuZXJhdGlvblJlYWR5ID8gMSA6IDApCiAgICAgICAgICAgICAgICA8PCAiIHNvdXJjZV9mcHM9IiA8PCBzbmFwc2hvdC5zb3VyY2VGcHMKICAgICAgICAgICAgICAgIDw8ICIgZ2VuZXJhdGVkX2Zwcz0iIDw8IHNuYXBzaG90LmdlbmVyYXRlZEZwcwogICAgICAgICAgICAgICAgPDwgIiBvdXRwdXRfZnBzPSIgPDwgc25hcHNob3Qub3V0cHV0RnBzCiAgICAgICAgICAgICAgICA8PCAiIHNvdXJjZV9mcmFtZXNfdG90YWw9IiA8PCBzbmFwc2hvdC50b3RhbFNvdXJjZUZyYW1lcwogICAgICAgICAgICAgICAgPDwgIiBnZW5lcmF0ZWRfZnJhbWVzX3RvdGFsPSIgPDwgc25hcHNob3QudG90YWxHZW5lcmF0ZWRGcmFtZXMKICAgICAgICAgICAgICAgIDw8ICIgcHJlc2VudF9mYWlsdXJlcz0iIDw8IHNuYXBzaG90LnByZXNlbnRGYWlsdXJlcwogICAgICAgICAgICAgICAgPDwgIiBtdWx0aXBsaWVyPSIgPDwgc25hcHNob3QubXVsdGlwbGllcgogICAgICAgICAgICAgICAgPDwgIiBhZGFwdGl2ZT0iIDw8IChzbmFwc2hvdC5hZGFwdGl2ZSA/IDEgOiAwKQogICAgICAgICAgICAgICAgPDwgIiB0YXJnZXRfZnBzPSIgPDwgc25hcHNob3QudGFyZ2V0RnBzCiAgICAgICAgICAgICAgICA8PCAiIHNvdXJjZV9saW1pdF9mcHM9IiA8PCBzbmFwc2hvdC5zb3VyY2VMaW1pdEZwcwogICAgICAgICAgICAgICAgPDwgIiBwZXJmb3JtYW5jZT0iIDw8IChzbmFwc2hvdC5wZXJmb3JtYW5jZSA/IDEgOiAwKQogICAgICAgICAgICAgICAgPDwgJ1xuJzsKICAgICAgICAgICAgaWYgKCFvdXQpCiAgICAgICAgICAgICAgICB0aHJvdyBzdGQ6OnJ1bnRpbWVfZXJyb3IoImZhaWxlZCB0byBhcHBlbmQgZGlhZ25vc3RpY3MubG9nIik7CiAgICAgICAgICAgIFV0aWxzOjpyZXNldExpbWl0TigiZGlhZ1dyaXRlIik7CiAgICAgICAgfSBjYXRjaCAoY29uc3Qgc3RkOjpleGNlcHRpb24mIGUpIHsKICAgICAgICAgICAgVXRpbHM6OmxvZ0xpbWl0TigiZGlhZ1dyaXRlIiwgNSwKICAgICAgICAgICAgICAgICJGYWlsZWQgdG8gYXBwZW5kIEFuZHJvaWQgcnVudGltZSBkaWFnbm9zdGljczogIiArIHN0ZDo6c3RyaW5nKGUud2hhdCgpKSk7CiAgICAgICAgfQogICAgfQoK').decode()
+          marker = base64.b64decode('ICAgIHZvaWQgcnVudGltZUlvV29ya2VyKCkgewo=').decode()
+          old = base64.b64decode('ICAgICAgICAgICAgaWYgKHN0YXRzU25hcHNob3QuaGFzX3ZhbHVlKCkpCiAgICAgICAgICAgICAgICB3cml0ZVJ1bnRpbWVTdGF0c1NuYXBzaG90Tm93KCpzdGF0c1NuYXBzaG90KTsK').decode()
+          new = base64.b64decode('ICAgICAgICAgICAgaWYgKHN0YXRzU25hcHNob3QuaGFzX3ZhbHVlKCkpIHsKICAgICAgICAgICAgICAgIHdyaXRlUnVudGltZVN0YXRzU25hcHNob3ROb3coKnN0YXRzU25hcHNob3QpOwogICAgICAgICAgICAgICAgd3JpdGVSdW50aW1lRGlhZ25vc3RpY1RpbWVsaW5lTm93KCpzdGF0c1NuYXBzaG90KTsKICAgICAgICAgICAgfQo=').decode()
           assert text.count(marker) == 1, text.count(marker)
-          text = text.replace(marker, insert + marker, 1)
-
-          old = '''            if (statsSnapshot.has_value())
-                writeRuntimeStatsSnapshotNow(*statsSnapshot);
-          '''
-          new = '''            if (statsSnapshot.has_value()) {
-                writeRuntimeStatsSnapshotNow(*statsSnapshot);
-                writeRuntimeDiagnosticTimelineNow(*statsSnapshot);
-            }
-          '''
           assert text.count(old) == 1, text.count(old)
+          text = text.replace(marker, insert + marker, 1)
           text = text.replace(old, new, 1)
           path.write_text(text)
           PY
