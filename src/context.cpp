@@ -649,17 +649,22 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // explicit and synchronized instead of relying on Turnip-specific behavior.
 
     // 1. Copy the game swapchain image into frame_0/frame_1, then release the
-    //    AHB to VK_QUEUE_FAMILY_EXTERNAL for framegen.
+    //    AHB to VK_QUEUE_FAMILY_EXTERNAL for framegen. Direct Adaptive-zero
+    //    presents may advance frameIdx without touching either input AHB, so
+    //    layout initialization is tracked per AHB rather than inferred from
+    //    the global frame counter.
     pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
     pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
     pass.preCopyBuf.begin();
 
+    const size_t sourceAhbIndex = static_cast<size_t>(this->frameIdx % 2);
+    const bool firstSourceAhbUse = !this->sourceAhbInitialized_.at(sourceAhbIndex);
     copySwapchainToExternalAhb(pass.preCopyBuf.handle(),
         this->swapchainImages.at(presentIdx),
-        this->frameIdx % 2 == 0 ? this->frame_0.handle() : this->frame_1.handle(),
+        sourceAhbIndex == 0 ? this->frame_0.handle() : this->frame_1.handle(),
         this->extent.width, this->extent.height,
-        info.queue.first, this->frameIdx < 2);
+        info.queue.first, firstSourceAhbUse);
 
     pass.preCopyBuf.end();
 
@@ -680,6 +685,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         gameRenderSemaphores2, preCopySignals,
         *this->ahbHandoffFence, this->resetHandoffFences,
         this->waitHandoffFences);
+    this->sourceAhbInitialized_.at(sourceAhbIndex) = true;
     this->previousSourceCopySignalValid_ = true;
     const double handoffMs = std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - handoffStart).count();
