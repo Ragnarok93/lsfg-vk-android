@@ -22,6 +22,10 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <optional>
 
 using namespace Hooks;
 
@@ -52,8 +56,16 @@ namespace {
     bool requiresSwapchainRecreation(
             const Config::Configuration& previous,
             const Config::Configuration& next) {
+        const bool previousNeedsFgWsi = previous.enable && previous.multiplier > 1;
+        const bool nextNeedsFgWsi = next.enable && next.multiplier > 1;
+        if (previousNeedsFgWsi != nextNeedsFgWsi)
+            return true;
+        if (!nextNeedsFgWsi)
+            return false;
         return previous.dll != next.dll
-            || previous.hdr != next.hdr;
+            || previous.hdr != next.hdr
+            || previous.multiplier != next.multiplier
+            || previous.e_present != next.e_present;
     }
 
     bool supportsDeviceExtension(VkPhysicalDevice physicalDevice, const char* extensionName) {
@@ -186,6 +198,13 @@ namespace {
             .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
             .androidAhbSupported = androidAhbSupported
         });
+#ifdef __ANDROID__
+        std::cerr << "lsfg-vk: capability_matrix stage=device"
+                  << " identity_valid=" << (identity.has_value() ? 1 : 0)
+                  << " ahb_external_memory=" << (androidAhbSupported ? 1 : 0)
+                  << " sync_fallback=fence+legacy-barrier"
+                  << " fail_open=1\n";
+#endif
         return VK_SUCCESS;
     }
 
@@ -207,11 +226,19 @@ namespace {
     std::unordered_map<VkSwapchainKHR, VkPresentModeKHR> swapchainToPresent;
     std::unordered_map<VkSwapchainKHR, VkPresentModeKHR> swapchainToConfiguredPresent;
 
+    struct SwapchainWsiProvenance {
+        uint32_t gameMinImageCount{};
+        uint32_t effectiveMinImageCount{};
+        VkPresentModeKHR gamePresentMode{VK_PRESENT_MODE_FIFO_KHR};
+        VkPresentModeKHR effectivePresentMode{VK_PRESENT_MODE_FIFO_KHR};
+        bool fgModified{};
+    };
+    std::unordered_map<VkSwapchainKHR, SwapchainWsiProvenance> swapchainWsiProvenance;
+
 #ifdef __ANDROID__
     struct RuntimeOutputStats {
         using Clock = std::chrono::steady_clock;
         Clock::time_point windowStart{Clock::now()};
-        Clock::time_point nextConfigPoll{};
         std::vector<VkSemaphore> presentWaitSemaphores;
         SourceFramePacer sourceFramePacer;
         uint64_t windowSourceFrames{0};
@@ -221,84 +248,71 @@ namespace {
         uint64_t presentFailures{0};
     };
 
+    struct RuntimeStatsSnapshot {
+        std::string configFile;
+        bool active{};
+        bool generationReady{};
+        double outputFps{};
+        double sourceFps{};
+        double generatedFps{};
+        uint64_t totalSourceFrames{};
+        uint64_t totalGeneratedFrames{};
+        uint64_t presentFailures{};
+        int multiplier{};
+        bool adaptive{};
+        uint32_t targetFps{};
+        uint32_t sourceLimitFps{};
+        bool performance{};
+    };
+
+    struct RuntimeIoState {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::string watchedConfigFile;
+        std::filesystem::file_time_type observedTimestamp{};
+        bool observedExists{};
+        bool watcherArmed{};
+        Config::Configuration appliedConf{};
+        std::optional<Config::Configuration> pendingConfig;
+        bool pendingRequiresRecreate{};
+        std::atomic<bool> configPending{false};
+        std::optional<RuntimeStatsSnapshot> pendingStats;
+    };
+
     std::unordered_map<VkSwapchainKHR, RuntimeOutputStats> runtimeOutputStats;
 
-    void publishRuntimeState(const std::string& configFile,
-            bool active, bool generationReady, int multiplier,
-            bool performance, bool adaptive, uint32_t targetFps) {
-        if (configFile.empty())
-            return;
-
-        const std::filesystem::path statsPath =
-            std::filesystem::path(configFile).parent_path() / "stats.txt";
-        const std::filesystem::path tempPath = statsPath.string() + ".tmp";
-        try {
-            std::ofstream out(tempPath, std::ios::trunc);
-            if (!out)
-                throw std::runtime_error("unable to open temporary stats file");
-            out << "active=" << (active ? 1 : 0) << '\n'
-                << "generation_ready=" << (generationReady ? 1 : 0) << '\n'
-                << "fps=0.000\n"
-                << "source_fps=0.000\n"
-                << "generated_fps=0.000\n"
-                << "source_frames_total=0\n"
-                << "generated_frames_total=0\n"
-                << "present_failures=0\n"
-                << "multiplier=" << multiplier << '\n'
-                << "adaptive=" << (adaptive ? 1 : 0) << '\n'
-                << "target_fps=" << targetFps << '\n'
-                << "source_limit_fps=" << Config::activeConf.sourceFpsLimit << '\n'
-                << "performance=" << (performance ? 1 : 0) << '\n';
-            out.close();
-            if (!out)
-                throw std::runtime_error("failed to flush temporary stats file");
-
-            std::error_code ec;
-            std::filesystem::rename(tempPath, statsPath, ec);
-            if (ec) {
-                std::filesystem::remove(statsPath, ec);
-                ec.clear();
-                std::filesystem::rename(tempPath, statsPath, ec);
-            }
-            if (ec)
-                throw std::runtime_error("failed to publish stats.txt: " + ec.message());
-            Utils::resetLimitN("statsWrite");
-        } catch (const std::exception& e) {
-            std::error_code ignored;
-            std::filesystem::remove(tempPath, ignored);
-            Utils::logLimitN("statsWrite", 5,
-                "Failed to publish Android runtime state: " + std::string(e.what()));
-        }
+    RuntimeIoState& runtimeIoState() {
+        // Process-lifetime allocation deliberately avoids detached-thread/static
+        // teardown ordering hazards during loader shutdown.
+        static RuntimeIoState* state = new RuntimeIoState();
+        return *state;
     }
 
-    void writeRuntimeStatsFile(const std::string& configFile,
-            double outputFps, double sourceFps, double generatedFps,
-            const RuntimeOutputStats& stats, int multiplier, bool performance,
-            bool adaptive, uint32_t targetFps) {
-        if (configFile.empty())
+    void writeRuntimeStatsSnapshotNow(const RuntimeStatsSnapshot& snapshot) {
+        if (snapshot.configFile.empty())
             return;
 
         const std::filesystem::path statsPath =
-            std::filesystem::path(configFile).parent_path() / "stats.txt";
+            std::filesystem::path(snapshot.configFile).parent_path() / "stats.txt";
         const std::filesystem::path tempPath = statsPath.string() + ".tmp";
         try {
             std::ofstream out(tempPath, std::ios::trunc);
             if (!out)
                 throw std::runtime_error("unable to open temporary stats file");
             out << std::fixed << std::setprecision(3)
-                << "active=1\n"
-                << "generation_ready=1\n"
-                << "fps=" << outputFps << '\n'
-                << "source_fps=" << sourceFps << '\n'
-                << "generated_fps=" << generatedFps << '\n'
-                << "source_frames_total=" << stats.totalSourceFrames << '\n'
-                << "generated_frames_total=" << stats.totalGeneratedFrames << '\n'
-                << "present_failures=" << stats.presentFailures << '\n'
-                << "multiplier=" << multiplier << '\n'
-                << "adaptive=" << (adaptive ? 1 : 0) << '\n'
-                << "target_fps=" << targetFps << '\n'
-                << "source_limit_fps=" << Config::activeConf.sourceFpsLimit << '\n'
-                << "performance=" << (performance ? 1 : 0) << '\n';
+                << "active=" << (snapshot.active ? 1 : 0) << '\n'
+                << "generation_ready=" << (snapshot.generationReady ? 1 : 0) << '\n'
+                << "fps=" << snapshot.outputFps << '\n'
+                << "source_fps=" << snapshot.sourceFps << '\n'
+                << "generated_fps=" << snapshot.generatedFps << '\n'
+                << "source_frames_total=" << snapshot.totalSourceFrames << '\n'
+                << "generated_frames_total=" << snapshot.totalGeneratedFrames << '\n'
+                << "present_failures=" << snapshot.presentFailures << '\n'
+                << "multiplier=" << snapshot.multiplier << '\n'
+                << "adaptive=" << (snapshot.adaptive ? 1 : 0) << '\n'
+                << "target_fps=" << snapshot.targetFps << '\n'
+                << "source_limit_fps=" << snapshot.sourceLimitFps << '\n'
+                << "performance=" << (snapshot.performance ? 1 : 0) << '\n';
             out.close();
             if (!out)
                 throw std::runtime_error("failed to flush temporary stats file");
@@ -321,9 +335,199 @@ namespace {
         }
     }
 
+    void runtimeIoWorker() {
+        auto& state = runtimeIoState();
+        for (;;) {
+            std::string configFile;
+            bool watcherArmed = false;
+            bool observedExists = false;
+            std::filesystem::file_time_type observedTimestamp{};
+            Config::Configuration appliedConf{};
+            std::optional<RuntimeStatsSnapshot> statsSnapshot;
+            {
+                std::unique_lock lock(state.mutex);
+                state.cv.wait_for(lock, std::chrono::milliseconds(250), [&state] {
+                    return state.pendingStats.has_value();
+                });
+                statsSnapshot = std::move(state.pendingStats);
+                state.pendingStats.reset();
+                configFile = state.watchedConfigFile;
+                watcherArmed = state.watcherArmed;
+                observedExists = state.observedExists;
+                observedTimestamp = state.observedTimestamp;
+                appliedConf = state.appliedConf;
+            }
+
+            if (statsSnapshot.has_value())
+                writeRuntimeStatsSnapshotNow(*statsSnapshot);
+
+            if (!watcherArmed || configFile.empty())
+                continue;
+
+            std::error_code ec;
+            const bool exists = std::filesystem::exists(configFile, ec) && !ec;
+            std::filesystem::file_time_type timestamp{};
+            if (exists) {
+                ec.clear();
+                timestamp = std::filesystem::last_write_time(configFile, ec);
+                if (ec)
+                    continue;
+            }
+            const bool changed = exists != observedExists
+                || (exists && observedExists && timestamp != observedTimestamp);
+            if (!changed)
+                continue;
+
+            std::optional<Config::Configuration> nextConf;
+            if (exists) {
+                try {
+                    Config::updateConfig(configFile);
+                    nextConf = Config::getConfig(Utils::getProcessName());
+                    Utils::resetLimitN("configReload");
+                } catch (const std::exception& e) {
+                    Utils::logLimitN("configReload", 5,
+                        "Failed to hot-reload configuration; preserving the active runtime:\n- "
+                        + std::string(e.what()));
+                }
+            } else {
+                auto disabledConf = appliedConf;
+                disabledConf.enable = false;
+                disabledConf.config_file = configFile;
+                disabledConf.timestamp = {};
+                nextConf = std::move(disabledConf);
+            }
+
+            {
+                std::lock_guard lock(state.mutex);
+                if (state.watchedConfigFile != configFile)
+                    continue;
+                state.observedExists = exists;
+                state.observedTimestamp = timestamp;
+                if (nextConf.has_value()) {
+                    state.pendingRequiresRecreate = requiresSwapchainRecreation(
+                        state.appliedConf, *nextConf);
+                    state.pendingConfig = std::move(nextConf);
+                    state.configPending.store(true, std::memory_order_release);
+                }
+            }
+        }
+    }
+
+    void ensureRuntimeIoThread() {
+        static std::once_flag startFlag;
+        std::call_once(startFlag, [] {
+            std::thread(runtimeIoWorker).detach();
+        });
+    }
+
+    void armConfigWatcher(const Config::Configuration& conf) {
+        ensureRuntimeIoThread();
+        auto& state = runtimeIoState();
+        {
+            std::lock_guard lock(state.mutex);
+            state.watchedConfigFile = conf.config_file;
+            state.observedExists = !conf.config_file.empty();
+            state.observedTimestamp = conf.timestamp;
+            state.watcherArmed = !conf.config_file.empty();
+            state.appliedConf = conf;
+            state.pendingConfig.reset();
+            state.pendingRequiresRecreate = false;
+            state.configPending.store(false, std::memory_order_release);
+        }
+        state.cv.notify_one();
+    }
+
+    enum class PendingConfigAction {
+        None,
+        Applied,
+        Recreate
+    };
+
+    PendingConfigAction applyPendingRuntimeConfig() {
+        auto& state = runtimeIoState();
+        if (!state.configPending.load(std::memory_order_acquire))
+            return PendingConfigAction::None;
+
+        std::lock_guard lock(state.mutex);
+        if (!state.pendingConfig.has_value()) {
+            state.configPending.store(false, std::memory_order_release);
+            return PendingConfigAction::None;
+        }
+        if (state.pendingRequiresRecreate)
+            return PendingConfigAction::Recreate;
+
+        Config::activeConf = *state.pendingConfig;
+        state.appliedConf = Config::activeConf;
+        state.pendingConfig.reset();
+        state.pendingRequiresRecreate = false;
+        state.configPending.store(false, std::memory_order_release);
+        std::cerr << "lsfg-vk: runtime stage=config-applied-no-wsi-recreate"
+                  << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
+                  << " targetFps=" << Config::activeConf.fpsLimit
+                  << " sourceFpsLimit=" << Config::activeConf.sourceFpsLimit << "\n";
+        return PendingConfigAction::Applied;
+    }
+
+    bool applyPendingConfigForSwapchainCreation() {
+        auto& state = runtimeIoState();
+        if (!state.configPending.load(std::memory_order_acquire))
+            return false;
+
+        std::lock_guard lock(state.mutex);
+        if (!state.pendingConfig.has_value()) {
+            state.configPending.store(false, std::memory_order_release);
+            return false;
+        }
+        const auto previousConf = Config::activeConf;
+        Config::activeConf = *state.pendingConfig;
+        const bool requiredRecreate = requiresSwapchainRecreation(
+            previousConf, Config::activeConf);
+        state.appliedConf = Config::activeConf;
+        state.pendingConfig.reset();
+        state.pendingRequiresRecreate = false;
+        state.configPending.store(false, std::memory_order_release);
+        std::cerr << "lsfg-vk: init stage=config-applied-for-swapchain"
+                  << " multiplier=" << Config::activeConf.multiplier
+                  << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
+                  << " targetFps=" << Config::activeConf.fpsLimit
+                  << " sourceFpsLimit=" << Config::activeConf.sourceFpsLimit
+                  << " presentMode=" << Config::activeConf.e_present
+                  << " enabled=" << (Config::activeConf.enable ? 1 : 0)
+                  << " wsiChanged=" << (requiredRecreate ? 1 : 0) << "\n";
+        return true;
+    }
+
+    void queueRuntimeStats(RuntimeStatsSnapshot snapshot) {
+        ensureRuntimeIoThread();
+        auto& state = runtimeIoState();
+        {
+            std::lock_guard lock(state.mutex);
+            // Stats are telemetry, so keeping only the newest pending sample
+            // prevents file I/O from ever creating backpressure on presentation.
+            state.pendingStats = std::move(snapshot);
+        }
+        state.cv.notify_one();
+    }
+
+    void publishRuntimeState(const std::string& configFile,
+            bool active, bool generationReady, int multiplier,
+            bool performance, bool adaptive, uint32_t targetFps) {
+        queueRuntimeStats(RuntimeStatsSnapshot {
+            .configFile = configFile,
+            .active = active,
+            .generationReady = generationReady,
+            .multiplier = multiplier,
+            .adaptive = adaptive,
+            .targetFps = targetFps,
+            .sourceLimitFps = Config::activeConf.sourceFpsLimit,
+            .performance = performance,
+        });
+    }
+
     void recordSuccessfulOutputCycle(VkSwapchainKHR swapchain,
             const std::string& configFile, uint64_t generated,
-            int multiplier, bool performance, bool adaptive, uint32_t targetFps) {
+            int multiplier, bool performance, bool adaptive, uint32_t targetFps,
+            uint32_t sourceLimitFps) {
         auto& stats = runtimeOutputStats[swapchain];
         stats.windowSourceFrames++;
         stats.totalSourceFrames++;
@@ -339,8 +543,22 @@ namespace {
         const double sourceFps = static_cast<double>(stats.windowSourceFrames) / elapsedSeconds;
         const double generatedFps = static_cast<double>(stats.windowGeneratedFrames) / elapsedSeconds;
         const double outputFps = sourceFps + generatedFps;
-        writeRuntimeStatsFile(configFile, outputFps, sourceFps, generatedFps,
-            stats, multiplier, performance, adaptive, targetFps);
+        queueRuntimeStats(RuntimeStatsSnapshot {
+            .configFile = configFile,
+            .active = true,
+            .generationReady = true,
+            .outputFps = outputFps,
+            .sourceFps = sourceFps,
+            .generatedFps = generatedFps,
+            .totalSourceFrames = stats.totalSourceFrames,
+            .totalGeneratedFrames = stats.totalGeneratedFrames,
+            .presentFailures = stats.presentFailures,
+            .multiplier = multiplier,
+            .adaptive = adaptive,
+            .targetFps = targetFps,
+            .sourceLimitFps = sourceLimitFps,
+            .performance = performance,
+        });
 
         stats.windowStart = now;
         stats.windowSourceFrames = 0;
@@ -359,6 +577,7 @@ namespace {
         swapchainToDeviceTable.erase(swapchain);
         swapchainToPresent.erase(swapchain);
         swapchainToConfiguredPresent.erase(swapchain);
+        swapchainWsiProvenance.erase(swapchain);
 #ifdef __ANDROID__
         runtimeOutputStats.erase(swapchain);
 #endif
@@ -447,6 +666,10 @@ namespace {
             const VkSwapchainCreateInfoKHR* pCreateInfo,
             const VkAllocationCallbacks* pAllocator,
             VkSwapchainKHR* pSwapchain) noexcept {
+#ifdef __ANDROID__
+        applyPendingConfigForSwapchainCreation();
+        armConfigWatcher(Config::activeConf);
+#endif
         std::cerr << "lsfg-vk: init stage=swapchain-hook-enter requestedImages="
                   << pCreateInfo->minImageCount
                   << " extent=" << pCreateInfo->imageExtent.width << "x"
@@ -460,7 +683,7 @@ namespace {
         }
         Utils::resetLimitN("swapMap");
         auto& deviceInfo = it->second;
-        const auto& activeConf = Config::activeConf;
+        const auto activeConf = Config::activeConf;
 
         const auto createPassThrough = [&](const char* reason) -> VkResult {
             const auto res = Layer::ovkCreateSwapchainKHR(
@@ -469,6 +692,13 @@ namespace {
                 if (pCreateInfo->oldSwapchain)
                     eraseSwapchainState(pCreateInfo->oldSwapchain);
                 swapchainToDeviceTable.emplace(*pSwapchain, device);
+                swapchainWsiProvenance.emplace(*pSwapchain, SwapchainWsiProvenance {
+                    .gameMinImageCount = pCreateInfo->minImageCount,
+                    .effectiveMinImageCount = pCreateInfo->minImageCount,
+                    .gamePresentMode = pCreateInfo->presentMode,
+                    .effectivePresentMode = pCreateInfo->presentMode,
+                    .fgModified = false,
+                });
 #ifdef __ANDROID__
                 publishRuntimeState(activeConf.config_file, false, false,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
@@ -477,7 +707,11 @@ namespace {
                 std::cerr << "lsfg-vk: init stage=swapchain-pass-through reason="
                           << reason
                           << " enabled=" << (activeConf.enable ? 1 : 0)
-                          << " multiplier=" << activeConf.multiplier << "\n";
+                          << " multiplier=" << activeConf.multiplier
+                          << " gameImages=" << pCreateInfo->minImageCount
+                          << " effectiveImages=" << pCreateInfo->minImageCount
+                          << " gamePresentMode=" << pCreateInfo->presentMode
+                          << " effectivePresentMode=" << pCreateInfo->presentMode << "\n";
             }
             return res;
         };
@@ -558,7 +792,7 @@ namespace {
 
         createInfo.imageUsage |= requiredTransferUsage;
 
-        const auto configuredPresentMode = Config::activeConf.e_present;
+        const auto configuredPresentMode = activeConf.e_present;
         const bool recreatingExistingSwapchain = pCreateInfo->oldSwapchain != VK_NULL_HANDLE;
         createInfo.presentMode = recreatingExistingSwapchain
             ? pCreateInfo->presentMode
@@ -570,6 +804,16 @@ namespace {
                          " preservingGameMode=" << pCreateInfo->presentMode
                       << " configuredMode=" << configuredPresentMode << "\n";
         }
+
+        std::cerr << "lsfg-vk: capability_matrix stage=swapchain"
+                  << " ahb_external_memory=" << (deviceInfo.androidAhbSupported ? 1 : 0)
+                  << " bidirectional_blit=1"
+                  << " game_present_mode=" << pCreateInfo->presentMode
+                  << " configured_present_mode=" << configuredPresentMode
+                  << " selected_present_mode=" << createInfo.presentMode
+                  << " min_images_game=" << pCreateInfo->minImageCount
+                  << " min_images_fg=" << createInfo.minImageCount
+                  << " fail_open=1\n";
 
         std::cerr << "lsfg-vk: init stage=swapchain-downstream-create-begin images="
                   << createInfo.minImageCount
@@ -588,6 +832,13 @@ namespace {
         try {
             swapchainToPresent.emplace(*pSwapchain, createInfo.presentMode);
             swapchainToConfiguredPresent.emplace(*pSwapchain, configuredPresentMode);
+            swapchainWsiProvenance.emplace(*pSwapchain, SwapchainWsiProvenance {
+                .gameMinImageCount = pCreateInfo->minImageCount,
+                .effectiveMinImageCount = createInfo.minImageCount,
+                .gamePresentMode = pCreateInfo->presentMode,
+                .effectivePresentMode = createInfo.presentMode,
+                .fgModified = true,
+            });
 
             uint32_t imageCount{};
             res = Layer::ovkGetSwapchainImagesKHR(device, *pSwapchain, &imageCount, nullptr);
@@ -647,6 +898,13 @@ namespace {
                 Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);
                 *pSwapchain = fallbackSwapchain;
                 swapchainToDeviceTable.emplace(*pSwapchain, device);
+                swapchainWsiProvenance.emplace(*pSwapchain, SwapchainWsiProvenance {
+                    .gameMinImageCount = pCreateInfo->minImageCount,
+                    .effectiveMinImageCount = pCreateInfo->minImageCount,
+                    .gamePresentMode = pCreateInfo->presentMode,
+                    .effectivePresentMode = pCreateInfo->presentMode,
+                    .fgModified = false,
+                });
 #ifdef __ANDROID__
                 publishRuntimeState(activeConf.config_file, false, false,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
@@ -684,62 +942,28 @@ namespace {
         }
         auto& deviceInfo = it2->second;
 
-        auto& conf = Config::activeConf;
 #ifdef __ANDROID__
-        auto& runtimeStats = runtimeOutputStats[*pPresentInfo->pSwapchains];
-        const auto configPollNow = RuntimeOutputStats::Clock::now();
-        const bool shouldPollConfig = configPollNow >= runtimeStats.nextConfigPoll;
-        if (shouldPollConfig)
-            runtimeStats.nextConfigPoll = configPollNow + std::chrono::milliseconds(50);
-#else
-        const bool shouldPollConfig = true;
-#endif
-        if (shouldPollConfig && !conf.config_file.empty()
-                && (
-                        !std::filesystem::exists(conf.config_file)
-                      || conf.timestamp != std::filesystem::last_write_time(conf.config_file)
-                )) {
-            const std::string configFile = conf.config_file;
-            const auto previousConf = conf;
-            bool recreateSwapchain = false;
-            if (std::filesystem::exists(configFile)) {
-                try {
-                    Config::updateConfig(configFile);
-                    Config::activeConf = Config::getConfig(Utils::getProcessName());
-                    recreateSwapchain = requiresSwapchainRecreation(
-                        previousConf, Config::activeConf);
-                    std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
-                              << Config::activeConf.multiplier
-                              << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
-                              << " targetFps=" << Config::activeConf.fpsLimit
-                              << " sourceFpsLimit=" << Config::activeConf.sourceFpsLimit
-                              << " presentMode=" << Config::activeConf.e_present
-                              << " enabled=" << (Config::activeConf.enable ? 1 : 0)
-                              << " recreateSwapchain=" << (recreateSwapchain ? 1 : 0)
-                              << "\n";
-                } catch (const std::exception& e) {
-                    Utils::logLimitN("configReload", 5,
-                        "Failed to hot-reload configuration; preserving the active runtime:\n- "
-                        + std::string(e.what()));
-                }
-            } else {
-                recreateSwapchain = true;
-            }
-            if (recreateSwapchain) {
-#ifdef __ANDROID__
-                publishRuntimeState(configFile, false, false,
-                    static_cast<int>(Config::activeConf.multiplier),
-                    Config::activeConf.performance,
-                    Config::activeConf.adaptiveFramegen,
-                    Config::activeConf.fpsLimit);
-#endif
-                Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-                return VK_ERROR_OUT_OF_DATE_KHR;
-            }
+        const auto pendingAction = applyPendingRuntimeConfig();
+        if (pendingAction == PendingConfigAction::Recreate) {
+            // Transition frames are native. Returning OUT_OF_DATE after the
+            // native present asks the application to rebuild WSI from its own
+            // untouched create parameters; sustained Off then has no LSFG WSI.
+            Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+            std::cerr << "lsfg-vk: runtime stage=wsi-restore-requested reason=config-transition\n";
+            return VK_ERROR_OUT_OF_DATE_KHR;
         }
+#endif
 
+        const auto conf = Config::activeConf;
+        // Canonical disabled path: no LsContext, adaptive plan, pacer, telemetry
+        // file I/O or generated semaphore handling. The resident hook exists
+        // only so a background config change can request a future recreation.
         if (!conf.enable || conf.multiplier <= 1)
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+
+#ifdef __ANDROID__
+        auto& runtimeStats = runtimeOutputStats[*pPresentInfo->pSwapchains];
+#endif
 
         auto it3 = swapchains.find(*pPresentInfo->pSwapchains);
         if (it3 == swapchains.end()) {
@@ -777,7 +1001,7 @@ namespace {
         const bool presentModeChangePending = configuredPresent != conf.e_present;
         if (presentModeChangePending)
             Utils::logLimitN("presentModeDeferred", 1,
-                "Present-mode change deferred until the application's next natural swapchain creation");
+                "Present-mode change awaits the config-triggered swapchain recreation");
         else
             Utils::resetLimitN("presentModeDeferred");
 
@@ -807,7 +1031,7 @@ namespace {
             recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
                 conf.config_file, swapchain.lastGeneratedFrameCount(),
                 conf.multiplier, conf.performance,
-                conf.adaptiveFramegen, conf.fpsLimit);
+                conf.adaptiveFramegen, conf.fpsLimit, conf.sourceFpsLimit);
 #endif
             Utils::resetLimitN("swapPresent");
             return res;
