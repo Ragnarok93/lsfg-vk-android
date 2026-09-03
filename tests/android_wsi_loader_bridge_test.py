@@ -194,20 +194,37 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertNotIn("VkSemaphore lastPostCopySem =", android)
         self.assertIn("runtime stage=present-sync-ready", android)
 
-    def test_runtime_disable_recreates_a_tracked_pass_through_swapchain(self) -> None:
+    def test_runtime_disable_restores_wsi_from_staged_config_then_fast_paths(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        present = hooks.split("VkResult myvkQueuePresentKHR", 1)[1]
 
         self.assertIn("if (!activeConf.enable || activeConf.multiplier <= 1)", hooks)
         self.assertIn("init stage=swapchain-pass-through reason=", hooks)
-        self.assertIn("enabled=", hooks)
         self.assertIn("swapchainToDeviceTable.emplace(*pSwapchain, device)", hooks)
-        self.assertIn("if (!conf.enable || conf.multiplier <= 1)", hooks)
+        self.assertIn("applyPendingRuntimeConfig()", present)
+        self.assertIn("PendingConfigAction::Recreate", present)
+        self.assertIn("stage=wsi-restore-requested", present)
+        self.assertIn("if (!conf.enable || conf.multiplier <= 1)", present)
+        self.assertIn("auto it3 = swapchains.find", present)
 
-        reload_pos = hooks.index("init stage=config-reloaded multiplier=")
-        disable_pos = hooks.index("if (!conf.enable || conf.multiplier <= 1)")
-        context_lookup_pos = hooks.index("auto it3 = swapchains.find")
-        self.assertLess(reload_pos, disable_pos)
+        apply_pos = present.index("applyPendingRuntimeConfig()")
+        recreate_pos = present.index("PendingConfigAction::Recreate")
+        disable_pos = present.index("if (!conf.enable || conf.multiplier <= 1)")
+        context_lookup_pos = present.index("auto it3 = swapchains.find")
+        self.assertLess(apply_pos, recreate_pos)
+        self.assertLess(recreate_pos, disable_pos)
         self.assertLess(disable_pos, context_lookup_pos)
+
+        self.assertNotIn(
+            "Config::updateConfig(",
+            present,
+            "Runtime disable must not perform filesystem/config parsing on the present thread",
+        )
+        self.assertNotIn(
+            "Config::getConfig(Utils::getProcessName())",
+            present,
+            "The present thread consumes the staged snapshot only",
+        )
 
     def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:
         source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")
