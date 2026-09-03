@@ -80,6 +80,7 @@ private:
 
 #ifdef __ANDROID__
     AdaptiveFrameScheduler adaptiveScheduler_;
+    AdaptiveFrameScheduler::StageCosts lastStageCosts_{};
     OutputFramePacer outputFramePacer_;
     bool requiresSourceHistoryWarmup_{false};
     bool previousSourceCopySignalValid_{false};
@@ -87,8 +88,10 @@ private:
         using Clock = std::chrono::steady_clock;
 
         Clock::time_point windowStart{Clock::now()};
-        Clock::time_point lastSourcePresent{};
-        bool hasLastSourcePresent{false};
+        Clock::time_point lastPresentEntry{};
+        Clock::time_point lastCycleEnd{};
+        bool hasLastPresentEntry{false};
+        bool hasLastCycleEnd{false};
 
         uint64_t windowSourceFrames{0};
         uint64_t windowGeneratedFrames{0};
@@ -108,6 +111,9 @@ private:
         double windowSourceIntervalMs{0.0};
         double windowSourceIntervalMaxMs{0.0};
         uint64_t windowSourceIntervals{0};
+        double windowPresentEntryIntervalMs{0.0};
+        double windowPresentEntryIntervalMaxMs{0.0};
+        uint64_t windowPresentEntryIntervals{0};
     } runtimeMetrics;
 
     // Reused for the game-device -> framegen AHB handoff. The handoff
