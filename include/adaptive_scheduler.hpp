@@ -49,12 +49,17 @@ public:
     /// baseline, probe and cooldown state so the old policy cannot leak through.
     void configure(uint32_t targetFps, std::size_t maxGeneratedFrames);
 
-    /// Observe pure source/game cadence produced after the previous plan plus
-    /// the LSFG stage cost incurred by that previous plan, then return the
-    /// generated-frame count for the next source interval.
+    /// Observe pure source/game cadence produced after the previous plan and
+    /// return the generated-frame count for the next source interval.
+    std::size_t plan(std::chrono::nanoseconds sourceInterval);
+
+    /// Observe pure source/game cadence plus the LSFG stage cost incurred by
+    /// the previous plan, then return the generated-frame count for the next
+    /// source interval. The overload avoids a nested-type default argument that
+    /// Clang 18 in Android NDK r27 rejects.
     std::size_t plan(
         std::chrono::nanoseconds sourceInterval,
-        const StageCosts& priorStageCosts = {});
+        const StageCosts& priorStageCosts);
 
     /// Tell the policy when the presentation path could not execute the planned
     /// count (history warmup, timeout/fail-open). This keeps the next sample from
