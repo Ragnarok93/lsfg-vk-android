@@ -1,18 +1,18 @@
 #pragma once
 
+#include "frame_pacer.hpp"
+
 #include <chrono>
 #include <cstdint>
-#include <optional>
 
 class SourceFramePacer {
 public:
-    using Clock = std::chrono::steady_clock;
+    using Clock = FramePacer::Clock;
 
     void configure(uint32_t targetFps) noexcept;
     std::chrono::nanoseconds delayUntilNext(Clock::time_point now) noexcept;
-    uint32_t targetFps() const noexcept { return targetFps_; }
+    uint32_t targetFps() const noexcept { return pacer_.targetFps(); }
 
 private:
-    uint32_t targetFps_{0};
-    std::optional<Clock::time_point> nextDeadline_{};
+    FramePacer pacer_;
 };
