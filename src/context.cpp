@@ -6,6 +6,7 @@
 #include "utils/utils.hpp"
 #include "hooks.hpp"
 #include "layer.hpp"
+#include "runtime_policy.hpp"
 
 #ifdef __ANDROID__
 #include <android/hardware_buffer.h>
@@ -801,7 +802,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // copy submission signals two binary semaphores: one consumed by this
     // generated present, and one reserved for the next generated/source
     // present. A binary semaphore signal must not be consumed twice.
-    this->outputFramePacer_.configure(conf.fpsLimit);
+    const uint32_t outputPacingTarget = resolveOutputPacingTarget(
+        conf.adaptiveFramegen, conf.fpsLimit,
+        conf.sourceFpsLimit, conf.multiplier);
+    this->outputFramePacer_.configure(outputPacingTarget);
     const auto paceOutputPresent = [&]() -> double {
         const auto delay = this->outputFramePacer_.delayUntilNext(
             OutputFramePacer::Clock::now());

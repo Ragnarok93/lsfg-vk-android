@@ -5,6 +5,7 @@
 #include "context.hpp"
 #include "layer.hpp"
 #include "source_frame_pacer.hpp"
+#include "runtime_policy.hpp"
 
 #include <vulkan/vulkan_core.h>
 
@@ -275,6 +276,7 @@ namespace {
         Config::Configuration appliedConf{};
         std::optional<Config::Configuration> pendingConfig;
         bool pendingRequiresRecreate{};
+        RuntimeWsiRecreateGate wsiRecreateGate;
         std::atomic<bool> configPending{false};
         std::optional<RuntimeStatsSnapshot> pendingStats;
     };
@@ -488,6 +490,7 @@ namespace {
             state.appliedConf = conf;
             state.pendingConfig.reset();
             state.pendingRequiresRecreate = false;
+            state.wsiRecreateGate.onSwapchainCreation();
             state.configPending.store(false, std::memory_order_release);
         }
         state.cv.notify_one();
@@ -504,13 +507,22 @@ namespace {
         if (!state.configPending.load(std::memory_order_acquire))
             return PendingConfigAction::None;
 
+        // Once OUT_OF_DATE has been returned, leave all subsequent writes
+        // pending until the replacement swapchain consumes the newest config.
+        // This is a lock-free hot-path check while recreation is outstanding.
+        if (state.wsiRecreateGate.inFlight())
+            return PendingConfigAction::None;
+
         std::lock_guard lock(state.mutex);
         if (!state.pendingConfig.has_value()) {
             state.configPending.store(false, std::memory_order_release);
             return PendingConfigAction::None;
         }
-        if (state.pendingRequiresRecreate)
-            return PendingConfigAction::Recreate;
+        if (state.pendingRequiresRecreate) {
+            return state.wsiRecreateGate.requestIfNeeded(true)
+                ? PendingConfigAction::Recreate
+                : PendingConfigAction::None;
+        }
 
         Config::activeConf = *state.pendingConfig;
         state.appliedConf = Config::activeConf;
@@ -526,12 +538,10 @@ namespace {
 
     bool applyPendingConfigForSwapchainCreation() {
         auto& state = runtimeIoState();
-        if (!state.configPending.load(std::memory_order_acquire))
-            return false;
-
         std::lock_guard lock(state.mutex);
         if (!state.pendingConfig.has_value()) {
             state.configPending.store(false, std::memory_order_release);
+            state.wsiRecreateGate.onSwapchainCreation();
             return false;
         }
         const auto previousConf = Config::activeConf;
@@ -542,6 +552,9 @@ namespace {
         state.pendingConfig.reset();
         state.pendingRequiresRecreate = false;
         state.configPending.store(false, std::memory_order_release);
+        // Clear only after the newest coalesced config is installed, so no
+        // present thread can launch a second invalidation during consumption.
+        state.wsiRecreateGate.onSwapchainCreation();
         std::cerr << "lsfg-vk: init stage=config-applied-for-swapchain"
                   << " multiplier=" << Config::activeConf.multiplier
                   << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
