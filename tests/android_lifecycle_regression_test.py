@@ -36,8 +36,16 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         self.assertIn('"active="', hooks)
         self.assertIn('"generation_ready="', hooks)
         self.assertIn("publishRuntimeState", hooks)
-        self.assertIn("publishRuntimeState(configFile, false, false", hooks)
-        self.assertIn("publishRuntimeState(activeConf.config_file, true, true", hooks)
+        self.assertIn(
+            "publishRuntimeState(activeConf.config_file, false, false",
+            hooks,
+            "Pass-through/fail-open swapchains must immediately publish generation_ready=0 from the active cached config",
+        )
+        self.assertIn(
+            "publishRuntimeState(activeConf.config_file, true, true",
+            hooks,
+            "A successfully constructed LSFG swapchain must immediately publish generation_ready=1",
+        )
 
 
 if __name__ == "__main__":
