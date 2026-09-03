@@ -114,6 +114,26 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn('"adaptive="', hooks)
         self.assertIn('"target_fps="', hooks)
 
+    def test_runtime_stats_export_real_interval_generation_counts(self) -> None:
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        for token in (
+            "uint64_t windowSourceFrames{}",
+            "uint64_t windowGeneratedFrames{}",
+            "double generatedPerSource{}",
+            '"source_frames=" << snapshot.windowSourceFrames',
+            '"generated_frames=" << snapshot.windowGeneratedFrames',
+            '"generated_per_source=" << snapshot.generatedPerSource',
+            ".windowSourceFrames = stats.windowSourceFrames",
+            ".windowGeneratedFrames = stats.windowGeneratedFrames",
+        ):
+            self.assertIn(token, source)
+
+        present_start = source.index("VkResult myvkQueuePresentKHR")
+        present_end = source.index("void myvkDestroySwapchainKHR", present_start)
+        present = source[present_start:present_end]
+        self.assertNotIn("std::ofstream", present)
+        self.assertNotIn("stats.txt", present)
+
     def test_source_interval_excludes_previous_lsfg_cycle(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")

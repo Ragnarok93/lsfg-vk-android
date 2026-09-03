@@ -269,6 +269,9 @@ namespace {
         double outputFps{};
         double sourceFps{};
         double generatedFps{};
+        uint64_t windowSourceFrames{};
+        uint64_t windowGeneratedFrames{};
+        double generatedPerSource{};
         uint64_t totalSourceFrames{};
         uint64_t totalGeneratedFrames{};
         uint64_t presentFailures{};
@@ -322,6 +325,9 @@ namespace {
                 << "fps=" << snapshot.outputFps << '\n'
                 << "source_fps=" << snapshot.sourceFps << '\n'
                 << "generated_fps=" << snapshot.generatedFps << '\n'
+                << "source_frames=" << snapshot.windowSourceFrames << '\n'
+                << "generated_frames=" << snapshot.windowGeneratedFrames << '\n'
+                << "generated_per_source=" << snapshot.generatedPerSource << '\n'
                 << "source_frames_total=" << snapshot.totalSourceFrames << '\n'
                 << "generated_frames_total=" << snapshot.totalGeneratedFrames << '\n'
                 << "present_failures=" << snapshot.presentFailures << '\n'
@@ -390,6 +396,9 @@ namespace {
                 << " source_fps=" << snapshot.sourceFps
                 << " generated_fps=" << snapshot.generatedFps
                 << " output_fps=" << snapshot.outputFps
+                << " source_frames=" << snapshot.windowSourceFrames
+                << " generated_frames=" << snapshot.windowGeneratedFrames
+                << " generated_per_source=" << snapshot.generatedPerSource
                 << " source_frames_total=" << snapshot.totalSourceFrames
                 << " generated_frames_total=" << snapshot.totalGeneratedFrames
                 << " present_failures=" << snapshot.presentFailures
@@ -642,6 +651,12 @@ namespace {
             .outputFps = outputFps,
             .sourceFps = sourceFps,
             .generatedFps = generatedFps,
+            .windowSourceFrames = stats.windowSourceFrames,
+            .windowGeneratedFrames = stats.windowGeneratedFrames,
+            .generatedPerSource = stats.windowSourceFrames > 0
+                ? static_cast<double>(stats.windowGeneratedFrames)
+                    / static_cast<double>(stats.windowSourceFrames)
+                : 0.0,
             .totalSourceFrames = stats.totalSourceFrames,
             .totalGeneratedFrames = stats.totalGeneratedFrames,
             .presentFailures = stats.presentFailures,
