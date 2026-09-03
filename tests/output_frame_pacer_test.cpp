@@ -37,6 +37,8 @@ int main() {
         lastDelay = pacer.delayUntilNext(start);
     assert(lastDelay >= 999999999ns && lastDelay <= 1000000001ns);
 
+    // Regression coverage from the SM-S731U 2026-09-03 traces: fixed mode must
+    // not inherit Adaptive's persisted output target or divide source cadence.
     // Adaptive's target is not a fixed-multiplier pacing target. Fixed mode is
     // paced only from an explicit source budget and configured multiplier.
     assert(resolveOutputPacingTarget(false, 60, 30, 2) == 60);
