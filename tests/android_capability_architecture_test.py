@@ -84,6 +84,31 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         ):
             self.assertIn(token, combined)
 
+    def test_precompiled_shader_route_is_capability_selected_not_vendor_selected(self) -> None:
+        extract_header = (ROOT / "include/extract/extract.hpp").read_text(encoding="utf-8")
+        extract_source = (ROOT / "src/extract/extract.cpp").read_text(encoding="utf-8")
+        trans_header = (ROOT / "include/extract/trans.hpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        device = (ROOT / "framegen/src/core/device.cpp").read_text(encoding="utf-8")
+        combined = extract_header + extract_source + trans_header + context + device
+
+        self.assertIn("ShaderVariant", extract_header)
+        self.assertIn("PrecompiledFp32", extract_header)
+        self.assertIn("PrecompiledFp16", extract_header)
+        self.assertIn("kFp16ResourceOffset", extract_source)
+        self.assertIn("kFp32ResourceOffset", extract_source)
+        self.assertIn("normalizePrecompiledSpirv", trans_header)
+        self.assertIn("LSFG_VK_SHADER_ROUTE", context)
+        self.assertNotIn("VK_VENDOR_ID_QUALCOMM", combined)
+        self.assertNotIn("0x5143", combined)
+
+    def test_vulkan_11_memory_model_extension_is_probed_and_enabled_for_dxbc_fallback(self) -> None:
+        device = (ROOT / "framegen/src/core/device.cpp").read_text(encoding="utf-8")
+        self.assertIn("VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME", device)
+        self.assertIn("VkPhysicalDeviceVulkanMemoryModelFeaturesKHR", device)
+        self.assertIn("memoryModelProbe", device)
+        self.assertIn("memoryModelEnable", device)
+
 
 if __name__ == "__main__":
     unittest.main()
