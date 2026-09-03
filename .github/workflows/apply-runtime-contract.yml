@@ -1,0 +1,30 @@
+name: Apply corrected runtime stability contract
+
+on:
+  push:
+    branches:
+      - Adaptive-Frame-Generation
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Adaptive-Frame-Generation
+          fetch-depth: 0
+      - name: Update only stale pacing contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/update_runtime_stability_contract.py
+          git diff --check
+          git diff -- tests/android_runtime_stability_test.py
+          git config user.name "Ragnarok93"
+          git config user.email "e_fontenot1@yahoo.com"
+          git add -A
+          git commit -m "test(android): align stability contract with pacing ownership"
+          git push origin HEAD:Adaptive-Frame-Generation
