@@ -51,8 +51,14 @@ int main() {
 
     // Adaptive may space output toward its objective only when a separate source
     // limiter has deliberately created room for those generated presentations.
+    // Targets above the configured interpolation capacity are clamped to the
+    // sustainable maximum so outputs remain evenly spaced instead of bunching
+    // early in each source interval and leaving a visible cadence gap.
     assert(resolveOutputPacingTarget(true, 60, 30, 2) == 60);
-    assert(resolveOutputPacingTarget(true, 120, 30, 2) == 120);
+    assert(resolveOutputPacingTarget(true, 70, 30, 2) == 60);
+    assert(resolveOutputPacingTarget(true, 120, 30, 2) == 60);
+    assert(resolveOutputPacingTarget(true, 70, 30, 3) == 70);
+    assert(resolveOutputPacingTarget(true, 120, 30, 4) == 120);
 
     assert(resolveOutputPacingTarget(false, 1,
         std::numeric_limits<uint32_t>::max(), 4)
