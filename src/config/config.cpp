@@ -95,12 +95,11 @@ void Config::updateConfig(const std::string& file) {
 
         const std::string exe = toml::find<std::string>(gameTable, "exe");
         Configuration game{
-            // A matching GameNative target must keep the Vulkan layer's loader
-            // dispatch resident for the process lifetime. Runtime Off is the
-            // validated multiplier=1 pass-through state; the serialized enabled
-            // flag is UI intent and must not make the loader stop advertising
-            // already-installed WSI hooks before a later hot-enable.
-            .enable = true,
+            // A matching GameNative target keeps the Vulkan layer's loader
+            // dispatch resident for the process lifetime, but user-facing Off
+            // is now a real runtime state.  `targeted` controls hook residency;
+            // `enable` controls whether the current swapchain needs LSFG WSI.
+            .enable = toml::find_or(gameTable, "enabled", true),
             .targeted = true,
             .dll = global.dll,
             .multiplier = toml::find_or(gameTable, "multiplier", 2U),
@@ -119,7 +118,7 @@ void Config::updateConfig(const std::string& file) {
         if (game.multiplier < 1)
             throw std::runtime_error("Multiplier cannot be less than 1");
         if (game.flowScale < 0.25F || game.flowScale > 1.0F)
-            throw std::runtime_error("Flow scale must be between 0.25 and 1.0");
+            throw std::runtime_error("Flow scale must be between 0.25F and 1.0F");
         if (game.adaptiveFramegen && game.fpsLimit == 0)
             throw std::runtime_error("Adaptive frame generation requires a positive fps_limit");
         games[exe] = std::move(game);
@@ -141,6 +140,8 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
             .e_present = VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR
         };
 
+        const char* enabled = std::getenv("LSFG_ENABLED");
+        if (enabled) conf.enable = std::string(enabled) != "0";
         const char* dll = std::getenv("LSFG_DLL_PATH");
         if (dll) conf.dll = std::string(dll);
         const char* multiplier = std::getenv("LSFG_MULTIPLIER");
