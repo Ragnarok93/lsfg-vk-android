@@ -56,6 +56,11 @@ public:
         std::chrono::nanoseconds sourceInterval,
         const StageCosts& priorStageCosts = {});
 
+    /// Tell the policy when the presentation path could not execute the planned
+    /// count (history warmup, timeout/fail-open). This keeps the next sample from
+    /// being attributed to work that never actually ran.
+    void noteActualGenerationCount(std::size_t count) noexcept;
+
     /// Compatibility shim for the existing Android present path. Adaptive FPS
     /// is an objective rather than a source limiter, so this always returns
     /// zero and never intentionally sleeps the game's real-frame presentation.
