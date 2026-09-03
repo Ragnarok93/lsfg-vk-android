@@ -169,6 +169,11 @@ void AdaptiveFrameScheduler::logControllerEvent(
 }
 
 std::size_t AdaptiveFrameScheduler::plan(
+        std::chrono::nanoseconds sourceInterval) {
+    return plan(sourceInterval, StageCosts{});
+}
+
+std::size_t AdaptiveFrameScheduler::plan(
         std::chrono::nanoseconds sourceInterval,
         const StageCosts& priorStageCosts) {
     lastProbeRejected_ = false;
