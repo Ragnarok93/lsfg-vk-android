@@ -24,5 +24,15 @@ int main() {
 
     pacer.configure(0);
     assert(pacer.delayUntilNext(start + 1s) == 0ns);
+
+    // Fractional nanoseconds are accumulated instead of truncated. Ninety 90 Hz
+    // periods should land at ~1 second, not drift early by repeated integer loss.
+    pacer.configure(90);
+    assert(pacer.delayUntilNext(start) == 0ns);
+    std::chrono::nanoseconds lastDelay{};
+    for (int i = 0; i < 90; ++i)
+        lastDelay = pacer.delayUntilNext(start);
+    assert(lastDelay >= 999999999ns && lastDelay <= 1000000001ns);
+
     return 0;
 }
