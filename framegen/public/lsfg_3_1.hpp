@@ -100,6 +100,11 @@ namespace LSFG_3_1 {
     void finalize();
 
 #ifdef __ANDROID__
+    /// Wait for submissions belonging only to the selected context.
+    /// Returns false when the bounded completion budget expires.
+    __attribute__((visibility("default")))
+    bool waitContext(int32_t id);
+
     /// Block until framegen's internal Vulkan device is idle. Used by the
     /// Android wrapper to sync between its own device (which writes input
     /// AHBs) and framegen's device (which reads them) — without an explicit

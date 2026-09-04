@@ -11,6 +11,7 @@
 #include <optional>
 #include <cstdint>
 #include <cstdlib>
+#include <chrono>
 
 using namespace LSFG;
 using namespace LSFG_3_1P;
@@ -367,11 +368,18 @@ void Context::present(Vulkan& vk,
 }
 
 bool Context::waitForCompletion(Vulkan& vk) {
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::nanoseconds(framegenWaitTimeoutNs());
     for (auto& renderData : this->data) {
         if (!renderData.shouldWait)
             continue;
         for (auto& fence : renderData.completionFences) {
-            if (!fence.wait(vk.device, framegenWaitTimeoutNs()))
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+                return false;
+            const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                deadline - now).count();
+            if (!fence.wait(vk.device, static_cast<uint64_t>(remaining)))
                 return false;
         }
         renderData.shouldWait = false;

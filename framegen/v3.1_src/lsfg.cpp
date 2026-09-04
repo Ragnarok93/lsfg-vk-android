@@ -94,6 +94,11 @@ void LSFG_3_1::deleteContext(int32_t id) {
         return;
     }
     contexts.erase(it);
+    if (contexts.empty()) {
+        device.reset();
+        instance.reset();
+        std::cerr << "lsfg-vk: runtime stage=framegen-runtime-released backend=3.1\n";
+    }
 }
 
 void LSFG_3_1::finalize() {
@@ -131,6 +136,15 @@ int32_t LSFG_3_1::createContextFromAHB(
 #endif // __ANDROID__
 
 #ifdef __ANDROID__
+bool LSFG_3_1::waitContext(int32_t id) {
+    if (!device.has_value())
+        return false;
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        return false;
+    return it->second.waitForCompletion(*device);
+}
+
 void LSFG_3_1::waitIdle() {
     if (!device.has_value()) return;
     for (auto& [id, context] : contexts) {
