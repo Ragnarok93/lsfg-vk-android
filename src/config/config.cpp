@@ -31,14 +31,9 @@ namespace {
             return;
 
         // Adaptive Frame Generation has one authoritative target: the active
-        // GameNative source FPS limiter. A disabled limiter cannot leave a stale
-        // independent fps_limit active in the controller.
-        if (conf.sourceFpsLimit == 0) {
-            conf.adaptiveFramegen = false;
-            conf.fpsLimit = 0;
-            return;
-        }
-
+        // GameNative source FPS limiter. Preserve Adaptive mode at a zero target
+        // so disabling the limiter produces Adaptive zero-generation rather than
+        // silently falling back to fixed-multiplier generation.
         conf.fpsLimit = conf.sourceFpsLimit;
     }
 }
@@ -73,7 +68,6 @@ void Config::updateConfig(const std::string& file) {
         out.close();
     }
 
-    // parse config file
     std::optional<toml::value> parsed;
     try {
         parsed.emplace(toml::parse(file));
@@ -86,21 +80,18 @@ void Config::updateConfig(const std::string& file) {
     }
     auto& toml = *parsed;
 
-    // parse global configuration
     const toml::value globalTable = toml::find_or_default<toml::table>(toml, "global");
     const Configuration global{
-        .dll =   toml::find_or(globalTable, "dll", std::string()),
+        .dll = toml::find_or(globalTable, "dll", std::string()),
         .config_file = file,
         .timestamp = std::filesystem::last_write_time(file)
     };
 
-    // validate global configuration
     if (global.multiplier < 2)
         throw std::runtime_error("Global Multiplier cannot be less than 2");
     if (global.flowScale < 0.25F || global.flowScale > 1.0F)
         throw std::runtime_error("Flow scale must be between 0.25 and 1.0");
 
-    // parse game-specific configuration
     std::unordered_map<std::string, Configuration> games;
     const toml::value gamesList = toml::find_or_default<toml::array>(toml, "game");
     for (const auto& gameTable : gamesList.as_array()) {
@@ -111,10 +102,6 @@ void Config::updateConfig(const std::string& file) {
 
         const std::string exe = toml::find<std::string>(gameTable, "exe");
         Configuration game{
-            // A matching GameNative target keeps the Vulkan layer's loader
-            // dispatch resident for the process lifetime, but user-facing Off
-            // is now a real runtime state.  `targeted` controls hook residency;
-            // `enable` controls whether the current swapchain needs LSFG WSI.
             .enable = toml::find_or(gameTable, "enabled", true),
             .targeted = true,
             .dll = global.dll,
@@ -125,12 +112,11 @@ void Config::updateConfig(const std::string& file) {
             .adaptiveFramegen = toml::find_or(gameTable, "adaptive_framegen", false),
             .fpsLimit = toml::find_or(gameTable, "fps_limit", 0U),
             .sourceFpsLimit = toml::find_or(gameTable, "source_fps_limit", 0U),
-            .e_present =   into_present(toml::find_or(gameTable, "experimental_present_mode", "")),
+            .e_present = into_present(toml::find_or(gameTable, "experimental_present_mode", "")),
             .config_file = file,
             .timestamp = global.timestamp
         };
 
-        // validate the configuration
         if (game.multiplier < 1)
             throw std::runtime_error("Multiplier cannot be less than 1");
         if (game.flowScale < 0.25F || game.flowScale > 1.0F)
@@ -140,13 +126,11 @@ void Config::updateConfig(const std::string& file) {
         games[exe] = std::move(game);
     }
 
-    // store configurations
     globalConf = global;
     gameConfs = std::move(games);
 }
 
 Configuration Config::getConfig(const std::pair<std::string, std::string>& name) {
-    // process legacy environment variables
     if (std::getenv("LSFG_LEGACY")) {
         Configuration conf{
             .enable = true,
@@ -181,7 +165,6 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
         return conf;
     }
 
-    // process new configuration system
     if (!gameConfs.has_value())
         return globalConf;
 
