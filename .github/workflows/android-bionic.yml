@@ -35,6 +35,7 @@ jobs:
           python3 tests/android_wsi_loader_bridge_test.py
           python3 tests/android_wsi_provenance_test.py
           python3 tests/android_runtime_stability_test.py
+          python3 tests/android_off_path_contract_test.py
           python3 tests/android_hot_reload_capability_cache_test.py
           python3 tests/android_capability_architecture_test.py
           python3 tests/android_source_pacing_test.py
@@ -119,14 +120,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-build-log-${{ matrix.abi }}
-          path: android-build-${{ matrix.abi }}.log
+          path: android-build-${ANDROID_ABI}.log
           if-no-files-found: warn
 
       - name: Inspect ${{ matrix.abi }} artifact
         run: |
-          file "build-android-${{ matrix.abi }}/dist/liblsfg-vk-${{ matrix.abi }}.so"
+          file "build-android-${ANDROID_ABI}/dist/liblsfg-vk-${ANDROID_ABI}.so"
           "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
-            -h -d "build-android-${{ matrix.abi }}/dist/liblsfg-vk-${{ matrix.abi }}.so"
+            -h -d "build-android-${ANDROID_ABI}/dist/liblsfg-vk-${ANDROID_ABI}.so"
 
       - name: Upload ${{ matrix.abi }} artifact
         uses: actions/upload-artifact@v4
