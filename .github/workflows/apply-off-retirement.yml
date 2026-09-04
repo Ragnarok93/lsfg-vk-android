@@ -1,4 +1,5 @@
 name: Apply strict OFF transition patch
+# Retry after aligning the implementation with the red contract.
 
 on:
   push:
