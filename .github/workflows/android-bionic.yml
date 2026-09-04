@@ -39,6 +39,7 @@ jobs:
           python3 tests/android_hot_reload_capability_cache_test.py
           python3 tests/android_capability_architecture_test.py
           python3 tests/android_source_pacing_test.py
+          python3 tests/android_present_metadata_contract_test.py
 
       - name: Install Vulkan headers
         run: |
@@ -133,7 +134,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: liblsfg-vk-${{ matrix.abi }}
-          path: build-android-${{ matrix.abi }}/dist/liblsfg-vk-${{ matrix.abi }}.so
+          path: build-android-${ANDROID_ABI}/dist/liblsfg-vk-${ANDROID_ABI}.so
           if-no-files-found: error
 
   tag_release:
