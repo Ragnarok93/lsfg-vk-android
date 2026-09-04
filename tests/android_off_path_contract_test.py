@@ -19,6 +19,17 @@ device_post = hooks.split("VkResult myvkCreateDevicePost(", 1)[1].split(
 )[0]
 assert "const bool androidAhbSupported = frameGenDeviceFeaturesEnabled" in device_post
 
+runtime_apply = hooks.split("PendingConfigAction applyPendingRuntimeConfig()", 1)[1].split(
+    "bool applyPendingConfigForSwapchainCreation()", 1
+)[0]
+assert "const bool nextNeedsFrameGeneration" in runtime_apply
+assert "if (!nextNeedsFrameGeneration)" in runtime_apply
+disable_apply = runtime_apply.split("if (!nextNeedsFrameGeneration)", 1)[1]
+assert "Config::activeConf = *state.pendingConfig;" in disable_apply
+assert "state.appliedConf = Config::activeConf;" in disable_apply
+assert "state.pendingConfig.reset();" in disable_apply
+assert "state.configPending.store(false, std::memory_order_release);" in disable_apply
+
 swapchain = hooks.split("VkResult myvkCreateSwapchainKHR(", 1)[1].split(
     "VkResult myvkQueuePresentKHR(", 1
 )[0]
@@ -33,6 +44,18 @@ assert "effectiveMinImageCount = pCreateInfo->minImageCount" in pass_through
 present = hooks.split("VkResult myvkQueuePresentKHR(", 1)[1].split(
     "void myvkDestroySwapchainKHR(", 1
 )[0]
+transition = present.split("if (pendingAction == PendingConfigAction::Recreate)", 1)[1].split(
+    "#endif", 1
+)[0]
+assert "Layer::ovkQueuePresentKHR(queue, pPresentInfo);" in transition
+assert "eraseSwapchainState(*pPresentInfo->pSwapchains);" in transition
+assert transition.index("Layer::ovkQueuePresentKHR(queue, pPresentInfo);") < transition.index(
+    "eraseSwapchainState(*pPresentInfo->pSwapchains);"
+)
+assert transition.index("eraseSwapchainState(*pPresentInfo->pSwapchains);") < transition.index(
+    "return VK_ERROR_OUT_OF_DATE_KHR;"
+)
+
 disabled_guard = "if (!conf.enable || conf.multiplier <= 1)\n            return Layer::ovkQueuePresentKHR(queue, pPresentInfo);"
 assert disabled_guard in present
 assert present.index(disabled_guard) < present.index("sourceFramePacer.configure")
