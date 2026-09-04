@@ -20,6 +20,14 @@
 #include <unordered_map>
 
 namespace {
+
+bool shouldInterceptTarget() {
+    // `targeted` is immutable process residency. Runtime `enable` may change
+    // after the application has cached Vulkan WSI entrypoints, so it must not
+    // decide whether those entrypoints are intercepted.
+    return Config::activeConf.targeted || Config::activeConf.enable;
+}
+
 PFN_vkCreateInstance next_vkCreateInstance{};
 PFN_vkDestroyInstance next_vkDestroyInstance{};
 PFN_vkCreateDevice next_vkCreateDevice{};
@@ -257,7 +265,7 @@ VkResult layer_vkCreateInstance(
             throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
                 "Failed to get instance function pointer for vkCreateInstance");
 
-        if (!Config::activeConf.enable) {
+        if (!shouldInterceptTarget()) {
             auto res = next_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
             if (res == VK_SUCCESS)
                 initInstanceFunc(*pInstance, "vkCreateDevice", &next_vkCreateDevice);
@@ -322,7 +330,7 @@ VkResult layer_vkCreateDevice(
                 "No layer device loader data found in pNext chain");
         next_vSetDeviceLoaderData = loaderData->u.pfnSetDeviceLoaderData;
 
-        if (!Config::activeConf.enable) {
+        if (!shouldInterceptTarget()) {
             auto res = next_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
             if (res == VK_SUCCESS) registerPassthroughDevice(*pDevice);
             return res;
@@ -424,7 +432,7 @@ PFN_vkVoidFunction layer_vkGetInstanceProcAddr(VkInstance instance, const char* 
     auto it = layerFunctions.find(name);
     if (it != layerFunctions.end()) return it->second;
     it = Hooks::hooks.find(name);
-    if (it != Hooks::hooks.end() && Config::activeConf.enable) {
+    if (it != Hooks::hooks.end() && shouldInterceptTarget()) {
         logPresentationHookResolution("gipa", name);
         return it->second;
     }
@@ -442,7 +450,7 @@ PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName)
         tracked && dispatch.GetDeviceProcAddr ? dispatch.GetDeviceProcAddr : next_vkGetDeviceProcAddr;
 
     it = Hooks::hooks.find(name);
-    if (it != Hooks::hooks.end() && Config::activeConf.enable) {
+    if (it != Hooks::hooks.end() && shouldInterceptTarget()) {
         // The loader may query GDPA while it is still constructing a logical
         // device's dispatch table, before storeDeviceDispatch() has published
         // our per-device snapshot.  Do not hand it a permanent downstream WSI

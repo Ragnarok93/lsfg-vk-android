@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <algorithm>
+#include <utility>
 #include <vector>
 
 using namespace Extract;
@@ -21,13 +22,14 @@ struct BindingOffsets {
 };
 
 std::vector<uint8_t> Extract::translateShader(std::vector<uint8_t> bytecode) {
-    // compile the shader
+    if (isSpirvBytecode(bytecode))
+        return normalizePrecompiledSpirv(std::move(bytecode));
+
     dxvk::DxbcReader reader(reinterpret_cast<const char*>(bytecode.data()), bytecode.size());
     dxvk::DxbcModule module(reader);
     const dxvk::DxbcModuleInfo info{};
     auto code = module.compile(info, "CS");
 
-    // find all bindings
     std::vector<BindingOffsets> bindingOffsets;
     std::vector<uint32_t> varIds;
     for (auto ins : code) {
@@ -60,15 +62,13 @@ std::vector<uint8_t> Extract::translateShader(std::vector<uint8_t> bytecode) {
             validBindings.push_back(info);
     }
 
-    // patch binding offset
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
         for (size_t i = 0; i < validBindings.size(); i++)
-            code.data()[validBindings.at(i).bindingOffset] // NOLINT
+            code.data()[validBindings.at(i).bindingOffset]
                 = static_cast<uint8_t>(i);
     #pragma clang diagnostic pop
 
-    // return the new bytecode
     std::vector<uint8_t> spirvBytecode(code.size());
     std::copy_n(reinterpret_cast<uint8_t*>(code.data()),
         code.size(), spirvBytecode.data());

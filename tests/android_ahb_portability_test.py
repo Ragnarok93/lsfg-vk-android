@@ -79,6 +79,30 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             "Android generated AHB output must not use swapchain-only copyImage layout semantics",
         )
 
+    def test_source_ahb_first_use_is_tracked_per_shared_image(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        present = source.split("VkResult LsContext::present", 1)[1]
+        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+
+        self.assertIn("sourceAhbInitialized_", header)
+        self.assertIn("const size_t sourceAhbIndex", android_present)
+        self.assertIn("const bool firstSourceAhbUse", android_present)
+        self.assertNotIn(
+            "this->frameIdx < 2",
+            android_present,
+            "Adaptive-zero direct presents may advance frameIdx before either source AHB has been initialized",
+        )
+        wait_pos = android_present.index("submitAndWaitForAhbHandoff(")
+        init_pos = android_present.index(
+            "this->sourceAhbInitialized_.at(sourceAhbIndex) = true;"
+        )
+        self.assertGreater(
+            init_pos,
+            wait_pos,
+            "A source AHB becomes initialized only after its first copy/release handoff completes successfully",
+        )
+
     def test_swapchain_context_initialization_has_staged_diagnostics(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         for marker in (
@@ -89,19 +113,33 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, hooks)
 
-    def test_runtime_config_change_is_reparsed_before_swapchain_recreation(self) -> None:
+    def test_runtime_config_change_is_staged_off_present_thread_before_wsi_restore(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         present = hooks.split("VkResult myvkQueuePresentKHR", 1)[1]
+
         self.assertIn(
+            "applyPendingRuntimeConfig()",
+            present,
+            "The present thread should adopt an already-staged config snapshot only",
+        )
+        self.assertNotIn(
             "Config::updateConfig(",
             present,
-            "A GameNative hot-reload must reparse conf.toml instead of remaining permanently OUT_OF_DATE",
+            "No filesystem timestamp/config polling belongs in vkQueuePresentKHR",
         )
-        self.assertIn(
+        self.assertNotIn(
             "Config::activeConf = Config::getConfig(Utils::getProcessName())",
             present,
+            "Config parsing must remain on the reload worker, not the presentation hot path",
         )
-        self.assertIn("stage=config-reloaded", present)
+        self.assertIn("stage=wsi-restore-requested", present)
+        transition_present = present.index("Layer::ovkQueuePresentKHR(queue, pPresentInfo)")
+        out_of_date = present.index("return VK_ERROR_OUT_OF_DATE_KHR")
+        self.assertLess(
+            transition_present,
+            out_of_date,
+            "A WSI-changing hot toggle must present the current real frame before requesting recreation",
+        )
 
     def test_android_first_present_has_one_shot_framegen_stage_diagnostics(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")

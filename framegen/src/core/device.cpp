@@ -154,6 +154,8 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
     const bool hasTimelineExt = hasExtension(availableExtensions,
         VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+    const bool hasMemoryModelExt = !api12 && hasExtension(availableExtensions,
+        VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME);
     const bool hasDriverProperties = api12 || hasExtension(availableExtensions,
         VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
 
@@ -194,6 +196,9 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     VkPhysicalDeviceTimelineSemaphoreFeaturesKHR timelineProbe{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR,
     };
+    VkPhysicalDeviceVulkanMemoryModelFeaturesKHR memoryModelProbe{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES_KHR,
+    };
 
     void* featureProbeHead = nullptr;
     if (api13) {
@@ -214,6 +219,10 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         if (hasTimelineExt) {
             timelineProbe.pNext = featureProbeHead;
             featureProbeHead = &timelineProbe;
+        }
+        if (hasMemoryModelExt) {
+            memoryModelProbe.pNext = featureProbeHead;
+            featureProbeHead = &memoryModelProbe;
         }
     }
     VkPhysicalDeviceFeatures2 featuresProbe{
@@ -245,6 +254,10 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     caps.subgroupStages = subgroup.supportedStages;
     caps.subgroupOperations = subgroup.supportedOperations;
     caps.subgroupSize = subgroup.subgroupSize;
+
+    const bool memoryModelAvailable = api12
+        ? features12Probe.vulkanMemoryModel == VK_TRUE
+        : (hasMemoryModelExt && memoryModelProbe.vulkanMemoryModel == VK_TRUE);
 
     const SupportRequirements requirements{
 #ifdef __ANDROID__
@@ -303,7 +316,8 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
               << " ahbR16fStorage=" << (this->diagnostics.ahbR16fStorage ? 1 : 0)
               << " ahbMode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
               << " sync=" << synchronizationPathName(decision.synchronizationPath)
-              << " fp=" << shaderPrecisionName(decision.shaderPrecision) << '\n';
+              << " fp=" << shaderPrecisionName(decision.shaderPrecision)
+              << " vmm=" << (memoryModelAvailable ? 1 : 0) << '\n';
 
     uint32_t familyCount{};
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
@@ -333,6 +347,11 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         enabledExtensions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
     if (!api12 && caps.shaderFloat16)
         enabledExtensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+
+    const bool enableMemoryModel = !api12 && hasMemoryModelExt
+        && memoryModelProbe.vulkanMemoryModel == VK_TRUE;
+    if (enableMemoryModel)
+        enabledExtensions.push_back(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME);
 
     const bool hasRobustness2 = hasExtension(availableExtensions,
         VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
@@ -381,6 +400,16 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR,
         .shaderFloat16 = !api12 && caps.shaderFloat16 ? VK_TRUE : VK_FALSE,
     };
+    VkPhysicalDeviceVulkanMemoryModelFeaturesKHR memoryModelEnable{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES_KHR,
+        .vulkanMemoryModel = enableMemoryModel ? VK_TRUE : VK_FALSE,
+        .vulkanMemoryModelDeviceScope = enableMemoryModel
+            ? memoryModelProbe.vulkanMemoryModelDeviceScope
+            : VK_FALSE,
+        .vulkanMemoryModelAvailabilityVisibilityChains = enableMemoryModel
+            ? memoryModelProbe.vulkanMemoryModelAvailabilityVisibilityChains
+            : VK_FALSE,
+    };
 
     void* enableHead = enableNullDescriptor ? &robustnessEnable : nullptr;
     if (decision.synchronizationPath == SynchronizationPath::Core13Sync2) {
@@ -393,9 +422,15 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     if (api12) {
         features12Enable.pNext = enableHead;
         enableHead = &features12Enable;
-    } else if (caps.shaderFloat16) {
-        float16Enable.pNext = enableHead;
-        enableHead = &float16Enable;
+    } else {
+        if (caps.shaderFloat16) {
+            float16Enable.pNext = enableHead;
+            enableHead = &float16Enable;
+        }
+        if (enableMemoryModel) {
+            memoryModelEnable.pNext = enableHead;
+            enableHead = &memoryModelEnable;
+        }
     }
 
     VkPhysicalDeviceFeatures2 enabledFeatures2{
