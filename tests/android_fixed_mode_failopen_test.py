@@ -11,11 +11,17 @@ class AndroidFixedModeFailOpenTest(unittest.TestCase):
         return_pos = source.index("return VK_SUCCESS;", marker)
         fallback = source[marker:return_pos]
 
-        self.assertIn("ovkDestroySwapchainKHR", fallback)
-        self.assertIn("eraseSwapchainState", fallback)
-        self.assertIn("device, pCreateInfo, pAllocator, pSwapchain", fallback)
+        self.assertIn("VkSwapchainCreateInfoKHR fallbackCreateInfo = *pCreateInfo;", fallback)
+        self.assertIn("fallbackCreateInfo.oldSwapchain = failedSwapchain;", fallback)
+        self.assertIn("VkSwapchainKHR fallbackSwapchain = VK_NULL_HANDLE;", fallback)
+        self.assertIn("device, &fallbackCreateInfo, pAllocator, &fallbackSwapchain", fallback)
+        create_pos = fallback.index("&fallbackCreateInfo")
+        destroy_pos = fallback.index("ovkDestroySwapchainKHR(device, failedSwapchain")
+        self.assertLess(create_pos, destroy_pos)
+        self.assertIn("eraseSwapchainState(failedSwapchain)", fallback)
+        self.assertIn("*pSwapchain = fallbackSwapchain;", fallback)
         self.assertIn("swapchain-fallback-pass-through", fallback)
-        self.assertIn("swapchainToDeviceTable.emplace", fallback)
+        self.assertIn("swapchainToDeviceTable.emplace(*pSwapchain, device)", fallback)
 
 
 if __name__ == "__main__":

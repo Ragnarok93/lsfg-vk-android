@@ -87,6 +87,11 @@ namespace LSFG_3_1P {
     void finalize();
 
 #ifdef __ANDROID__
+    /// Wait for submissions belonging only to the selected context.
+    /// Returns false when the bounded completion budget expires.
+    __attribute__((visibility("default")))
+    bool waitContext(int32_t id);
+
     /// Block until framegen's internal Vulkan device is idle. See LSFG_3_1::waitIdle.
     __attribute__((visibility("default")))
     void waitIdle();

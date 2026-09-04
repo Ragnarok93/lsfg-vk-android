@@ -201,9 +201,54 @@ namespace {
         uint64_t totalSourceFrames{0};
         uint64_t totalGeneratedFrames{0};
         uint64_t presentFailures{0};
+        bool generationReadyPublished{false};
     };
 
     std::unordered_map<VkSwapchainKHR, RuntimeOutputStats> runtimeOutputStats;
+
+    void publishRuntimeState(const std::string& configFile,
+            bool active, bool generationReady, int multiplier, bool performance) {
+        if (configFile.empty())
+            return;
+
+        const std::filesystem::path statsPath =
+            std::filesystem::path(configFile).parent_path() / "stats.txt";
+        const std::filesystem::path tempPath = statsPath.string() + ".tmp";
+        try {
+            std::ofstream out(tempPath, std::ios::trunc);
+            if (!out)
+                throw std::runtime_error("unable to open temporary stats file");
+            out << "active=" << (active ? 1 : 0) << '\n'
+                << "generation_ready=" << (generationReady ? 1 : 0) << '\n'
+                << "fps=0.000\n"
+                << "source_fps=0.000\n"
+                << "generated_fps=0.000\n"
+                << "source_frames_total=0\n"
+                << "generated_frames_total=0\n"
+                << "present_failures=0\n"
+                << "multiplier=" << multiplier << '\n'
+                << "performance=" << (performance ? 1 : 0) << '\n';
+            out.close();
+            if (!out)
+                throw std::runtime_error("failed to flush temporary stats file");
+
+            std::error_code ec;
+            std::filesystem::rename(tempPath, statsPath, ec);
+            if (ec) {
+                std::filesystem::remove(statsPath, ec);
+                ec.clear();
+                std::filesystem::rename(tempPath, statsPath, ec);
+            }
+            if (ec)
+                throw std::runtime_error("failed to publish stats.txt: " + ec.message());
+            Utils::resetLimitN("statsWrite");
+        } catch (const std::exception& e) {
+            std::error_code ignored;
+            std::filesystem::remove(tempPath, ignored);
+            Utils::logLimitN("statsWrite", 5,
+                "Failed to publish Android runtime state: " + std::string(e.what()));
+        }
+    }
 
     void writeRuntimeStatsFile(const std::string& configFile,
             double outputFps, double sourceFps, double generatedFps,
@@ -219,6 +264,8 @@ namespace {
             if (!out)
                 throw std::runtime_error("unable to open temporary stats file");
             out << std::fixed << std::setprecision(3)
+                << "active=1\n"
+                << "generation_ready=1\n"
                 << "fps=" << outputFps << '\n'
                 << "source_fps=" << sourceFps << '\n'
                 << "generated_fps=" << generatedFps << '\n'
@@ -250,14 +297,17 @@ namespace {
     }
 
     void recordSuccessfulOutputCycle(VkSwapchainKHR swapchain,
-            const std::string& configFile, int multiplier, bool performance) {
+            const std::string& configFile, uint64_t generated,
+            int multiplier, bool performance) {
         auto& stats = runtimeOutputStats[swapchain];
         stats.windowSourceFrames++;
         stats.totalSourceFrames++;
-        const uint64_t generated = multiplier > 1
-            ? static_cast<uint64_t>(multiplier - 1) : 0;
         stats.windowGeneratedFrames += generated;
         stats.totalGeneratedFrames += generated;
+        if (!stats.generationReadyPublished && generated > 0) {
+            publishRuntimeState(configFile, true, true, multiplier, performance);
+            stats.generationReadyPublished = true;
+        }
 
         const auto now = RuntimeOutputStats::Clock::now();
         const double elapsedSeconds = std::chrono::duration<double>(
@@ -390,26 +440,30 @@ namespace {
         Utils::resetLimitN("swapMap");
         auto& deviceInfo = it->second;
 
-        if (pCreateInfo->oldSwapchain)
-            eraseSwapchainState(pCreateInfo->oldSwapchain);
-
         const auto& activeConf = Config::activeConf;
-        if (!activeConf.enable || activeConf.multiplier <= 1) {
-            const auto res = Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+        const auto createPassThrough = [&](const char* reason) -> VkResult {
+            const auto res = Layer::ovkCreateSwapchainKHR(
+                device, pCreateInfo, pAllocator, pSwapchain);
             if (res == VK_SUCCESS) {
+                if (pCreateInfo->oldSwapchain)
+                    eraseSwapchainState(pCreateInfo->oldSwapchain);
                 swapchainToDeviceTable.emplace(*pSwapchain, device);
                 std::cerr << "lsfg-vk: init stage=swapchain-pass-through enabled="
                           << (activeConf.enable ? 1 : 0)
-                          << " multiplier=" << activeConf.multiplier << "\n";
+                          << " multiplier=" << activeConf.multiplier
+                          << " reason=" << reason << "\n";
             }
             return res;
-        }
+        };
+
+        if (!activeConf.enable || activeConf.multiplier <= 1)
+            return createPassThrough("disabled");
 
 #ifdef __ANDROID__
         if (!deviceInfo.androidAhbSupported) {
             Utils::logLimitN("swapAhb", 5,
                 "init stage=ahb-extension-unavailable; preserving original swapchain");
-            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+            return createPassThrough("ahb-unavailable");
         }
 #endif
 
@@ -419,7 +473,7 @@ namespace {
         if (surfaceRes != VK_SUCCESS) {
             Utils::logLimitN("swapCaps", 5,
                 "init stage=swapchain-capabilities-unavailable; preserving original swapchain");
-            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+            return createPassThrough("capabilities-unavailable");
         }
 
         constexpr VkImageUsageFlags requiredTransferUsage =
@@ -430,7 +484,7 @@ namespace {
                       << surfaceCapabilities.supportedUsageFlags
                       << " requiredUsage=" << requiredTransferUsage
                       << "; preserving original swapchain\n";
-            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+            return createPassThrough("unsupported-usage");
         }
 
         VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;
@@ -443,7 +497,7 @@ namespace {
                       << " maxImageCount=" << maxImageCount
                       << " requiredHeadroom=" << requiredHeadroom
                       << "; preserving original swapchain\n";
-            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+            return createPassThrough("headroom-overflow");
         }
         const uint32_t requiredImageCount = pCreateInfo->minImageCount + requiredHeadroom;
         std::cerr << "lsfg-vk: init stage=swapchain-capacity minImageCount="
@@ -457,7 +511,7 @@ namespace {
                       << " maxImageCount=" << maxImageCount
                       << " requiredHeadroom=" << requiredHeadroom
                       << "; preserving original swapchain\n";
-            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+            return createPassThrough("insufficient-headroom");
         }
         createInfo.minImageCount = requiredImageCount;
         Utils::resetLimitN("swapCount");
@@ -470,19 +524,25 @@ namespace {
             std::cerr << "lsfg-vk: init stage=blit-format-unsupported sharedFormat="
                       << sharedFormat << " swapchainFormat=" << pCreateInfo->imageFormat
                       << "; preserving original swapchain\n";
-            return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+            return createPassThrough("blit-unsupported");
         }
 
         createInfo.imageUsage |= requiredTransferUsage;
 
         const auto configuredPresentMode = Config::activeConf.e_present;
-        createInfo.presentMode = choosePresentMode(
-            deviceInfo.physicalDevice, pCreateInfo->surface,
-            pCreateInfo->presentMode, configuredPresentMode);
+        const bool recreatingExistingSwapchain = pCreateInfo->oldSwapchain != VK_NULL_HANDLE;
+        createInfo.presentMode = recreatingExistingSwapchain
+            ? pCreateInfo->presentMode
+            : choosePresentMode(
+                deviceInfo.physicalDevice, pCreateInfo->surface,
+                pCreateInfo->presentMode, configuredPresentMode);
 
         auto res = Layer::ovkCreateSwapchainKHR(device, &createInfo, pAllocator, pSwapchain);
-        if (res != VK_SUCCESS)
-            return res;
+        if (res != VK_SUCCESS) {
+            std::cerr << "lsfg-vk: init stage=swapchain-modified-create-failed result="
+                      << res << "; retrying original parameters\n";
+            return createPassThrough("modified-create-failed");
+        }
 
         try {
             swapchainToPresent.emplace(*pSwapchain, createInfo.presentMode);
@@ -506,6 +566,12 @@ namespace {
                 deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
                 swapchainImages
             ));
+            if (pCreateInfo->oldSwapchain)
+                eraseSwapchainState(pCreateInfo->oldSwapchain);
+#ifdef __ANDROID__
+            publishRuntimeState(activeConf.config_file, true, false,
+                static_cast<int>(activeConf.multiplier), activeConf.performance);
+#endif
             std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 
             std::cerr << "lsfg-vk: Swapchain context " <<
@@ -520,18 +586,25 @@ namespace {
                 "An error occurred while creating the swapchain wrapper:\n"
                 "- " + std::string(e.what()));
             const VkSwapchainKHR failedSwapchain = *pSwapchain;
-            eraseSwapchainState(failedSwapchain);
-            Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);
-            *pSwapchain = VK_NULL_HANDLE;
-
+            VkSwapchainCreateInfoKHR fallbackCreateInfo = *pCreateInfo;
+            fallbackCreateInfo.oldSwapchain = failedSwapchain;
+            VkSwapchainKHR fallbackSwapchain = VK_NULL_HANDLE;
             const auto fallbackRes = Layer::ovkCreateSwapchainKHR(
-                device, pCreateInfo, pAllocator, pSwapchain);
+                device, &fallbackCreateInfo, pAllocator, &fallbackSwapchain);
             if (fallbackRes == VK_SUCCESS) {
+                eraseSwapchainState(failedSwapchain);
+                if (pCreateInfo->oldSwapchain)
+                    eraseSwapchainState(pCreateInfo->oldSwapchain);
+                Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);
+                *pSwapchain = fallbackSwapchain;
                 swapchainToDeviceTable.emplace(*pSwapchain, device);
                 std::cerr << "lsfg-vk: init stage=swapchain-fallback-pass-through"
                              " reason=ls-context-failed\n";
                 return VK_SUCCESS;
             }
+            eraseSwapchainState(failedSwapchain);
+            Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);
+            *pSwapchain = VK_NULL_HANDLE;
             std::cerr << "lsfg-vk: init stage=swapchain-fallback-failed result="
                       << fallbackRes << "\n";
             return fallbackRes;
@@ -588,6 +661,14 @@ namespace {
                         + std::string(e.what()));
                 }
             }
+#ifdef __ANDROID__
+            publishRuntimeState(configFile, false, false,
+                static_cast<int>(Config::activeConf.multiplier),
+                Config::activeConf.performance);
+#endif
+            // Retire only the LSFG wrapper before recreation. Keep the old Vulkan
+            // swapchain and routing state usable as a pass-through fallback.
+            swapchains.erase(*pPresentInfo->pSwapchains);
             Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
@@ -629,6 +710,13 @@ namespace {
         #pragma clang diagnostic pop
 
         if (configuredPresent != conf.e_present) {
+#ifdef __ANDROID__
+            publishRuntimeState(conf.config_file, false, false,
+                static_cast<int>(conf.multiplier), conf.performance);
+#endif
+            // Release the LSFG context so replacement construction cannot inherit
+            // stale multiplier/backend runtime capacity.
+            swapchains.erase(*pPresentInfo->pSwapchains);
             Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
@@ -647,14 +735,22 @@ namespace {
                 queue, semaphores, *pPresentInfo->pImageIndices);
 
 #ifdef __ANDROID__
-            recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
-                conf.config_file, conf.multiplier, conf.performance);
+            const uint64_t generated = swapchain.lastGeneratedFrameCount();
+            if (generated > 0) {
+                recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
+                    conf.config_file, generated, conf.multiplier, conf.performance);
+            } else if (res == VK_ERROR_OUT_OF_DATE_KHR) {
+                publishRuntimeState(conf.config_file, false, false,
+                    static_cast<int>(conf.multiplier), conf.performance);
+            }
 #endif
             Utils::resetLimitN("swapPresent");
             return res;
         } catch (const std::exception& e) {
 #ifdef __ANDROID__
             recordOutputFailure(*pPresentInfo->pSwapchains);
+            publishRuntimeState(conf.config_file, false, false,
+                static_cast<int>(conf.multiplier), conf.performance);
 #endif
             Utils::logLimitN("swapPresent", 5,
                 "An error occurred while presenting the swapchain; degrading to native presentation:\n"

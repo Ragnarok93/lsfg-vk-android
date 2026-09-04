@@ -16,6 +16,7 @@
 #include <ctime>
 #include <functional>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -27,6 +28,17 @@ namespace {
     std::optional<Core::Instance> instance;
     std::optional<Vulkan> device;
     std::unordered_map<int32_t, Context> contexts;
+
+    void validateOutputCount(size_t outputCount) {
+        if (!device.has_value())
+            throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+        if (outputCount != device->generationCount) {
+            throw std::runtime_error(
+                "LSFG output-count mismatch: expected=" +
+                std::to_string(device->generationCount) + " actual=" +
+                std::to_string(outputCount));
+        }
+    }
 }
 
 void LSFG_3_1P::initialize(const LSFG::DeviceIdentity& identity, VkFormat sharedFormat,
@@ -64,6 +76,7 @@ int32_t LSFG_3_1P::createContext(
         VkExtent2D extent, VkFormat format) {
     if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    validateOutputCount(outN.size());
 
     const int32_t id = std::rand();
     contexts.emplace(id, Context(*device, in0, in1, outN, extent, format));
@@ -94,6 +107,11 @@ void LSFG_3_1P::deleteContext(int32_t id) {
         return;
     }
     contexts.erase(it);
+    if (contexts.empty()) {
+        device.reset();
+        instance.reset();
+        std::cerr << "lsfg-vk: runtime stage=framegen-runtime-released backend=3.1P\n";
+    }
 }
 
 void LSFG_3_1P::finalize() {
@@ -122,6 +140,7 @@ int32_t LSFG_3_1P::createContextFromAHB(
         VkExtent2D extent, VkFormat format) {
     if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    validateOutputCount(outN.size());
 
     const int32_t id = std::rand();
     contexts.emplace(id, Context(*device, in0, in1, outN, extent, format));
@@ -131,6 +150,15 @@ int32_t LSFG_3_1P::createContextFromAHB(
 #endif // __ANDROID__
 
 #ifdef __ANDROID__
+bool LSFG_3_1P::waitContext(int32_t id) {
+    if (!device.has_value())
+        return false;
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        return false;
+    return it->second.waitForCompletion(*device);
+}
+
 void LSFG_3_1P::waitIdle() {
     if (!device.has_value()) return;
     for (auto& [id, context] : contexts) {

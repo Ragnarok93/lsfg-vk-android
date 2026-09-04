@@ -36,6 +36,10 @@ jobs:
           python3 tests/android_wsi_provenance_test.py
           python3 tests/android_runtime_stability_test.py
           python3 tests/android_capability_architecture_test.py
+          python3 tests/android_fixed_mode_failopen_test.py
+          python3 tests/android_fixed_mode_recreate_test.py
+          python3 tests/android_fixed_mode_readiness_timeout_test.py
+          python3 tests/android_fixed_mode_source_history_warmup_test.py
 
       - name: Install Vulkan headers
         run: |
