@@ -132,9 +132,22 @@ namespace {
             const VkAllocationCallbacks* pAllocator,
             VkDevice* pDevice) {
 #ifdef __ANDROID__
-        // AHB is required by this Android exchange path, but LSFG must never
-        // turn a missing optional capability into failure of the game's own
-        // Vulkan device. Probe first and fail open to the unmodified create info.
+        // Device creation is the earliest point where the layer can materially
+        // alter the game's Vulkan contract. If frame generation is disabled at
+        // process launch, preserve the application's extension list exactly.
+        // A later enable request therefore requires a process restart rather
+        // than retroactively changing an already-created VkDevice.
+        const bool frameGenDeviceFeaturesEnabled =
+            Config::activeConf.enable && Config::activeConf.multiplier > 1.0;
+        if (!frameGenDeviceFeaturesEnabled) {
+            std::cerr << "lsfg-vk: init stage=device-pass-through reason=disabled; "
+                         "preserving game device extensions\n";
+            return Layer::ovkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+        }
+
+        // AHB is required only while the Android frame-generation exchange path
+        // is active. Missing optional capability must fail open to the game's
+        // untouched device creation rather than breaking native presentation.
         const bool ahbSupported = supportsDeviceExtension(physicalDevice,
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
         if (!ahbSupported) {
@@ -176,8 +189,14 @@ namespace {
             const VkAllocationCallbacks*,
             VkDevice* pDevice) {
 #ifdef __ANDROID__
-        const bool androidAhbSupported = supportsDeviceExtension(physicalDevice,
-            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+        // Mark the exchange path usable only when this VkDevice was created for
+        // an active frame-generation session. A layer that started disabled
+        // must not begin AHB work after a hot config change on the same device.
+        const bool frameGenDeviceFeaturesEnabled =
+            Config::activeConf.enable && Config::activeConf.multiplier > 1.0;
+        const bool androidAhbSupported = frameGenDeviceFeaturesEnabled
+            && supportsDeviceExtension(physicalDevice,
+                VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
 #else
         const bool androidAhbSupported = true;
 #endif
