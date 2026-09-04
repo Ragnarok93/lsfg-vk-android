@@ -16,7 +16,9 @@ new_runtime = '''        if (state.pendingRequiresRecreate) {
             const auto action = state.wsiRecreateGate.requestIfNeeded(true)
                 ? PendingConfigAction::Recreate
                 : PendingConfigAction::None;
-            if (action == PendingConfigAction::Recreate && !nextNeedsFrameGeneration) {
+            if (action != PendingConfigAction::Recreate)
+                return action;
+            if (!nextNeedsFrameGeneration) {
                 // OFF is committed before WSI restoration so no stale enabled
                 // controller or source-pacer policy can survive the accepted
                 // disengagement request while the application recreates WSI.
