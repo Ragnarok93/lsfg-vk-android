@@ -15,14 +15,15 @@ inline uint32_t saturatingOutputRate(uint32_t sourceFps, uint32_t multiplier) no
         : static_cast<uint32_t>(product);
 }
 
-// LSFG executes synchronously inside the application's present call. Output
-// sleeping is therefore safe only when a separate source limiter has created a
-// known frame-time budget. Fixed multiplier mode derives its cadence strictly
-// from that source budget; Adaptive's target is an objective and is clamped to
-// the maximum output rate the configured interpolation capacity can produce.
+// LSFG executes synchronously inside the application's present call. Fixed
+// multiplier mode derives its output cadence from the explicit source budget.
+// Adaptive Frame Generation is limiter-pegged: the GameNative FPS limiter is
+// both the source pacing budget and Adaptive's final-output objective. The
+// legacy adaptiveTargetFps argument is retained only so older call sites remain
+// source-compatible; it cannot create an independent Adaptive target.
 inline uint32_t resolveOutputPacingTarget(
         bool adaptive,
-        uint32_t adaptiveTargetFps,
+        uint32_t /*adaptiveTargetFps*/,
         uint32_t sourceFpsLimit,
         uint32_t multiplier) noexcept {
     const uint32_t capacityFps = saturatingOutputRate(sourceFpsLimit, multiplier);
@@ -30,7 +31,7 @@ inline uint32_t resolveOutputPacingTarget(
         return 0;
     if (!adaptive)
         return capacityFps;
-    return std::min(adaptiveTargetFps, capacityFps);
+    return sourceFpsLimit;
 }
 
 // One app-visible WSI invalidation at a time. Settings written while a recreate
