@@ -83,6 +83,8 @@ jobs:
   build:
     name: Build ${{ matrix.abi }}
     runs-on: ubuntu-latest
+    env:
+      ANDROID_ABI: ${{ matrix.abi }}
     strategy:
       fail-fast: false
       matrix:
@@ -109,7 +111,6 @@ jobs:
 
       - name: Build ${{ matrix.abi }}
         env:
-          ANDROID_ABI: ${{ matrix.abi }}
           HOST_TAG: linux-x86_64
         shell: bash
         run: |
@@ -121,7 +122,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-build-log-${{ matrix.abi }}
-          path: android-build-${ANDROID_ABI}.log
+          path: android-build-${{ matrix.abi }}.log
           if-no-files-found: warn
 
       - name: Inspect ${{ matrix.abi }} artifact
@@ -134,7 +135,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: liblsfg-vk-${{ matrix.abi }}
-          path: build-android-${ANDROID_ABI}/dist/liblsfg-vk-${ANDROID_ABI}.so
+          path: build-android-${{ matrix.abi }}/dist/liblsfg-vk-${{ matrix.abi }}.so
           if-no-files-found: error
 
   tag_release:
