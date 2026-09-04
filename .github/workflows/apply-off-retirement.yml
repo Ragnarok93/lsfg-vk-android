@@ -1,4 +1,4 @@
-name: Apply strict-OFF transition patch
+name: Apply strict OFF transition patch
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
       - Adaptive-Frame-Generation
     paths:
       - .github/workflows/apply-off-retirement.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,88 +21,24 @@ jobs:
           ref: Adaptive-Frame-Generation
           fetch-depth: 0
 
-      - name: Apply minimal OFF-transition retirement
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("src/hooks.cpp")
-          text = path.read_text()
-
-          old_runtime = '''        if (state.pendingRequiresRecreate) {
-              return state.wsiRecreateGate.requestIfNeeded(true)
-                  ? PendingConfigAction::Recreate
-                  : PendingConfigAction::None;
-          }
-'''
-          new_runtime = '''        if (state.pendingRequiresRecreate) {
-              const bool nextNeedsFrameGeneration =
-                  state.pendingConfig->enable && state.pendingConfig->multiplier > 1;
-              const auto action = state.wsiRecreateGate.requestIfNeeded(true)
-                  ? PendingConfigAction::Recreate
-                  : PendingConfigAction::None;
-              if (action == PendingConfigAction::Recreate && !nextNeedsFrameGeneration) {
-                  // OFF is committed before WSI restoration so no stale enabled
-                  // controller or source-pacer policy can survive the accepted
-                  // disengagement request while the application recreates WSI.
-                  Config::activeConf = *state.pendingConfig;
-                  state.appliedConf = Config::activeConf;
-                  state.pendingConfig.reset();
-                  state.pendingRequiresRecreate = false;
-                  state.configPending.store(false, std::memory_order_release);
-                  std::cerr << "lsfg-vk: runtime stage=frame-generation-disabled-before-wsi-restore\\n";
-              }
-              return action;
-          }
-'''
-
-          old_present = '''        if (pendingAction == PendingConfigAction::Recreate) {
-              // Transition frames are native. Returning OUT_OF_DATE after the
-              // native present asks the application to rebuild WSI from its own
-              // untouched create parameters; sustained Off then has no LSFG WSI.
-              Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-              std::cerr << "lsfg-vk: runtime stage=wsi-restore-requested reason=config-transition\\n";
-              return VK_ERROR_OUT_OF_DATE_KHR;
-          }
-'''
-          new_present = '''        if (pendingAction == PendingConfigAction::Recreate) {
-              // Transition frames are native. Retire every LSFG-owned object for
-              // the old swapchain immediately after that source present; the
-              // replacement WSI is then rebuilt from the application's untouched
-              // create parameters, and sustained OFF has no context/AHB/pacer work.
-              Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-              eraseSwapchainState(*pPresentInfo->pSwapchains);
-              std::cerr << "lsfg-vk: runtime stage=wsi-restore-requested reason=config-transition\\n";
-              return VK_ERROR_OUT_OF_DATE_KHR;
-          }
-'''
-
-          if text.count(old_runtime) != 1:
-              raise SystemExit(f"runtime replacement count={text.count(old_runtime)}")
-          if text.count(old_present) != 1:
-              raise SystemExit(f"present replacement count={text.count(old_present)}")
-
-          text = text.replace(old_runtime, new_runtime).replace(old_present, new_present)
-          path.write_text(text)
-          PY
-          git diff --check
+      - name: Apply reviewed patch
+        run: python3 scripts/apply_off_transition_patch.py
 
       - name: Verify focused native contracts
         run: |
+          git diff --check
           python3 tests/android_off_path_contract_test.py
           python3 tests/android_present_metadata_contract_test.py
           python3 tests/android_source_pacing_test.py
 
-      - name: Commit verified patch and remove one-shot workflow
+      - name: Commit patch and remove temporary patch machinery
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/hooks.cpp
-          git rm .github/workflows/apply-off-retirement.yml
+          git rm .github/workflows/apply-off-retirement.yml scripts/apply_off_transition_patch.py
           git diff --cached --check
           git commit -m 'fix(android): retire LSFG state immediately on disable'
           git push origin HEAD:Adaptive-Frame-Generation
