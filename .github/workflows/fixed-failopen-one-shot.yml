@@ -1,0 +1,63 @@
+name: Fixed LSFG fail-open recovery
+
+on:
+  push:
+    branches:
+      - fix/fixed-runtime-failopen-20260904
+    paths:
+      - .github/workflows/fixed-failopen-one-shot.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/fixed-runtime-failopen-20260904
+          fetch-depth: 0
+
+      - name: Restore original swapchain on LSFG context failure
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/hooks.cpp')
+          text = path.read_text()
+          marker = text.index('init stage=ls-context-failed')
+          return_pos = text.index('            return VK_SUCCESS;', marker)
+          insertion = '''            // The swapchain above was created from LSFG-modified parameters.
+            // Without an LsContext it is not true pass-through, so destroy it
+            // and recreate the game's untouched swapchain on the failure path.
+            const VkSwapchainKHR failedSwapchain = *pSwapchain;
+            eraseSwapchainState(failedSwapchain);
+            Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);
+            *pSwapchain = VK_NULL_HANDLE;
+
+            const auto fallbackRes = Layer::ovkCreateSwapchainKHR(
+                device, pCreateInfo, pAllocator, pSwapchain);
+            if (fallbackRes == VK_SUCCESS) {
+                swapchainToDeviceTable.emplace(*pSwapchain, device);
+                std::cerr << "lsfg-vk: init stage=swapchain-fallback-pass-through"
+                             " reason=ls-context-failed\\n";
+                return VK_SUCCESS;
+            }
+            std::cerr << "lsfg-vk: init stage=swapchain-fallback-failed result="
+                      << fallbackRes << "\\n";
+            return fallbackRes;
+'''
+          text = text[:return_pos] + insertion + text[return_pos + len('            return VK_SUCCESS;\n'):]
+          path.write_text(text)
+          Path('.github/workflows/fixed-failopen-one-shot.yml').unlink()
+          PY
+          git diff --check
+          python3 tests/android_fixed_mode_failopen_test.py
+
+      - name: Commit recovered fail-open behavior
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/hooks.cpp .github/workflows/fixed-failopen-one-shot.yml
+          git commit -m 'fix(android): recreate original swapchain when LSFG setup fails'
+          git push origin HEAD:fix/fixed-runtime-failopen-20260904
