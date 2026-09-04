@@ -1,0 +1,48 @@
+name: Harden LSFG OFF path once
+
+on:
+  push:
+    branches:
+      - Adaptive-Frame-Generation
+    paths:
+      - scripts/harden_off_path_once.py
+      - .github/workflows/harden-off-path-once.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: harden-lsfg-off-once
+  cancel-in-progress: false
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Adaptive branch
+        uses: actions/checkout@v4
+        with:
+          ref: Adaptive-Frame-Generation
+          fetch-depth: 0
+
+      - name: Apply strict OFF-path patch
+        run: python3 scripts/harden_off_path_once.py
+
+      - name: Verify strict OFF contracts
+        run: |
+          python3 tests/android_off_path_contract_test.py
+          python3 tests/android_runtime_stability_test.py
+          python3 tests/android_source_pacing_test.py
+
+      - name: Commit production repair
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm scripts/harden_off_path_once.py
+          git rm .github/workflows/harden-off-path-once.yml
+          git add src/hooks.cpp tests/android_off_path_contract_test.py .github/workflows/android-bionic.yml
+          git commit -m "fix(android): make LSFG off path inert"
+          git push origin HEAD:Adaptive-Frame-Generation
