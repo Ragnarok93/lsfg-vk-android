@@ -25,6 +25,22 @@ using namespace Config;
 namespace {
     Configuration globalConf{};
     std::optional<std::unordered_map<std::string, Configuration>> gameConfs;
+
+    void resolveAdaptiveLimiterTarget(Configuration& conf) {
+        if (!conf.adaptiveFramegen)
+            return;
+
+        // Adaptive Frame Generation has one authoritative target: the active
+        // GameNative source FPS limiter. A disabled limiter cannot leave a stale
+        // independent fps_limit active in the controller.
+        if (conf.sourceFpsLimit == 0) {
+            conf.adaptiveFramegen = false;
+            conf.fpsLimit = 0;
+            return;
+        }
+
+        conf.fpsLimit = conf.sourceFpsLimit;
+    }
 }
 
 Configuration Config::activeConf{};
@@ -119,8 +135,8 @@ void Config::updateConfig(const std::string& file) {
             throw std::runtime_error("Multiplier cannot be less than 1");
         if (game.flowScale < 0.25F || game.flowScale > 1.0F)
             throw std::runtime_error("Flow scale must be between 0.25F and 1.0F");
-        if (game.adaptiveFramegen && game.fpsLimit == 0)
-            throw std::runtime_error("Adaptive frame generation requires a positive fps_limit");
+
+        resolveAdaptiveLimiterTarget(game);
         games[exe] = std::move(game);
     }
 
@@ -143,7 +159,7 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
         const char* enabled = std::getenv("LSFG_ENABLED");
         if (enabled) conf.enable = std::string(enabled) != "0";
         const char* dll = std::getenv("LSFG_DLL_PATH");
-        if (dll) conf.dll = std::string(dll);
+        if (dll) conf.dll = dll;
         const char* multiplier = std::getenv("LSFG_MULTIPLIER");
         if (multiplier) conf.multiplier = std::stoul(multiplier);
         const char* flow_scale = std::getenv("LSFG_FLOW_SCALE");
@@ -161,6 +177,7 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
         const char* e_present = std::getenv("LSFG_EXPERIMENTAL_PRESENT_MODE");
         if (e_present) conf.e_present = into_present(std::string(e_present));
 
+        resolveAdaptiveLimiterTarget(conf);
         return conf;
     }
 
