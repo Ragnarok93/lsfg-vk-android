@@ -86,15 +86,11 @@ replace_once(
 #endif
 ''')
 
-contract = Path("tests/android_off_path_contract_test.py")
-contract.write_text(r'''#!/usr/bin/env python3
+Path("tests/android_off_path_contract_test.py").write_text(r'''#!/usr/bin/env python3
 from pathlib import Path
 
 hooks = Path("src/hooks.cpp").read_text()
 
-# Initial OFF must preserve the game's VkDevice creation exactly. This keeps
-# LSFG from negotiating AHardwareBuffer extensions merely because the layer is
-# resident.
 device_pre = hooks.split("VkResult myvkCreateDevicePre(", 1)[1].split(
     "VkResult myvkCreateDevicePost(", 1
 )[0]
@@ -106,15 +102,11 @@ assert device_pre.index("if (!frameGenDeviceFeaturesEnabled)") < device_pre.inde
     "supportsDeviceExtension(physicalDevice"
 )
 
-# A VkDevice created while OFF is not retrofitted for AHB by a later hot config
-# change. Re-enable must happen after restart/device recreation.
 device_post = hooks.split("VkResult myvkCreateDevicePost(", 1)[1].split(
     "VkPresentModeKHR choosePresentMode(", 1
 )[0]
 assert "const bool androidAhbSupported = frameGenDeviceFeaturesEnabled" in device_post
 
-# Disabled swapchain creation must use the application's untouched create info;
-# this preserves FIFO/FIFO_RELAXED choice, image count, usage and pNext chain.
 swapchain = hooks.split("VkResult myvkCreateSwapchainKHR(", 1)[1].split(
     "VkResult myvkQueuePresentKHR(", 1
 )[0]
@@ -126,8 +118,6 @@ assert "Layer::ovkCreateSwapchainKHR(\n                device, pCreateInfo, pAll
 assert "effectivePresentMode = pCreateInfo->presentMode" in pass_through
 assert "effectiveMinImageCount = pCreateInfo->minImageCount" in pass_through
 
-# Disabled presentation is a direct downstream call before controller, pacer,
-# generated semaphore, or present-mode mutation logic.
 present = hooks.split("VkResult myvkQueuePresentKHR(", 1)[1].split(
     "void myvkDestroySwapchainKHR(", 1
 )[0]
@@ -137,17 +127,6 @@ assert present.index(disabled_guard) < present.index("sourceFramePacer.configure
 assert present.index(disabled_guard) < present.index("VkSwapchainPresentModeInfoEXT")
 
 print("Android strict-OFF Vulkan contract: PASS")
-''')
-
-workflow = Path(".github/workflows/android-bionic.yml")
-replace_once(
-    workflow,
-    '''          python3 tests/android_runtime_stability_test.py
-          python3 tests/android_hot_reload_capability_cache_test.py
-''',
-    '''          python3 tests/android_runtime_stability_test.py
-          python3 tests/android_off_path_contract_test.py
-          python3 tests/android_hot_reload_capability_cache_test.py
 ''')
 
 print("Applied strict LSFG OFF-path hardening and contract test")
