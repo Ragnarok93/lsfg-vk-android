@@ -20,19 +20,20 @@ namespace Config {
         /// Path to Lossless.dll.
         std::string dll;
 
-        /// The frame generation muliplier
+        /// The frame generation multiplier.
         size_t multiplier{2};
-        /// The internal flow scale factor
+        /// The internal flow scale factor.
         float flowScale{1.0F};
-        /// Whether performance mode is enabled
+        /// Whether performance mode is enabled.
         bool performance{false};
-        /// Whether HDR is enabled
+        /// Whether HDR is enabled.
         bool hdr{false};
-        /// Vary the generated frame count to approach fpsLimit.
+        /// Vary generated frame count to approach the limiter-pegged target.
         bool adaptiveFramegen{false};
-        /// Final output FPS ceiling used by adaptive frame generation.
+        /// Canonical Adaptive target. When Adaptive is active this is resolved
+        /// from sourceFpsLimit and cannot remain an independent target.
         uint32_t fpsLimit{0};
-        /// Real/source Vulkan present ceiling applied before frame generation.
+        /// GameNative's authoritative real/source FPS limiter.
         uint32_t sourceFpsLimit{0};
 
         /// Experimental flag for overriding the synchronization method.
@@ -40,7 +41,7 @@ namespace Config {
 
         /// Path to the configuration file.
         std::filesystem::path config_file;
-        /// File timestamp of the configuration file
+        /// File timestamp of the configuration file.
         std::chrono::time_point<std::chrono::file_clock> timestamp;
     };
 
@@ -59,10 +60,8 @@ namespace Config {
 
     ///
     /// Get the configuration for a game.
-    ///
     /// @param name The name of the executable to fetch.
     /// @return The configuration for the game or global configuration.
-    ///
     /// @throws std::runtime_error if the configuration is invalid.
     ///
     Configuration getConfig(const std::pair<std::string, std::string>& name);
