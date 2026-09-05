@@ -21,6 +21,9 @@ jobs:
           ref: optimize/a6xx-transport
           fetch-depth: 0
 
+      - name: Repair harness class anchor
+        run: sed -i 's/AndroidWsiLoaderBridgeContract/AndroidWsiLoaderBridgeContractTest/g' scripts/tmp_postfix_runtime_patch.py
+
       - name: Record RED contract
         shell: bash
         run: |
