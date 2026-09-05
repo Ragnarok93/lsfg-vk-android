@@ -1,0 +1,599 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import re
+
+
+def replace_once(path, old, new):
+    p = Path(path)
+    text = p.read_text()
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"{path}: expected one literal match, got {count}")
+    p.write_text(text.replace(old, new, 1))
+
+
+def sub_once(path, pattern, repl):
+    p = Path(path)
+    text = p.read_text()
+    new, count = re.subn(pattern, repl, text, count=1, flags=re.S)
+    if count != 1:
+        raise SystemExit(f"{path}: expected one regex match, got {count}: {pattern[:80]}")
+    p.write_text(new)
+
+
+replace_once(
+    'include/hooks.hpp',
+    '        bool androidAhbSupported{true};\n',
+    '        bool androidAhbSupported{true};\n        bool androidExternalSemaphoreFdSupported{false};\n',
+)
+replace_once(
+    'framegen/public/lsfg_backend.hpp',
+    '    bool ahbR8Storage{false};\n    AhbTransportMode ahbTransportMode{AhbTransportMode::Unsupported};\n',
+    '    bool ahbR8Storage{false};\n    bool externalSemaphoreFd{false};\n    AhbTransportMode ahbTransportMode{AhbTransportMode::Unsupported};\n',
+)
+for path in (
+    'framegen/v3.1_include/v3_1/context.hpp',
+    'framegen/v3.1p_include/v3_1p/context.hpp',
+):
+    replace_once(
+        path,
+        '        bool transportOnly{false};\n        Core::Image sharedInImg_0, sharedInImg_1;\n',
+        '        bool transportOnly{false};\n        bool transportInputsPrimed_{false};\n        Core::Image sharedInImg_0, sharedInImg_1;\n',
+    )
+replace_once(
+    'include/context.hpp',
+    '    bool requiresSourceHistoryWarmup_{false};\n    bool previousSourceCopySignalValid_{false};\n',
+    '    bool requiresSourceHistoryWarmup_{false};\n    bool previousSourceCopySignalValid_{false};\n    bool externalSemaphoreFdSync_{false};\n    bool previousAsyncReuseSignalValid_{false};\n    Mini::Semaphore previousAsyncReuseSemaphore_;\n',
+)
+
+hooks = Path('src/hooks.cpp')
+text = hooks.read_text()
+marker = '    VkResult myvkCreateInstance(\n'
+if text.count(marker) != 1:
+    raise SystemExit('src/hooks.cpp: create-instance marker mismatch')
+helper = '''    bool supportsOpaqueFdExternalSemaphore(VkPhysicalDevice physicalDevice) {
+        if (!supportsDeviceExtension(physicalDevice,
+                VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
+            return false;
+
+        auto getExternalSemaphoreProperties =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(
+                Layer::ovkGetInstanceProcAddr(layerInstance,
+                    "vkGetPhysicalDeviceExternalSemaphoreProperties"));
+        if (getExternalSemaphoreProperties == nullptr) {
+            getExternalSemaphoreProperties =
+                reinterpret_cast<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(
+                    Layer::ovkGetInstanceProcAddr(layerInstance,
+                        "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR"));
+        }
+        if (getExternalSemaphoreProperties == nullptr)
+            return false;
+
+        const VkPhysicalDeviceExternalSemaphoreInfo info{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
+            .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+        };
+        VkExternalSemaphoreProperties properties{
+            .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+        };
+        getExternalSemaphoreProperties(physicalDevice, &info, &properties);
+        constexpr VkExternalSemaphoreFeatureFlags required =
+            VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
+            VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
+        return (properties.externalSemaphoreFeatures & required) == required;
+    }
+
+'''
+hooks.write_text(text.replace(marker, helper + marker, 1))
+replace_once(
+    'src/hooks.cpp',
+    '''        auto extensions = Utils::addExtensions(
+            pCreateInfo->ppEnabledExtensionNames,
+            pCreateInfo->enabledExtensionCount,
+            { VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME }
+        );
+''',
+    '''        std::vector<const char*> requiredExtensions{
+            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
+        };
+        if (supportsOpaqueFdExternalSemaphore(physicalDevice))
+            requiredExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+        auto extensions = Utils::addExtensions(
+            pCreateInfo->ppEnabledExtensionNames,
+            pCreateInfo->enabledExtensionCount,
+            requiredExtensions);
+''',
+)
+replace_once(
+    'src/hooks.cpp',
+    '''        const bool androidAhbSupported = supportsDeviceExtension(physicalDevice,
+            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+#else
+''',
+    '''        const bool androidAhbSupported = supportsDeviceExtension(physicalDevice,
+            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+        const bool androidExternalSemaphoreFdSupported = androidAhbSupported
+            && supportsOpaqueFdExternalSemaphore(physicalDevice);
+#else
+''',
+)
+replace_once(
+    'src/hooks.cpp',
+    '''#else
+        const bool androidAhbSupported = true;
+#endif
+        auto getProperties2''',
+    '''#else
+        const bool androidAhbSupported = true;
+        const bool androidExternalSemaphoreFdSupported = false;
+#endif
+        auto getProperties2''',
+)
+replace_once(
+    'src/hooks.cpp',
+    '''            .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
+            .androidAhbSupported = androidAhbSupported
+''',
+    '''            .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
+            .androidAhbSupported = androidAhbSupported,
+            .androidExternalSemaphoreFdSupported = androidExternalSemaphoreFdSupported
+''',
+)
+
+device = Path('framegen/src/core/device.cpp')
+text = device.read_text()
+marker = '\n} // namespace\n\nconst Image& Device::getFallbackDescriptorImage() const {'
+if text.count(marker) != 1:
+    raise SystemExit('framegen/src/core/device.cpp: namespace marker mismatch')
+helper = '''
+
+bool probeOpaqueFdExternalSemaphore(VkPhysicalDevice physicalDevice) {
+#ifdef __ANDROID__
+    if (vkGetPhysicalDeviceExternalSemaphoreProperties == nullptr)
+        return false;
+    const VkPhysicalDeviceExternalSemaphoreInfo info{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
+        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    VkExternalSemaphoreProperties properties{
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+    };
+    vkGetPhysicalDeviceExternalSemaphoreProperties(physicalDevice, &info, &properties);
+    constexpr VkExternalSemaphoreFeatureFlags required =
+        VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
+        VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
+    return (properties.externalSemaphoreFeatures & required) == required;
+#else
+    (void)physicalDevice;
+    return false;
+#endif
+}
+'''
+device.write_text(text.replace(marker, helper + marker, 1))
+replace_once(
+    'framegen/src/core/device.cpp',
+    '''    this->diagnostics.ahbR8Storage = probeAhbImageUsage(physicalDevice,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    const bool directStorage = probeAhbImageUsage(physicalDevice, sharedFormat,
+''',
+    '''    this->diagnostics.ahbR8Storage = probeAhbImageUsage(physicalDevice,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    this->diagnostics.externalSemaphoreFd =
+        hasExtension(availableExtensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)
+        && probeOpaqueFdExternalSemaphore(physicalDevice);
+    const bool directStorage = probeAhbImageUsage(physicalDevice, sharedFormat,
+''',
+)
+replace_once(
+    'framegen/src/core/device.cpp',
+    '''              << " ahbR16fStorage=" << (this->diagnostics.ahbR16fStorage ? 1 : 0)
+              << " ahbMode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
+''',
+    '''              << " ahbR16fStorage=" << (this->diagnostics.ahbR16fStorage ? 1 : 0)
+              << " ahbMode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
+              << " externalSemaphoreFd=" << (this->diagnostics.externalSemaphoreFd ? 1 : 0)
+''',
+)
+replace_once(
+    'framegen/src/core/device.cpp',
+    '''#ifdef __ANDROID__
+    requireExtension(availableExtensions, enabledExtensions,
+        VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+#else
+''',
+    '''#ifdef __ANDROID__
+    requireExtension(availableExtensions, enabledExtensions,
+        VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+    if (this->diagnostics.externalSemaphoreFd)
+        enabledExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+#else
+''',
+)
+
+for path in ('framegen/v3.1_src/context.cpp', 'framegen/v3.1p_src/context.cpp'):
+    replace_once(
+        path,
+        '''    if (generationCount == 0) {
+        this->frameIdx++;
+        return;
+    }
+''',
+        '''    if (generationCount == 0) {
+#ifdef __ANDROID__
+        if (this->transportOnly)
+            this->transportInputsPrimed_ = false;
+#endif
+        this->frameIdx++;
+        return;
+    }
+''',
+    )
+    sub_once(
+        path,
+        r'''    if \(this->transportOnly\) \{\n        std::vector<VkImageMemoryBarrier2> barriers;\n.*?        emit_external_barriers\(data\.cmdBuffer1, barriers\);\n    \} else \{\n        std::vector<VkImageMemoryBarrier2> acquireBarriers;''',
+        '''    if (this->transportOnly) {
+        const bool refreshBothInputs = !this->transportInputsPrimed_;
+        const bool refreshInput0 = refreshBothInputs || (this->frameIdx % 2 == 0);
+        const bool refreshInput1 = refreshBothInputs || (this->frameIdx % 2 != 0);
+        std::vector<VkImageMemoryBarrier2> barriers;
+        barriers.reserve(refreshBothInputs ? 4 : 2);
+        if (refreshInput0) {
+            add_external_transfer_acquire(barriers, vk, this->sharedInImg_0,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+            add_local_transition(barriers, this->inImg_0,
+                this->transportInputsPrimed_ ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                                             : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                this->transportInputsPrimed_ ? VK_ACCESS_2_SHADER_READ_BIT : 0,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        }
+        if (refreshInput1) {
+            add_external_transfer_acquire(barriers, vk, this->sharedInImg_1,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+            add_local_transition(barriers, this->inImg_1,
+                this->transportInputsPrimed_ ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                                             : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                this->transportInputsPrimed_ ? VK_ACCESS_2_SHADER_READ_BIT : 0,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        }
+        emit_external_barriers(data.cmdBuffer1, barriers);
+        if (refreshInput0)
+            copy_same_format(data.cmdBuffer1, this->sharedInImg_0, this->inImg_0);
+        if (refreshInput1)
+            copy_same_format(data.cmdBuffer1, this->sharedInImg_1, this->inImg_1);
+        barriers.clear();
+        if (refreshInput0) {
+            add_local_transition(barriers, this->inImg_0, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            add_external_transfer_release(barriers, vk, this->sharedInImg_0,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        }
+        if (refreshInput1) {
+            add_local_transition(barriers, this->inImg_1, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            add_external_transfer_release(barriers, vk, this->sharedInImg_1,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        }
+        emit_external_barriers(data.cmdBuffer1, barriers);
+        this->transportInputsPrimed_ = true;
+    } else {
+        std::vector<VkImageMemoryBarrier2> acquireBarriers;''',
+    )
+
+replace_once(
+    'src/context.cpp',
+    '''    const auto ahbTransportMode = backendDiagnostics.ahbTransportMode;
+    if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported)
+''',
+    '''    const auto ahbTransportMode = backendDiagnostics.ahbTransportMode;
+    this->externalSemaphoreFdSync_ = info.androidExternalSemaphoreFdSupported
+        && backendDiagnostics.externalSemaphoreFd;
+    if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported)
+''',
+)
+sub_once(
+    'src/context.cpp',
+    r'''    // Resolve and allocate the handoff fence once per swapchain context\..*?    std::cerr << "lsfg-vk: Android AHB context created \(id=" << ctxId << "\)\\n";''',
+    '''    // The external-semaphore path orders the two VkDevices entirely on-GPU.
+    // Keep the reusable host fence only as a compatibility fallback for ICDs
+    // that cannot import/export OPAQUE_FD semaphores.
+    if (!this->externalSemaphoreFdSync_) {
+        const auto createHandoffFence = reinterpret_cast<PFN_vkCreateFence>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkCreateFence"));
+        this->resetHandoffFences = reinterpret_cast<PFN_vkResetFences>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkResetFences"));
+        this->waitHandoffFences = reinterpret_cast<PFN_vkWaitForFences>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkWaitForFences"));
+        const auto destroyHandoffFence = reinterpret_cast<PFN_vkDestroyFence>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkDestroyFence"));
+        if (createHandoffFence == nullptr || this->resetHandoffFences == nullptr
+                || this->waitHandoffFences == nullptr || destroyHandoffFence == nullptr)
+            throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+                "Required fence functions unavailable for Android AHB handoff");
+
+        const VkFenceCreateInfo handoffFenceInfo{
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        };
+        VkFence handoffFence{};
+        const auto handoffFenceRes = createHandoffFence(
+            info.device, &handoffFenceInfo, nullptr, &handoffFence);
+        if (handoffFenceRes != VK_SUCCESS || handoffFence == VK_NULL_HANDLE)
+            throw LSFG::vulkan_error(handoffFenceRes,
+                "Failed to create Android AHB handoff fence");
+
+        this->ahbHandoffFence = std::shared_ptr<VkFence>(
+            new VkFence(handoffFence),
+            [device = info.device, destroyHandoffFence](VkFence* ownedFence) {
+                if (ownedFence != nullptr) {
+                    if (*ownedFence != VK_NULL_HANDLE)
+                        destroyHandoffFence(device, *ownedFence, nullptr);
+                    delete ownedFence;
+                }
+            });
+    }
+
+    std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
+              << ") sync=" << (this->externalSemaphoreFdSync_ ? "external-semaphore-fd" : "host-fence")
+              << "\\n";''',
+)
+replace_once(
+    'src/context.cpp',
+    '''    this->lastGeneratedFrameCount_ = generatedFrameCount;
+
+    const bool firstPresentDiagnostic''',
+    '''    this->lastGeneratedFrameCount_ = generatedFrameCount;
+    const auto advanceFramegenCadence = [&]() {
+        const std::vector<int> noSemaphores;
+        if (conf.performance)
+            LSFG_3_1P::presentContextWithCount(*this->lsfgCtxId, -1, noSemaphores, 0);
+        else
+            LSFG_3_1::presentContextWithCount(*this->lsfgCtxId, -1, noSemaphores, 0);
+    };
+
+    const bool firstPresentDiagnostic''',
+)
+replace_once(
+    'src/context.cpp',
+    '        const VkPresentInfoKHR directPresentInfo{\n',
+    '        advanceFramegenCadence();\n        const VkPresentInfoKHR directPresentInfo{\n',
+)
+sub_once(
+    'src/context.cpp',
+    r'''    pass\.preCopySemaphores\.at\(0\) = Mini::Semaphore\(info\.device\);\n    pass\.preCopySemaphores\.at\(1\) = Mini::Semaphore\(info\.device\);.*?    if \(firstPresentDiagnostic\)\n        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\\n";''',
+    '''    const bool useExternalSemaphoreSync =
+        this->externalSemaphoreFdSync_ && !warmupSourceHistory;
+    int preCopySemaphoreFd{-1};
+    if (useExternalSemaphoreSync)
+        pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device, &preCopySemaphoreFd);
+    else
+        pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
+    pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
+    pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
+    pass.preCopyBuf.begin();
+
+    copySwapchainToExternalAhb(pass.preCopyBuf.handle(),
+        this->swapchainImages.at(presentIdx),
+        this->frameIdx % 2 == 0 ? this->frame_0.handle() : this->frame_1.handle(),
+        this->extent.width, this->extent.height,
+        info.queue.first, this->frameIdx < 2);
+
+    pass.preCopyBuf.end();
+
+    std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
+    bool consumesAsyncReuseSignal = false;
+    if (this->externalSemaphoreFdSync_ && this->previousAsyncReuseSignalValid_) {
+        gameRenderSemaphores2.emplace_back(this->previousAsyncReuseSemaphore_.handle());
+        consumesAsyncReuseSignal = true;
+    } else if (!this->externalSemaphoreFdSync_ && this->previousSourceCopySignalValid_) {
+        gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
+            .preCopySemaphores.at(1).handle());
+    }
+
+    const auto handoffStart = RuntimeMetrics::Clock::now();
+    if (useExternalSemaphoreSync) {
+        pass.preCopyBuf.submit(info.queue.second, gameRenderSemaphores2,
+            { pass.preCopySemaphores.at(0).handle() });
+    } else if (this->externalSemaphoreFdSync_ && warmupSourceHistory) {
+        pass.preCopyBuf.submit(info.queue.second, gameRenderSemaphores2,
+            { pass.preCopySemaphores.at(0).handle(), pass.preCopySemaphores.at(1).handle() });
+        this->previousAsyncReuseSemaphore_ = pass.preCopySemaphores.at(1);
+        this->previousAsyncReuseSignalValid_ = true;
+    } else {
+        std::vector<VkSemaphore> preCopySignals{
+            pass.preCopySemaphores.at(0).handle(),
+            pass.preCopySemaphores.at(1).handle(),
+        };
+        submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
+            gameRenderSemaphores2, preCopySignals,
+            *this->ahbHandoffFence, this->resetHandoffFences,
+            this->waitHandoffFences);
+        this->previousSourceCopySignalValid_ = true;
+    }
+    if (consumesAsyncReuseSignal)
+        this->previousAsyncReuseSignalValid_ = false;
+    metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
+        RuntimeMetrics::Clock::now() - handoffStart).count();
+    if (firstPresentDiagnostic)
+        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready sync="
+                  << (useExternalSemaphoreSync ? "external-semaphore-fd" :
+                      (this->externalSemaphoreFdSync_ ? "warmup-semaphore" : "host-fence"))
+                  << "\\n";''',
+)
+replace_once(
+    'src/context.cpp',
+    '''        std::cerr << "lsfg-vk: runtime stage=source-history-warmup\\n";
+        return finishSourcePresent(warmupResult, "pre-copy-warmup");
+''',
+    '''        advanceFramegenCadence();
+        std::cerr << "lsfg-vk: runtime stage=source-history-warmup\\n";
+        return finishSourcePresent(warmupResult, "pre-copy-warmup");
+''',
+)
+replace_once(
+    'src/context.cpp',
+    '''    std::vector<int> noOutSems;
+    if (firstPresentDiagnostic) {
+''',
+    '''    std::vector<int> noOutSems;
+    std::vector<int> renderSemaphoreFds;
+    if (useExternalSemaphoreSync) {
+        renderSemaphoreFds.resize(generatedFrameCount, -1);
+        for (size_t i = 0; i < generatedFrameCount; ++i)
+            pass.renderSemaphores.at(i) = Mini::Semaphore(
+                info.device, &renderSemaphoreFds.at(i));
+    }
+    if (firstPresentDiagnostic) {
+''',
+)
+replace_once(
+    'src/context.cpp',
+    '''        LSFG_3_1P::presentContextWithCount(
+            *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
+    else
+        LSFG_3_1::presentContextWithCount(
+            *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
+''',
+    '''        LSFG_3_1P::presentContextWithCount(
+            *this->lsfgCtxId,
+            useExternalSemaphoreSync ? preCopySemaphoreFd : -1,
+            useExternalSemaphoreSync ? renderSemaphoreFds : noOutSems,
+            generatedFrameCount);
+    else
+        LSFG_3_1::presentContextWithCount(
+            *this->lsfgCtxId,
+            useExternalSemaphoreSync ? preCopySemaphoreFd : -1,
+            useExternalSemaphoreSync ? renderSemaphoreFds : noOutSems,
+            generatedFrameCount);
+''',
+)
+sub_once(
+    'src/context.cpp',
+    r'''    const auto waitIdleStart = RuntimeMetrics::Clock::now\(\);\n    const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs\(\);\n    const bool framegenReady = conf\.performance\n        \? LSFG_3_1P::waitContext\(\*this->lsfgCtxId, framegenCompletionTimeoutNs\)\n        : LSFG_3_1::waitContext\(\*this->lsfgCtxId, framegenCompletionTimeoutNs\);\n    metrics\.windowWaitIdleMs \+= std::chrono::duration<double, std::milli>\(\n        RuntimeMetrics::Clock::now\(\) - waitIdleStart\)\.count\(\);''',
+    '''    const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
+    bool framegenReady = true;
+    if (!useExternalSemaphoreSync) {
+        const auto waitIdleStart = RuntimeMetrics::Clock::now();
+        framegenReady = conf.performance
+            ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
+            : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
+        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    }''',
+)
+replace_once(
+    'src/context.cpp',
+    '''    // 4. Copy generated frames to swapchain images and present them. Each
+    // copy submission signals two binary semaphores: one consumed by this
+    // generated present, and one reserved for the next generated/source
+    // present. A binary semaphore signal must not be consumed twice.
+    for (size_t i = 0; i < generatedFrameCount; i++) {
+''',
+    '''    // 4. Copy generated frames to swapchain images and present them. On the
+    // external-semaphore path, each copy also waits for framegen's cross-device
+    // completion signal. The final post-copy emits a third, game-local reuse
+    // signal; the next source upload consumes it before either shared input or
+    // output AHB can be reused.
+    Mini::Semaphore asyncReuseSemaphore;
+    if (useExternalSemaphoreSync)
+        asyncReuseSemaphore = Mini::Semaphore(info.device);
+    for (size_t i = 0; i < generatedFrameCount; i++) {
+''',
+)
+replace_once(
+    'src/context.cpp',
+    '''        pass.postCopyBufs.at(i).submit(info.queue.second,
+            { pass.acquireSemaphores.at(i).handle() },
+            { pass.postCopySemaphores.at(i).handle(),
+              pass.prevPostCopySemaphores.at(i).handle() });
+''',
+    '''        std::vector<VkSemaphore> postCopyWaits{
+            pass.acquireSemaphores.at(i).handle(),
+        };
+        if (useExternalSemaphoreSync)
+            postCopyWaits.emplace_back(pass.renderSemaphores.at(i).handle());
+        std::vector<VkSemaphore> postCopySignals{
+            pass.postCopySemaphores.at(i).handle(),
+            pass.prevPostCopySemaphores.at(i).handle(),
+        };
+        if (useExternalSemaphoreSync && i + 1 == generatedFrameCount)
+            postCopySignals.emplace_back(asyncReuseSemaphore.handle());
+        pass.postCopyBufs.at(i).submit(info.queue.second,
+            postCopyWaits, postCopySignals);
+''',
+)
+replace_once(
+    'src/context.cpp',
+    '    // 5. Present the actual game frame after generated frames using the signal\n',
+    '''    if (useExternalSemaphoreSync) {
+        this->previousAsyncReuseSemaphore_ = asyncReuseSemaphore;
+        this->previousAsyncReuseSignalValid_ = true;
+    }
+
+    // 5. Present the actual game frame after generated frames using the signal
+''',
+)
+
+Path('tests/android_a6xx_transport_test.py').write_text('''#!/usr/bin/env python3
+import pathlib
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+class AndroidA6xxTransportContract(unittest.TestCase):
+    def test_external_semaphore_fd_is_capability_gated(self):
+        hooks = (ROOT / "src/hooks.cpp").read_text()
+        device = (ROOT / "framegen/src/core/device.cpp").read_text()
+        backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text()
+        self.assertIn("supportsOpaqueFdExternalSemaphore", hooks)
+        self.assertIn("VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT", hooks)
+        self.assertIn("VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT", hooks)
+        self.assertIn("VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME", hooks)
+        self.assertIn("externalSemaphoreFd", backend)
+        self.assertIn("probeOpaqueFdExternalSemaphore", device)
+
+    def test_fast_path_replaces_both_host_waits_with_gpu_semaphores(self):
+        context = (ROOT / "src/context.cpp").read_text()
+        self.assertIn("externalSemaphoreFdSync_", context)
+        self.assertIn("Mini::Semaphore(info.device, &preCopySemaphoreFd)", context)
+        self.assertIn("renderSemaphoreFds", context)
+        self.assertIn("if (!useExternalSemaphoreSync)", context)
+        self.assertIn("waitContext", context)
+        self.assertIn("submitAndWaitForAhbHandoff", context)
+        self.assertIn("postCopyWaits.emplace_back(pass.renderSemaphores.at(i).handle())", context)
+        self.assertIn("previousAsyncReuseSignalValid_", context)
+
+    def test_transport_only_refreshes_one_history_slot_after_priming(self):
+        for rel in ("framegen/v3.1_src/context.cpp", "framegen/v3.1p_src/context.cpp"):
+            context = (ROOT / rel).read_text()
+            self.assertIn("refreshBothInputs", context)
+            self.assertIn("refreshInput0", context)
+            self.assertIn("refreshInput1", context)
+            self.assertIn("transportInputsPrimed_ = false", context)
+            self.assertIn("transportInputsPrimed_ = true", context)
+
+    def test_zero_generation_ticks_keep_history_parity_aligned(self):
+        outer = (ROOT / "src/context.cpp").read_text()
+        self.assertGreaterEqual(outer.count("advanceFramegenCadence();"), 2)
+        for rel in ("framegen/v3.1_src/context.cpp", "framegen/v3.1p_src/context.cpp"):
+            context = (ROOT / rel).read_text()
+            self.assertIn("if (generationCount == 0)", context)
+            self.assertIn("this->frameIdx++", context)
+
+if __name__ == "__main__":
+    unittest.main()
+''')
+replace_once(
+    '.github/workflows/android-bionic.yml',
+    '          python3 tests/android_capability_architecture_test.py\n',
+    '          python3 tests/android_capability_architecture_test.py\n          python3 tests/android_a6xx_transport_test.py\n',
+)
+replace_once(
+    'docs/android-capability-backends.md',
+    '- Direct-storage AHardwareBuffer sharing is used when the exact external-image storage contract is supported. Otherwise, transport-only AHB sharing keeps shader storage private to the framegen device and copies through transfer-capable shared images.\n',
+    '- Direct-storage AHardwareBuffer sharing is used when the exact external-image storage contract is supported. Otherwise, transport-only AHB sharing keeps shader storage private to the framegen device and copies through transfer-capable shared images. After history is primed, transport-only refreshes only the alternating source slot that changed.\n- When both exact Vulkan devices advertise importable/exportable `OPAQUE_FD` external semaphores, Android orders source upload, framegen, generated readback, and shared-AHB reuse entirely on the GPU. Drivers without that capability retain the bounded host-fence / context-wait compatibility path.\n',
+)
