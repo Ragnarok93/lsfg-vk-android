@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# One-shot source repair for malformed newline literals introduced by patch generation.
 path = Path('src/context.cpp')
 text = path.read_text(encoding='utf-8')
 broken = '              << "\n";'
