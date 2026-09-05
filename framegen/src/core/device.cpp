@@ -156,6 +156,12 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
     const bool hasDriverProperties = api12 || hasExtension(availableExtensions,
         VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
+#ifdef __ANDROID__
+    const bool hasExternalSemaphoreFd = hasExtension(availableExtensions,
+        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+#else
+    const bool hasExternalSemaphoreFd = true;
+#endif
 
     VkPhysicalDeviceDriverProperties driverProperties{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
@@ -293,18 +299,6 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.ahbTransportMode = LSFG::AhbTransportMode::DirectStorage;
 #endif
 
-    std::cerr << "lsfg-vk: backend-init apiVersion="
-              << VK_VERSION_MAJOR(this->diagnostics.apiVersion) << '.'
-              << VK_VERSION_MINOR(this->diagnostics.apiVersion)
-              << " driverName=\"" << this->diagnostics.driverName << "\""
-              << " driverVersion=" << this->diagnostics.driverVersion
-              << " deviceUUID=" << uuidString(this->diagnostics.identity.deviceUUID)
-              << " driverUUID=" << uuidString(this->diagnostics.identity.driverUUID)
-              << " ahbR16fStorage=" << (this->diagnostics.ahbR16fStorage ? 1 : 0)
-              << " ahbMode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
-              << " sync=" << synchronizationPathName(decision.synchronizationPath)
-              << " fp=" << shaderPrecisionName(decision.shaderPrecision) << '\n';
-
     uint32_t familyCount{};
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
     std::vector<VkQueueFamilyProperties> queueFamilies(familyCount);
@@ -323,6 +317,8 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
 #ifdef __ANDROID__
     requireExtension(availableExtensions, enabledExtensions,
         VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+    if (hasExternalSemaphoreFd)
+        enabledExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
 #else
     requireExtension(availableExtensions, enabledExtensions,
         VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
@@ -424,6 +420,26 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     if (res != VK_SUCCESS || handle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create capability-selected logical device");
     volkLoadDevice(handle);
+
+#ifdef __ANDROID__
+    this->diagnostics.externalSemaphoreFd = hasExternalSemaphoreFd
+        && vkImportSemaphoreFdKHR != nullptr;
+#else
+    this->diagnostics.externalSemaphoreFd = true;
+#endif
+
+    std::cerr << "lsfg-vk: backend-init apiVersion="
+              << VK_VERSION_MAJOR(this->diagnostics.apiVersion) << '.'
+              << VK_VERSION_MINOR(this->diagnostics.apiVersion)
+              << " driverName=\"" << this->diagnostics.driverName << "\""
+              << " driverVersion=" << this->diagnostics.driverVersion
+              << " deviceUUID=" << uuidString(this->diagnostics.identity.deviceUUID)
+              << " driverUUID=" << uuidString(this->diagnostics.identity.driverUUID)
+              << " ahbR16fStorage=" << (this->diagnostics.ahbR16fStorage ? 1 : 0)
+              << " ahbMode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
+              << " externalSemaphoreFd=" << (this->diagnostics.externalSemaphoreFd ? 1 : 0)
+              << " sync=" << synchronizationPathName(decision.synchronizationPath)
+              << " fp=" << shaderPrecisionName(decision.shaderPrecision) << '\n';
 
     if (decision.synchronizationPath == SynchronizationPath::KhrSync2
             && vkCmdPipelineBarrier2 == nullptr && vkCmdPipelineBarrier2KHR != nullptr) {
