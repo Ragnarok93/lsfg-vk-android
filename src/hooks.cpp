@@ -20,6 +20,11 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#ifdef __ANDROID__
+#include <sys/inotify.h>
+#include <unistd.h>
+#include <cerrno>
+#endif
 
 using namespace Hooks;
 
@@ -214,7 +219,6 @@ namespace {
     struct RuntimeOutputStats {
         using Clock = std::chrono::steady_clock;
         Clock::time_point windowStart{Clock::now()};
-        Clock::time_point nextConfigPoll{};
         std::vector<VkSemaphore> presentWaitSemaphores;
         uint64_t windowSourceFrames{0};
         uint64_t windowGeneratedFrames{0};
@@ -223,6 +227,117 @@ namespace {
         uint64_t presentFailures{0};
     };
 
+    class AndroidConfigWatcher {
+    public:
+        ~AndroidConfigWatcher() {
+            reset();
+        }
+
+        bool changed(const std::string& configFile) noexcept {
+            if (configFile.empty())
+                return false;
+
+            const std::filesystem::path path(configFile);
+            const std::string directory = path.parent_path().string();
+            const std::string filename = path.filename().string();
+            if (fd_ < 0 || wd_ < 0 || directory != directory_ || filename != filename_) {
+                if (!arm(directory, filename))
+                    return fallbackChanged(configFile);
+            }
+
+            bool sawChange = false;
+            alignas(struct inotify_event) char buffer[4096];
+            for (;;) {
+                const ssize_t length = ::read(fd_, buffer, sizeof(buffer));
+                if (length < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        break;
+                    reset();
+                    return fallbackChanged(configFile);
+                }
+                if (length == 0)
+                    break;
+
+                size_t offset = 0;
+                while (offset < static_cast<size_t>(length)) {
+                    const auto* event = reinterpret_cast<const struct inotify_event*>(buffer + offset);
+                    const bool matchingName = event->len > 0 && filename_ == event->name;
+                    if (matchingName && (event->mask & (
+                            IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE |
+                            IN_ATTRIB | IN_MOVE_SELF | IN_DELETE_SELF))) {
+                        sawChange = true;
+                    }
+                    if (event->mask & IN_IGNORED) {
+                        reset();
+                        break;
+                    }
+                    offset += sizeof(struct inotify_event) + event->len;
+                }
+            }
+            return sawChange;
+        }
+
+    private:
+        bool arm(const std::string& directory, const std::string& filename) noexcept {
+            reset();
+            fd_ = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+            if (fd_ < 0)
+                return false;
+
+            wd_ = ::inotify_add_watch(fd_, directory.c_str(),
+                IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_ATTRIB |
+                IN_MOVE_SELF | IN_DELETE_SELF);
+            if (wd_ < 0) {
+                reset();
+                return false;
+            }
+
+            directory_ = directory;
+            filename_ = filename;
+            std::error_code ec;
+            fallbackTimestamp_ = std::filesystem::last_write_time(
+                std::filesystem::path(directory_) / filename_, ec);
+            fallbackTimestampValid_ = !ec;
+            return true;
+        }
+
+        bool fallbackChanged(const std::string& configFile) noexcept {
+            const auto now = RuntimeOutputStats::Clock::now();
+            if (now < nextFallbackPoll_)
+                return false;
+            nextFallbackPoll_ = now + std::chrono::seconds(1);
+
+            std::error_code ec;
+            const auto timestamp = std::filesystem::last_write_time(configFile, ec);
+            const bool valid = !ec;
+            const bool changed = valid != fallbackTimestampValid_
+                || (valid && timestamp != fallbackTimestamp_);
+            fallbackTimestamp_ = timestamp;
+            fallbackTimestampValid_ = valid;
+            return changed;
+        }
+
+        void reset() noexcept {
+            if (fd_ >= 0 && wd_ >= 0)
+                ::inotify_rm_watch(fd_, wd_);
+            if (fd_ >= 0)
+                ::close(fd_);
+            fd_ = -1;
+            wd_ = -1;
+            directory_.clear();
+            filename_.clear();
+        }
+
+        int fd_{-1};
+        int wd_{-1};
+        std::string directory_;
+        std::string filename_;
+        RuntimeOutputStats::Clock::time_point nextFallbackPoll_{};
+        std::filesystem::file_time_type fallbackTimestamp_{};
+        bool fallbackTimestampValid_{false};
+    };
+
+    AndroidConfigWatcher androidConfigWatcher;
     std::unordered_map<VkSwapchainKHR, RuntimeOutputStats> runtimeOutputStats;
 
     void publishRuntimeState(const std::string& configFile,
@@ -687,22 +802,17 @@ namespace {
         auto& conf = Config::activeConf;
 #ifdef __ANDROID__
         auto& runtimeStats = runtimeOutputStats[*pPresentInfo->pSwapchains];
-        const auto configPollNow = RuntimeOutputStats::Clock::now();
-        const bool shouldPollConfig = configPollNow >= runtimeStats.nextConfigPoll;
-        if (shouldPollConfig)
-            runtimeStats.nextConfigPoll = configPollNow + std::chrono::milliseconds(250);
+        const bool shouldPollConfig = androidConfigWatcher.changed(conf.config_file);
 #else
         const bool shouldPollConfig = true;
 #endif
-        if (shouldPollConfig && !conf.config_file.empty()
-                && (
-                        !std::filesystem::exists(conf.config_file)
-                      || conf.timestamp != std::filesystem::last_write_time(conf.config_file)
-                )) {
+        if (shouldPollConfig && !conf.config_file.empty()) {
             const std::string configFile = conf.config_file;
             const auto previousConf = conf;
             bool recreateSwapchain = false;
-            if (std::filesystem::exists(configFile)) {
+            std::error_code configEc;
+            const bool configExists = std::filesystem::exists(configFile, configEc) && !configEc;
+            if (configExists) {
                 try {
                     Config::updateConfig(configFile);
                     Config::activeConf = Config::getConfig(Utils::getProcessName());
