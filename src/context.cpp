@@ -413,8 +413,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
               << ") sync=" << (this->externalSemaphoreFdSync_ ? "external-semaphore-fd" : "host-fence")
-              << "
-";
+              << "\n";
 
 #else
     // Desktop Linux path: use OPAQUE_FD-based image sharing
@@ -699,8 +698,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready sync="
                   << (useExternalSemaphoreSync ? "external-semaphore-fd" :
                       (this->externalSemaphoreFdSync_ ? "warmup-semaphore" : "host-fence"))
-                  << "
-";
+                  << "\n";
 
     if (warmupSourceHistory) {
         this->requiresSourceHistoryWarmup_ = false;
