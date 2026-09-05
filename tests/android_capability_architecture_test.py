@@ -73,6 +73,27 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         self.assertIn("VK_FORMAT_FEATURE_BLIT_SRC_BIT", combined)
         self.assertIn("VK_FORMAT_FEATURE_BLIT_DST_BIT", combined)
 
+    def test_phase1_accelerator_is_opt_in_lazy_and_vulkan_fail_open(self) -> None:
+        coordinator = (ROOT / "src/accelerator_coordinator.cpp").read_text(encoding="utf-8")
+        interface = (ROOT / "include/frame_generation_backend.hpp").read_text(encoding="utf-8")
+        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+
+        self.assertIn("FrameGenerationComputeBackend", interface)
+        self.assertIn("LSFG_NPU_ACCELERATION", coordinator)
+        self.assertIn("libQnnSystem.so", coordinator)
+        self.assertIn("libQnnHtp.so", coordinator)
+        self.assertIn("libSNPE.so", coordinator)
+        self.assertIn("RTLD_NOW | RTLD_LOCAL", coordinator)
+        self.assertIn("phase1-execution-disabled", coordinator)
+        self.assertIn("selectedBackend = BackendKind::Vulkan", coordinator)
+        self.assertIn("if (!status_.npuSettingEnabled)", coordinator)
+        self.assertIn("if (conf.multiplier > 1)", main)
+        self.assertIn("AcceleratorCoordinator::instance().beginEligibleSession()", main)
+        self.assertNotIn("QnnSystem", cmake)
+        self.assertNotIn("QnnHtp", cmake)
+        self.assertNotIn("SNPE", cmake)
+
     def test_initialization_telemetry_contains_required_provenance_and_capacity(self) -> None:
         combined = (
             (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
