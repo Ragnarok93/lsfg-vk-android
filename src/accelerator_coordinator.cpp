@@ -80,6 +80,12 @@ void applyMetadata(AcceleratorStatus& status, const QnnRuntimeProbeResult& resul
     status.qnnSystemLibraryPath = result.systemLibraryPath;
 }
 
+std::string loadFailureDetail(const QnnRuntimeProbeResult& result) {
+    if (!result.systemLibraryLoaded) return result.systemLoadDiagnostic;
+    if (!result.computeLibraryLoaded) return result.computeLoadDiagnostic;
+    return "none";
+}
+
 #ifdef __ANDROID__
 void* openOptionalRuntime(const char* library) { return dlopen(library, RTLD_NOW | RTLD_LOCAL); }
 void closeOptionalRuntime(void*& handle) noexcept {
@@ -181,7 +187,8 @@ void AcceleratorCoordinator::probeQnnRuntime() {
             lastFailure = metadata.failureReason.empty() ? "qnn-provider-unqualified" : metadata.failureReason;
             logAccelerator(
                 std::string("LSFG_ACCEL event=qnn-provider-rejected compute_backend=")
-                + qnnComputeBackendName(candidate) + " reason=" + lastFailure);
+                + qnnComputeBackendName(candidate) + " reason=" + lastFailure
+                + " load_detail=" + logToken(loadFailureDetail(metadata)));
             continue;
         }
 
