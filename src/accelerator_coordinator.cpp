@@ -86,7 +86,7 @@ void AcceleratorCoordinator::beginEligibleSession() {
     // bypass the user's NPU permission and never force accelerator loading.
     if (!status_.npuSettingEnabled) {
         status_.selectionReason = "npu-setting-disabled";
-        if (envEnabled("LSFG_ACCEL_VERBOSE")) logSnapshot();
+        logSnapshot();
         return;
     }
 
