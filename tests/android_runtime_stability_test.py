@@ -41,10 +41,15 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn('"vkCreateFence"', helper)
         self.assertNotIn('"vkDestroyFence"', helper)
 
-    def test_present_hook_debounces_fs_and_reuses_wait_storage(self) -> None:
+    def test_present_hook_uses_event_driven_config_reload_and_reuses_wait_storage(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        self.assertIn("Clock::time_point nextConfigPoll", source)
-        self.assertIn("std::chrono::milliseconds(250)", source)
+        self.assertIn("class AndroidConfigWatcher", source)
+        self.assertIn("inotify_init1(IN_NONBLOCK | IN_CLOEXEC)", source)
+        self.assertIn("IN_MOVED_TO", source)
+        self.assertIn("androidConfigWatcher.changed(conf.config_file)", source)
+        self.assertIn("std::chrono::seconds(1)", source)
+        self.assertNotIn("Clock::time_point nextConfigPoll", source)
+        self.assertNotIn("std::chrono::milliseconds(250)", source)
         self.assertIn("std::vector<VkSemaphore> presentWaitSemaphores", source)
         self.assertIn("auto& semaphores = runtimeStats.presentWaitSemaphores", source)
 
