@@ -27,6 +27,23 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
             device,
         )
 
+    def test_external_semaphore_fd_is_optional_and_capability_gated_on_android(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        device = (ROOT / "framegen/src/core/device.cpp").read_text(encoding="utf-8")
+        backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(encoding="utf-8")
+        wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME", hooks)
+        self.assertIn("supportsDeviceExtension(physicalDevice", hooks)
+        self.assertIn('ovkGetDeviceProcAddr(*pDevice, "vkGetSemaphoreFdKHR")', hooks)
+        self.assertIn("hasExternalSemaphoreFd", device)
+        self.assertIn("vkImportSemaphoreFdKHR != nullptr", device)
+        self.assertIn("bool externalSemaphoreFd{false}", backend)
+        self.assertIn("info.androidExternalSemaphoreFdSupported", wrapper)
+        self.assertIn("backendDiagnostics.externalSemaphoreFd", wrapper)
+        self.assertNotIn("Adreno", wrapper)
+        self.assertNotIn("Qualcomm", wrapper)
+
     def test_ahb_storage_contract_is_probed_and_allocated_correctly(self) -> None:
         image = (ROOT / "src/mini/image.cpp").read_text(encoding="utf-8")
         device = (ROOT / "framegen/src/core/device.cpp").read_text(encoding="utf-8")
@@ -80,7 +97,8 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         )
         for token in (
             "driverUUID", "deviceUUID", "driverName", "driverVersion",
-            "ahbR16fStorage", "requiredHeadroom", "minImageCount", "maxImageCount"
+            "ahbR16fStorage", "externalSemaphoreFd", "requiredHeadroom",
+            "minImageCount", "maxImageCount"
         ):
             self.assertIn(token, combined)
 
