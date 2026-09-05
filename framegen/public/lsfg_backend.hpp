@@ -34,6 +34,7 @@ struct BackendDiagnostics {
     bool ahbR16fTransferDst{false};
     bool ahbR8Storage{false};
     AhbTransportMode ahbTransportMode{AhbTransportMode::Unsupported};
+    bool externalSemaphoreFd{false};
 };
 
 inline constexpr uint64_t DEFAULT_DRIVER_WAIT_TIMEOUT_NS = 500'000'000ULL;
