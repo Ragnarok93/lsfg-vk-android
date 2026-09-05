@@ -21,7 +21,6 @@ using QnnHandle = void*;
 using GenericFn = void (*)();
 constexpr QnnErrorHandle QNN_SUCCESS = 0;
 constexpr uint32_t QNN_CORE_ABI_MAJOR = 2;
-
 constexpr uint32_t QNN_TENSOR_VERSION_1 = 1;
 constexpr uint32_t QNN_OPCONFIG_VERSION_1 = 1;
 constexpr uint32_t QNN_TENSOR_TYPE_APP_WRITE = 0;
@@ -34,42 +33,14 @@ constexpr uint32_t QNN_TENSORMEMTYPE_RAW = 0;
 constexpr uint32_t QNN_TENSORMEMTYPE_MEMHANDLE = 1;
 constexpr uint32_t QNN_MEM_TYPE_ION = 1;
 
-struct QnnAbiVersion {
-    uint32_t major;
-    uint32_t minor;
-    uint32_t patch;
-};
-
-struct QnnAbiApiVersion {
-    QnnAbiVersion coreApiVersion;
-    QnnAbiVersion backendApiVersion;
-};
-
-struct QnnScaleOffset {
-    float scale;
-    int32_t offset;
-};
-
-struct QnnAxisScaleOffset {
-    int32_t axis;
-    uint32_t numScaleOffsets;
-    QnnScaleOffset* scaleOffset;
-};
-
-struct QnnBwScaleOffset {
-    uint32_t bitwidth;
-    float scale;
-    int32_t offset;
-};
-
+struct QnnAbiVersion { uint32_t major; uint32_t minor; uint32_t patch; };
+struct QnnAbiApiVersion { QnnAbiVersion coreApiVersion; QnnAbiVersion backendApiVersion; };
+struct QnnScaleOffset { float scale; int32_t offset; };
+struct QnnAxisScaleOffset { int32_t axis; uint32_t numScaleOffsets; QnnScaleOffset* scaleOffset; };
+struct QnnBwScaleOffset { uint32_t bitwidth; float scale; int32_t offset; };
 struct QnnBwAxisScaleOffset {
-    uint32_t bitwidth;
-    int32_t axis;
-    uint32_t numElements;
-    float* scales;
-    int32_t* offsets;
+    uint32_t bitwidth; int32_t axis; uint32_t numElements; float* scales; int32_t* offsets;
 };
-
 struct QnnQuantizeParams {
     uint32_t encodingDefinition;
     uint32_t quantizationEncoding;
@@ -80,12 +51,7 @@ struct QnnQuantizeParams {
         QnnBwAxisScaleOffset bwAxisScaleOffsetEncoding;
     };
 };
-
-struct QnnClientBuffer {
-    void* data;
-    uint32_t dataSize;
-};
-
+struct QnnClientBuffer { void* data; uint32_t dataSize; };
 struct QnnTensorV1 {
     uint32_t id;
     const char* name;
@@ -96,19 +62,9 @@ struct QnnTensorV1 {
     uint32_t rank;
     uint32_t* dimensions;
     uint32_t memType;
-    union {
-        QnnClientBuffer clientBuf;
-        QnnHandle memHandle;
-    };
+    union { QnnClientBuffer clientBuf; QnnHandle memHandle; };
 };
-
-struct QnnTensor {
-    uint32_t version;
-    union {
-        QnnTensorV1 v1;
-    };
-};
-
+struct QnnTensor { uint32_t version; union { QnnTensorV1 v1; }; };
 struct QnnOpConfigV1 {
     const char* name;
     const char* packageName;
@@ -120,32 +76,14 @@ struct QnnOpConfigV1 {
     uint32_t numOfOutputs;
     QnnTensor* outputTensors;
 };
-
-struct QnnOpConfig {
-    uint32_t version;
-    union {
-        QnnOpConfigV1 v1;
-    };
-};
-
-struct QnnMemShape {
-    uint32_t numDim;
-    uint32_t* dimSize;
-    const char* shapeConfig;
-};
-
-struct QnnMemIonInfo {
-    int32_t fd;
-};
-
+struct QnnOpConfig { uint32_t version; union { QnnOpConfigV1 v1; }; };
+struct QnnMemShape { uint32_t numDim; uint32_t* dimSize; const char* shapeConfig; };
+struct QnnMemIonInfo { int32_t fd; };
 struct QnnMemDescriptor {
     QnnMemShape memShape;
     uint32_t dataType;
     uint32_t memType;
-    union {
-        QnnMemIonInfo ionInfo;
-        void* customInfo;
-    };
+    union { QnnMemIonInfo ionInfo; void* customInfo; };
 };
 
 using BackendCreateFn = QnnErrorHandle (*)(QnnHandle, const void* const*, QnnHandle*);
@@ -164,6 +102,8 @@ using MemDeRegisterFn = QnnErrorHandle (*)(const QnnHandle*, uint32_t);
 using DeviceCreateFn = QnnErrorHandle (*)(QnnHandle, const void* const*, QnnHandle*);
 using DeviceFreeFn = QnnErrorHandle (*)(QnnHandle);
 
+// Stable QNN v2 interface prefix through deviceFree. Newer interface members
+// are appended after this prefix and are intentionally not dereferenced here.
 struct QnnInterfaceImplementation {
     GenericFn propertyHasCapability;
     BackendCreateFn backendCreate;
@@ -173,14 +113,12 @@ struct QnnInterfaceImplementation {
     GenericFn backendGetSupportedOperations;
     GenericFn backendValidateOpConfig;
     BackendFreeFn backendFree;
-
     ContextCreateFn contextCreate;
     GenericFn contextSetConfig;
     GenericFn contextGetBinarySize;
     GenericFn contextGetBinary;
     GenericFn contextCreateFromBinary;
     ContextFreeFn contextFree;
-
     GraphCreateFn graphCreate;
     GenericFn graphSetConfig;
     GraphAddNodeFn graphAddNode;
@@ -188,23 +126,18 @@ struct QnnInterfaceImplementation {
     GenericFn graphRetrieve;
     GraphExecuteFn graphExecute;
     GenericFn graphExecuteAsync;
-
     GenericFn tensorCreateContextTensor;
     TensorCreateGraphTensorFn tensorCreateGraphTensor;
-
     GenericFn logCreate;
     GenericFn logSetLogLevel;
     GenericFn logFree;
-
     GenericFn profileCreate;
     GenericFn profileGetEvents;
     GenericFn profileGetSubEvents;
     GenericFn profileGetEventData;
     GenericFn profileFree;
-
     MemRegisterFn memRegister;
     MemDeRegisterFn memDeRegister;
-
     GenericFn deviceGetPlatformInfo;
     GenericFn deviceFreePlatformInfo;
     GenericFn deviceGetInfrastructure;
@@ -213,46 +146,46 @@ struct QnnInterfaceImplementation {
     GenericFn deviceGetInfo;
     DeviceFreeFn deviceFree;
 };
-
 struct QnnInterfaceProvider {
     uint32_t backendId;
     const char* providerName;
     QnnAbiApiVersion apiVersion;
-    union {
-        QnnInterfaceImplementation implementation;
-    };
+    union { QnnInterfaceImplementation implementation; };
 };
-
 using GetProvidersFn = QnnErrorHandle (*)(const QnnInterfaceProvider***, uint32_t*);
 
-struct NativeHandlePrefix {
-    int version;
-    int numFds;
-    int numInts;
-    int data[1];
-};
+struct NativeHandlePrefix { int version; int numFds; int numInts; int data[1]; };
+using AHardwareBufferGetNativeHandleFn = const NativeHandlePrefix* (*)(const AHardwareBuffer*);
 
-using AHardwareBufferGetNativeHandleFn =
-    const NativeHandlePrefix* (*)(const AHardwareBuffer*);
-
-bool containsHtp(const char* raw) {
-    if (raw == nullptr || *raw == '\0') return false;
-    std::string value(raw);
+std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
-    return value.find("htp") != std::string::npos;
+    return value;
 }
 
-bool symbolComesFromHtp(const void* symbol) {
+const char* expectedModuleName(QnnComputeBackendKind backend) {
+    switch (backend) {
+        case QnnComputeBackendKind::Htp: return "libqnnhtp.so";
+        case QnnComputeBackendKind::Dsp: return "libqnndsp.so";
+        case QnnComputeBackendKind::None: break;
+    }
+    return "";
+}
+
+bool providerMatches(const QnnInterfaceProvider* provider, QnnComputeBackendKind backend) {
+    if (provider == nullptr) return false;
+    if (provider->providerName == nullptr) return true;
+    const std::string name = lower(provider->providerName);
+    return name.find(qnnComputeBackendName(backend)) != std::string::npos;
+}
+
+bool symbolComesFromComputeBackend(const void* symbol, QnnComputeBackendKind backend) {
     if (symbol == nullptr) return false;
     Dl_info info{};
     if (dladdr(symbol, &info) == 0 || info.dli_fname == nullptr) return false;
-    std::string path(info.dli_fname);
-    std::transform(path.begin(), path.end(), path.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    return path.find("libqnnhtp.so") != std::string::npos;
+    const std::string path = lower(info.dli_fname);
+    return path.find(expectedModuleName(backend)) != std::string::npos;
 }
 
 QnnQuantizeParams signedInt8Quantization() {
@@ -279,10 +212,7 @@ QnnTensor graphTensor(const char* name, uint32_t type, uint32_t* dimensions) {
     return tensor;
 }
 
-struct AhbBuffer {
-    AHardwareBuffer* buffer{nullptr};
-    int fd{-1};
-};
+struct AhbBuffer { AHardwareBuffer* buffer{nullptr}; int fd{-1}; };
 
 void releaseAhb(AhbBuffer& buffer) noexcept {
     if (buffer.buffer != nullptr) {
@@ -302,12 +232,10 @@ bool allocateShareableAhb(AHardwareBufferGetNativeHandleFn getNativeHandle,
     desc.usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN
         | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
         | AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER;
-
     if (AHardwareBuffer_allocate(&desc, &out.buffer) != 0 || out.buffer == nullptr) {
         failure = "ahb-shared-buffer-allocation-failed";
         return false;
     }
-
     const NativeHandlePrefix* nativeHandle = getNativeHandle(out.buffer);
     if (nativeHandle == nullptr || nativeHandle->numFds < 1 || nativeHandle->data[0] < 0) {
         failure = "ahb-native-dmabuf-unavailable";
@@ -320,14 +248,13 @@ bool allocateShareableAhb(AHardwareBufferGetNativeHandleFn getNativeHandle,
 
 bool writeInputAhb(AhbBuffer& input, const int8_t (&values)[4], std::string& failure) {
     void* address = nullptr;
-    const uint64_t usage = AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN;
-    if (AHardwareBuffer_lock(input.buffer, usage, -1, nullptr, &address) != 0 || address == nullptr) {
+    if (AHardwareBuffer_lock(input.buffer, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
+            -1, nullptr, &address) != 0 || address == nullptr) {
         failure = "ahb-input-lock-failed";
         return false;
     }
     std::memcpy(address, values, sizeof(values));
-    const int unlockResult = AHardwareBuffer_unlock(input.buffer, nullptr);
-    if (unlockResult != 0) {
+    if (AHardwareBuffer_unlock(input.buffer, nullptr) != 0) {
         failure = "ahb-input-unlock-failed";
         return false;
     }
@@ -336,17 +263,14 @@ bool writeInputAhb(AhbBuffer& input, const int8_t (&values)[4], std::string& fai
 
 bool verifyOutputAhb(AhbBuffer& output, std::string& failure) {
     void* address = nullptr;
-    const uint64_t usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
-    if (AHardwareBuffer_lock(output.buffer, usage, -1, nullptr, &address) != 0 || address == nullptr) {
+    if (AHardwareBuffer_lock(output.buffer, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+            -1, nullptr, &address) != 0 || address == nullptr) {
         failure = "ahb-output-lock-failed";
         return false;
     }
-
-    const auto* values = static_cast<const int8_t*>(address);
     const int8_t expected[4] = {0, 0, 3, 12};
-    const bool matches = std::memcmp(values, expected, sizeof(expected)) == 0;
-    const int unlockResult = AHardwareBuffer_unlock(output.buffer, nullptr);
-    if (unlockResult != 0) {
+    const bool matches = std::memcmp(address, expected, sizeof(expected)) == 0;
+    if (AHardwareBuffer_unlock(output.buffer, nullptr) != 0) {
         failure = "ahb-output-unlock-failed";
         return false;
     }
@@ -370,12 +294,12 @@ QnnMemDescriptor ionDescriptor(int fd, uint32_t* dimensions) {
 
 } // namespace
 
-QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
-    QnnHtpSmokeResult result{};
-
+QnnComputeSmokeResult probeQnnComputeGraphAndSharedMemory(
+        void* qnnComputeHandle, QnnComputeBackendKind computeBackend) noexcept {
+    QnnComputeSmokeResult result{};
 #ifdef __ANDROID__
-    if (qnnHtpHandle == nullptr) {
-        result.failureReason = "qnn-htp-library-unavailable";
+    if (qnnComputeHandle == nullptr || computeBackend == QnnComputeBackendKind::None) {
+        result.failureReason = "qnn-compute-library-unavailable";
         return result;
     }
 
@@ -390,28 +314,17 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
 
     const auto cleanup = [&]() noexcept {
         if (api != nullptr && api->memDeRegister != nullptr) {
-            if (outputMem != nullptr) {
-                QnnHandle handle = outputMem;
-                api->memDeRegister(&handle, 1);
-                outputMem = nullptr;
-            }
-            if (inputMem != nullptr) {
-                QnnHandle handle = inputMem;
-                api->memDeRegister(&handle, 1);
-                inputMem = nullptr;
-            }
+            if (outputMem != nullptr) { QnnHandle h = outputMem; api->memDeRegister(&h, 1); outputMem = nullptr; }
+            if (inputMem != nullptr) { QnnHandle h = inputMem; api->memDeRegister(&h, 1); inputMem = nullptr; }
         }
         if (api != nullptr && api->contextFree != nullptr && context != nullptr) {
-            api->contextFree(context, nullptr);
-            context = nullptr;
+            api->contextFree(context, nullptr); context = nullptr;
         }
         if (api != nullptr && api->deviceFree != nullptr && device != nullptr) {
-            api->deviceFree(device);
-            device = nullptr;
+            api->deviceFree(device); device = nullptr;
         }
         if (api != nullptr && api->backendFree != nullptr && backend != nullptr) {
-            api->backendFree(backend);
-            backend = nullptr;
+            api->backendFree(backend); backend = nullptr;
         }
         releaseAhb(outputAhb);
         releaseAhb(inputAhb);
@@ -419,10 +332,11 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
 
     try {
         auto getProviders = reinterpret_cast<GetProvidersFn>(
-            dlsym(qnnHtpHandle, "QnnInterface_getProviders"));
-        if (getProviders == nullptr || !symbolComesFromHtp(
-                reinterpret_cast<const void*>(getProviders))) {
-            result.failureReason = "qnn-htp-provider-origin-unverified";
+            dlsym(qnnComputeHandle, "QnnInterface_getProviders"));
+        if (getProviders == nullptr || !symbolComesFromComputeBackend(
+                reinterpret_cast<const void*>(getProviders), computeBackend)) {
+            result.failureReason = std::string("qnn-") + qnnComputeBackendName(computeBackend)
+                + "-provider-origin-unverified";
             cleanup();
             return result;
         }
@@ -431,21 +345,16 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
         uint32_t providerCount = 0;
         if (getProviders(&providers, &providerCount) != QNN_SUCCESS
                 || providers == nullptr || providerCount == 0) {
-            result.failureReason = "qnn-htp-provider-enumeration-failed";
+            result.failureReason = "qnn-compute-provider-enumeration-failed";
             cleanup();
             return result;
         }
-
         const QnnInterfaceProvider* selected = nullptr;
         for (uint32_t i = 0; i < providerCount; ++i) {
-            const auto* provider = providers[i];
-            if (provider != nullptr && containsHtp(provider->providerName)) {
-                selected = provider;
-                break;
-            }
+            if (providerMatches(providers[i], computeBackend)) { selected = providers[i]; break; }
         }
         if (selected == nullptr) {
-            result.failureReason = "qnn-htp-provider-identity-unverified";
+            result.failureReason = "qnn-compute-provider-identity-unverified";
             cleanup();
             return result;
         }
@@ -454,8 +363,7 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
             cleanup();
             return result;
         }
-
-        result.htpAttributionQualified = true;
+        result.computeAttributionQualified = true;
         api = &selected->implementation;
         if (api->backendCreate == nullptr || api->backendFree == nullptr
                 || api->contextCreate == nullptr || api->contextFree == nullptr
@@ -467,28 +375,22 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
             cleanup();
             return result;
         }
-
         if (api->backendGetBuildId != nullptr) {
             const char* buildId = nullptr;
             if (api->backendGetBuildId(&buildId) == QNN_SUCCESS && buildId != nullptr)
                 result.backendBuildId = buildId;
         }
-
         if (api->backendCreate(nullptr, nullptr, &backend) != QNN_SUCCESS || backend == nullptr) {
-            result.failureReason = "qnn-htp-backend-create-failed";
+            result.failureReason = "qnn-compute-backend-create-failed";
             cleanup();
             return result;
         }
-
         if (api->deviceCreate != nullptr) {
             QnnHandle candidate = nullptr;
-            if (api->deviceCreate(nullptr, nullptr, &candidate) == QNN_SUCCESS)
-                device = candidate;
+            if (api->deviceCreate(nullptr, nullptr, &candidate) == QNN_SUCCESS) device = candidate;
         }
-
-        if (api->contextCreate(backend, device, nullptr, &context) != QNN_SUCCESS
-                || context == nullptr) {
-            result.failureReason = "qnn-htp-context-create-failed";
+        if (api->contextCreate(backend, device, nullptr, &context) != QNN_SUCCESS || context == nullptr) {
+            result.failureReason = "qnn-compute-context-create-failed";
             cleanup();
             return result;
         }
@@ -500,13 +402,11 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
             cleanup();
             return result;
         }
-
         if (!allocateShareableAhb(getNativeHandle, inputAhb, result.failureReason)
                 || !allocateShareableAhb(getNativeHandle, outputAhb, result.failureReason)) {
             cleanup();
             return result;
         }
-
         const int8_t inputValues[4] = {-4, 0, 3, 12};
         if (!writeInputAhb(inputAhb, inputValues, result.failureReason)) {
             cleanup();
@@ -516,14 +416,12 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
         uint32_t dimensions[1] = {4};
         const QnnMemDescriptor inputDescriptor = ionDescriptor(inputAhb.fd, dimensions);
         const QnnMemDescriptor outputDescriptor = ionDescriptor(outputAhb.fd, dimensions);
-        if (api->memRegister(context, &inputDescriptor, 1, &inputMem) != QNN_SUCCESS
-                || inputMem == nullptr) {
+        if (api->memRegister(context, &inputDescriptor, 1, &inputMem) != QNN_SUCCESS || inputMem == nullptr) {
             result.failureReason = "qnn-ahb-input-mem-register-failed";
             cleanup();
             return result;
         }
-        if (api->memRegister(context, &outputDescriptor, 1, &outputMem) != QNN_SUCCESS
-                || outputMem == nullptr) {
+        if (api->memRegister(context, &outputDescriptor, 1, &outputMem) != QNN_SUCCESS || outputMem == nullptr) {
             result.failureReason = "qnn-ahb-output-mem-register-failed";
             cleanup();
             return result;
@@ -531,13 +429,11 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
         result.sharedMemoryQualified = true;
 
         QnnHandle graph = nullptr;
-        if (api->graphCreate(context, "lsfg_phase2_htp_smoke", nullptr, &graph) != QNN_SUCCESS
-                || graph == nullptr) {
+        if (api->graphCreate(context, "lsfg_phase2_compute_smoke", nullptr, &graph) != QNN_SUCCESS || graph == nullptr) {
             result.failureReason = "qnn-smoke-graph-create-failed";
             cleanup();
             return result;
         }
-
         QnnTensor inputTensor = graphTensor("phase2_input", QNN_TENSOR_TYPE_APP_WRITE, dimensions);
         QnnTensor outputTensor = graphTensor("phase2_output", QNN_TENSOR_TYPE_APP_READ, dimensions);
         if (api->tensorCreateGraphTensor(graph, &inputTensor) != QNN_SUCCESS
@@ -546,19 +442,15 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
             cleanup();
             return result;
         }
-
         QnnOpConfig op{};
         op.version = QNN_OPCONFIG_VERSION_1;
         op.v1.name = "lsfg_phase2_relu";
         op.v1.packageName = "qti.aisw";
         op.v1.typeName = "Relu";
-        op.v1.numOfParams = 0;
-        op.v1.params = nullptr;
         op.v1.numOfInputs = 1;
         op.v1.inputTensors = &inputTensor;
         op.v1.numOfOutputs = 1;
         op.v1.outputTensors = &outputTensor;
-
         if (api->graphAddNode(graph, op) != QNN_SUCCESS) {
             result.failureReason = "qnn-smoke-graph-add-node-failed";
             cleanup();
@@ -569,22 +461,18 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
             cleanup();
             return result;
         }
-
         QnnTensor executeInput = inputTensor;
         executeInput.v1.memType = QNN_TENSORMEMTYPE_MEMHANDLE;
         executeInput.v1.memHandle = inputMem;
         QnnTensor executeOutput = outputTensor;
         executeOutput.v1.memType = QNN_TENSORMEMTYPE_MEMHANDLE;
         executeOutput.v1.memHandle = outputMem;
-
-        if (api->graphExecute(graph, &executeInput, 1, &executeOutput, 1,
-                nullptr, nullptr) != QNN_SUCCESS) {
+        if (api->graphExecute(graph, &executeInput, 1, &executeOutput, 1, nullptr, nullptr) != QNN_SUCCESS) {
             result.failureReason = "qnn-smoke-graph-execute-failed";
             cleanup();
             return result;
         }
         result.graphExecutionQualified = true;
-
         if (!verifyOutputAhb(outputAhb, result.failureReason)) {
             cleanup();
             return result;
@@ -597,10 +485,10 @@ QnnHtpSmokeResult probeQnnHtpGraphAndSharedMemory(void* qnnHtpHandle) noexcept {
         cleanup();
     }
 #else
-    (void)qnnHtpHandle;
+    (void)qnnComputeHandle;
+    (void)computeBackend;
     result.failureReason = "qnn-android-runtime-unavailable";
 #endif
-
     return result;
 }
 

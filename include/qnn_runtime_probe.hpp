@@ -5,6 +5,12 @@
 
 namespace LSFG::Accelerator {
 
+enum class QnnComputeBackendKind : uint8_t {
+    None,
+    Htp,
+    Dsp,
+};
+
 struct QnnVersion {
     uint32_t major{0};
     uint32_t minor{0};
@@ -15,7 +21,7 @@ struct QnnVersion {
 
 struct QnnRuntimeProbeResult {
     bool systemLibraryLoaded{false};
-    bool htpLibraryLoaded{false};
+    bool computeLibraryLoaded{false};
     bool qnnInterfaceSymbolFound{false};
     bool qnnSystemInterfaceSymbolFound{false};
     bool qnnProviderEnumerated{false};
@@ -26,20 +32,26 @@ struct QnnRuntimeProbeResult {
     uint32_t qnnSystemProviderCount{0};
     uint32_t backendId{0};
     uint32_t systemBackendId{0};
+    QnnComputeBackendKind computeBackend{QnnComputeBackendKind::None};
     std::string providerName;
     std::string systemProviderName;
     QnnVersion coreApiVersion{};
     QnnVersion backendApiVersion{};
     QnnVersion systemApiVersion{};
-    std::string htpLibraryPath;
+    std::string computeLibraryPath;
     std::string systemLibraryPath;
     std::string failureReason;
 };
 
-/// Inspect the public, versioned QNN provider prefixes exposed by the optional
-/// HTP/System runtime libraries. This intentionally does not call backend,
-/// device, context, graph, tensor, or memory-registration entry points.
+/// Inspect the versioned QNN provider prefixes exposed by an optional compute
+/// backend and libQnnSystem. Phase 2 supports both the HTP backend used by
+/// newer Snapdragon platforms and the DSP backend used by SM8250/Hexagon v66.
+/// No backend/device/context/graph/tensor/memory API is called here.
 QnnRuntimeProbeResult probeQnnRuntimeMetadata(
-    void*& qnnSystemHandle, void*& qnnHtpHandle) noexcept;
+    QnnComputeBackendKind computeBackend,
+    void*& qnnSystemHandle,
+    void*& qnnComputeHandle) noexcept;
+
+[[nodiscard]] const char* qnnComputeBackendName(QnnComputeBackendKind backend) noexcept;
 
 } // namespace LSFG::Accelerator

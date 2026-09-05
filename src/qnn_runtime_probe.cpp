@@ -14,9 +14,6 @@ namespace {
 
 #ifdef __ANDROID__
 
-// Minimal ABI-only mirrors of the stable public provider prefixes. Keeping this
-// local avoids a compile/link dependency on a Qualcomm SDK while still letting
-// Phase 2 verify which provider the device runtime actually exposes.
 using QnnErrorHandle = uint64_t;
 constexpr QnnErrorHandle QNN_SUCCESS = 0;
 
@@ -48,8 +45,26 @@ using QnnInterfaceGetProvidersFn = QnnErrorHandle (*)(
 using QnnSystemInterfaceGetProvidersFn = QnnErrorHandle (*)(
     const QnnSystemInterfacePrefix*** providerList, uint32_t* numProviders);
 
+const char* computeLibrary(QnnComputeBackendKind backend) {
+    switch (backend) {
+        case QnnComputeBackendKind::Htp: return "libQnnHtp.so";
+        case QnnComputeBackendKind::Dsp: return "libQnnDsp.so";
+        case QnnComputeBackendKind::None: break;
+    }
+    return nullptr;
+}
+
+const char* providerToken(QnnComputeBackendKind backend) {
+    switch (backend) {
+        case QnnComputeBackendKind::Htp: return "htp";
+        case QnnComputeBackendKind::Dsp: return "dsp";
+        case QnnComputeBackendKind::None: break;
+    }
+    return "";
+}
+
 void* openOptionalRuntime(const char* library) {
-    return dlopen(library, RTLD_NOW | RTLD_LOCAL);
+    return library == nullptr ? nullptr : dlopen(library, RTLD_NOW | RTLD_LOCAL);
 }
 
 std::string modulePathForSymbol(const void* symbol) {
@@ -60,29 +75,42 @@ std::string modulePathForSymbol(const void* symbol) {
     return {};
 }
 
-bool containsHtp(const char* raw) {
-    if (raw == nullptr || *raw == '\0') return false;
+bool containsInsensitive(const char* raw, const char* token) {
+    if (raw == nullptr || *raw == '\0' || token == nullptr || *token == '\0') return false;
     std::string value(raw);
+    std::string needle(token);
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
-    return value.find("htp") != std::string::npos;
+    std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value.find(needle) != std::string::npos;
+}
+
+bool providerMatches(const QnnInterfacePrefix* provider, QnnComputeBackendKind backend) {
+    if (provider == nullptr) return false;
+    // providerName is explicitly allowed to be null by QNN. The symbol-origin
+    // check in the smoke probe remains authoritative in that case.
+    return provider->providerName == nullptr
+        || containsInsensitive(provider->providerName, providerToken(backend));
 }
 
 QnnVersion versionOf(const QnnAbiVersion& version) {
     return QnnVersion{version.major, version.minor, version.patch};
 }
 
-void qualifyHtpProvider(void* htpHandle, QnnRuntimeProbeResult& result) {
+void qualifyComputeProvider(void* computeHandle, QnnComputeBackendKind backend,
+        QnnRuntimeProbeResult& result) {
     dlerror();
     auto getProviders = reinterpret_cast<QnnInterfaceGetProvidersFn>(
-        dlsym(htpHandle, "QnnInterface_getProviders"));
+        dlsym(computeHandle, "QnnInterface_getProviders"));
     result.qnnInterfaceSymbolFound = getProviders != nullptr;
     if (getProviders == nullptr) {
         result.failureReason = "qnn-interface-symbol-missing";
         return;
     }
-    result.htpLibraryPath = modulePathForSymbol(reinterpret_cast<const void*>(getProviders));
+    result.computeLibraryPath = modulePathForSymbol(reinterpret_cast<const void*>(getProviders));
 
     const QnnInterfacePrefix** providers = nullptr;
     uint32_t providerCount = 0;
@@ -96,14 +124,14 @@ void qualifyHtpProvider(void* htpHandle, QnnRuntimeProbeResult& result) {
 
     const QnnInterfacePrefix* selected = nullptr;
     for (uint32_t i = 0; i < providerCount; ++i) {
-        const QnnInterfacePrefix* provider = providers[i];
-        if (provider != nullptr && containsHtp(provider->providerName)) {
-            selected = provider;
+        if (providerMatches(providers[i], backend)) {
+            selected = providers[i];
             break;
         }
     }
     if (selected == nullptr) {
-        result.failureReason = "qnn-htp-provider-identity-unverified";
+        result.failureReason = std::string("qnn-") + qnnComputeBackendName(backend)
+            + "-provider-identity-unverified";
         return;
     }
 
@@ -158,8 +186,11 @@ void qualifySystemProvider(void* systemHandle, QnnRuntimeProbeResult& result) {
 } // namespace
 
 QnnRuntimeProbeResult probeQnnRuntimeMetadata(
-        void*& qnnSystemHandle, void*& qnnHtpHandle) noexcept {
+        QnnComputeBackendKind computeBackend,
+        void*& qnnSystemHandle,
+        void*& qnnComputeHandle) noexcept {
     QnnRuntimeProbeResult result{};
+    result.computeBackend = computeBackend;
 
 #ifdef __ANDROID__
     try {
@@ -170,14 +201,16 @@ QnnRuntimeProbeResult probeQnnRuntimeMetadata(
             return result;
         }
 
-        qnnHtpHandle = openOptionalRuntime("libQnnHtp.so");
-        result.htpLibraryLoaded = qnnHtpHandle != nullptr;
-        if (!result.htpLibraryLoaded) {
-            result.failureReason = "qnn-htp-library-unavailable";
+        const char* library = computeLibrary(computeBackend);
+        qnnComputeHandle = openOptionalRuntime(library);
+        result.computeLibraryLoaded = qnnComputeHandle != nullptr;
+        if (!result.computeLibraryLoaded) {
+            result.failureReason = std::string("qnn-") + qnnComputeBackendName(computeBackend)
+                + "-library-unavailable";
             return result;
         }
 
-        qualifyHtpProvider(qnnHtpHandle, result);
+        qualifyComputeProvider(qnnComputeHandle, computeBackend, result);
         if (!result.qnnProviderQualified) return result;
 
         qualifySystemProvider(qnnSystemHandle, result);
@@ -189,11 +222,20 @@ QnnRuntimeProbeResult probeQnnRuntimeMetadata(
     }
 #else
     (void)qnnSystemHandle;
-    (void)qnnHtpHandle;
+    (void)qnnComputeHandle;
     result.failureReason = "qnn-android-runtime-unavailable";
 #endif
 
     return result;
+}
+
+const char* qnnComputeBackendName(QnnComputeBackendKind backend) noexcept {
+    switch (backend) {
+        case QnnComputeBackendKind::None: return "none";
+        case QnnComputeBackendKind::Htp: return "htp";
+        case QnnComputeBackendKind::Dsp: return "dsp";
+    }
+    return "none";
 }
 
 } // namespace LSFG::Accelerator
