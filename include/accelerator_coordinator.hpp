@@ -1,6 +1,7 @@
 #pragma once
 
 #include "frame_generation_backend.hpp"
+#include "qnn_runtime_probe.hpp"
 
 #include <cstdint>
 #include <string>
@@ -30,7 +31,18 @@ struct AcceleratorStatus {
     bool npuSettingEnabled{false};
     bool qnnRuntimeFound{false};
     bool snpeRuntimeFound{false};
+    bool qnnProviderQualified{false};
+    bool qnnSystemProviderQualified{false};
+    bool directAhbInteropQualified{false};
     bool executionEnabled{false};
+    uint32_t qnnBackendId{0};
+    std::string qnnProviderName;
+    std::string qnnSystemProviderName;
+    QnnVersion qnnCoreApiVersion{};
+    QnnVersion qnnBackendApiVersion{};
+    QnnVersion qnnSystemApiVersion{};
+    std::string qnnHtpLibraryPath;
+    std::string qnnSystemLibraryPath;
     BackendKind selectedBackend{BackendKind::Vulkan};
     BackendOverride requestedBackend{BackendOverride::Auto};
     AcceleratorHealthState healthState{AcceleratorHealthState::Unprobed};
@@ -40,9 +52,10 @@ struct AcceleratorStatus {
 
 /// Owns optional accelerator runtime discovery and backend health state.
 ///
-/// Phase 1 is discovery/scaffolding only: beginEligibleSession() may probe
-/// optional Qualcomm libraries when explicitly allowed, but it never hands
-/// frame-generation execution away from Vulkan.
+/// Phase 2 verifies the actual QNN HTP/System providers and records runtime
+/// provenance, but does not create accelerator devices/graphs or redirect frame
+/// generation. Vulkan remains the unconditional execution backend until the
+/// memory/interoperability and execution path are separately qualified.
 class AcceleratorCoordinator final {
 public:
     static AcceleratorCoordinator& instance() noexcept;

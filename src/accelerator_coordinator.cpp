@@ -42,6 +42,20 @@ void logAccelerator(const std::string& message) {
     LSFG::AndroidDiagnostics::logNativeDiagnostic(message);
 }
 
+std::string logToken(std::string value) {
+    if (value.empty()) return "none";
+    std::replace_if(value.begin(), value.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    }, '_');
+    return value;
+}
+
+std::string versionToken(const QnnVersion& version) {
+    if (!version.valid()) return "none";
+    return std::to_string(version.major) + "." + std::to_string(version.minor)
+        + "." + std::to_string(version.patch);
+}
+
 #ifdef __ANDROID__
 void* openOptionalRuntime(const char* library) {
     // Deliberately no link-time Qualcomm dependency: failure is ordinary and
@@ -95,36 +109,46 @@ void AcceleratorCoordinator::beginEligibleSession() {
     }
 
     status_.healthState = AcceleratorHealthState::Probing;
-    logAccelerator("LSFG_ACCEL event=probe-begin");
+    logAccelerator("LSFG_ACCEL event=probe-begin phase=2");
 
     if (status_.requestedBackend == BackendOverride::Snpe) {
         probeSnpeRuntime();
     } else {
         probeQnnRuntime();
-        if (!status_.qnnRuntimeFound && status_.requestedBackend == BackendOverride::Auto)
+        if ((!status_.qnnProviderQualified || !status_.qnnSystemProviderQualified)
+                && status_.requestedBackend == BackendOverride::Auto) {
             probeSnpeRuntime();
+        }
     }
 
-    // Phase 1 invariant: discovery is informational only. No QNN/SNPE graph is
-    // created and Vulkan remains the unconditional execution backend.
+    // Phase 2 invariant: provider qualification is still informational. Direct
+    // AHB -> QNN memory registration and actual HTP graph execution have not yet
+    // been proven, so no runtime discovery result is allowed to steal execution
+    // from the validated Vulkan path.
     status_.executionEnabled = false;
     status_.selectedBackend = BackendKind::Vulkan;
-    if (status_.qnnRuntimeFound || status_.snpeRuntimeFound) {
-        status_.selectionReason = "phase1-execution-disabled";
-        status_.fallbackReason = "phase1-execution-disabled";
+    status_.directAhbInteropQualified = false;
+
+    if (status_.qnnProviderQualified && status_.qnnSystemProviderQualified) {
+        status_.healthState = AcceleratorHealthState::Supported;
+        status_.selectionReason = "phase2-execution-disabled";
+        status_.fallbackReason = "direct-ahb-qnn-memory-registration-unproven";
+    } else if (status_.snpeRuntimeFound) {
+        status_.healthState = AcceleratorHealthState::Unprobed;
+        status_.selectionReason = "snpe-phase2-unqualified";
+        status_.fallbackReason = "snpe-provider-qualification-not-implemented";
     } else {
-        status_.selectionReason = "accelerator-runtime-unavailable";
-        status_.fallbackReason = "accelerator-runtime-unavailable";
+        status_.healthState = AcceleratorHealthState::Unprobed;
+        if (status_.fallbackReason.empty())
+            status_.fallbackReason = "accelerator-runtime-unavailable";
+        status_.selectionReason = status_.fallbackReason;
     }
-    status_.healthState = AcceleratorHealthState::Unprobed;
 
     logAccelerator(
         std::string("LSFG_ACCEL event=vulkan-fallback reason=") + status_.fallbackReason);
     logSnapshot();
 
-    // Discovery must not retain accelerator resources in Phase 1. Later phases
-    // may keep qualified runtimes resident only while an accelerator backend is
-    // actually warm/active.
+    // Metadata inspection does not need accelerator runtimes to remain resident.
     closeRuntimeHandles();
 }
 
@@ -134,24 +158,45 @@ void AcceleratorCoordinator::endSession() noexcept {
 }
 
 void AcceleratorCoordinator::probeQnnRuntime() {
-    qnnSystemHandle_ = openOptionalRuntime("libQnnSystem.so");
-    qnnHtpHandle_ = openOptionalRuntime("libQnnHtp.so");
-    status_.qnnRuntimeFound = qnnSystemHandle_ != nullptr && qnnHtpHandle_ != nullptr;
+    const QnnRuntimeProbeResult result =
+        probeQnnRuntimeMetadata(qnnSystemHandle_, qnnHtpHandle_);
 
-    if (!status_.qnnRuntimeFound) {
-        closeOptionalRuntime(qnnSystemHandle_);
-        closeOptionalRuntime(qnnHtpHandle_);
+    status_.qnnRuntimeFound = result.systemLibraryLoaded && result.htpLibraryLoaded;
+    status_.qnnProviderQualified = result.qnnProviderQualified;
+    status_.qnnSystemProviderQualified = result.qnnSystemProviderQualified;
+    status_.qnnBackendId = result.backendId;
+    status_.qnnProviderName = result.providerName;
+    status_.qnnSystemProviderName = result.systemProviderName;
+    status_.qnnCoreApiVersion = result.coreApiVersion;
+    status_.qnnBackendApiVersion = result.backendApiVersion;
+    status_.qnnSystemApiVersion = result.systemApiVersion;
+    status_.qnnHtpLibraryPath = result.htpLibraryPath;
+    status_.qnnSystemLibraryPath = result.systemLibraryPath;
+
+    if (status_.qnnProviderQualified && status_.qnnSystemProviderQualified) {
+        logAccelerator(
+            std::string("LSFG_ACCEL event=qnn-provider-qualified")
+            + " provider=" + logToken(status_.qnnProviderName)
+            + " backend_id=" + std::to_string(status_.qnnBackendId)
+            + " core_api=" + versionToken(status_.qnnCoreApiVersion)
+            + " backend_api=" + versionToken(status_.qnnBackendApiVersion)
+            + " system_api=" + versionToken(status_.qnnSystemApiVersion)
+            + " htp_module=" + logToken(status_.qnnHtpLibraryPath)
+            + " system_module=" + logToken(status_.qnnSystemLibraryPath));
         return;
     }
 
-    logAccelerator("LSFG_ACCEL event=qnn-runtime-found");
+    status_.fallbackReason = result.failureReason.empty()
+        ? "qnn-provider-unqualified" : result.failureReason;
+    logAccelerator(
+        std::string("LSFG_ACCEL event=qnn-provider-rejected reason=") + status_.fallbackReason);
 }
 
 void AcceleratorCoordinator::probeSnpeRuntime() {
     snpeHandle_ = openOptionalRuntime("libSNPE.so");
     status_.snpeRuntimeFound = snpeHandle_ != nullptr;
     if (status_.snpeRuntimeFound)
-        logAccelerator("LSFG_ACCEL event=snpe-runtime-found");
+        logAccelerator("LSFG_ACCEL event=snpe-runtime-found phase2_provider_qualified=0");
 }
 
 void AcceleratorCoordinator::closeRuntimeHandles() noexcept {
@@ -163,8 +208,18 @@ void AcceleratorCoordinator::closeRuntimeHandles() noexcept {
 void AcceleratorCoordinator::logSnapshot() const {
     logAccelerator(
         std::string("LSFG_ACCEL npu_setting_enabled=") + (status_.npuSettingEnabled ? "1" : "0")
-        + " accelerator_module_version=phase1"
+        + " accelerator_module_version=phase2"
         + " qnn_runtime_found=" + (status_.qnnRuntimeFound ? "1" : "0")
+        + " qnn_provider_qualified=" + (status_.qnnProviderQualified ? "1" : "0")
+        + " qnn_system_provider_qualified=" + (status_.qnnSystemProviderQualified ? "1" : "0")
+        + " direct_ahb_interop_qualified=" + (status_.directAhbInteropQualified ? "1" : "0")
+        + " qnn_provider=" + logToken(status_.qnnProviderName)
+        + " qnn_backend_id=" + std::to_string(status_.qnnBackendId)
+        + " qnn_core_api=" + versionToken(status_.qnnCoreApiVersion)
+        + " qnn_backend_api=" + versionToken(status_.qnnBackendApiVersion)
+        + " qnn_system_api=" + versionToken(status_.qnnSystemApiVersion)
+        + " qnn_htp_module=" + logToken(status_.qnnHtpLibraryPath)
+        + " qnn_system_module=" + logToken(status_.qnnSystemLibraryPath)
         + " snpe_runtime_found=" + (status_.snpeRuntimeFound ? "1" : "0")
         + " requested_backend=" + backendOverrideName(status_.requestedBackend)
         + " selected_backend=" + backendKindName(status_.selectedBackend)
