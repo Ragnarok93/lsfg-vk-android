@@ -1,0 +1,62 @@
+name: Temporary post-fix runtime patch
+
+on:
+  push:
+    branches:
+      - optimize/a6xx-transport
+    paths:
+      - scripts/tmp_postfix_runtime_patch.py
+      - .github/workflows/tmp-postfix-runtime.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: optimize/a6xx-transport
+          fetch-depth: 0
+
+      - name: Record RED contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/tmp_postfix_runtime_patch.py --tests-only
+          if python3 tests/android_wsi_loader_bridge_test.py \
+              && python3 tests/android_runtime_stability_test.py \
+              && python3 tests/android_a6xx_transport_test.py; then
+            echo "Expected new post-fix contracts to fail before source patch"
+            exit 1
+          fi
+          echo "RED confirmed: at least one new contract fails on pre-patch source"
+
+      - name: Apply source patch
+        run: python3 scripts/tmp_postfix_runtime_patch.py --source-only
+
+      - name: Record GREEN contracts
+        run: |
+          set -euo pipefail
+          python3 tests/android_wsi_loader_bridge_test.py
+          python3 tests/android_runtime_stability_test.py
+          python3 tests/android_a6xx_transport_test.py
+
+      - name: Commit source and contracts only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            src/android_wsi_loader_bridge.cpp \
+            src/hooks.cpp \
+            framegen/src/core/device.cpp \
+            tests/android_wsi_loader_bridge_test.py \
+            tests/android_runtime_stability_test.py \
+            tests/android_a6xx_transport_test.py
+          git diff --cached --check
+          git commit -m "android: harden LSFG off path and expose A6xx sync caps"
+          git push origin HEAD:optimize/a6xx-transport
