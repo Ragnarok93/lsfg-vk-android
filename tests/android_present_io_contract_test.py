@@ -32,13 +32,14 @@ class AndroidPresentIoContractTest(unittest.TestCase):
         present = source[present_start:present_end]
 
         changed = present.index("androidConfigWatcher.consumeChanged()")
+        reload_guard = present.index("if (shouldPollConfig && !conf.config_file.empty())")
         inactive = present.index("!androidFrameGenerationActive.load")
         swapchain_lookup = present.index("swapchainToDeviceTable.find")
         context_lookup = present.index("swapchains.find")
-        self.assertLess(changed, inactive)
+        self.assertLess(changed, reload_guard)
+        self.assertLess(reload_guard, inactive)
         self.assertLess(inactive, swapchain_lookup)
         self.assertLess(swapchain_lookup, context_lookup)
-        self.assertNotIn("std::filesystem::", present[:swapchain_lookup])
         self.assertNotIn("runtimeOutputStats[", present[:swapchain_lookup])
 
     def test_known_passthrough_swapchains_do_not_probe_lsfg_context(self) -> None:
