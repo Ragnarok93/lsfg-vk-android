@@ -22,19 +22,19 @@ jobs:
         run: |
           python3 scripts/tmp_a6xx_patch.py
           python3 scripts/tmp_a6xx_compat_fix.py
+          git checkout -- .github/workflows/android-bionic.yml
+          rm -rf tests/__pycache__
       - name: Verify patch contracts
         run: |
           git diff --check
           python3 tests/android_a6xx_transport_test.py
           python3 tests/android_ahb_portability_test.py
           python3 tests/android_runtime_stability_test.py
-      - name: Commit source changes and remove patch scaffolding
+      - name: Commit optimized source
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add include src framegen tests docs .github/workflows/android-bionic.yml
+          git add include src framegen docs tests/android_a6xx_transport_test.py
           git commit -m "android: pipeline A6xx AHB transport with external semaphores"
-          git rm scripts/tmp_a6xx_patch.py scripts/tmp_a6xx_compat_fix.py .github/workflows/tmp-a6xx-transport-patch.yml
-          git commit -m "ci: remove temporary A6xx patch scaffolding"
           git push origin HEAD:optimize/a6xx-transport
