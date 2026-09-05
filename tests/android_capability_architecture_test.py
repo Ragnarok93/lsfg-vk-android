@@ -77,6 +77,7 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         coordinator = (ROOT / "src/accelerator_coordinator.cpp").read_text(encoding="utf-8")
         header = (ROOT / "include/accelerator_coordinator.hpp").read_text(encoding="utf-8")
         qnn_probe = (ROOT / "src/qnn_runtime_probe.cpp").read_text(encoding="utf-8")
+        qnn_probe_header = (ROOT / "include/qnn_runtime_probe.hpp").read_text(encoding="utf-8")
         interface = (ROOT / "include/frame_generation_backend.hpp").read_text(encoding="utf-8")
         main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
         cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
@@ -85,6 +86,14 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         self.assertIn("LSFG_NPU_ACCELERATION", coordinator)
         self.assertIn("libQnnSystem.so", qnn_probe)
         self.assertIn("libQnnHtp.so", qnn_probe)
+        # SM8250 / Snapdragon 865 is Hexagon v66 and uses the QNN DSP backend,
+        # while SM8350+ devices use QNN HTP. Both must remain valid candidates.
+        self.assertIn("libQnnDsp.so", qnn_probe)
+        self.assertIn("QnnComputeBackendKind", qnn_probe_header)
+        self.assertIn("Dsp", qnn_probe_header)
+        self.assertIn("Htp", qnn_probe_header)
+        self.assertIn("QnnComputeBackendKind::Htp", coordinator)
+        self.assertIn("QnnComputeBackendKind::Dsp", coordinator)
         self.assertIn("QnnInterface_getProviders", qnn_probe)
         self.assertIn("QnnSystemInterface_getProviders", qnn_probe)
         self.assertIn("providerName", qnn_probe)
@@ -94,6 +103,7 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         self.assertIn("dladdr", qnn_probe)
         self.assertIn("qnnProviderQualified", header)
         self.assertIn("qnnSystemProviderQualified", header)
+        self.assertIn("qnnComputeBackend", header)
         self.assertIn("directAhbInteropQualified", header)
         self.assertIn("phase2-execution-disabled", coordinator)
         self.assertIn("accelerator_module_version=phase2", coordinator)
@@ -104,9 +114,10 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         self.assertIn("AcceleratorCoordinator::instance().beginEligibleSession()", main)
         self.assertNotIn("QnnSystem", cmake)
         self.assertNotIn("QnnHtp", cmake)
+        self.assertNotIn("QnnDsp", cmake)
         self.assertNotIn("SNPE", cmake)
 
-    def test_phase2_qnn_smoke_proves_htp_graph_ahb_and_numerical_path(self) -> None:
+    def test_phase2_qnn_smoke_proves_compute_graph_ahb_and_numerical_path(self) -> None:
         smoke = (ROOT / "src/qnn_htp_smoke_probe.cpp").read_text(encoding="utf-8")
         header = (ROOT / "include/accelerator_coordinator.hpp").read_text(encoding="utf-8")
         coordinator = (ROOT / "src/accelerator_coordinator.cpp").read_text(encoding="utf-8")
@@ -123,11 +134,14 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
             "qti.aisw",
             "Relu",
             "numerical-smoke-mismatch",
+            "QnnComputeBackendKind",
+            "libqnnhtp.so",
+            "libqnndsp.so",
         ):
             self.assertIn(token, smoke)
 
         for token in (
-            "qnnHtpAttributionQualified",
+            "qnnComputeAttributionQualified",
             "qnnSharedMemoryQualified",
             "qnnGraphExecutionQualified",
             "qnnNumericalSmokeQualified",
