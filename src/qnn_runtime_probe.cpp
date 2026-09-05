@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 
 #ifdef __ANDROID__
@@ -63,8 +64,50 @@ const char* providerToken(QnnComputeBackendKind backend) {
     return "";
 }
 
-void* openOptionalRuntime(const char* library) {
-    return library == nullptr ? nullptr : dlopen(library, RTLD_NOW | RTLD_LOCAL);
+std::string consumeLoaderError() {
+    const char* error = dlerror();
+    return error == nullptr || *error == '\0' ? "unknown" : std::string(error);
+}
+
+void* openOptionalRuntime(const char* library, std::string& diagnostic) {
+    diagnostic.clear();
+    if (library == nullptr || *library == '\0') {
+        diagnostic = "invalid-library-name";
+        return nullptr;
+    }
+
+    // First preserve Android's normal linker-namespace behavior. This can find
+    // a runtime already exposed by the platform or by the application's native
+    // library namespace without modifying any global linker state.
+    dlerror();
+    if (void* handle = dlopen(library, RTLD_NOW | RTLD_LOCAL); handle != nullptr) {
+        diagnostic = "namespace-load";
+        return handle;
+    }
+    const std::string namespaceError = consumeLoaderError();
+
+    // QAIRT deployments may instead be installed alongside the app's native
+    // libraries. GameNative passes that directory explicitly so the probe can
+    // try an absolute path without relying on LD_LIBRARY_PATH or namespace
+    // widening. Library names remain fixed by this module.
+    const char* runtimeDir = std::getenv("LSFG_QNN_RUNTIME_DIR");
+    if (runtimeDir == nullptr || *runtimeDir == '\0') {
+        diagnostic = "namespace=" + namespaceError + ";app_local=runtime-dir-unset";
+        return nullptr;
+    }
+
+    std::string path(runtimeDir);
+    while (path.size() > 1 && path.back() == '/') path.pop_back();
+    path.push_back('/');
+    path.append(library);
+
+    dlerror();
+    if (void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL); handle != nullptr) {
+        diagnostic = "app-local-load";
+        return handle;
+    }
+    diagnostic = "namespace=" + namespaceError + ";app_local=" + consumeLoaderError();
+    return nullptr;
 }
 
 std::string modulePathForSymbol(const void* symbol) {
@@ -194,7 +237,7 @@ QnnRuntimeProbeResult probeQnnRuntimeMetadata(
 
 #ifdef __ANDROID__
     try {
-        qnnSystemHandle = openOptionalRuntime("libQnnSystem.so");
+        qnnSystemHandle = openOptionalRuntime("libQnnSystem.so", result.systemLoadDiagnostic);
         result.systemLibraryLoaded = qnnSystemHandle != nullptr;
         if (!result.systemLibraryLoaded) {
             result.failureReason = "qnn-system-library-unavailable";
@@ -202,7 +245,7 @@ QnnRuntimeProbeResult probeQnnRuntimeMetadata(
         }
 
         const char* library = computeLibrary(computeBackend);
-        qnnComputeHandle = openOptionalRuntime(library);
+        qnnComputeHandle = openOptionalRuntime(library, result.computeLoadDiagnostic);
         result.computeLibraryLoaded = qnnComputeHandle != nullptr;
         if (!result.computeLibraryLoaded) {
             result.failureReason = std::string("qnn-") + qnnComputeBackendName(computeBackend)
