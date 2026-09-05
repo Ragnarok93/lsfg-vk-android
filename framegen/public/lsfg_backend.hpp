@@ -33,6 +33,7 @@ struct BackendDiagnostics {
     bool ahbR16fTransferSrc{false};
     bool ahbR16fTransferDst{false};
     bool ahbR8Storage{false};
+    bool externalSemaphoreFd{false};
     AhbTransportMode ahbTransportMode{AhbTransportMode::Unsupported};
 };
 

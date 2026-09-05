@@ -18,6 +18,7 @@ namespace Hooks {
         bool identityValid{false};
         std::pair<uint32_t, VkQueue> queue; // graphics family
         bool androidAhbSupported{true};
+        bool androidExternalSemaphoreFdSupported{false};
     };
 
     /// Map of hooked Vulkan functions.

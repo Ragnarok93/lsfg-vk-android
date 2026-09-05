@@ -80,6 +80,9 @@ private:
     AdaptiveFrameScheduler adaptiveScheduler_;
     bool requiresSourceHistoryWarmup_{false};
     bool previousSourceCopySignalValid_{false};
+    bool externalSemaphoreFdSync_{false};
+    bool previousAsyncReuseSignalValid_{false};
+    Mini::Semaphore previousAsyncReuseSemaphore_;
     struct RuntimeMetrics {
         using Clock = std::chrono::steady_clock;
 

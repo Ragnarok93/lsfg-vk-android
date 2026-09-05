@@ -229,6 +229,10 @@ void Context::present(Vulkan& vk,
         size_t activeGenerationCount) {
     const size_t generationCount = std::min(activeGenerationCount, vk.generationCount);
     if (generationCount == 0) {
+#ifdef __ANDROID__
+        if (this->transportOnly)
+            this->transportInputsPrimed_ = false;
+#endif
         this->frameIdx++;
         return;
     }
@@ -252,33 +256,53 @@ void Context::present(Vulkan& vk,
 
 #ifdef __ANDROID__
     if (this->transportOnly) {
+        const bool refreshBothInputs = !this->transportInputsPrimed_;
+        const bool refreshInput0 = refreshBothInputs || (this->frameIdx % 2 == 0);
+        const bool refreshInput1 = refreshBothInputs || (this->frameIdx % 2 != 0);
         std::vector<VkImageMemoryBarrier2> barriers;
-        barriers.reserve(4);
-        add_external_transfer_acquire(barriers, vk, this->sharedInImg_0,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
-        add_external_transfer_acquire(barriers, vk, this->sharedInImg_1,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
-        add_local_transition(barriers, this->inImg_0, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        add_local_transition(barriers, this->inImg_1, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        barriers.reserve(refreshBothInputs ? 4 : 2);
+        if (refreshInput0) {
+            add_external_transfer_acquire(barriers, vk, this->sharedInImg_0,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+            add_local_transition(barriers, this->inImg_0,
+                this->transportInputsPrimed_ ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                                             : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                this->transportInputsPrimed_ ? VK_ACCESS_2_SHADER_READ_BIT : 0,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        }
+        if (refreshInput1) {
+            add_external_transfer_acquire(barriers, vk, this->sharedInImg_1,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+            add_local_transition(barriers, this->inImg_1,
+                this->transportInputsPrimed_ ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                                             : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                this->transportInputsPrimed_ ? VK_ACCESS_2_SHADER_READ_BIT : 0,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        }
         emit_external_barriers(data.cmdBuffer1, barriers);
-        copy_same_format(data.cmdBuffer1, this->sharedInImg_0, this->inImg_0);
-        copy_same_format(data.cmdBuffer1, this->sharedInImg_1, this->inImg_1);
+        if (refreshInput0)
+            copy_same_format(data.cmdBuffer1, this->sharedInImg_0, this->inImg_0);
+        if (refreshInput1)
+            copy_same_format(data.cmdBuffer1, this->sharedInImg_1, this->inImg_1);
         barriers.clear();
-        add_local_transition(barriers, this->inImg_0, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
-        add_local_transition(barriers, this->inImg_1, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
-        add_external_transfer_release(barriers, vk, this->sharedInImg_0,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
-        add_external_transfer_release(barriers, vk, this->sharedInImg_1,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        if (refreshInput0) {
+            add_local_transition(barriers, this->inImg_0, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            add_external_transfer_release(barriers, vk, this->sharedInImg_0,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        }
+        if (refreshInput1) {
+            add_local_transition(barriers, this->inImg_1, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            add_external_transfer_release(barriers, vk, this->sharedInImg_1,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        }
         emit_external_barriers(data.cmdBuffer1, barriers);
+        this->transportInputsPrimed_ = true;
     } else {
         std::vector<VkImageMemoryBarrier2> acquireBarriers;
         acquireBarriers.reserve(2);

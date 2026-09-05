@@ -324,6 +324,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         ? LSFG_3_1P::getBackendDiagnostics()
         : LSFG_3_1::getBackendDiagnostics();
     const auto ahbTransportMode = backendDiagnostics.ahbTransportMode;
+    this->externalSemaphoreFdSync_ = info.androidExternalSemaphoreFdSupported
+        && backendDiagnostics.externalSemaphoreFd;
     if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported)
         throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
             "Exact game/framegen ICD has no supported AHB image transport for LSFG format");
@@ -371,43 +373,48 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     unsetenv("DISABLE_LSFG"); // NOLINT
 
 
-    // Resolve and allocate the handoff fence once per swapchain context. The old
-    // path looked up three entrypoints and created/destroyed a fence every source
-    // frame even though each handoff is synchronously completed before the next.
-    const auto createHandoffFence = reinterpret_cast<PFN_vkCreateFence>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkCreateFence"));
-    this->resetHandoffFences = reinterpret_cast<PFN_vkResetFences>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkResetFences"));
-    this->waitHandoffFences = reinterpret_cast<PFN_vkWaitForFences>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkWaitForFences"));
-    const auto destroyHandoffFence = reinterpret_cast<PFN_vkDestroyFence>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkDestroyFence"));
-    if (createHandoffFence == nullptr || this->resetHandoffFences == nullptr
-            || this->waitHandoffFences == nullptr || destroyHandoffFence == nullptr)
-        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
-            "Required fence functions unavailable for Android AHB handoff");
+    // The external-semaphore path orders the two VkDevices entirely on-GPU.
+    // Keep the reusable host fence only as a compatibility fallback for ICDs
+    // that cannot import/export OPAQUE_FD semaphores.
+    if (!this->externalSemaphoreFdSync_) {
+        const auto createHandoffFence = reinterpret_cast<PFN_vkCreateFence>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkCreateFence"));
+        this->resetHandoffFences = reinterpret_cast<PFN_vkResetFences>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkResetFences"));
+        this->waitHandoffFences = reinterpret_cast<PFN_vkWaitForFences>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkWaitForFences"));
+        const auto destroyHandoffFence = reinterpret_cast<PFN_vkDestroyFence>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkDestroyFence"));
+        if (createHandoffFence == nullptr || this->resetHandoffFences == nullptr
+                || this->waitHandoffFences == nullptr || destroyHandoffFence == nullptr)
+            throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+                "Required fence functions unavailable for Android AHB handoff");
 
-    const VkFenceCreateInfo handoffFenceInfo{
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-    };
-    VkFence handoffFence{};
-    const auto handoffFenceRes = createHandoffFence(
-        info.device, &handoffFenceInfo, nullptr, &handoffFence);
-    if (handoffFenceRes != VK_SUCCESS || handoffFence == VK_NULL_HANDLE)
-        throw LSFG::vulkan_error(handoffFenceRes,
-            "Failed to create Android AHB handoff fence");
+        const VkFenceCreateInfo handoffFenceInfo{
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        };
+        VkFence handoffFence{};
+        const auto handoffFenceRes = createHandoffFence(
+            info.device, &handoffFenceInfo, nullptr, &handoffFence);
+        if (handoffFenceRes != VK_SUCCESS || handoffFence == VK_NULL_HANDLE)
+            throw LSFG::vulkan_error(handoffFenceRes,
+                "Failed to create Android AHB handoff fence");
 
-    this->ahbHandoffFence = std::shared_ptr<VkFence>(
-        new VkFence(handoffFence),
-        [device = info.device, destroyHandoffFence](VkFence* ownedFence) {
-            if (ownedFence != nullptr) {
-                if (*ownedFence != VK_NULL_HANDLE)
-                    destroyHandoffFence(device, *ownedFence, nullptr);
-                delete ownedFence;
-            }
-        });
+        this->ahbHandoffFence = std::shared_ptr<VkFence>(
+            new VkFence(handoffFence),
+            [device = info.device, destroyHandoffFence](VkFence* ownedFence) {
+                if (ownedFence != nullptr) {
+                    if (*ownedFence != VK_NULL_HANDLE)
+                        destroyHandoffFence(device, *ownedFence, nullptr);
+                    delete ownedFence;
+                }
+            });
+    }
 
-    std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId << ")\n";
+    std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
+              << ") sync=" << (this->externalSemaphoreFdSync_ ? "external-semaphore-fd" : "host-fence")
+              << "
+";
 
 #else
     // Desktop Linux path: use OPAQUE_FD-based image sharing
@@ -501,6 +508,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     const bool warmupSourceHistory =
         generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
     this->lastGeneratedFrameCount_ = generatedFrameCount;
+    const auto advanceFramegenCadence = [&]() {
+        const std::vector<int> noSemaphores;
+        if (conf.performance)
+            LSFG_3_1P::presentContextWithCount(*this->lsfgCtxId, -1, noSemaphores, 0);
+        else
+            LSFG_3_1::presentContextWithCount(*this->lsfgCtxId, -1, noSemaphores, 0);
+    };
 
     const bool firstPresentDiagnostic = this->frameIdx == 0;
     if (firstPresentDiagnostic) {
@@ -600,6 +614,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (delay > std::chrono::nanoseconds::zero())
             std::this_thread::sleep_for(delay);
 
+        advanceFramegenCadence();
         const VkPresentInfoKHR directPresentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = pNext,
@@ -626,7 +641,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     // 1. Copy the game swapchain image into frame_0/frame_1, then release the
     //    AHB to VK_QUEUE_FAMILY_EXTERNAL for framegen.
-    pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
+    const bool useExternalSemaphoreSync =
+        this->externalSemaphoreFdSync_ && !warmupSourceHistory;
+    int preCopySemaphoreFd{-1};
+    if (useExternalSemaphoreSync)
+        pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device, &preCopySemaphoreFd);
+    else
+        pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
     pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
     pass.preCopyBuf.begin();
@@ -640,27 +661,46 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     pass.preCopyBuf.end();
 
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
-    if (this->previousSourceCopySignalValid_)
-        gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
-            .preCopySemaphores.at(1).handle());
+    bool consumesAsyncReuseSignal = false;
+    if (this->externalSemaphoreFdSync_ && this->previousAsyncReuseSignalValid_) {
+        gameRenderSemaphores2.emplace_back(this->previousAsyncReuseSemaphore_.handle());
+        consumesAsyncReuseSignal = true;
+    } else if (!this->externalSemaphoreFdSync_) {
+        if (this->previousSourceCopySignalValid_)
+            gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
+                .preCopySemaphores.at(1).handle());
+    }
 
-    // The AHB is shared memory, not implicit synchronization. Wait for the
-    // game-device release barrier/copy to complete before the framegen VkDevice
-    // performs its matching external acquire.
     const auto handoffStart = RuntimeMetrics::Clock::now();
-    std::vector<VkSemaphore> preCopySignals{
-        pass.preCopySemaphores.at(0).handle(),
-        pass.preCopySemaphores.at(1).handle(),
-    };
-    submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
-        gameRenderSemaphores2, preCopySignals,
-        *this->ahbHandoffFence, this->resetHandoffFences,
-        this->waitHandoffFences);
-    this->previousSourceCopySignalValid_ = true;
+    if (useExternalSemaphoreSync) {
+        pass.preCopyBuf.submit(info.queue.second, gameRenderSemaphores2,
+            { pass.preCopySemaphores.at(0).handle() });
+    } else if (this->externalSemaphoreFdSync_ && warmupSourceHistory) {
+        pass.preCopyBuf.submit(info.queue.second, gameRenderSemaphores2,
+            { pass.preCopySemaphores.at(0).handle(), pass.preCopySemaphores.at(1).handle() });
+        this->previousAsyncReuseSemaphore_ = pass.preCopySemaphores.at(1);
+        this->previousAsyncReuseSignalValid_ = true;
+    } else {
+        std::vector<VkSemaphore> preCopySignals{
+            pass.preCopySemaphores.at(0).handle(),
+            pass.preCopySemaphores.at(1).handle(),
+        };
+        submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
+            gameRenderSemaphores2, preCopySignals,
+            *this->ahbHandoffFence, this->resetHandoffFences,
+            this->waitHandoffFences);
+        this->previousSourceCopySignalValid_ = true;
+    }
+    if (consumesAsyncReuseSignal)
+        this->previousAsyncReuseSignalValid_ = false;
     metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - handoffStart).count();
     if (firstPresentDiagnostic)
-        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\n";
+        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready sync="
+                  << (useExternalSemaphoreSync ? "external-semaphore-fd" :
+                      (this->externalSemaphoreFdSync_ ? "warmup-semaphore" : "host-fence"))
+                  << "
+";
 
     if (warmupSourceHistory) {
         this->requiresSourceHistoryWarmup_ = false;
@@ -682,6 +722,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             throw LSFG::vulkan_error(warmupResult,
                 "Failed to present source-history warmup frame");
         }
+        advanceFramegenCadence();
         std::cerr << "lsfg-vk: runtime stage=source-history-warmup\n";
         return finishSourcePresent(warmupResult, "pre-copy-warmup");
     }
@@ -689,6 +730,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // 2. Tell framegen to generate intermediary frames. It acquires the input
     //    and output AHBs from EXTERNAL and releases them back to EXTERNAL.
     std::vector<int> noOutSems;
+    std::vector<int> renderSemaphoreFds;
+    if (useExternalSemaphoreSync) {
+        renderSemaphoreFds.resize(generatedFrameCount, -1);
+        for (size_t i = 0; i < generatedFrameCount; ++i)
+            pass.renderSemaphores.at(i) = Mini::Semaphore(
+                info.device, &renderSemaphoreFds.at(i));
+    }
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
                   << (conf.performance ? "performance" : "quality")
@@ -697,10 +745,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     const auto dispatchStart = RuntimeMetrics::Clock::now();
     if (conf.performance)
         LSFG_3_1P::presentContextWithCount(
-            *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
+            *this->lsfgCtxId,
+            useExternalSemaphoreSync ? preCopySemaphoreFd : -1,
+            useExternalSemaphoreSync ? renderSemaphoreFds : noOutSems,
+            generatedFrameCount);
     else
         LSFG_3_1::presentContextWithCount(
-            *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
+            *this->lsfgCtxId,
+            useExternalSemaphoreSync ? preCopySemaphoreFd : -1,
+            useExternalSemaphoreSync ? renderSemaphoreFds : noOutSems,
+            generatedFrameCount);
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)
@@ -708,13 +762,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     // 3. Ensure framegen's separate VkDevice has completed its release barriers
     //    before the game device acquires generated AHBs for readback/blit.
-    const auto waitIdleStart = RuntimeMetrics::Clock::now();
     const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
-    const bool framegenReady = conf.performance
-        ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
-        : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-    metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-        RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    bool framegenReady = true;
+    if (!useExternalSemaphoreSync) {
+        const auto waitIdleStart = RuntimeMetrics::Clock::now();
+        framegenReady = conf.performance
+            ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
+            : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
+        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    }
     if (!framegenReady) {
         this->lastGeneratedFrameCount_ = 0;
         std::cerr << "lsfg-vk: runtime stage=framegen-completion-timeout timeout_ms="
@@ -742,10 +799,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
 
-    // 4. Copy generated frames to swapchain images and present them. Each
-    // copy submission signals two binary semaphores: one consumed by this
-    // generated present, and one reserved for the next generated/source
-    // present. A binary semaphore signal must not be consumed twice.
+    // 4. Copy generated frames to swapchain images and present them. On the
+    // external-semaphore path, each copy also waits for framegen's cross-device
+    // completion signal. The final post-copy emits a third, game-local reuse
+    // signal; the next source upload consumes it before either shared input or
+    // output AHB can be reused.
+    Mini::Semaphore asyncReuseSemaphore;
+    if (useExternalSemaphoreSync)
+        asyncReuseSemaphore = Mini::Semaphore(info.device);
     for (size_t i = 0; i < generatedFrameCount; i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
@@ -770,10 +831,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             info.queue.first);
 
         pass.postCopyBufs.at(i).end();
+        std::vector<VkSemaphore> postCopyWaits{
+            pass.acquireSemaphores.at(i).handle(),
+        };
+        if (useExternalSemaphoreSync)
+            postCopyWaits.emplace_back(pass.renderSemaphores.at(i).handle());
+        std::vector<VkSemaphore> postCopySignals{
+            pass.postCopySemaphores.at(i).handle(),
+            pass.prevPostCopySemaphores.at(i).handle(),
+        };
+        if (useExternalSemaphoreSync && i + 1 == generatedFrameCount)
+            postCopySignals.emplace_back(asyncReuseSemaphore.handle());
         pass.postCopyBufs.at(i).submit(info.queue.second,
-            { pass.acquireSemaphores.at(i).handle() },
-            { pass.postCopySemaphores.at(i).handle(),
-              pass.prevPostCopySemaphores.at(i).handle() });
+            postCopyWaits, postCopySignals);
 
         std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
         if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());
@@ -801,6 +871,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::cerr << "lsfg-vk: runtime stage=generated-present-ready image=" << imageIdx
                       << " result=" << res << "\n";
         }
+    }
+
+    if (useExternalSemaphoreSync) {
+        this->previousAsyncReuseSemaphore_ = asyncReuseSemaphore;
+        this->previousAsyncReuseSignalValid_ = true;
     }
 
     // 5. Present the actual game frame after generated frames using the signal

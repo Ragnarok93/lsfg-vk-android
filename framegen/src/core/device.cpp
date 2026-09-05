@@ -99,6 +99,29 @@ bool probeAhbImageUsage(VkPhysicalDevice physicalDevice, VkFormat format,
 #endif
 }
 
+
+bool probeOpaqueFdExternalSemaphore(VkPhysicalDevice physicalDevice) {
+#ifdef __ANDROID__
+    if (vkGetPhysicalDeviceExternalSemaphoreProperties == nullptr)
+        return false;
+    const VkPhysicalDeviceExternalSemaphoreInfo info{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
+        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    VkExternalSemaphoreProperties properties{
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+    };
+    vkGetPhysicalDeviceExternalSemaphoreProperties(physicalDevice, &info, &properties);
+    constexpr VkExternalSemaphoreFeatureFlags required =
+        VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
+        VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
+    return (properties.externalSemaphoreFeatures & required) == required;
+#else
+    (void)physicalDevice;
+    return false;
+#endif
+}
+
 } // namespace
 
 const Image& Device::getFallbackDescriptorImage() const {
@@ -278,6 +301,9 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.ahbR8Storage = probeAhbImageUsage(physicalDevice,
         VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    this->diagnostics.externalSemaphoreFd =
+        hasExtension(availableExtensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)
+        && probeOpaqueFdExternalSemaphore(physicalDevice);
     const bool directStorage = probeAhbImageUsage(physicalDevice, sharedFormat,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     const bool transferSrc = probeAhbImageUsage(physicalDevice, sharedFormat,
@@ -302,6 +328,7 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
               << " driverUUID=" << uuidString(this->diagnostics.identity.driverUUID)
               << " ahbR16fStorage=" << (this->diagnostics.ahbR16fStorage ? 1 : 0)
               << " ahbMode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
+              << " externalSemaphoreFd=" << (this->diagnostics.externalSemaphoreFd ? 1 : 0)
               << " sync=" << synchronizationPathName(decision.synchronizationPath)
               << " fp=" << shaderPrecisionName(decision.shaderPrecision) << '\n';
 
@@ -323,6 +350,8 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
 #ifdef __ANDROID__
     requireExtension(availableExtensions, enabledExtensions,
         VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+    if (this->diagnostics.externalSemaphoreFd)
+        enabledExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
 #else
     requireExtension(availableExtensions, enabledExtensions,
         VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
