@@ -16,9 +16,14 @@
 #include <fstream>
 #include <iomanip>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <mutex>
+#include <optional>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 #ifdef __ANDROID__
 #include <sys/inotify.h>
@@ -203,8 +208,6 @@ namespace {
             VkPresentModeKHR gamePresentMode,
             VkPresentModeKHR configuredPresentMode);
 
-    std::unordered_map<VkDevice, DeviceInfo> dummyDeviceToInfoDeclarationGuard;
-
     void myvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAllocator) noexcept {
         deviceToInfo.erase(device);
         Layer::ovkDestroyDevice(device, pAllocator);
@@ -340,51 +343,111 @@ namespace {
     AndroidConfigWatcher androidConfigWatcher;
     std::unordered_map<VkSwapchainKHR, RuntimeOutputStats> runtimeOutputStats;
 
+    class AndroidStatsPublisher {
+    public:
+        ~AndroidStatsPublisher() {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                stopping_ = true;
+            }
+            cv_.notify_one();
+            if (worker_.joinable())
+                worker_.join();
+        }
+
+        void publish(std::filesystem::path path, std::string payload) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!worker_.joinable())
+                    worker_ = std::thread(&AndroidStatsPublisher::run, this);
+                pending_ = Pending{std::move(path), std::move(payload)};
+            }
+            cv_.notify_one();
+        }
+
+    private:
+        struct Pending {
+            std::filesystem::path path;
+            std::string payload;
+        };
+
+        static void write(const Pending& pending) noexcept {
+            const std::filesystem::path tempPath = pending.path.string() + ".tmp";
+            try {
+                std::ofstream out(tempPath, std::ios::trunc);
+                if (!out)
+                    throw std::runtime_error("unable to open temporary stats file");
+                out << pending.payload;
+                out.close();
+                if (!out)
+                    throw std::runtime_error("failed to flush temporary stats file");
+
+                std::error_code ec;
+                std::filesystem::rename(tempPath, pending.path, ec);
+                if (ec) {
+                    std::filesystem::remove(pending.path, ec);
+                    ec.clear();
+                    std::filesystem::rename(tempPath, pending.path, ec);
+                }
+                if (ec)
+                    throw std::runtime_error("failed to publish stats.txt: " + ec.message());
+                Utils::resetLimitN("statsWrite");
+            } catch (const std::exception& e) {
+                std::error_code ignored;
+                std::filesystem::remove(tempPath, ignored);
+                Utils::logLimitN("statsWrite", 5,
+                    "Failed to publish Android runtime stats: " + std::string(e.what()));
+            }
+        }
+
+        void run() noexcept {
+            for (;;) {
+                std::optional<Pending> pending;
+                {
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    cv_.wait(lock, [this] { return stopping_ || pending_.has_value(); });
+                    if (stopping_ && !pending_.has_value())
+                        return;
+                    pending = std::move(pending_);
+                    pending_.reset();
+                }
+                write(*pending);
+            }
+        }
+
+        std::mutex mutex_;
+        std::condition_variable cv_;
+        std::optional<Pending> pending_;
+        std::thread worker_;
+        bool stopping_{false};
+    };
+
+    AndroidStatsPublisher androidStatsPublisher;
+
+    std::filesystem::path runtimeStatsPath(const std::string& configFile) {
+        return std::filesystem::path(configFile).parent_path() / "stats.txt";
+    }
+
     void publishRuntimeState(const std::string& configFile,
             bool active, bool generationReady, int multiplier,
             bool performance, bool adaptive, uint32_t targetFps) {
         if (configFile.empty())
             return;
 
-        const std::filesystem::path statsPath =
-            std::filesystem::path(configFile).parent_path() / "stats.txt";
-        const std::filesystem::path tempPath = statsPath.string() + ".tmp";
-        try {
-            std::ofstream out(tempPath, std::ios::trunc);
-            if (!out)
-                throw std::runtime_error("unable to open temporary stats file");
-            out << "active=" << (active ? 1 : 0) << '\n'
-                << "generation_ready=" << (generationReady ? 1 : 0) << '\n'
-                << "fps=0.000\n"
-                << "source_fps=0.000\n"
-                << "generated_fps=0.000\n"
-                << "source_frames_total=0\n"
-                << "generated_frames_total=0\n"
-                << "present_failures=0\n"
-                << "multiplier=" << multiplier << '\n'
-                << "adaptive=" << (adaptive ? 1 : 0) << '\n'
-                << "target_fps=" << targetFps << '\n'
-                << "performance=" << (performance ? 1 : 0) << '\n';
-            out.close();
-            if (!out)
-                throw std::runtime_error("failed to flush temporary stats file");
-
-            std::error_code ec;
-            std::filesystem::rename(tempPath, statsPath, ec);
-            if (ec) {
-                std::filesystem::remove(statsPath, ec);
-                ec.clear();
-                std::filesystem::rename(tempPath, statsPath, ec);
-            }
-            if (ec)
-                throw std::runtime_error("failed to publish stats.txt: " + ec.message());
-            Utils::resetLimitN("statsWrite");
-        } catch (const std::exception& e) {
-            std::error_code ignored;
-            std::filesystem::remove(tempPath, ignored);
-            Utils::logLimitN("statsWrite", 5,
-                "Failed to publish Android runtime state: " + std::string(e.what()));
-        }
+        std::ostringstream out;
+        out << "active=" << (active ? 1 : 0) << '\n'
+            << "generation_ready=" << (generationReady ? 1 : 0) << '\n'
+            << "fps=0.000\n"
+            << "source_fps=0.000\n"
+            << "generated_fps=0.000\n"
+            << "source_frames_total=0\n"
+            << "generated_frames_total=0\n"
+            << "present_failures=0\n"
+            << "multiplier=" << multiplier << '\n'
+            << "adaptive=" << (adaptive ? 1 : 0) << '\n'
+            << "target_fps=" << targetFps << '\n'
+            << "performance=" << (performance ? 1 : 0) << '\n';
+        androidStatsPublisher.publish(runtimeStatsPath(configFile), out.str());
     }
 
     void writeRuntimeStatsFile(const std::string& configFile,
@@ -394,46 +457,21 @@ namespace {
         if (configFile.empty())
             return;
 
-        const std::filesystem::path statsPath =
-            std::filesystem::path(configFile).parent_path() / "stats.txt";
-        const std::filesystem::path tempPath = statsPath.string() + ".tmp";
-        try {
-            std::ofstream out(tempPath, std::ios::trunc);
-            if (!out)
-                throw std::runtime_error("unable to open temporary stats file");
-            out << std::fixed << std::setprecision(3)
-                << "active=1\n"
-                << "generation_ready=1\n"
-                << "fps=" << outputFps << '\n'
-                << "source_fps=" << sourceFps << '\n'
-                << "generated_fps=" << generatedFps << '\n'
-                << "source_frames_total=" << stats.totalSourceFrames << '\n'
-                << "generated_frames_total=" << stats.totalGeneratedFrames << '\n'
-                << "present_failures=" << stats.presentFailures << '\n'
-                << "multiplier=" << multiplier << '\n'
-                << "adaptive=" << (adaptive ? 1 : 0) << '\n'
-                << "target_fps=" << targetFps << '\n'
-                << "performance=" << (performance ? 1 : 0) << '\n';
-            out.close();
-            if (!out)
-                throw std::runtime_error("failed to flush temporary stats file");
-
-            std::error_code ec;
-            std::filesystem::rename(tempPath, statsPath, ec);
-            if (ec) {
-                std::filesystem::remove(statsPath, ec);
-                ec.clear();
-                std::filesystem::rename(tempPath, statsPath, ec);
-            }
-            if (ec)
-                throw std::runtime_error("failed to publish stats.txt: " + ec.message());
-            Utils::resetLimitN("statsWrite");
-        } catch (const std::exception& e) {
-            std::error_code ignored;
-            std::filesystem::remove(tempPath, ignored);
-            Utils::logLimitN("statsWrite", 5,
-                "Failed to publish Android runtime stats: " + std::string(e.what()));
-        }
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(3)
+            << "active=1\n"
+            << "generation_ready=1\n"
+            << "fps=" << outputFps << '\n'
+            << "source_fps=" << sourceFps << '\n'
+            << "generated_fps=" << generatedFps << '\n'
+            << "source_frames_total=" << stats.totalSourceFrames << '\n'
+            << "generated_frames_total=" << stats.totalGeneratedFrames << '\n'
+            << "present_failures=" << stats.presentFailures << '\n'
+            << "multiplier=" << multiplier << '\n'
+            << "adaptive=" << (adaptive ? 1 : 0) << '\n'
+            << "target_fps=" << targetFps << '\n'
+            << "performance=" << (performance ? 1 : 0) << '\n';
+        androidStatsPublisher.publish(runtimeStatsPath(configFile), out.str());
     }
 
     void recordSuccessfulOutputCycle(VkSwapchainKHR swapchain,
