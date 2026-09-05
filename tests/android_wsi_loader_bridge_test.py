@@ -179,11 +179,18 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
 
         # A Vulkan binary semaphore signal can satisfy only one wait. The
         # generated present and following generated/source present therefore
-        # require independently signaled semaphores, matching the desktop path.
+        # retain independently signaled semaphores. The capability-gated A6xx
+        # path may append a third signal solely to guard shared-AHB reuse.
         self.assertIn("pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);", android)
+        self.assertIn("std::vector<VkSemaphore> postCopySignals{", android)
+        self.assertIn("pass.postCopySemaphores.at(i).handle(),", android)
+        self.assertIn("pass.prevPostCopySemaphores.at(i).handle(),", android)
         self.assertIn(
-            "{ pass.postCopySemaphores.at(i).handle(),\n"
-            "              pass.prevPostCopySemaphores.at(i).handle() }",
+            "if (useExternalSemaphoreSync && i + 1 == generatedFrameCount)",
+            android,
+        )
+        self.assertIn(
+            "postCopySignals.emplace_back(asyncReuseSemaphore.handle());",
             android,
         )
         self.assertIn(
