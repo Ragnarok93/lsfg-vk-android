@@ -96,7 +96,6 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         self.assertIn("qnnSystemProviderQualified", header)
         self.assertIn("directAhbInteropQualified", header)
         self.assertIn("phase2-execution-disabled", coordinator)
-        self.assertIn("direct-ahb-qnn-memory-registration-unproven", coordinator)
         self.assertIn("accelerator_module_version=phase2", coordinator)
         self.assertIn("selectedBackend = BackendKind::Vulkan", coordinator)
         self.assertIn("executionEnabled = false", coordinator)
@@ -106,6 +105,39 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         self.assertNotIn("QnnSystem", cmake)
         self.assertNotIn("QnnHtp", cmake)
         self.assertNotIn("SNPE", cmake)
+
+    def test_phase2_qnn_smoke_proves_htp_graph_ahb_and_numerical_path(self) -> None:
+        smoke = (ROOT / "src/qnn_htp_smoke_probe.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/accelerator_coordinator.hpp").read_text(encoding="utf-8")
+        coordinator = (ROOT / "src/accelerator_coordinator.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "AHardwareBuffer_getNativeHandle",
+            "AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER",
+            "QNN_MEM_TYPE_ION",
+            "memRegister",
+            "graphCreate",
+            "graphAddNode",
+            "graphFinalize",
+            "graphExecute",
+            "qti.aisw",
+            "Relu",
+            "numerical-smoke-mismatch",
+        ):
+            self.assertIn(token, smoke)
+
+        for token in (
+            "qnnHtpAttributionQualified",
+            "qnnSharedMemoryQualified",
+            "qnnGraphExecutionQualified",
+            "qnnNumericalSmokeQualified",
+        ):
+            self.assertIn(token, header)
+            self.assertIn(token, coordinator)
+
+        self.assertIn("phase3-dynamic-warp-benchmark-required", coordinator)
+        self.assertIn("executionEnabled = false", coordinator)
+        self.assertIn("selectedBackend = BackendKind::Vulkan", coordinator)
 
     def test_accelerator_events_use_existing_native_diagnostics_artifact(self) -> None:
         diagnostics = (ROOT / "src/android_diagnostics.cpp").read_text(encoding="utf-8")
