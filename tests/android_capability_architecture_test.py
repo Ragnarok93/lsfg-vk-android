@@ -94,6 +94,17 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         self.assertNotIn("QnnHtp", cmake)
         self.assertNotIn("SNPE", cmake)
 
+    def test_accelerator_events_use_existing_native_diagnostics_artifact(self) -> None:
+        diagnostics = (ROOT / "src/android_diagnostics.cpp").read_text(encoding="utf-8")
+        coordinator = (ROOT / "src/accelerator_coordinator.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/android_diagnostics.hpp").read_text(encoding="utf-8")
+
+        self.assertIn("logNativeDiagnostic", header)
+        self.assertIn("LSFG_CONFIG", diagnostics)
+        self.assertIn("diagnostics.log", diagnostics)
+        self.assertIn("O_APPEND", diagnostics)
+        self.assertIn("logNativeDiagnostic(message)", coordinator)
+
     def test_initialization_telemetry_contains_required_provenance_and_capacity(self) -> None:
         combined = (
             (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
