@@ -1,0 +1,32 @@
+name: Apply A6xx compile fix
+
+on:
+  push:
+    branches:
+      - "optimize/a6xx-transport"
+    paths:
+      - ".github/workflows/tmp-fix-a6xx-compile.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "optimize/a6xx-transport"
+          fetch-depth: 0
+      - name: Fix malformed generated literals
+        run: |
+          python3 scripts/tmp_fix_a6xx_compile.py
+          git diff --check
+      - name: Commit source fix
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/context.cpp
+          git commit -m "android: fix A6xx transport compile literals"
+          git push origin HEAD:optimize/a6xx-transport
