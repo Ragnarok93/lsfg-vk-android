@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -32,6 +33,17 @@ std::atomic<PFN_vkDestroySwapchainKHR> diagnosticDestroySwapchainTarget{nullptr}
 std::atomic<uint64_t> presentSequence{0};
 std::mutex provenanceMutex;
 std::unordered_set<std::string> acquisitionKeys;
+
+bool provenanceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("LSFG_WSI_PROVENANCE");
+        return value != nullptr && (
+            std::strcmp(value, "1") == 0 ||
+            std::strcmp(value, "true") == 0 ||
+            std::strcmp(value, "TRUE") == 0);
+    }();
+    return enabled;
+}
 
 long currentTid() {
     return static_cast<long>(syscall(SYS_gettid));
@@ -216,6 +228,8 @@ void diagnostic_vkDestroySwapchainKHR(
 PFN_vkVoidFunction wrapWsiHook(const char* resolver, VkInstance instance,
         VkDevice device, const char* pName, PFN_vkVoidFunction resolved) {
     if (pName == nullptr || resolved == nullptr) return resolved;
+
+    if (!provenanceEnabled()) return resolved;
 
     const auto createHook = Hooks::hooks.find("vkCreateSwapchainKHR");
     if (createHook != Hooks::hooks.end() && resolved == createHook->second

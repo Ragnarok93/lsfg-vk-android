@@ -100,18 +100,30 @@ bool probeAhbImageUsage(VkPhysicalDevice physicalDevice, VkFormat format,
 }
 
 
-bool probeOpaqueFdExternalSemaphore(VkPhysicalDevice physicalDevice) {
-#ifdef __ANDROID__
-    if (vkGetPhysicalDeviceExternalSemaphoreProperties == nullptr)
-        return false;
-    const VkPhysicalDeviceExternalSemaphoreInfo info{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
-        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
-    };
+VkExternalSemaphoreProperties queryExternalSemaphoreProperties(VkPhysicalDevice physicalDevice,
+        VkExternalSemaphoreHandleTypeFlagBits handleType) {
     VkExternalSemaphoreProperties properties{
         .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
     };
+#ifdef __ANDROID__
+    if (vkGetPhysicalDeviceExternalSemaphoreProperties == nullptr)
+        return properties;
+    const VkPhysicalDeviceExternalSemaphoreInfo info{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
+        .handleType = handleType,
+    };
     vkGetPhysicalDeviceExternalSemaphoreProperties(physicalDevice, &info, &properties);
+#else
+    (void)physicalDevice;
+    (void)handleType;
+#endif
+    return properties;
+}
+
+bool probeOpaqueFdExternalSemaphore(VkPhysicalDevice physicalDevice) {
+#ifdef __ANDROID__
+    const auto properties = queryExternalSemaphoreProperties(physicalDevice,
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
     constexpr VkExternalSemaphoreFeatureFlags required =
         VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
         VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
@@ -319,6 +331,21 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.ahbTransportMode = LSFG::AhbTransportMode::DirectStorage;
 #endif
 
+    const bool externalSemaphoreFdExtension = hasExtension(availableExtensions,
+        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+    const auto opaqueFdProperties = queryExternalSemaphoreProperties(physicalDevice,
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+    const auto syncFdProperties = queryExternalSemaphoreProperties(physicalDevice,
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+    std::cerr << "lsfg-vk: framegen-external-semaphore-fd"
+              << " extension=" << (externalSemaphoreFdExtension ? 1 : 0)
+              << " opaqueFeatures=0x" << std::hex << opaqueFdProperties.externalSemaphoreFeatures
+              << " opaqueCompatible=0x" << opaqueFdProperties.compatibleHandleTypes
+              << " opaqueExportFromImported=0x" << opaqueFdProperties.exportFromImportedHandleTypes
+              << " syncFeatures=0x" << syncFdProperties.externalSemaphoreFeatures
+              << " syncCompatible=0x" << syncFdProperties.compatibleHandleTypes
+              << " syncExportFromImported=0x" << syncFdProperties.exportFromImportedHandleTypes << std::dec << '\n';
+
     std::cerr << "lsfg-vk: backend-init apiVersion="
               << VK_VERSION_MAJOR(this->diagnostics.apiVersion) << '.'
               << VK_VERSION_MINOR(this->diagnostics.apiVersion)
@@ -453,6 +480,10 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     if (res != VK_SUCCESS || handle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create capability-selected logical device");
     volkLoadDevice(handle);
+
+    std::cerr << "lsfg-vk: framegen-external-semaphore-fd-procs"
+              << " getSemaphoreFdKHR=" << (vkGetSemaphoreFdKHR != nullptr ? 1 : 0)
+              << " importSemaphoreFdKHR=" << (vkImportSemaphoreFdKHR != nullptr ? 1 : 0) << '\n';
 
     if (decision.synchronizationPath == SynchronizationPath::KhrSync2
             && vkCmdPipelineBarrier2 == nullptr && vkCmdPipelineBarrier2KHR != nullptr) {

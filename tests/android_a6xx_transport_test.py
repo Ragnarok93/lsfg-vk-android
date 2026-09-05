@@ -44,5 +44,16 @@ class AndroidA6xxTransportContract(unittest.TestCase):
             self.assertIn("if (generationCount == 0)", context)
             self.assertIn("this->frameIdx++", context)
 
+    def test_external_semaphore_fd_diagnostics_cover_sync_fd_without_forcing_it(self):
+        hooks = (ROOT / "src/hooks.cpp").read_text()
+        device = (ROOT / "framegen/src/core/device.cpp").read_text()
+        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", hooks)
+        self.assertIn("game-external-semaphore-fd", hooks)
+        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", device)
+        self.assertIn("framegen-external-semaphore-fd", device)
+        self.assertIn("supportsOpaqueFdExternalSemaphore", hooks)
+        self.assertIn("probeOpaqueFdExternalSemaphore", device)
+
+
 if __name__ == "__main__":
     unittest.main()

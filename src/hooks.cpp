@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include <iostream>
 #include <fstream>
@@ -27,6 +28,7 @@
 #include <vector>
 #ifdef __ANDROID__
 #include <sys/inotify.h>
+#include <poll.h>
 #include <unistd.h>
 #include <cerrno>
 #endif
@@ -89,11 +91,11 @@ namespace {
             });
     }
 
-    bool supportsOpaqueFdExternalSemaphore(VkPhysicalDevice physicalDevice) {
-        if (!supportsDeviceExtension(physicalDevice,
-                VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
-            return false;
-
+    VkExternalSemaphoreProperties queryExternalSemaphoreProperties(
+            VkPhysicalDevice physicalDevice, VkExternalSemaphoreHandleTypeFlagBits handleType) {
+        VkExternalSemaphoreProperties properties{
+            .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+        };
         auto getExternalSemaphoreProperties =
             reinterpret_cast<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(
                 Layer::ovkGetInstanceProcAddr(layerInstance,
@@ -105,16 +107,22 @@ namespace {
                         "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR"));
         }
         if (getExternalSemaphoreProperties == nullptr)
-            return false;
-
+            return properties;
         const VkPhysicalDeviceExternalSemaphoreInfo info{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
-            .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
-        };
-        VkExternalSemaphoreProperties properties{
-            .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+            .handleType = handleType,
         };
         getExternalSemaphoreProperties(physicalDevice, &info, &properties);
+        return properties;
+    }
+
+    bool supportsOpaqueFdExternalSemaphore(VkPhysicalDevice physicalDevice) {
+        if (!supportsDeviceExtension(physicalDevice,
+                VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
+            return false;
+
+        const auto properties = queryExternalSemaphoreProperties(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
         constexpr VkExternalSemaphoreFeatureFlags required =
             VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
             VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
@@ -219,6 +227,26 @@ namespace {
         const bool androidAhbSupported = true;
         const bool androidExternalSemaphoreFdSupported = false;
 #endif
+#ifdef __ANDROID__
+        const bool externalSemaphoreFdExtension = supportsDeviceExtension(physicalDevice,
+            VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+        const auto opaqueFdProperties = queryExternalSemaphoreProperties(physicalDevice,
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+        const auto syncFdProperties = queryExternalSemaphoreProperties(physicalDevice,
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+        const bool getSemaphoreFdProc = Layer::ovkGetDeviceProcAddr(*pDevice, "vkGetSemaphoreFdKHR") != nullptr;
+        const bool importSemaphoreFdProc = Layer::ovkGetDeviceProcAddr(*pDevice, "vkImportSemaphoreFdKHR") != nullptr;
+        std::cerr << "lsfg-vk: game-external-semaphore-fd"
+                  << " extension=" << (externalSemaphoreFdExtension ? 1 : 0)
+                  << " opaqueFeatures=0x" << std::hex << opaqueFdProperties.externalSemaphoreFeatures
+                  << " opaqueCompatible=0x" << opaqueFdProperties.compatibleHandleTypes
+                  << " opaqueExportFromImported=0x" << opaqueFdProperties.exportFromImportedHandleTypes
+                  << " syncFeatures=0x" << syncFdProperties.externalSemaphoreFeatures
+                  << " syncCompatible=0x" << syncFdProperties.compatibleHandleTypes
+                  << " syncExportFromImported=0x" << syncFdProperties.exportFromImportedHandleTypes << std::dec
+                  << " getSemaphoreFdKHR=" << (getSemaphoreFdProc ? 1 : 0)
+                  << " importSemaphoreFdKHR=" << (importSemaphoreFdProc ? 1 : 0) << '\n';
+#endif
         auto getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
             Layer::ovkGetInstanceProcAddr(layerInstance, "vkGetPhysicalDeviceProperties2"));
         if (getProperties2 == nullptr) {
@@ -273,111 +301,122 @@ namespace {
     class AndroidConfigWatcher {
     public:
         ~AndroidConfigWatcher() {
-            reset();
+            stop();
         }
 
         bool changed(const std::string& configFile) noexcept {
             if (configFile.empty())
                 return false;
-
-            const std::filesystem::path path(configFile);
-            const std::string directory = path.parent_path().string();
-            const std::string filename = path.filename().string();
-            if (fd_ < 0 || wd_ < 0 || directory != directory_ || filename != filename_) {
-                if (!arm(directory, filename))
-                    return fallbackChanged(configFile);
-            }
-
-            bool sawChange = false;
-            alignas(struct inotify_event) char buffer[4096];
-            for (;;) {
-                const ssize_t length = ::read(fd_, buffer, sizeof(buffer));
-                if (length < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                        break;
-                    reset();
-                    return fallbackChanged(configFile);
-                }
-                if (length == 0)
-                    break;
-
-                size_t offset = 0;
-                while (offset < static_cast<size_t>(length)) {
-                    const auto* event = reinterpret_cast<const struct inotify_event*>(buffer + offset);
-                    const bool matchingName = event->len > 0 && filename_ == event->name;
-                    if (matchingName && (event->mask & (
-                            IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE |
-                            IN_ATTRIB | IN_MOVE_SELF | IN_DELETE_SELF))) {
-                        sawChange = true;
-                    }
-                    if (event->mask & IN_IGNORED) {
-                        reset();
-                        break;
-                    }
-                    offset += sizeof(struct inotify_event) + event->len;
-                }
-            }
-            return sawChange;
+            if (configFile != configFile_)
+                arm(configFile);
+            return changed_.exchange(false, std::memory_order_acq_rel);
         }
 
     private:
-        bool arm(const std::string& directory, const std::string& filename) noexcept {
-            reset();
-            fd_ = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-            if (fd_ < 0)
-                return false;
+        void arm(const std::string& configFile) noexcept {
+            stop();
+            configFile_ = configFile;
+            const std::filesystem::path path(configFile_);
+            directory_ = path.parent_path().string();
+            filename_ = path.filename().string();
 
-            wd_ = ::inotify_add_watch(fd_, directory.c_str(),
-                IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_ATTRIB |
-                IN_MOVE_SELF | IN_DELETE_SELF);
-            if (wd_ < 0) {
-                reset();
-                return false;
+            fd_ = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+            if (fd_ >= 0) {
+                wd_ = ::inotify_add_watch(fd_, directory_.c_str(),
+                    IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_ATTRIB |
+                    IN_MOVE_SELF | IN_DELETE_SELF);
             }
 
-            directory_ = directory;
-            filename_ = filename;
             std::error_code ec;
-            fallbackTimestamp_ = std::filesystem::last_write_time(
-                std::filesystem::path(directory_) / filename_, ec);
+            fallbackTimestamp_ = std::filesystem::last_write_time(configFile_, ec);
             fallbackTimestampValid_ = !ec;
-            return true;
+            stopRequested_.store(false, std::memory_order_release);
+            worker_ = std::thread(&AndroidConfigWatcher::run, this);
         }
 
-        bool fallbackChanged(const std::string& configFile) noexcept {
-            const auto now = RuntimeOutputStats::Clock::now();
-            if (now < nextFallbackPoll_)
-                return false;
-            nextFallbackPoll_ = now + std::chrono::seconds(1);
+        void run() noexcept {
+            bool useInotify = fd_ >= 0 && wd_ >= 0;
+            auto nextFallbackPoll = RuntimeOutputStats::Clock::now() + std::chrono::seconds(1);
+            alignas(struct inotify_event) char buffer[4096];
 
-            std::error_code ec;
-            const auto timestamp = std::filesystem::last_write_time(configFile, ec);
-            const bool valid = !ec;
-            const bool changed = valid != fallbackTimestampValid_
-                || (valid && timestamp != fallbackTimestamp_);
-            fallbackTimestamp_ = timestamp;
-            fallbackTimestampValid_ = valid;
-            return changed;
+            while (!stopRequested_.load(std::memory_order_acquire)) {
+                if (useInotify) {
+                    struct pollfd pfd { fd_, POLLIN, 0 };
+                    const int pollResult = ::poll(&pfd, 1, 250);
+                    if (pollResult > 0 && (pfd.revents & POLLIN)) {
+                        for (;;) {
+                            const ssize_t length = ::read(fd_, buffer, sizeof(buffer));
+                            if (length < 0) {
+                                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                                    break;
+                                useInotify = false;
+                                break;
+                            }
+                            if (length == 0)
+                                break;
+
+                            size_t offset = 0;
+                            while (offset < static_cast<size_t>(length)) {
+                                const auto* event = reinterpret_cast<const struct inotify_event*>(buffer + offset);
+                                const bool matchingName = event->len > 0 && filename_ == event->name;
+                                if (matchingName && (event->mask & (
+                                        IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE |
+                                        IN_ATTRIB | IN_MOVE_SELF | IN_DELETE_SELF))) {
+                                    changed_.store(true, std::memory_order_release);
+                                }
+                                if (event->mask & IN_IGNORED)
+                                    useInotify = false;
+                                offset += sizeof(struct inotify_event) + event->len;
+                            }
+                        }
+                    } else if (pollResult < 0 && errno != EINTR) {
+                        useInotify = false;
+                    }
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+
+                if (!useInotify && RuntimeOutputStats::Clock::now() >= nextFallbackPoll) {
+                    nextFallbackPoll = RuntimeOutputStats::Clock::now() + std::chrono::seconds(1);
+                    std::error_code ec;
+                    const auto timestamp = std::filesystem::last_write_time(configFile_, ec);
+                    const bool valid = !ec;
+                    if (valid != fallbackTimestampValid_
+                            || (valid && timestamp != fallbackTimestamp_)) {
+                        changed_.store(true, std::memory_order_release);
+                    }
+                    fallbackTimestamp_ = timestamp;
+                    fallbackTimestampValid_ = valid;
+                }
+            }
         }
 
-        void reset() noexcept {
+        void stop() noexcept {
+            stopRequested_.store(true, std::memory_order_release);
+            if (worker_.joinable())
+                worker_.join();
             if (fd_ >= 0 && wd_ >= 0)
                 ::inotify_rm_watch(fd_, wd_);
             if (fd_ >= 0)
                 ::close(fd_);
             fd_ = -1;
             wd_ = -1;
+            configFile_.clear();
             directory_.clear();
             filename_.clear();
+            changed_.store(false, std::memory_order_release);
         }
 
         int fd_{-1};
         int wd_{-1};
+        std::string configFile_;
         std::string directory_;
         std::string filename_;
-        RuntimeOutputStats::Clock::time_point nextFallbackPoll_{};
         std::filesystem::file_time_type fallbackTimestamp_{};
         bool fallbackTimestampValid_{false};
+        std::atomic<bool> changed_{false};
+        std::atomic<bool> stopRequested_{false};
+        std::thread worker_;
     };
 
     AndroidConfigWatcher androidConfigWatcher;

@@ -195,5 +195,17 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("fpsLimit", helper)
 
 
+    def test_android_config_watcher_is_present_thread_syscall_free_after_arm(self):
+        hooks = (ROOT / "src/hooks.cpp").read_text()
+        start = hooks.index("bool changed(const std::string& configFile) noexcept")
+        end = hooks.index("private:", start)
+        changed_body = hooks[start:end]
+        self.assertIn("changed_.exchange(false", changed_body)
+        self.assertNotIn("::read(", changed_body)
+        self.assertNotIn("last_write_time", changed_body)
+        self.assertIn("void run() noexcept", hooks)
+        self.assertIn("::poll(", hooks)
+
+
 if __name__ == "__main__":
     unittest.main()

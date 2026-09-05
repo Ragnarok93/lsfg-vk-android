@@ -7,6 +7,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
+    def test_provenance_wrappers_are_opt_in(self):
+        source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text()
+        self.assertIn("LSFG_WSI_PROVENANCE", source)
+        self.assertIn("if (!provenanceEnabled()) return resolved;", source)
+
     def test_manifest_uses_android_loader_compatible_api13_and_production_procaddr(self) -> None:
         manifest = json.loads((ROOT / "VkLayer_LS_frame_generation.json").read_text(encoding="utf-8"))
         layer_manifest = manifest["layer"]
