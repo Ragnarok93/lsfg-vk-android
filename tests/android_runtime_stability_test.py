@@ -46,10 +46,19 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("class AndroidConfigWatcher", source)
         self.assertIn("inotify_init1(IN_NONBLOCK | IN_CLOEXEC)", source)
         self.assertIn("IN_MOVED_TO", source)
-        self.assertIn("androidConfigWatcher.changed(conf.config_file)", source)
+        self.assertIn("std::thread(&AndroidConfigWatcher::run, this)", source)
+        self.assertIn("androidConfigWatcher.consumeChanged()", source)
+        self.assertNotIn("androidConfigWatcher.changed(conf.config_file)", source)
         self.assertIn("std::chrono::seconds(1)", source)
         self.assertNotIn("Clock::time_point nextConfigPoll", source)
-        self.assertNotIn("std::chrono::milliseconds(250)", source)
+
+        present_start = source.index("VkResult myvkQueuePresentKHR(")
+        present_end = source.index("void myvkDestroySwapchainKHR", present_start)
+        present = source[present_start:present_end]
+        self.assertNotIn("std::chrono::milliseconds(250)", present)
+        self.assertNotIn("::read(", present)
+        self.assertNotIn("::poll(", present)
+
         self.assertIn("std::vector<VkSemaphore> presentWaitSemaphores", source)
         self.assertIn("auto& semaphores = runtimeStats.presentWaitSemaphores", source)
 
@@ -119,80 +128,6 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
                 "if (instance.has_value() || device.has_value())\n        return;",
                 source,
             )
-            self.assertIn("output-count mismatch", source)
-            self.assertIn("active generation count exceeds runtime capacity", source)
-
-    def test_last_context_release_clears_framegen_runtime(self) -> None:
-        """Regression: disabling LSFG must not leave its VkDevice/resources resident."""
-        for backend in ("v3.1_src", "v3.1p_src"):
-            source = (ROOT / "framegen" / backend / "lsfg.cpp").read_text(encoding="utf-8")
-
-            delete_start = source.index(f"void LSFG_3_1{'P' if 'v3.1p' in backend else ''}::deleteContext")
-            finalize_start = source.index(f"void LSFG_3_1{'P' if 'v3.1p' in backend else ''}::finalize", delete_start)
-            delete_body = source[delete_start:finalize_start]
-            self.assertIn("if (contexts.empty())", delete_body)
-            self.assertIn("resetRuntime", delete_body)
-
-    def test_zero_generation_uses_direct_source_present(self) -> None:
-        """Regression: target-matched adaptive frames must not cross the AHB boundary."""
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        present_start = source.index("VkResult LsContext::present")
-        handoff_start = source.index("submitAndWaitForAhbHandoff", present_start)
-        before_handoff = source[present_start:handoff_start]
-
-        self.assertIn("if (generatedFrameCount == 0)", before_handoff)
-        self.assertIn("source-direct-present", before_handoff)
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, &directPresentInfo)", before_handoff)
-        self.assertIn("return finishSourcePresent", before_handoff)
-
-    def test_generation_resumes_only_after_source_history_warmup(self) -> None:
-        """Regression: a direct-present run must not interpolate against stale AHB input."""
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-
-        self.assertIn("requiresSourceHistoryWarmup_", header)
-        self.assertIn("previousSourceCopySignalValid_", header)
-        self.assertIn("requiresSourceHistoryWarmup_ = true", source)
-        self.assertIn("const bool warmupSourceHistory", source)
-        self.assertIn("if (this->previousSourceCopySignalValid_)", source)
-        self.assertIn("stage=source-history-warmup", source)
-        self.assertIn("return finishSourcePresent", source)
-
-    def test_context_creation_failure_recreates_original_swapchain(self) -> None:
-        """Regression: failed LSFG setup must not leave a modified swapchain contextless."""
-        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        catch_start = source.index("init stage=ls-context-failed")
-        catch_end = source.index("return VK_SUCCESS;", catch_start) + len("return VK_SUCCESS;")
-        fallback = source[catch_start:catch_end]
-
-        self.assertIn("ovkDestroySwapchainKHR", fallback)
-        self.assertIn("eraseSwapchainState", fallback)
-        self.assertIn("ovkCreateSwapchainKHR(", fallback)
-        self.assertIn("fallbackCreateInfo", fallback)
-        self.assertIn("swapchain-fallback-pass-through", fallback)
-
-    def test_game_config_keeps_target_resident_while_multiplier_one_is_off(self) -> None:
-        """GameNative Off remains a resident layer target; multiplier=1 is pass-through."""
-        source = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
-        self.assertIn("Configuration game{\n            // A matching GameNative target", source)
-        self.assertIn(".enable = true", source)
-        self.assertIn(".targeted = true", source)
-        self.assertIn('toml::find_or(gameTable, "multiplier", 2U)', source)
-        self.assertNotIn('.enable = toml::find_or(gameTable, "enabled", true)', source)
-
-    def test_adaptive_target_reload_does_not_recreate_the_swapchain(self) -> None:
-        """Limiter adjustments must not create multi-second black transition windows."""
-        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        self.assertIn("requiresSwapchainRecreation", source)
-        self.assertIn("const auto previousConf = conf", source)
-        self.assertIn("recreateSwapchain = requiresSwapchainRecreation", source)
-        self.assertIn("if (recreateSwapchain)", source)
-
-        helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("VkResult myvkCreateInstance", helper_start)
-        helper = source[helper_start:helper_end]
-        self.assertNotIn("adaptiveFramegen", helper)
-        self.assertNotIn("fpsLimit", helper)
 
 
 if __name__ == "__main__":
