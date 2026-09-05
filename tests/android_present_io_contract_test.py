@@ -41,6 +41,8 @@ class AndroidPresentIoContractTest(unittest.TestCase):
         self.assertLess(inactive, swapchain_lookup)
         self.assertLess(swapchain_lookup, context_lookup)
         self.assertNotIn("runtimeOutputStats[", present[:swapchain_lookup])
+        self.assertNotIn("::read(", present)
+        self.assertNotIn("::poll(", present)
 
     def test_known_passthrough_swapchains_do_not_probe_lsfg_context(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
