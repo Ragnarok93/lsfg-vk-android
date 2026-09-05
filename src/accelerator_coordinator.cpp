@@ -1,13 +1,12 @@
 #include "accelerator_coordinator.hpp"
+#include "android_diagnostics.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
-#include <iostream>
 #include <string>
 
 #ifdef __ANDROID__
-#include <android/log.h>
 #include <dlfcn.h>
 #endif
 
@@ -40,10 +39,7 @@ BackendOverride requestedBackendFromEnvironment() {
 }
 
 void logAccelerator(const std::string& message) {
-#ifdef __ANDROID__
-    __android_log_print(ANDROID_LOG_INFO, "LSFG", "%s", message.c_str());
-#endif
-    std::cerr << message << '\n';
+    LSFG::AndroidDiagnostics::logNativeDiagnostic(message);
 }
 
 #ifdef __ANDROID__
