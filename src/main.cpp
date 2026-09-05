@@ -1,4 +1,5 @@
 #include "config/config.hpp"
+#include "accelerator_coordinator.hpp"
 #include "extract/extract.hpp"
 #include "utils/benchmark.hpp"
 #include "utils/utils.hpp"
@@ -52,6 +53,14 @@ namespace {
         std::cerr << "  Performance Mode: " << (conf.performance ? "Enabled" : "Disabled") << '\n';
         std::cerr << "  HDR Mode: " << (conf.hdr ? "Enabled" : "Disabled") << '\n';
         if (conf.e_present != 2) std::cerr << "  ! Present Mode: " << conf.e_present << '\n';
+
+#ifdef __ANDROID__
+        // NPU permission never makes the accelerator a frame-rate authority.
+        // Probe only for an actually active frame-generation session; multiplier
+        // 1 is the disabled/source-only path and must remain accelerator-free.
+        if (conf.multiplier > 1)
+            LSFG::Accelerator::AcceleratorCoordinator::instance().beginEligibleSession();
+#endif
 
         // remove mesa var in favor of config
         unsetenv("MESA_VK_WSI_PRESENT_MODE"); // NOLINT
