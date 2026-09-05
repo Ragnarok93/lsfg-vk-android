@@ -88,8 +88,8 @@ void* openOptionalRuntime(const char* library, std::string& diagnostic) {
 
     // QAIRT deployments may instead be installed alongside the app's native
     // libraries. GameNative passes that directory explicitly so the probe can
-    // try an absolute path without relying on LD_LIBRARY_PATH or namespace
-    // widening. Library names remain fixed by this module.
+    // try an absolute path without widening the process-wide search path or
+    // linker namespace. Library names remain fixed by this module.
     const char* runtimeDir = std::getenv("LSFG_QNN_RUNTIME_DIR");
     if (runtimeDir == nullptr || *runtimeDir == '\0') {
         diagnostic = "namespace=" + namespaceError + ";app_local=runtime-dir-unset";
