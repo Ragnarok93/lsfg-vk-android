@@ -40,6 +40,8 @@ struct QnnRuntimeProbeResult {
     QnnVersion systemApiVersion{};
     std::string computeLibraryPath;
     std::string systemLibraryPath;
+    std::string systemLoadDiagnostic;
+    std::string computeLoadDiagnostic;
     std::string failureReason;
 };
 
