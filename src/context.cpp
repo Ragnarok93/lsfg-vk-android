@@ -80,9 +80,6 @@ VkImageBlit fullImageBlit(uint32_t width, uint32_t height) {
     };
 }
 
-// Copy the real game frame into an AHardwareBuffer-backed VkImage and release
-// ownership to the external queue family. The framegen VkDevice performs the
-// matching EXTERNAL -> compute-family acquire before reading the same AHB.
 void copySwapchainToExternalAhb(VkCommandBuffer buf,
         VkImage swapchainImage, VkImage ahbImage,
         uint32_t width, uint32_t height,
@@ -153,8 +150,6 @@ void copySwapchainToExternalAhb(VkCommandBuffer buf,
         static_cast<uint32_t>(std::size(releaseBarriers)), releaseBarriers);
 }
 
-// Acquire a generated AHB from framegen, copy it into an acquired swapchain
-// image, then release the AHB back to EXTERNAL for the next framegen cycle.
 void copyExternalAhbToSwapchain(VkCommandBuffer buf,
         VkImage ahbImage, VkImage swapchainImage,
         uint32_t width, uint32_t height,
@@ -225,9 +220,6 @@ void copyExternalAhbToSwapchain(VkCommandBuffer buf,
         static_cast<uint32_t>(std::size(releaseBarriers)), releaseBarriers);
 }
 
-// AHardwareBuffer makes memory visible to both VkDevices, but it does not make
-// an unfinished queue submission visible. Attach a fence to the game-device
-// copy and wait on the host before framegen submits work on its separate device.
 void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuffer,
         VkQueue queue, const std::vector<VkSemaphore>& waitSemaphores,
         const std::vector<VkSemaphore>& signalSemaphores,
@@ -254,7 +246,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages)
         : swapchain(swapchain), swapchainImages(swapchainImages),
           extent(extent) {
-    // get updated configuration
     auto& conf = Config::activeConf;
     if (!conf.config_file.empty()
             && (
@@ -264,7 +255,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         std::cerr << "lsfg-vk: Rereading configuration, as it is no longer valid.\n";
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        // reread configuration
         const std::string file = Utils::getConfigFile();
         const auto name = Utils::getProcessName();
         try {
@@ -278,7 +268,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         LSFG_3_1P::finalize();
         LSFG_3_1::finalize();
 
-        // print config
         std::cerr << "lsfg-vk: Reloaded configuration for " << name.second << ":\n";
         if (!conf.dll.empty()) std::cerr << "  Using DLL from: " << conf.dll << '\n';
         std::cerr << "  Multiplier: " << conf.multiplier << '\n';
@@ -291,8 +280,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
         if (conf.multiplier <= 1) return;
     }
-    // we could take the format from the swapchain,
-    // but honestly this is safer.
     const VkFormat format = conf.hdr
         ? VK_FORMAT_R8G8B8A8_UNORM
         : VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -302,7 +289,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             "Exact Vulkan device/driver UUID provenance is unavailable");
 
 #ifdef __ANDROID__
-    // Select and validate the exact framegen ICD before allocating any shared AHB.
     auto* lsfgInitialize = LSFG_3_1::initialize;
     auto* lsfgDeleteContext = LSFG_3_1::deleteContext;
     if (conf.performance) {
@@ -328,10 +314,9 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
             "Exact game/framegen ICD has no supported AHB image transport for LSFG format");
 
-    // Android path: use AHardwareBuffer-backed images for sharing with framegen.
-    // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL
-    // ownership around every shared-image access, so this path is valid on
-    // stock Android ICDs as well as wrapper/custom drivers.
+    this->externalSemaphoreFdSync_ = info.androidExternalSemaphoreFdSupported
+        && backendDiagnostics.externalSemaphoreFd;
+
     this->frame_0 = Mini::Image(info.device, info.physicalDevice,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
         ahbTransportMode);
@@ -345,7 +330,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
             ahbTransportMode);
 
-    // Create framegen context using AHB sharing
     std::vector<AHardwareBuffer*> outAhbs;
     outAhbs.reserve(conf.multiplier - 1);
     for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); ++i)
@@ -370,48 +354,47 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     unsetenv("DISABLE_LSFG"); // NOLINT
 
+    if (!this->externalSemaphoreFdSync_) {
+        const auto createHandoffFence = reinterpret_cast<PFN_vkCreateFence>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkCreateFence"));
+        this->resetHandoffFences = reinterpret_cast<PFN_vkResetFences>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkResetFences"));
+        this->waitHandoffFences = reinterpret_cast<PFN_vkWaitForFences>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkWaitForFences"));
+        const auto destroyHandoffFence = reinterpret_cast<PFN_vkDestroyFence>(
+            Layer::ovkGetDeviceProcAddr(info.device, "vkDestroyFence"));
+        if (createHandoffFence == nullptr || this->resetHandoffFences == nullptr
+                || this->waitHandoffFences == nullptr || destroyHandoffFence == nullptr)
+            throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+                "Required fence functions unavailable for Android AHB handoff");
 
-    // Resolve and allocate the handoff fence once per swapchain context. The old
-    // path looked up three entrypoints and created/destroyed a fence every source
-    // frame even though each handoff is synchronously completed before the next.
-    const auto createHandoffFence = reinterpret_cast<PFN_vkCreateFence>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkCreateFence"));
-    this->resetHandoffFences = reinterpret_cast<PFN_vkResetFences>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkResetFences"));
-    this->waitHandoffFences = reinterpret_cast<PFN_vkWaitForFences>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkWaitForFences"));
-    const auto destroyHandoffFence = reinterpret_cast<PFN_vkDestroyFence>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkDestroyFence"));
-    if (createHandoffFence == nullptr || this->resetHandoffFences == nullptr
-            || this->waitHandoffFences == nullptr || destroyHandoffFence == nullptr)
-        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
-            "Required fence functions unavailable for Android AHB handoff");
+        const VkFenceCreateInfo handoffFenceInfo{
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        };
+        VkFence handoffFence{};
+        const auto handoffFenceRes = createHandoffFence(
+            info.device, &handoffFenceInfo, nullptr, &handoffFence);
+        if (handoffFenceRes != VK_SUCCESS || handoffFence == VK_NULL_HANDLE)
+            throw LSFG::vulkan_error(handoffFenceRes,
+                "Failed to create Android AHB handoff fence");
 
-    const VkFenceCreateInfo handoffFenceInfo{
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-    };
-    VkFence handoffFence{};
-    const auto handoffFenceRes = createHandoffFence(
-        info.device, &handoffFenceInfo, nullptr, &handoffFence);
-    if (handoffFenceRes != VK_SUCCESS || handoffFence == VK_NULL_HANDLE)
-        throw LSFG::vulkan_error(handoffFenceRes,
-            "Failed to create Android AHB handoff fence");
+        this->ahbHandoffFence = std::shared_ptr<VkFence>(
+            new VkFence(handoffFence),
+            [device = info.device, destroyHandoffFence](VkFence* ownedFence) {
+                if (ownedFence != nullptr) {
+                    if (*ownedFence != VK_NULL_HANDLE)
+                        destroyHandoffFence(device, *ownedFence, nullptr);
+                    delete ownedFence;
+                }
+            });
+    }
 
-    this->ahbHandoffFence = std::shared_ptr<VkFence>(
-        new VkFence(handoffFence),
-        [device = info.device, destroyHandoffFence](VkFence* ownedFence) {
-            if (ownedFence != nullptr) {
-                if (*ownedFence != VK_NULL_HANDLE)
-                    destroyHandoffFence(device, *ownedFence, nullptr);
-                delete ownedFence;
-            }
-        });
-
-    std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId << ")\n";
+    std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
+              << ", sync="
+              << (this->externalSemaphoreFdSync_ ? "external-semaphore-fd" : "host-fence")
+              << ")\n";
 
 #else
-    // Desktop Linux path: use OPAQUE_FD-based image sharing
-
     std::array<int, 2> fds{};
     this->frame_0 = Mini::Image(info.device, info.physicalDevice,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -427,7 +410,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
             &outFds.at(i));
 
-    // initialize lsfg
     auto* lsfgInitialize = LSFG_3_1::initialize;
     auto* lsfgCreateContext = LSFG_3_1::createContext;
     auto* lsfgDeleteContext = LSFG_3_1::deleteContext;
@@ -459,7 +441,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     unsetenv("DISABLE_LSFG"); // NOLINT
 #endif
 
-    // prepare render passes
     this->cmdPool = Mini::CommandPool(info.device, info.queue.first);
     for (size_t i = 0; i < 8; i++) {
         auto& pass = this->passInfos.at(i);
@@ -508,7 +489,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << " multiplier=" << conf.multiplier
                   << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                   << " target_fps=" << conf.fpsLimit
-                  << " performance=" << (conf.performance ? 1 : 0) << "\n";
+                  << " performance=" << (conf.performance ? 1 : 0)
+                  << " sync="
+                  << (this->externalSemaphoreFdSync_ ? "external-semaphore-fd" : "host-fence")
+                  << "\n";
     }
 
     const auto finishSourcePresent = [&](VkResult result, const char* sourceWait) -> VkResult {
@@ -570,6 +554,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                       << " target_fps=" << conf.fpsLimit
                       << " performance=" << (conf.performance ? 1 : 0)
+                      << " sync="
+                      << (this->externalSemaphoreFdSync_ ? "external-semaphore-fd" : "host-fence")
                       << "\n";
 
             metrics.windowStart = cycleEnd;
@@ -620,13 +606,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(directResult, "game-render");
     }
 
-    // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
-    // PR #8 presentation sequence intact, but make the external-memory handoff
-    // explicit and synchronized instead of relying on Turnip-specific behavior.
-
-    // 1. Copy the game swapchain image into frame_0/frame_1, then release the
-    //    AHB to VK_QUEUE_FAMILY_EXTERNAL for framegen.
-    pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
+    int preCopySemaphoreFd = -1;
+    if (this->externalSemaphoreFdSync_ && !warmupSourceHistory)
+        pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device, &preCopySemaphoreFd);
+    else
+        pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
     pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
     pass.preCopyBuf.begin();
@@ -644,23 +628,26 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
             .preCopySemaphores.at(1).handle());
 
-    // The AHB is shared memory, not implicit synchronization. Wait for the
-    // game-device release barrier/copy to complete before the framegen VkDevice
-    // performs its matching external acquire.
     const auto handoffStart = RuntimeMetrics::Clock::now();
     std::vector<VkSemaphore> preCopySignals{
         pass.preCopySemaphores.at(0).handle(),
         pass.preCopySemaphores.at(1).handle(),
     };
-    submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
-        gameRenderSemaphores2, preCopySignals,
-        *this->ahbHandoffFence, this->resetHandoffFences,
-        this->waitHandoffFences);
+    if (this->externalSemaphoreFdSync_) {
+        pass.preCopyBuf.submit(info.queue.second, gameRenderSemaphores2, preCopySignals);
+    } else {
+        submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
+            gameRenderSemaphores2, preCopySignals,
+            *this->ahbHandoffFence, this->resetHandoffFences,
+            this->waitHandoffFences);
+    }
     this->previousSourceCopySignalValid_ = true;
     metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - handoffStart).count();
     if (firstPresentDiagnostic)
-        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\n";
+        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready sync="
+                  << (this->externalSemaphoreFdSync_ ? "external-semaphore-fd" : "host-fence")
+                  << "\n";
 
     if (warmupSourceHistory) {
         this->requiresSourceHistoryWarmup_ = false;
@@ -686,66 +673,74 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(warmupResult, "pre-copy-warmup");
     }
 
-    // 2. Tell framegen to generate intermediary frames. It acquires the input
-    //    and output AHBs from EXTERNAL and releases them back to EXTERNAL.
-    std::vector<int> noOutSems;
+    std::vector<int> renderSemaphoreFds;
+    if (this->externalSemaphoreFdSync_) {
+        renderSemaphoreFds.resize(generatedFrameCount, -1);
+        for (size_t i = 0; i < generatedFrameCount; ++i)
+            pass.renderSemaphores.at(i) = Mini::Semaphore(
+                info.device, &renderSemaphoreFds.at(i));
+    }
+
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
                   << (conf.performance ? "performance" : "quality")
-                  << " generated=" << generatedFrameCount << "\n";
+                  << " generated=" << generatedFrameCount
+                  << " sync="
+                  << (this->externalSemaphoreFdSync_ ? "external-semaphore-fd" : "host-fence")
+                  << "\n";
     }
     const auto dispatchStart = RuntimeMetrics::Clock::now();
     if (conf.performance)
         LSFG_3_1P::presentContextWithCount(
-            *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
+            *this->lsfgCtxId,
+            this->externalSemaphoreFdSync_ ? preCopySemaphoreFd : -1,
+            renderSemaphoreFds, generatedFrameCount);
     else
         LSFG_3_1::presentContextWithCount(
-            *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
+            *this->lsfgCtxId,
+            this->externalSemaphoreFdSync_ ? preCopySemaphoreFd : -1,
+            renderSemaphoreFds, generatedFrameCount);
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-returned\n";
 
-    // 3. Ensure framegen's separate VkDevice has completed its release barriers
-    //    before the game device acquires generated AHBs for readback/blit.
-    const auto waitIdleStart = RuntimeMetrics::Clock::now();
-    const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
-    const bool framegenReady = conf.performance
-        ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
-        : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-    metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-        RuntimeMetrics::Clock::now() - waitIdleStart).count();
-    if (!framegenReady) {
-        this->lastGeneratedFrameCount_ = 0;
-        std::cerr << "lsfg-vk: runtime stage=framegen-completion-timeout timeout_ms="
-                  << (framegenCompletionTimeoutNs / 1'000'000ULL)
-                  << "; presenting source and requesting swapchain recreation\n";
-        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
-        const VkPresentInfoKHR timeoutPresentInfo{
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = pNext,
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &sourceReady,
-            .swapchainCount = 1,
-            .pSwapchains = &this->swapchain,
-            .pImageIndices = &presentIdx,
-        };
-        const auto timeoutPresentResult = Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
-        if (timeoutPresentResult != VK_SUCCESS && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
-            metrics.windowSourcePresentFailures++;
-            metrics.totalSourcePresentFailures++;
-            throw LSFG::vulkan_error(timeoutPresentResult,
-                "Failed to present source frame after framegen timeout");
+    if (!this->externalSemaphoreFdSync_) {
+        const auto waitIdleStart = RuntimeMetrics::Clock::now();
+        const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
+        const bool framegenReady = conf.performance
+            ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
+            : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
+        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        if (!framegenReady) {
+            this->lastGeneratedFrameCount_ = 0;
+            std::cerr << "lsfg-vk: runtime stage=framegen-completion-timeout timeout_ms="
+                      << (framegenCompletionTimeoutNs / 1'000'000ULL)
+                      << "; presenting source and requesting swapchain recreation\n";
+            const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+            const VkPresentInfoKHR timeoutPresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = pNext,
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &sourceReady,
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto timeoutPresentResult = Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
+            if (timeoutPresentResult != VK_SUCCESS && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(timeoutPresentResult,
+                    "Failed to present source frame after framegen timeout");
+            }
+            return finishSourcePresent(VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-timeout");
         }
-        return finishSourcePresent(VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-timeout");
+        if (firstPresentDiagnostic)
+            std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
     }
-    if (firstPresentDiagnostic)
-        std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
 
-    // 4. Copy generated frames to swapchain images and present them. Each
-    // copy submission signals two binary semaphores: one consumed by this
-    // generated present, and one reserved for the next generated/source
-    // present. A binary semaphore signal must not be consumed twice.
     for (size_t i = 0; i < generatedFrameCount; i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
@@ -770,8 +765,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             info.queue.first);
 
         pass.postCopyBufs.at(i).end();
+        std::vector<VkSemaphore> postCopyWaits{
+            pass.acquireSemaphores.at(i).handle(),
+        };
+        if (this->externalSemaphoreFdSync_)
+            postCopyWaits.emplace_back(pass.renderSemaphores.at(i).handle());
         pass.postCopyBufs.at(i).submit(info.queue.second,
-            { pass.acquireSemaphores.at(i).handle() },
+            postCopyWaits,
             { pass.postCopySemaphores.at(i).handle(),
               pass.prevPostCopySemaphores.at(i).handle() });
 
@@ -803,9 +803,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    // 5. Present the actual game frame after generated frames using the signal
-    // reserved for this present, rather than waiting a second time on the
-    // generated-present semaphore.
     VkSemaphore lastPrevPostCopySemaphore = generatedFrameCount > 0
         ? pass.prevPostCopySemaphores.at(generatedFrameCount - 1).handle()
         : pass.preCopySemaphores.at(0).handle();
@@ -827,9 +824,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     return finishSourcePresent(res, "prev-post-copy");
 
 #else
-    // Desktop Linux path: OPAQUE_FD semaphore-based synchronization
-
-    // 1. copy swapchain image to frame_0/frame_1
     int preCopySemaphoreFd{};
     pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device, &preCopySemaphoreFd);
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
@@ -854,7 +848,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         { pass.preCopySemaphores.at(0).handle(),
           pass.preCopySemaphores.at(1).handle() });
 
-    // 2. render intermediary frames
     std::vector<int> renderSemaphoreFds(conf.multiplier - 1);
     for (size_t i = 0; i < (conf.multiplier - 1); ++i)
         pass.renderSemaphores.at(i) = Mini::Semaphore(info.device, &renderSemaphoreFds.at(i));
@@ -869,7 +862,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             renderSemaphoreFds);
 
     for (size_t i = 0; i < (conf.multiplier - 1); i++) {
-        // 3. acquire next swapchain image
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
         auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, runtimeWaitTimeoutNs(),
@@ -877,7 +869,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");
 
-        // 4. copy output image to swapchain image
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.postCopyBufs.at(i) = Mini::CommandBuffer(info.device, this->cmdPool);
@@ -897,13 +888,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             { pass.postCopySemaphores.at(i).handle(),
               pass.prevPostCopySemaphores.at(i).handle() });
 
-        // 5. present swapchain image
         std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
         if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());
 
         const VkPresentInfoKHR presentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = i == 0 ? pNext : nullptr, // only set on first present
+            .pNext = i == 0 ? pNext : nullptr,
             .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
             .pWaitSemaphores = waitSemaphores.data(),
             .swapchainCount = 1,
@@ -915,7 +905,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             throw LSFG::vulkan_error(res, "Failed to present swapchain image");
     }
 
-    // 6. present actual next frame
     VkSemaphore lastPrevPostCopySemaphore =
         pass.prevPostCopySemaphores.at(conf.multiplier - 1 - 1).handle();
     const VkPresentInfoKHR presentInfo{
