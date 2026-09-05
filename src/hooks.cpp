@@ -8,6 +8,7 @@
 #include <vulkan/vulkan_core.h>
 
 #include <unordered_map>
+#include <unordered_set>
 #include <filesystem>
 #include <stdexcept>
 #include <algorithm>
@@ -17,6 +18,7 @@
 #include <iomanip>
 #include <chrono>
 #include <condition_variable>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
@@ -27,6 +29,7 @@
 #include <vector>
 #ifdef __ANDROID__
 #include <sys/inotify.h>
+#include <poll.h>
 #include <unistd.h>
 #include <cerrno>
 #endif
@@ -217,6 +220,7 @@ namespace {
     std::unordered_map<VkSwapchainKHR, VkDevice> swapchainToDeviceTable;
     std::unordered_map<VkSwapchainKHR, VkPresentModeKHR> swapchainToPresent;
     std::unordered_map<VkSwapchainKHR, VkPresentModeKHR> swapchainToConfiguredPresent;
+    std::unordered_set<VkSwapchainKHR> passThroughSwapchains;
 
 #ifdef __ANDROID__
     struct RuntimeOutputStats {
@@ -236,91 +240,97 @@ namespace {
             reset();
         }
 
-        bool changed(const std::string& configFile) noexcept {
+        void watch(const std::string& configFile) noexcept {
             if (configFile.empty())
-                return false;
+                return;
+            if (configFile == configFile_ && worker_.joinable())
+                return;
 
+            reset();
+            configFile_ = configFile;
             const std::filesystem::path path(configFile);
-            const std::string directory = path.parent_path().string();
-            const std::string filename = path.filename().string();
-            if (fd_ < 0 || wd_ < 0 || directory != directory_ || filename != filename_) {
-                if (!arm(directory, filename))
-                    return fallbackChanged(configFile);
-            }
+            directory_ = path.parent_path().string();
+            filename_ = path.filename().string();
 
-            bool sawChange = false;
-            alignas(struct inotify_event) char buffer[4096];
-            for (;;) {
-                const ssize_t length = ::read(fd_, buffer, sizeof(buffer));
-                if (length < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                        break;
-                    reset();
-                    return fallbackChanged(configFile);
-                }
-                if (length == 0)
-                    break;
-
-                size_t offset = 0;
-                while (offset < static_cast<size_t>(length)) {
-                    const auto* event = reinterpret_cast<const struct inotify_event*>(buffer + offset);
-                    const bool matchingName = event->len > 0 && filename_ == event->name;
-                    if (matchingName && (event->mask & (
-                            IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE |
-                            IN_ATTRIB | IN_MOVE_SELF | IN_DELETE_SELF))) {
-                        sawChange = true;
-                    }
-                    if (event->mask & IN_IGNORED) {
-                        reset();
-                        break;
-                    }
-                    offset += sizeof(struct inotify_event) + event->len;
+            fd_ = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+            if (fd_ >= 0) {
+                wd_ = ::inotify_add_watch(fd_, directory_.c_str(),
+                    IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_ATTRIB |
+                    IN_MOVE_SELF | IN_DELETE_SELF);
+                if (wd_ < 0) {
+                    ::close(fd_);
+                    fd_ = -1;
                 }
             }
-            return sawChange;
+
+            std::error_code ec;
+            fallbackTimestamp_ = std::filesystem::last_write_time(configFile_, ec);
+            fallbackTimestampValid_ = !ec;
+            stopping_.store(false, std::memory_order_release);
+            changed_.store(false, std::memory_order_release);
+            worker_ = std::thread(&AndroidConfigWatcher::run, this);
+        }
+
+        bool consumeChanged() noexcept {
+            return changed_.exchange(false, std::memory_order_acq_rel);
         }
 
     private:
-        bool arm(const std::string& directory, const std::string& filename) noexcept {
-            reset();
-            fd_ = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-            if (fd_ < 0)
-                return false;
+        void run() noexcept {
+            auto nextFallbackPoll = std::chrono::steady_clock::now();
+            while (!stopping_.load(std::memory_order_acquire)) {
+                bool sawChange = false;
+                if (fd_ >= 0 && wd_ >= 0) {
+                    struct pollfd descriptor { fd_, POLLIN, 0 };
+                    const int ready = ::poll(&descriptor, 1, 250);
+                    if (ready > 0 && (descriptor.revents & POLLIN)) {
+                        alignas(struct inotify_event) char buffer[4096];
+                        for (;;) {
+                            const ssize_t length = ::read(fd_, buffer, sizeof(buffer));
+                            if (length < 0) {
+                                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                                    break;
+                                break;
+                            }
+                            if (length == 0)
+                                break;
+                            size_t offset = 0;
+                            while (offset < static_cast<size_t>(length)) {
+                                const auto* event = reinterpret_cast<const struct inotify_event*>(buffer + offset);
+                                const bool matchingName = event->len > 0 && filename_ == event->name;
+                                if (matchingName && (event->mask & (
+                                        IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE |
+                                        IN_ATTRIB | IN_MOVE_SELF | IN_DELETE_SELF)))
+                                    sawChange = true;
+                                offset += sizeof(struct inotify_event) + event->len;
+                            }
+                        }
+                    }
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                }
 
-            wd_ = ::inotify_add_watch(fd_, directory.c_str(),
-                IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_ATTRIB |
-                IN_MOVE_SELF | IN_DELETE_SELF);
-            if (wd_ < 0) {
-                reset();
-                return false;
+                const auto now = std::chrono::steady_clock::now();
+                if (fd_ < 0 && now >= nextFallbackPoll) {
+                    nextFallbackPoll = now + std::chrono::seconds(1);
+                    std::error_code ec;
+                    const auto timestamp = std::filesystem::last_write_time(configFile_, ec);
+                    const bool valid = !ec;
+                    if (valid != fallbackTimestampValid_ || (valid && timestamp != fallbackTimestamp_))
+                        sawChange = true;
+                    fallbackTimestamp_ = timestamp;
+                    fallbackTimestampValid_ = valid;
+                }
+
+                if (sawChange)
+                    changed_.store(true, std::memory_order_release);
             }
-
-            directory_ = directory;
-            filename_ = filename;
-            std::error_code ec;
-            fallbackTimestamp_ = std::filesystem::last_write_time(
-                std::filesystem::path(directory_) / filename_, ec);
-            fallbackTimestampValid_ = !ec;
-            return true;
-        }
-
-        bool fallbackChanged(const std::string& configFile) noexcept {
-            const auto now = RuntimeOutputStats::Clock::now();
-            if (now < nextFallbackPoll_)
-                return false;
-            nextFallbackPoll_ = now + std::chrono::seconds(1);
-
-            std::error_code ec;
-            const auto timestamp = std::filesystem::last_write_time(configFile, ec);
-            const bool valid = !ec;
-            const bool changed = valid != fallbackTimestampValid_
-                || (valid && timestamp != fallbackTimestamp_);
-            fallbackTimestamp_ = timestamp;
-            fallbackTimestampValid_ = valid;
-            return changed;
         }
 
         void reset() noexcept {
+            stopping_.store(true, std::memory_order_release);
+            if (worker_.joinable())
+                worker_.join();
             if (fd_ >= 0 && wd_ >= 0)
                 ::inotify_rm_watch(fd_, wd_);
             if (fd_ >= 0)
@@ -329,18 +339,23 @@ namespace {
             wd_ = -1;
             directory_.clear();
             filename_.clear();
+            configFile_.clear();
         }
 
         int fd_{-1};
         int wd_{-1};
         std::string directory_;
         std::string filename_;
-        RuntimeOutputStats::Clock::time_point nextFallbackPoll_{};
+        std::string configFile_;
+        std::thread worker_;
+        std::atomic<bool> stopping_{false};
+        std::atomic<bool> changed_{false};
         std::filesystem::file_time_type fallbackTimestamp_{};
         bool fallbackTimestampValid_{false};
     };
 
     AndroidConfigWatcher androidConfigWatcher;
+    std::atomic<bool> androidFrameGenerationActive{false};
     std::unordered_map<VkSwapchainKHR, RuntimeOutputStats> runtimeOutputStats;
 
     class AndroidStatsPublisher {
@@ -512,6 +527,7 @@ namespace {
         swapchainToDeviceTable.erase(swapchain);
         swapchainToPresent.erase(swapchain);
         swapchainToConfiguredPresent.erase(swapchain);
+        passThroughSwapchains.erase(swapchain);
 #ifdef __ANDROID__
         runtimeOutputStats.erase(swapchain);
 #endif
@@ -614,6 +630,12 @@ namespace {
         Utils::resetLimitN("swapMap");
         auto& deviceInfo = it->second;
         const auto& activeConf = Config::activeConf;
+#ifdef __ANDROID__
+        androidConfigWatcher.watch(activeConf.config_file);
+        androidFrameGenerationActive.store(
+            activeConf.enable && activeConf.multiplier > 1,
+            std::memory_order_release);
+#endif
 
         const auto createPassThrough = [&](const char* reason) -> VkResult {
             const auto res = Layer::ovkCreateSwapchainKHR(
@@ -622,6 +644,7 @@ namespace {
                 if (pCreateInfo->oldSwapchain)
                     eraseSwapchainState(pCreateInfo->oldSwapchain);
                 swapchainToDeviceTable.emplace(*pSwapchain, device);
+                passThroughSwapchains.insert(*pSwapchain);
 #ifdef __ANDROID__
                 publishRuntimeState(activeConf.config_file, false, false,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
@@ -760,6 +783,7 @@ namespace {
                 eraseSwapchainState(pCreateInfo->oldSwapchain);
 
             swapchainToDeviceTable.emplace(*pSwapchain, device);
+            passThroughSwapchains.erase(*pSwapchain);
             std::cerr << "lsfg-vk: init stage=ls-context-begin images=" << imageCount
                       << " selectedPresentMode=" << createInfo.presentMode << "\n";
             swapchains.emplace(*pSwapchain, LsContext(
@@ -800,6 +824,7 @@ namespace {
                 Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);
                 *pSwapchain = fallbackSwapchain;
                 swapchainToDeviceTable.emplace(*pSwapchain, device);
+                passThroughSwapchains.insert(*pSwapchain);
 #ifdef __ANDROID__
                 publishRuntimeState(activeConf.config_file, false, false,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
@@ -822,25 +847,13 @@ namespace {
     VkResult myvkQueuePresentKHR(
             VkQueue queue,
             const VkPresentInfoKHR* pPresentInfo) noexcept {
-        auto it = swapchainToDeviceTable.find(*pPresentInfo->pSwapchains);
-        if (it == swapchainToDeviceTable.end()) {
-            Utils::logLimitN("swapMap", 5,
-                "Swapchain not found in map");
+        if (pPresentInfo == nullptr || pPresentInfo->swapchainCount == 0
+                || pPresentInfo->pSwapchains == nullptr)
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-        }
-
-        auto it2 = deviceToInfo.find(it->second);
-        if (it2 == deviceToInfo.end()) {
-            Utils::logLimitN("swapMap", 5,
-                "Device not found in map");
-            return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-        }
-        auto& deviceInfo = it2->second;
 
         auto& conf = Config::activeConf;
 #ifdef __ANDROID__
-        auto& runtimeStats = runtimeOutputStats[*pPresentInfo->pSwapchains];
-        const bool shouldPollConfig = androidConfigWatcher.changed(conf.config_file);
+        const bool shouldPollConfig = androidConfigWatcher.consumeChanged();
 #else
         const bool shouldPollConfig = true;
 #endif
@@ -854,8 +867,7 @@ namespace {
                 try {
                     Config::updateConfig(configFile);
                     Config::activeConf = Config::getConfig(Utils::getProcessName());
-                    recreateSwapchain = requiresSwapchainRecreation(
-                        previousConf, Config::activeConf);
+                    recreateSwapchain = requiresSwapchainRecreation(previousConf, Config::activeConf);
                     std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
                               << Config::activeConf.multiplier
                               << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
@@ -872,6 +884,12 @@ namespace {
             } else {
                 recreateSwapchain = true;
             }
+#ifdef __ANDROID__
+            androidConfigWatcher.watch(Config::activeConf.config_file);
+            androidFrameGenerationActive.store(
+                Config::activeConf.enable && Config::activeConf.multiplier > 1,
+                std::memory_order_release);
+#endif
             if (recreateSwapchain) {
 #ifdef __ANDROID__
                 publishRuntimeState(configFile, false, false,
@@ -885,8 +903,31 @@ namespace {
             }
         }
 
+#ifdef __ANDROID__
+        if (!androidFrameGenerationActive.load(std::memory_order_acquire))
+            return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+        if (passThroughSwapchains.find(*pPresentInfo->pSwapchains) != passThroughSwapchains.end())
+            return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+#else
         if (!conf.enable || conf.multiplier <= 1)
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+#endif
+
+        auto it = swapchainToDeviceTable.find(*pPresentInfo->pSwapchains);
+        if (it == swapchainToDeviceTable.end()) {
+            Utils::logLimitN("swapMap", 5, "Swapchain not found in map");
+            return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+        }
+
+        auto it2 = deviceToInfo.find(it->second);
+        if (it2 == deviceToInfo.end()) {
+            Utils::logLimitN("swapMap", 5, "Device not found in map");
+            return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+        }
+        auto& deviceInfo = it2->second;
+#ifdef __ANDROID__
+        auto& runtimeStats = runtimeOutputStats[*pPresentInfo->pSwapchains];
+#endif
 
         auto it3 = swapchains.find(*pPresentInfo->pSwapchains);
         if (it3 == swapchains.end()) {
