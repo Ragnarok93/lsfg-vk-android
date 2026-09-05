@@ -89,6 +89,16 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         # SM8250 / Snapdragon 865 is Hexagon v66 and uses the QNN DSP backend,
         # while SM8350+ devices use QNN HTP. Both must remain valid candidates.
         self.assertIn("libQnnDsp.so", qnn_probe)
+        # Phase 2 must be able to consume an app-local QAIRT deployment without
+        # changing Android's global linker state, and must preserve the exact
+        # loader error for diagnostics when neither namespace nor app-local load works.
+        self.assertIn("LSFG_QNN_RUNTIME_DIR", qnn_probe)
+        self.assertIn("std::getenv", qnn_probe)
+        self.assertIn("dlerror", qnn_probe)
+        self.assertIn("systemLoadDiagnostic", qnn_probe_header)
+        self.assertIn("computeLoadDiagnostic", qnn_probe_header)
+        self.assertIn("load_detail=", coordinator)
+        self.assertNotIn("LD_LIBRARY_PATH", qnn_probe)
         self.assertIn("QnnComputeBackendKind", qnn_probe_header)
         self.assertIn("Dsp", qnn_probe_header)
         self.assertIn("Htp", qnn_probe_header)
