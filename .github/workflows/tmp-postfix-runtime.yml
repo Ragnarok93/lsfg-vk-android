@@ -21,8 +21,11 @@ jobs:
           ref: optimize/a6xx-transport
           fetch-depth: 0
 
-      - name: Repair harness class anchor
-        run: sed -i 's/AndroidWsiLoaderBridgeContract/AndroidWsiLoaderBridgeContractTest/g' scripts/tmp_postfix_runtime_patch.py
+      - name: Repair harness anchors
+        shell: bash
+        run: |
+          sed -i 's/AndroidWsiLoaderBridgeContract/AndroidWsiLoaderBridgeContractTest/g' scripts/tmp_postfix_runtime_patch.py
+          sed -i 's/self.assertIn("probeOpaqueFdExternalSemaphore", hooks)/self.assertIn("supportsOpaqueFdExternalSemaphore", hooks)/g' scripts/tmp_postfix_runtime_patch.py
 
       - name: Record RED contract
         shell: bash
