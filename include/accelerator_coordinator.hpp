@@ -33,6 +33,10 @@ struct AcceleratorStatus {
     bool snpeRuntimeFound{false};
     bool qnnProviderQualified{false};
     bool qnnSystemProviderQualified{false};
+    bool qnnHtpAttributionQualified{false};
+    bool qnnSharedMemoryQualified{false};
+    bool qnnGraphExecutionQualified{false};
+    bool qnnNumericalSmokeQualified{false};
     bool directAhbInteropQualified{false};
     bool executionEnabled{false};
     uint32_t qnnBackendId{0};
@@ -43,6 +47,7 @@ struct AcceleratorStatus {
     QnnVersion qnnSystemApiVersion{};
     std::string qnnHtpLibraryPath;
     std::string qnnSystemLibraryPath;
+    std::string qnnBackendBuildId;
     BackendKind selectedBackend{BackendKind::Vulkan};
     BackendOverride requestedBackend{BackendOverride::Auto};
     AcceleratorHealthState healthState{AcceleratorHealthState::Unprobed};
@@ -52,10 +57,10 @@ struct AcceleratorStatus {
 
 /// Owns optional accelerator runtime discovery and backend health state.
 ///
-/// Phase 2 verifies the actual QNN HTP/System providers and records runtime
-/// provenance, but does not create accelerator devices/graphs or redirect frame
-/// generation. Vulkan remains the unconditional execution backend until the
-/// memory/interoperability and execution path are separately qualified.
+/// Phase 2 verifies the QNN HTP/System provider identity, a one-shot HTP graph
+/// execution, AHardwareBuffer-backed QNN memory registration, and numerical
+/// smoke output. It still does not redirect LSFG stages: Vulkan remains the
+/// unconditional execution backend until the Phase 3 dynamic-warp benchmark.
 class AcceleratorCoordinator final {
 public:
     static AcceleratorCoordinator& instance() noexcept;

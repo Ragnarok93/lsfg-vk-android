@@ -1,5 +1,6 @@
 #include "accelerator_coordinator.hpp"
 #include "android_diagnostics.hpp"
+#include "qnn_htp_smoke_probe.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -58,8 +59,6 @@ std::string versionToken(const QnnVersion& version) {
 
 #ifdef __ANDROID__
 void* openOptionalRuntime(const char* library) {
-    // Deliberately no link-time Qualcomm dependency: failure is ordinary and
-    // always falls through to the preserved Vulkan implementation.
     return dlopen(library, RTLD_NOW | RTLD_LOCAL);
 }
 
@@ -92,16 +91,12 @@ void AcceleratorCoordinator::beginEligibleSession() {
     status_.npuSettingEnabled = envEnabled("LSFG_NPU_ACCELERATION");
     status_.requestedBackend = requestedBackendFromEnvironment();
 
-    // The production opt-in is authoritative. Debug backend overrides never
-    // bypass the user's NPU permission and never force accelerator loading.
     if (!status_.npuSettingEnabled) {
         status_.selectionReason = "npu-setting-disabled";
         logSnapshot();
         return;
     }
 
-    // Forced Vulkan is useful for A/B testing and intentionally avoids even a
-    // Qualcomm runtime probe.
     if (status_.requestedBackend == BackendOverride::Vulkan) {
         status_.selectionReason = "forced-vulkan";
         logSnapshot();
@@ -121,18 +116,27 @@ void AcceleratorCoordinator::beginEligibleSession() {
         }
     }
 
-    // Phase 2 invariant: provider qualification is still informational. Direct
-    // AHB -> QNN memory registration and actual HTP graph execution have not yet
-    // been proven, so no runtime discovery result is allowed to steal execution
-    // from the validated Vulkan path.
     status_.executionEnabled = false;
     status_.selectedBackend = BackendKind::Vulkan;
-    status_.directAhbInteropQualified = false;
 
-    if (status_.qnnProviderQualified && status_.qnnSystemProviderQualified) {
+    const bool qnnPhase2Qualified = status_.qnnProviderQualified
+        && status_.qnnSystemProviderQualified
+        && status_.qnnHtpAttributionQualified
+        && status_.qnnSharedMemoryQualified
+        && status_.qnnGraphExecutionQualified
+        && status_.qnnNumericalSmokeQualified;
+
+    if (qnnPhase2Qualified) {
         status_.healthState = AcceleratorHealthState::Supported;
+        status_.directAhbInteropQualified = true;
         status_.selectionReason = "phase2-execution-disabled";
-        status_.fallbackReason = "direct-ahb-qnn-memory-registration-unproven";
+        status_.fallbackReason = "phase3-dynamic-warp-benchmark-required";
+    } else if (status_.qnnProviderQualified && status_.qnnSystemProviderQualified) {
+        status_.healthState = AcceleratorHealthState::Degraded;
+        status_.directAhbInteropQualified = false;
+        status_.selectionReason = "qnn-phase2-smoke-unqualified";
+        if (status_.fallbackReason.empty())
+            status_.fallbackReason = "qnn-phase2-smoke-unqualified";
     } else if (status_.snpeRuntimeFound) {
         status_.healthState = AcceleratorHealthState::Unprobed;
         status_.selectionReason = "snpe-phase2-unqualified";
@@ -147,8 +151,6 @@ void AcceleratorCoordinator::beginEligibleSession() {
     logAccelerator(
         std::string("LSFG_ACCEL event=vulkan-fallback reason=") + status_.fallbackReason);
     logSnapshot();
-
-    // Metadata inspection does not need accelerator runtimes to remain resident.
     closeRuntimeHandles();
 }
 
@@ -173,23 +175,48 @@ void AcceleratorCoordinator::probeQnnRuntime() {
     status_.qnnHtpLibraryPath = result.htpLibraryPath;
     status_.qnnSystemLibraryPath = result.systemLibraryPath;
 
-    if (status_.qnnProviderQualified && status_.qnnSystemProviderQualified) {
+    if (!status_.qnnProviderQualified || !status_.qnnSystemProviderQualified) {
+        status_.fallbackReason = result.failureReason.empty()
+            ? "qnn-provider-unqualified" : result.failureReason;
         logAccelerator(
-            std::string("LSFG_ACCEL event=qnn-provider-qualified")
-            + " provider=" + logToken(status_.qnnProviderName)
-            + " backend_id=" + std::to_string(status_.qnnBackendId)
-            + " core_api=" + versionToken(status_.qnnCoreApiVersion)
-            + " backend_api=" + versionToken(status_.qnnBackendApiVersion)
-            + " system_api=" + versionToken(status_.qnnSystemApiVersion)
-            + " htp_module=" + logToken(status_.qnnHtpLibraryPath)
-            + " system_module=" + logToken(status_.qnnSystemLibraryPath));
+            std::string("LSFG_ACCEL event=qnn-provider-rejected reason=") + status_.fallbackReason);
         return;
     }
 
-    status_.fallbackReason = result.failureReason.empty()
-        ? "qnn-provider-unqualified" : result.failureReason;
     logAccelerator(
-        std::string("LSFG_ACCEL event=qnn-provider-rejected reason=") + status_.fallbackReason);
+        std::string("LSFG_ACCEL event=qnn-provider-qualified")
+        + " provider=" + logToken(status_.qnnProviderName)
+        + " backend_id=" + std::to_string(status_.qnnBackendId)
+        + " core_api=" + versionToken(status_.qnnCoreApiVersion)
+        + " backend_api=" + versionToken(status_.qnnBackendApiVersion)
+        + " system_api=" + versionToken(status_.qnnSystemApiVersion)
+        + " htp_module=" + logToken(status_.qnnHtpLibraryPath)
+        + " system_module=" + logToken(status_.qnnSystemLibraryPath));
+
+    const QnnHtpSmokeResult smoke = probeQnnHtpGraphAndSharedMemory(qnnHtpHandle_);
+    status_.qnnHtpAttributionQualified = smoke.htpAttributionQualified;
+    status_.qnnSharedMemoryQualified = smoke.sharedMemoryQualified;
+    status_.qnnGraphExecutionQualified = smoke.graphExecutionQualified;
+    status_.qnnNumericalSmokeQualified = smoke.numericalSmokeQualified;
+    status_.qnnBackendBuildId = smoke.backendBuildId;
+
+    const bool qualified = smoke.htpAttributionQualified
+        && smoke.sharedMemoryQualified
+        && smoke.graphExecutionQualified
+        && smoke.numericalSmokeQualified;
+    if (!qualified)
+        status_.fallbackReason = smoke.failureReason.empty()
+            ? "qnn-phase2-smoke-unqualified" : smoke.failureReason;
+
+    logAccelerator(
+        std::string("LSFG_ACCEL event=qnn-phase2-smoke")
+        + " htp_attribution=" + (smoke.htpAttributionQualified ? "1" : "0")
+        + " ahb_shared=" + (smoke.sharedMemoryQualified ? "1" : "0")
+        + " graph_execute=" + (smoke.graphExecutionQualified ? "1" : "0")
+        + " numerical=" + (smoke.numericalSmokeQualified ? "1" : "0")
+        + " backend_build=" + logToken(smoke.backendBuildId)
+        + " result=" + (qualified ? "qualified" : "rejected")
+        + " reason=" + (smoke.failureReason.empty() ? "none" : smoke.failureReason));
 }
 
 void AcceleratorCoordinator::probeSnpeRuntime() {
@@ -212,6 +239,10 @@ void AcceleratorCoordinator::logSnapshot() const {
         + " qnn_runtime_found=" + (status_.qnnRuntimeFound ? "1" : "0")
         + " qnn_provider_qualified=" + (status_.qnnProviderQualified ? "1" : "0")
         + " qnn_system_provider_qualified=" + (status_.qnnSystemProviderQualified ? "1" : "0")
+        + " qnn_htp_attribution_qualified=" + (status_.qnnHtpAttributionQualified ? "1" : "0")
+        + " qnn_shared_memory_qualified=" + (status_.qnnSharedMemoryQualified ? "1" : "0")
+        + " qnn_graph_execution_qualified=" + (status_.qnnGraphExecutionQualified ? "1" : "0")
+        + " qnn_numerical_smoke_qualified=" + (status_.qnnNumericalSmokeQualified ? "1" : "0")
         + " direct_ahb_interop_qualified=" + (status_.directAhbInteropQualified ? "1" : "0")
         + " qnn_provider=" + logToken(status_.qnnProviderName)
         + " qnn_backend_id=" + std::to_string(status_.qnnBackendId)
@@ -220,6 +251,7 @@ void AcceleratorCoordinator::logSnapshot() const {
         + " qnn_system_api=" + versionToken(status_.qnnSystemApiVersion)
         + " qnn_htp_module=" + logToken(status_.qnnHtpLibraryPath)
         + " qnn_system_module=" + logToken(status_.qnnSystemLibraryPath)
+        + " qnn_backend_build=" + logToken(status_.qnnBackendBuildId)
         + " snpe_runtime_found=" + (status_.snpeRuntimeFound ? "1" : "0")
         + " requested_backend=" + backendOverrideName(status_.requestedBackend)
         + " selected_backend=" + backendKindName(status_.selectedBackend)
