@@ -948,3 +948,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     return res;
 #endif
 }
+
+#ifdef __ANDROID__
+void LsContext::enterSourceOnlyBypass() {
+    this->lastGeneratedFrameCount_ = 0;
+    this->requiresSourceHistoryWarmup_ = true;
+    this->previousSourceCopySignalValid_ = false;
+}
+#endif

@@ -838,6 +838,22 @@ namespace {
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
 
+#ifdef __ANDROID__
+        if (conf.targeted && conf.multiplier <= 1) {
+            swapchain.enterSourceOnlyBypass();
+            const auto res = Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+            if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
+                recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
+                    conf.config_file, 0, 1, conf.performance,
+                    conf.adaptiveFramegen, conf.fpsLimit);
+                Utils::resetLimitN("swapPresent");
+            } else {
+                recordOutputFailure(*pPresentInfo->pSwapchains);
+            }
+            return res;
+        }
+#endif
+
         try {
 #ifdef __ANDROID__
             auto& semaphores = runtimeStats.presentWaitSemaphores;

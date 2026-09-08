@@ -57,6 +57,10 @@ public:
         return lastGeneratedFrameCount_;
     }
 
+#ifdef __ANDROID__
+    void enterSourceOnlyBypass();
+#endif
+
     // Non-copyable, trivially moveable and destructible
     LsContext(const LsContext&) = delete;
     LsContext& operator=(const LsContext&) = delete;

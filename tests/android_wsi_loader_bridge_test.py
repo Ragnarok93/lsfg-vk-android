@@ -196,12 +196,19 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
 
     def test_runtime_disable_uses_resident_source_only_context(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
         self.assertIn("init stage=swapchain-pass-through reason=", hooks)
         self.assertIn("enabled=", hooks)
         self.assertIn("swapchainToDeviceTable.emplace(*pSwapchain, device)", hooks)
         self.assertNotIn("if (!conf.enable || conf.multiplier <= 1)", hooks)
+        self.assertIn("if (conf.targeted && conf.multiplier <= 1)", hooks)
+        self.assertIn("swapchain.enterSourceOnlyBypass()", hooks)
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", hooks)
+        self.assertIn("void enterSourceOnlyBypass();", header)
+        self.assertIn("void LsContext::enterSourceOnlyBypass()", context)
 
         reload_pos = hooks.index("init stage=config-reloaded multiplier=")
         context_lookup_pos = hooks.index("auto it3 = swapchains.find")
