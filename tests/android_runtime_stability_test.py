@@ -208,7 +208,9 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("const size_t runtimeMultiplier = residentCapacityMultiplier(conf)", context)
         self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
         self.assertIn("const bool generationActive = activeConf.multiplier > 1", hooks)
-        self.assertIn("publishRuntimeState(activeConf.config_file, generationActive, generationActive", hooks)
+        self.assertIn('generationActive ? "generating" : "source_only"', hooks)
+        self.assertIn("runtime stage=config-reload-soft-toggle", hooks)
+        self.assertIn("recreateSwapchain=0", hooks)
 
 
 if __name__ == "__main__":

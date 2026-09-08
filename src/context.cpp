@@ -629,7 +629,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             throw LSFG::vulkan_error(directResult, "Failed to present source frame directly");
         }
         if (firstPresentDiagnostic)
-            std::cerr << "lsfg-vk: runtime stage=source-direct-present\n";
+            std::cerr << "lsfg-vk: runtime stage=source-direct-present"
+                      << " state=source_only resident=1 generation_ready=0\n";
         return finishSourcePresent(directResult, "game-render");
     }
 

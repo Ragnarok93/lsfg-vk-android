@@ -245,8 +245,9 @@ namespace {
 
     std::unordered_map<VkSwapchainKHR, RuntimeOutputStats> runtimeOutputStats;
 
-    void publishRuntimeState(const std::string& configFile,
-            bool active, bool generationReady, int multiplier,
+    void publishRuntimeState(const std::string& configFile, const char* state,
+            bool active, bool generationReady, bool resident, bool sourceOnly,
+            bool generationInitialized, bool generatedPresented, bool degraded, int multiplier,
             bool performance, bool adaptive, uint32_t targetFps) {
         if (configFile.empty())
             return;
@@ -258,8 +259,14 @@ namespace {
             std::ofstream out(tempPath, std::ios::trunc);
             if (!out)
                 throw std::runtime_error("unable to open temporary stats file");
-            out << "active=" << (active ? 1 : 0) << '\n'
+            out << "state=" << state << '\n'
+                << "active=" << (active ? 1 : 0) << '\n'
                 << "generation_ready=" << (generationReady ? 1 : 0) << '\n'
+                << "resident=" << (resident ? 1 : 0) << '\n'
+                << "source_only=" << (sourceOnly ? 1 : 0) << '\n'
+                << "generation_initialized=" << (generationInitialized ? 1 : 0) << '\n'
+                << "generated_presented=" << (generatedPresented ? 1 : 0) << '\n'
+                << "degraded=" << (degraded ? 1 : 0) << '\n'
                 << "fps=0.000\n"
                 << "source_fps=0.000\n"
                 << "generated_fps=0.000\n"
@@ -292,8 +299,9 @@ namespace {
         }
     }
 
-    void writeRuntimeStatsFile(const std::string& configFile,
-            bool active, bool generationReady,
+    void writeRuntimeStatsFile(const std::string& configFile, const char* state,
+            bool active, bool generationReady, bool resident, bool sourceOnly,
+            bool generationInitialized, bool generatedPresented, bool degraded,
             double outputFps, double sourceFps, double generatedFps,
             const RuntimeOutputStats& stats, int multiplier, bool performance,
             bool adaptive, uint32_t targetFps) {
@@ -308,8 +316,14 @@ namespace {
             if (!out)
                 throw std::runtime_error("unable to open temporary stats file");
             out << std::fixed << std::setprecision(3)
+                << "state=" << state << '\n'
                 << "active=" << (active ? 1 : 0) << '\n'
                 << "generation_ready=" << (generationReady ? 1 : 0) << '\n'
+                << "resident=" << (resident ? 1 : 0) << '\n'
+                << "source_only=" << (sourceOnly ? 1 : 0) << '\n'
+                << "generation_initialized=" << (generationInitialized ? 1 : 0) << '\n'
+                << "generated_presented=" << (generatedPresented ? 1 : 0) << '\n'
+                << "degraded=" << (degraded ? 1 : 0) << '\n'
                 << "fps=" << outputFps << '\n'
                 << "source_fps=" << sourceFps << '\n'
                 << "generated_fps=" << generatedFps << '\n'
@@ -361,7 +375,11 @@ namespace {
         const double generatedFps = static_cast<double>(stats.windowGeneratedFrames) / elapsedSeconds;
         const double outputFps = sourceFps + generatedFps;
         const bool generationActive = multiplier > 1;
-        writeRuntimeStatsFile(configFile, generationActive, generationActive,
+        const bool generatedPresented = generationActive && stats.totalGeneratedFrames > 0;
+        writeRuntimeStatsFile(configFile,
+            generationActive ? "generating" : "source_only",
+            generationActive, generationActive, true, !generationActive, true,
+            generatedPresented, false,
             outputFps, sourceFps, generatedFps, stats, multiplier, performance,
             adaptive, targetFps);
 
@@ -493,7 +511,8 @@ namespace {
                     eraseSwapchainState(pCreateInfo->oldSwapchain);
                 swapchainToDeviceTable.emplace(*pSwapchain, device);
 #ifdef __ANDROID__
-                publishRuntimeState(activeConf.config_file, false, false,
+                publishRuntimeState(activeConf.config_file, "pass_through",
+                    false, false, false, false, false, false, false,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
                     activeConf.adaptiveFramegen, activeConf.fpsLimit);
 #endif
@@ -641,7 +660,10 @@ namespace {
             std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 #ifdef __ANDROID__
             const bool generationActive = activeConf.multiplier > 1;
-            publishRuntimeState(activeConf.config_file, generationActive, generationActive,
+            publishRuntimeState(activeConf.config_file,
+                generationActive ? "generating" : "source_only",
+                generationActive, generationActive, true, !generationActive, true,
+                false, false,
                 static_cast<int>(activeConf.multiplier), activeConf.performance,
                 activeConf.adaptiveFramegen, activeConf.fpsLimit);
 #endif
@@ -674,7 +696,8 @@ namespace {
                 *pSwapchain = fallbackSwapchain;
                 swapchainToDeviceTable.emplace(*pSwapchain, device);
 #ifdef __ANDROID__
-                publishRuntimeState(activeConf.config_file, false, false,
+                publishRuntimeState(activeConf.config_file, "degraded",
+                    false, false, false, false, false, false, true,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
                     activeConf.adaptiveFramegen, activeConf.fpsLimit);
 #endif
@@ -742,6 +765,19 @@ namespace {
                               << " enabled=" << (Config::activeConf.enable ? 1 : 0)
                               << " recreateSwapchain=" << (recreateSwapchain ? 1 : 0)
                               << "\n";
+                    if (!recreateSwapchain) {
+                        const bool generationActive = Config::activeConf.multiplier > 1;
+                        std::cerr << "lsfg-vk: runtime stage=config-reload-soft-toggle"
+                                  << " oldEnabled=" << (previousConf.enable ? 1 : 0)
+                                  << " newEnabled=" << (Config::activeConf.enable ? 1 : 0)
+                                  << " oldMultiplier=" << previousConf.multiplier
+                                  << " newMultiplier=" << Config::activeConf.multiplier
+                                  << " resident=1"
+                                  << " source_only=" << (generationActive ? 0 : 1)
+                                  << " generation_ready=" << (generationActive ? 1 : 0)
+                                  << " recreateSwapchain=0"
+                                  << "\n";
+                    }
                 } catch (const std::exception& e) {
                     Utils::logLimitN("configReload", 5,
                         "Failed to hot-reload configuration; preserving the active runtime:\n- "
@@ -752,7 +788,8 @@ namespace {
             }
             if (recreateSwapchain) {
 #ifdef __ANDROID__
-                publishRuntimeState(configFile, false, false,
+                publishRuntimeState(configFile, "degraded",
+                    false, false, false, false, false, false, true,
                     static_cast<int>(Config::activeConf.multiplier),
                     Config::activeConf.performance,
                     Config::activeConf.adaptiveFramegen,
@@ -825,7 +862,8 @@ namespace {
         } catch (const std::exception& e) {
 #ifdef __ANDROID__
             recordOutputFailure(*pPresentInfo->pSwapchains);
-            publishRuntimeState(conf.config_file, false, false,
+            publishRuntimeState(conf.config_file, "degraded",
+                false, false, false, false, false, false, true,
                 static_cast<int>(conf.multiplier), conf.performance,
                 conf.adaptiveFramegen, conf.fpsLimit);
 #endif

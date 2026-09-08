@@ -35,10 +35,16 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
 
         self.assertIn('"active="', hooks)
         self.assertIn('"generation_ready="', hooks)
+        self.assertIn('"state="', hooks)
+        self.assertIn('"resident="', hooks)
+        self.assertIn('"source_only="', hooks)
+        self.assertIn('"generation_initialized="', hooks)
+        self.assertIn('"generated_presented="', hooks)
+        self.assertIn('"degraded="', hooks)
         self.assertIn("publishRuntimeState", hooks)
-        self.assertIn("publishRuntimeState(configFile, false, false", hooks)
+        self.assertIn('publishRuntimeState(configFile, "degraded"', hooks)
         self.assertIn("const bool generationActive = activeConf.multiplier > 1", hooks)
-        self.assertIn("publishRuntimeState(activeConf.config_file, generationActive, generationActive", hooks)
+        self.assertIn('generationActive ? "generating" : "source_only"', hooks)
 
 
 if __name__ == "__main__":
