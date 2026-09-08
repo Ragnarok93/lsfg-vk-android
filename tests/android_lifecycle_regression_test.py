@@ -37,7 +37,8 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         self.assertIn('"generation_ready="', hooks)
         self.assertIn("publishRuntimeState", hooks)
         self.assertIn("publishRuntimeState(configFile, false, false", hooks)
-        self.assertIn("publishRuntimeState(activeConf.config_file, true, true", hooks)
+        self.assertIn("const bool generationActive = activeConf.multiplier > 1", hooks)
+        self.assertIn("publishRuntimeState(activeConf.config_file, generationActive, generationActive", hooks)
 
 
 if __name__ == "__main__":

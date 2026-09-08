@@ -17,6 +17,7 @@
 #include <lsfg_3_1p.hpp>
 
 #include <filesystem>
+#include <algorithm>
 #include <exception>
 #include <iostream>
 #include <cstdint>
@@ -28,9 +29,18 @@
 #include <thread>
 #include <array>
 
-#ifdef __ANDROID__
 namespace {
 
+size_t residentCapacityMultiplier(const Config::Configuration& conf) {
+#ifdef __ANDROID__
+    constexpr size_t kAndroidResidentMaxMultiplier = 4;
+    if (conf.targeted)
+        return std::max(conf.multiplier, kAndroidResidentMaxMultiplier);
+#endif
+    return conf.multiplier;
+}
+
+#ifdef __ANDROID__
 uint64_t runtimeWaitTimeoutNs() {
     constexpr uint64_t defaultMs = 250;
     constexpr uint64_t maxMs = 5000;
@@ -247,8 +257,9 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
         throw LSFG::vulkan_error(res, "Failed waiting for Android AHB handoff copy");
 }
 
-} // namespace
 #endif
+
+} // namespace
 
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages)
@@ -289,8 +300,10 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         if (conf.adaptiveFramegen) std::cerr << "  Output FPS Cap: " << conf.fpsLimit << '\n';
         if (conf.e_present != 2) std::cerr << "  ! Present Mode: " << conf.e_present << '\n';
 
-        if (conf.multiplier <= 1) return;
+        if (conf.multiplier <= 1 && !conf.targeted) return;
     }
+    const size_t runtimeMultiplier = residentCapacityMultiplier(conf);
+
     // we could take the format from the swapchain,
     // but honestly this is safer.
     const VkFormat format = conf.hdr
@@ -312,7 +325,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     setenv("DISABLE_LSFG", "1", 1); // NOLINT
     lsfgInitialize(
         info.identity, format,
-        conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
+        conf.hdr, 1.0F / conf.flowScale, runtimeMultiplier - 1,
         [](const std::string& name) {
             auto dxbc = Extract::getShader(name);
             auto spirv = Extract::translateShader(dxbc);
@@ -339,7 +352,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
         ahbTransportMode);
 
-    for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); ++i)
+    for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
         this->out_n.emplace_back(info.device, info.physicalDevice,
             extent, format,
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -347,8 +360,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     // Create framegen context using AHB sharing
     std::vector<AHardwareBuffer*> outAhbs;
-    outAhbs.reserve(conf.multiplier - 1);
-    for (size_t i = 0; i < static_cast<size_t>(conf.multiplier - 1); ++i)
+    outAhbs.reserve(runtimeMultiplier - 1);
+    for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
         outAhbs.push_back(this->out_n.at(i).getAhb());
 
     int32_t ctxId;

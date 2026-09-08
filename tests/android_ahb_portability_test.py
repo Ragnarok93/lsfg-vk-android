@@ -163,7 +163,8 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             "Queue-family numbering is vendor-specific and must never affect swapchain image count",
         )
         self.assertIn("requiredHeadroom", swapchain)
-        self.assertIn("activeConf.multiplier - 1", swapchain)
+        self.assertIn("residentMultiplier - 1", swapchain)
+        self.assertIn("activeConf.targeted", swapchain)
         self.assertIn("pCreateInfo->minImageCount + requiredHeadroom", swapchain)
         self.assertIn("requiredImageCount > maxImageCount", swapchain)
         self.assertIn("stage=swapchain-insufficient-headroom", swapchain)

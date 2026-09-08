@@ -47,9 +47,29 @@ namespace Layer {
 
 namespace {
 
+    constexpr size_t kAndroidResidentMaxMultiplier = 4;
+
+    size_t residentCapacityMultiplier(const Config::Configuration& conf) {
+#ifdef __ANDROID__
+        if (conf.targeted)
+            return std::max(conf.multiplier, kAndroidResidentMaxMultiplier);
+#endif
+        return conf.multiplier;
+    }
+
     bool requiresSwapchainRecreation(
             const Config::Configuration& previous,
             const Config::Configuration& next) {
+#ifdef __ANDROID__
+        const bool residentTarget = previous.targeted && next.targeted;
+        if (residentTarget) {
+            return previous.dll != next.dll
+                || previous.flowScale != next.flowScale
+                || previous.performance != next.performance
+                || previous.hdr != next.hdr
+                || previous.e_present != next.e_present;
+        }
+#endif
         return previous.enable != next.enable
             || previous.dll != next.dll
             || previous.multiplier != next.multiplier
@@ -273,6 +293,7 @@ namespace {
     }
 
     void writeRuntimeStatsFile(const std::string& configFile,
+            bool active, bool generationReady,
             double outputFps, double sourceFps, double generatedFps,
             const RuntimeOutputStats& stats, int multiplier, bool performance,
             bool adaptive, uint32_t targetFps) {
@@ -287,8 +308,8 @@ namespace {
             if (!out)
                 throw std::runtime_error("unable to open temporary stats file");
             out << std::fixed << std::setprecision(3)
-                << "active=1\n"
-                << "generation_ready=1\n"
+                << "active=" << (active ? 1 : 0) << '\n'
+                << "generation_ready=" << (generationReady ? 1 : 0) << '\n'
                 << "fps=" << outputFps << '\n'
                 << "source_fps=" << sourceFps << '\n'
                 << "generated_fps=" << generatedFps << '\n'
@@ -339,8 +360,10 @@ namespace {
         const double sourceFps = static_cast<double>(stats.windowSourceFrames) / elapsedSeconds;
         const double generatedFps = static_cast<double>(stats.windowGeneratedFrames) / elapsedSeconds;
         const double outputFps = sourceFps + generatedFps;
-        writeRuntimeStatsFile(configFile, outputFps, sourceFps, generatedFps,
-            stats, multiplier, performance, adaptive, targetFps);
+        const bool generationActive = multiplier > 1;
+        writeRuntimeStatsFile(configFile, generationActive, generationActive,
+            outputFps, sourceFps, generatedFps, stats, multiplier, performance,
+            adaptive, targetFps);
 
         stats.windowStart = now;
         stats.windowSourceFrames = 0;
@@ -482,7 +505,7 @@ namespace {
             return res;
         };
 
-        if (!activeConf.enable || activeConf.multiplier <= 1)
+        if (!activeConf.enable || (activeConf.multiplier <= 1 && !activeConf.targeted))
             return createPassThrough("disabled");
 
 #ifdef __ANDROID__
@@ -514,8 +537,9 @@ namespace {
         }
 
         VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;
+        const size_t residentMultiplier = residentCapacityMultiplier(activeConf);
         const uint32_t requiredHeadroom = static_cast<uint32_t>(
-            std::max<size_t>(1, activeConf.multiplier - 1));
+            std::max<size_t>(1, residentMultiplier - 1));
         const uint32_t maxImageCount = surfaceCapabilities.maxImageCount;
         if (pCreateInfo->minImageCount > UINT32_MAX - requiredHeadroom) {
             std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom minImageCount="
@@ -530,7 +554,8 @@ namespace {
                   << pCreateInfo->minImageCount
                   << " maxImageCount=" << maxImageCount
                   << " requiredHeadroom=" << requiredHeadroom
-                  << " multiplier=" << activeConf.multiplier << "\n";
+                  << " multiplier=" << activeConf.multiplier
+                  << " residentMultiplier=" << residentMultiplier << "\n";
         if (maxImageCount != 0 && requiredImageCount > maxImageCount) {
             std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom minImageCount="
                       << pCreateInfo->minImageCount
@@ -615,7 +640,8 @@ namespace {
             ));
             std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 #ifdef __ANDROID__
-            publishRuntimeState(activeConf.config_file, true, true,
+            const bool generationActive = activeConf.multiplier > 1;
+            publishRuntimeState(activeConf.config_file, generationActive, generationActive,
                 static_cast<int>(activeConf.multiplier), activeConf.performance,
                 activeConf.adaptiveFramegen, activeConf.fpsLimit);
 #endif
@@ -736,9 +762,6 @@ namespace {
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
         }
-
-        if (!conf.enable || conf.multiplier <= 1)
-            return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
 
         auto it3 = swapchains.find(*pPresentInfo->pSwapchains);
         if (it3 == swapchains.end()) {

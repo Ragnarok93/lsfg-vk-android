@@ -194,20 +194,18 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertNotIn("VkSemaphore lastPostCopySem =", android)
         self.assertIn("runtime stage=present-sync-ready", android)
 
-    def test_runtime_disable_recreates_a_tracked_pass_through_swapchain(self) -> None:
+    def test_runtime_disable_uses_resident_source_only_context(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("if (!activeConf.enable || activeConf.multiplier <= 1)", hooks)
+        self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
         self.assertIn("init stage=swapchain-pass-through reason=", hooks)
         self.assertIn("enabled=", hooks)
         self.assertIn("swapchainToDeviceTable.emplace(*pSwapchain, device)", hooks)
-        self.assertIn("if (!conf.enable || conf.multiplier <= 1)", hooks)
+        self.assertNotIn("if (!conf.enable || conf.multiplier <= 1)", hooks)
 
         reload_pos = hooks.index("init stage=config-reloaded multiplier=")
-        disable_pos = hooks.index("if (!conf.enable || conf.multiplier <= 1)")
         context_lookup_pos = hooks.index("auto it3 = swapchains.find")
-        self.assertLess(reload_pos, disable_pos)
-        self.assertLess(disable_pos, context_lookup_pos)
+        self.assertLess(reload_pos, context_lookup_pos)
 
     def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:
         source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")

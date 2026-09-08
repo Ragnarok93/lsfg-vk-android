@@ -189,6 +189,27 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("adaptiveFramegen", helper)
         self.assertNotIn("fpsLimit", helper)
 
+    def test_gamenative_resident_target_can_toggle_multiplier_without_recreate(self) -> None:
+        """GameNative runtime Off/2x/3x/4x changes stay inside one resident swapchain context."""
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        helper_start = hooks.index("bool requiresSwapchainRecreation")
+        helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
+        helper = hooks[helper_start:helper_end]
+        self.assertIn("const bool residentTarget = previous.targeted && next.targeted", helper)
+        self.assertNotIn("previous.multiplier != next.multiplier", helper.split("#endif", 1)[0])
+
+        self.assertIn("kAndroidResidentMaxMultiplier = 4", hooks)
+        self.assertIn("residentMultiplier", hooks)
+        self.assertIn("activeConf.targeted", hooks)
+        self.assertIn("kAndroidResidentMaxMultiplier = 4", context)
+        self.assertIn("size_t residentCapacityMultiplier", context)
+        self.assertIn("const size_t runtimeMultiplier = residentCapacityMultiplier(conf)", context)
+        self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
+        self.assertIn("const bool generationActive = activeConf.multiplier > 1", hooks)
+        self.assertIn("publishRuntimeState(activeConf.config_file, generationActive, generationActive", hooks)
+
 
 if __name__ == "__main__":
     unittest.main()
