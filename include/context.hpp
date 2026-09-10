@@ -100,6 +100,19 @@ private:
         uint64_t totalSourcePresentFailures{0};
         uint64_t totalGeneratedPresentFailures{0};
 
+        uint64_t windowAdaptiveZeroGenerationCycles{0};
+        uint64_t totalAdaptiveZeroGenerationCycles{0};
+        uint64_t windowAdaptiveRateSnaps{0};
+        uint64_t totalAdaptiveRateSnaps{0};
+        uint64_t windowAdaptiveCostRaises{0};
+        uint64_t totalAdaptiveCostRaises{0};
+        uint64_t windowAdaptiveCostBackoffs{0};
+        uint64_t totalAdaptiveCostBackoffs{0};
+        uint64_t windowAdaptiveCostProbes{0};
+        uint64_t totalAdaptiveCostProbes{0};
+        uint64_t windowAdaptiveDiscontinuities{0};
+        uint64_t totalAdaptiveDiscontinuities{0};
+
         double windowCycleMs{0.0};
         double windowCycleMaxMs{0.0};
         double windowHandoffMs{0.0};
