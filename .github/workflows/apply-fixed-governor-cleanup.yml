@@ -18,32 +18,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply fixed-governor cleanup
-        run: python3 scripts/apply_fixed_governor_cleanup.py
-
-      - name: Remove unreachable zero-count presentation paths
-        shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("src/context.cpp")
-          text = path.read_text(encoding="utf-8")
-          old = '''    VkSemaphore lastPrevPostCopySemaphore = generatedFrameCount > 0
-        ? pass.prevPostCopySemaphores.at(generatedFrameCount - 1).handle()
-        : pass.preCopySemaphores.at(0).handle();
-    const VkPresentInfoKHR finalPresentInfo{
-        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = generatedFrameCount == 0 ? pNext : nullptr,
-'''
-          new = '''    const VkSemaphore lastPrevPostCopySemaphore =
-        pass.prevPostCopySemaphores.at(generatedFrameCount - 1).handle();
-    const VkPresentInfoKHR finalPresentInfo{
-        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = nullptr,
-'''
-          if text.count(old) != 1:
-              raise SystemExit("expected one final-present zero-count fallback")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
-          PY
+          python3 scripts/apply_fixed_governor_cleanup.py
+          python3 scripts/remove_fixed_governor_zero_fallback.py
 
       - name: Run cleanup contracts
         shell: bash
@@ -59,11 +36,12 @@ jobs:
             -o /tmp/lsfg-fixed-frame-governor-test
           /tmp/lsfg-fixed-frame-governor-test
 
-      - name: Remove one-shot transformer and commit result
+      - name: Remove one-shot transformers and commit result
         shell: bash
         run: |
           set -euo pipefail
           rm -f scripts/apply_fixed_governor_cleanup.py
+          rm -f scripts/remove_fixed_governor_zero_fallback.py
           rm -f .github/workflows/apply-fixed-governor-cleanup.yml
           git config user.name "Ragnarok93"
           git config user.email "e_fontenot1@yahoo.com"
