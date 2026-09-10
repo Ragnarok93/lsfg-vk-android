@@ -30,16 +30,26 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
     def test_android_handoff_reuses_one_context_fence_and_bounds_wait(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        helper_start = source.index("submitAndWaitForAhbHandoff(")
-        helper_end = source.index("} // namespace", helper_start)
-        helper = source[helper_start:helper_end]
+        submit_start = source.index("void submitAhbHandoff(")
+        wait_start = source.index("void waitForAhbHandoff(", submit_start)
+        fallback_start = source.index("void submitAndWaitForAhbHandoff(", wait_start)
+        namespace_end = source.index("} // namespace", fallback_start)
+        submit_helper = source[submit_start:wait_start]
+        wait_helper = source[wait_start:fallback_start]
+        fallback_helper = source[fallback_start:namespace_end]
+
         self.assertIn("std::shared_ptr<VkFence> ahbHandoffFence", header)
         self.assertIn("PFN_vkResetFences resetHandoffFences", header)
-        self.assertIn("resetFences(device, 1, &fence)", helper)
-        self.assertIn("runtimeWaitTimeoutNs()", helper)
-        self.assertNotIn("UINT64_MAX", helper)
-        self.assertNotIn('"vkCreateFence"', helper)
-        self.assertNotIn('"vkDestroyFence"', helper)
+        self.assertIn("PFN_vkWaitForFences waitHandoffFences", header)
+        self.assertIn("resetFences(device, 1, &fence)", submit_helper)
+        self.assertIn("commandBuffer.submit", submit_helper)
+        self.assertIn("waitForFences(", wait_helper)
+        self.assertIn("runtimeWaitTimeoutNs()", wait_helper)
+        self.assertNotIn("UINT64_MAX", wait_helper)
+        self.assertIn("submitAhbHandoff(", fallback_helper)
+        self.assertIn("waitForAhbHandoff(device, fence, waitForFences)", fallback_helper)
+        self.assertNotIn('"vkCreateFence"', submit_helper + wait_helper + fallback_helper)
+        self.assertNotIn('"vkDestroyFence"', submit_helper + wait_helper + fallback_helper)
 
     def test_present_hook_debounces_fs_and_reuses_wait_storage(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
