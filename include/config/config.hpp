@@ -28,10 +28,12 @@ namespace Config {
         bool performance{false};
         /// Whether HDR is enabled
         bool hdr{false};
-        /// Vary the generated frame count to approach fpsLimit.
-        bool adaptiveFramegen{false};
-        /// Final output FPS ceiling used by adaptive frame generation.
-        uint32_t fpsLimit{0};
+        /// Allow an internal sustainability governor beneath a fixed 2x/3x/4x
+        /// request. Defaults off so standalone behavior remains unchanged.
+        bool fixedGovernor{false};
+        /// Optional physical display refresh used only to avoid generating slots
+        /// that cannot scan out. Zero means unknown and applies no refresh clamp.
+        uint32_t displayRefreshHz{0};
 
         /// Experimental flag for overriding the synchronization method.
         VkPresentModeKHR e_present;

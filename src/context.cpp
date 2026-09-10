@@ -316,8 +316,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         std::cerr << "  Flow Scale: " << conf.flowScale << '\n';
         std::cerr << "  Performance Mode: " << (conf.performance ? "Enabled" : "Disabled") << '\n';
         std::cerr << "  HDR Mode: " << (conf.hdr ? "Enabled" : "Disabled") << '\n';
-        std::cerr << "  Adaptive FrameGen: " << (conf.adaptiveFramegen ? "Enabled" : "Disabled") << '\n';
-        if (conf.adaptiveFramegen) std::cerr << "  Output FPS Cap: " << conf.fpsLimit << '\n';
+        std::cerr << "  Fixed Governor: " << (conf.fixedGovernor ? "Enabled" : "Disabled") << '\n';
+        if (conf.displayRefreshHz > 0) std::cerr << "  Display Refresh: " << conf.displayRefreshHz << " Hz\n";
         if (conf.e_present != 2) std::cerr << "  ! Present Mode: " << conf.e_present << '\n';
 
         if (conf.multiplier <= 1 && !conf.targeted) return;
@@ -522,9 +522,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 #ifdef __ANDROID__
     auto& metrics = this->runtimeMetrics;
     const auto cycleStart = RuntimeMetrics::Clock::now();
-    this->adaptiveScheduler_.configure(
-        conf.adaptiveFramegen ? conf.fpsLimit : 0,
-        conf.multiplier > 1 ? static_cast<size_t>(conf.multiplier - 1) : 0);
+    this->fixedGovernor_.configure(
+        conf.fixedGovernor, conf.multiplier, conf.displayRefreshHz);
     std::chrono::nanoseconds sourceInterval{};
     if (metrics.hasLastSourcePresent) {
         sourceInterval = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -538,52 +537,53 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
     metrics.lastSourcePresent = cycleStart;
     metrics.hasLastSourcePresent = true;
-    const size_t generatedFrameCount = conf.adaptiveFramegen
-        ? this->adaptiveScheduler_.plan(sourceInterval)
-        : static_cast<size_t>(conf.multiplier - 1);
-    const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
-    const bool adaptiveZeroGeneration = conf.adaptiveFramegen && generatedFrameCount == 0;
-    const bool warmupSourceHistory =
-        generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
+    const size_t generatedFrameCount = this->fixedGovernor_.plan(sourceInterval);
+    const auto& governorTelemetry = this->fixedGovernor_.telemetry();
+    const bool warmupSourceHistory = this->requiresSourceHistoryWarmup_;
     this->lastGeneratedFrameCount_ = generatedFrameCount;
 
-    if (conf.adaptiveFramegen) {
-        if (adaptiveTelemetry.sourceRateSnapped) {
-            metrics.windowAdaptiveRateSnaps++;
-            metrics.totalAdaptiveRateSnaps++;
+    if (conf.fixedGovernor) {
+        if (governorTelemetry.sourceRateSnapped) {
+            metrics.windowGovernorRateSnaps++;
+            metrics.totalGovernorRateSnaps++;
         }
-        if (adaptiveTelemetry.costRaised) {
-            metrics.windowAdaptiveCostRaises++;
-            metrics.totalAdaptiveCostRaises++;
+        if (governorTelemetry.costRaised) {
+            metrics.windowGovernorCostRaises++;
+            metrics.totalGovernorCostRaises++;
         }
-        if (adaptiveTelemetry.costBackedOff) {
-            metrics.windowAdaptiveCostBackoffs++;
-            metrics.totalAdaptiveCostBackoffs++;
+        if (governorTelemetry.costBackedOff) {
+            metrics.windowGovernorCostBackoffs++;
+            metrics.totalGovernorCostBackoffs++;
         }
-        if (adaptiveTelemetry.costProbe) {
-            metrics.windowAdaptiveCostProbes++;
-            metrics.totalAdaptiveCostProbes++;
+        if (governorTelemetry.costProbe) {
+            metrics.windowGovernorCostProbes++;
+            metrics.totalGovernorCostProbes++;
         }
-        if (adaptiveTelemetry.discontinuityReset) {
-            metrics.windowAdaptiveDiscontinuities++;
-            metrics.totalAdaptiveDiscontinuities++;
+        if (governorTelemetry.refreshLimited) {
+            metrics.windowGovernorRefreshLimits++;
+            metrics.totalGovernorRefreshLimits++;
         }
-
-        if (adaptiveTelemetry.sourceRateSnapped || adaptiveTelemetry.costRaised
-                || adaptiveTelemetry.costBackedOff || adaptiveTelemetry.costProbe
-                || adaptiveTelemetry.discontinuityReset) {
-            std::cerr << "lsfg-vk: adaptive-event"
-                      << " source_fps=" << adaptiveTelemetry.sourceFps
-                      << " smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
-                      << " wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
-                      << " cost_limit=" << adaptiveTelemetry.costLimit
-                      << " final_generated=" << adaptiveTelemetry.generatedFrames
-                      << " rate_snap=" << (adaptiveTelemetry.sourceRateSnapped ? 1 : 0)
-                      << " cost_raise=" << (adaptiveTelemetry.costRaised ? 1 : 0)
-                      << " cost_backoff=" << (adaptiveTelemetry.costBackedOff ? 1 : 0)
-                      << " cost_probe=" << (adaptiveTelemetry.costProbe ? 1 : 0)
-                      << " discontinuity=" << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
-                      << "\n";
+        if (governorTelemetry.discontinuityReset) {
+            metrics.windowGovernorDiscontinuities++;
+            metrics.totalGovernorDiscontinuities++;
+        }
+        if (governorTelemetry.sourceRateSnapped || governorTelemetry.costRaised
+                || governorTelemetry.costBackedOff || governorTelemetry.costProbe
+                || governorTelemetry.refreshLimited || governorTelemetry.discontinuityReset) {
+            std::cerr << "lsfg-vk: fixed-governor-event"
+                      << " source_fps=" << governorTelemetry.sourceFps
+                      << " smoothed_source_fps=" << governorTelemetry.smoothedSourceFps
+                      << " requested_generated=" << governorTelemetry.requestedGeneratedFrames
+                      << " cost_limit=" << governorTelemetry.costLimit
+                      << " final_generated=" << governorTelemetry.generatedFrames
+                      << " rate_snap=" << (governorTelemetry.sourceRateSnapped ? 1 : 0)
+                      << " cost_raise=" << (governorTelemetry.costRaised ? 1 : 0)
+                      << " cost_backoff=" << (governorTelemetry.costBackedOff ? 1 : 0)
+                      << " cost_probe=" << (governorTelemetry.costProbe ? 1 : 0)
+                      << " refresh_limited=" << (governorTelemetry.refreshLimited ? 1 : 0)
+                      << " discontinuity=" << (governorTelemetry.discontinuityReset ? 1 : 0)
+                      << "
+";
         }
     }
 
@@ -591,8 +591,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=first-present-enter image=" << presentIdx
                   << " multiplier=" << conf.multiplier
-                  << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
-                  << " target_fps=" << conf.fpsLimit
+                  << " fixed_governor=" << (conf.fixedGovernor ? 1 : 0)
+                  << " display_refresh_hz=" << conf.displayRefreshHz
                   << " performance=" << (conf.performance ? 1 : 0) << "\n";
     }
 
@@ -656,27 +656,27 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
                       << " source_interval_avg_ms=" << sourceIntervalAvgMs
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
-                      << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
-                      << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
-                      << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
-                      << " adaptive_cost_limit=" << adaptiveTelemetry.costLimit
-                      << " adaptive_final_generated=" << adaptiveTelemetry.generatedFrames
-                      << " adaptive_zero_cycles=" << metrics.windowAdaptiveZeroGenerationCycles
-                      << " adaptive_zero_cycles_total=" << metrics.totalAdaptiveZeroGenerationCycles
-                      << " adaptive_rate_snaps=" << metrics.windowAdaptiveRateSnaps
-                      << " adaptive_rate_snaps_total=" << metrics.totalAdaptiveRateSnaps
-                      << " adaptive_cost_raises=" << metrics.windowAdaptiveCostRaises
-                      << " adaptive_cost_raises_total=" << metrics.totalAdaptiveCostRaises
-                      << " adaptive_cost_backoffs=" << metrics.windowAdaptiveCostBackoffs
-                      << " adaptive_cost_backoffs_total=" << metrics.totalAdaptiveCostBackoffs
-                      << " adaptive_cost_probes=" << metrics.windowAdaptiveCostProbes
-                      << " adaptive_cost_probes_total=" << metrics.totalAdaptiveCostProbes
-                      << " adaptive_discontinuities=" << metrics.windowAdaptiveDiscontinuities
-                      << " adaptive_discontinuities_total=" << metrics.totalAdaptiveDiscontinuities
+                      << " governor_source_fps=" << governorTelemetry.sourceFps
+                      << " governor_smoothed_source_fps=" << governorTelemetry.smoothedSourceFps
+                      << " governor_requested_generated=" << governorTelemetry.requestedGeneratedFrames
+                      << " governor_cost_limit=" << governorTelemetry.costLimit
+                      << " governor_final_generated=" << governorTelemetry.generatedFrames
+                      << " governor_rate_snaps=" << metrics.windowGovernorRateSnaps
+                      << " governor_rate_snaps_total=" << metrics.totalGovernorRateSnaps
+                      << " governor_cost_raises=" << metrics.windowGovernorCostRaises
+                      << " governor_cost_raises_total=" << metrics.totalGovernorCostRaises
+                      << " governor_cost_backoffs=" << metrics.windowGovernorCostBackoffs
+                      << " governor_cost_backoffs_total=" << metrics.totalGovernorCostBackoffs
+                      << " governor_cost_probes=" << metrics.windowGovernorCostProbes
+                      << " governor_cost_probes_total=" << metrics.totalGovernorCostProbes
+                      << " governor_refresh_limits=" << metrics.windowGovernorRefreshLimits
+                      << " governor_refresh_limits_total=" << metrics.totalGovernorRefreshLimits
+                      << " governor_discontinuities=" << metrics.windowGovernorDiscontinuities
+                      << " governor_discontinuities_total=" << metrics.totalGovernorDiscontinuities
                       << " source_history_valid=" << (this->requiresSourceHistoryWarmup_ ? 0 : 1)
                       << " multiplier=" << conf.multiplier
-                      << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
-                      << " target_fps=" << conf.fpsLimit
+                      << " fixed_governor=" << (conf.fixedGovernor ? 1 : 0)
+                      << " display_refresh_hz=" << conf.displayRefreshHz
                       << " performance=" << (conf.performance ? 1 : 0)
                       << "\n";
 
@@ -685,13 +685,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedFrames = 0;
             metrics.windowSourcePresentFailures = 0;
             metrics.windowGeneratedPresentFailures = 0;
-            metrics.windowAdaptiveZeroGenerationCycles = 0;
-            metrics.windowAdaptiveRateSnaps = 0;
-            metrics.windowAdaptiveCostRaises = 0;
-            metrics.windowAdaptiveCostBackoffs = 0;
-            metrics.windowAdaptiveCostProbes = 0;
-            metrics.windowAdaptiveDiscontinuities = 0;
             metrics.windowAsyncHandoffs = 0;
+            metrics.windowGovernorRateSnaps = 0;
+            metrics.windowGovernorCostRaises = 0;
+            metrics.windowGovernorCostBackoffs = 0;
+            metrics.windowGovernorCostProbes = 0;
+            metrics.windowGovernorRefreshLimits = 0;
+            metrics.windowGovernorDiscontinuities = 0;
             metrics.windowSyncHandoffs = 0;
             metrics.windowCycleMs = 0.0;
             metrics.windowCycleMaxMs = 0.0;
@@ -711,9 +711,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
     // validated presentation sequence and EXTERNAL ownership barriers intact.
 
-    // 1. Copy every active Adaptive source frame into frame_0/frame_1, even on
-    // a zero-generation cadence cycle. That zero is cadence, not lifecycle: it
-    // must refresh temporal history instead of entering the Off/source-only path.
+    // 1. Copy every active fixed-mode source frame into frame_0/frame_1.
+    // The governor never returns zero while frame generation is enabled.
     pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
     pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
@@ -738,9 +737,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.preCopySemaphores.at(1).handle(),
     };
 
-    // Warm-up and zero-generation cycles deliberately retain the proven host
-    // fence path. Only ordinary generated cycles can use the optional dedicated
-    // cross-device semaphore, keeping source-only/history transitions unchanged.
+    // Re-enable warm-up deliberately retains the proven host-fence path.
+    // Ordinary generated cycles can use the optional dedicated cross-device
+    // semaphore without changing source-only/history transitions.
     bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
         && generatedFrameCount > 0
         && !warmupSourceHistory;
@@ -780,54 +779,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready mode="
                   << (useAsyncHandoff ? "gpu-semaphore" : "host-fence") << "\n";
-    }
-
-    if (adaptiveZeroGeneration) {
-        // The framegen zero-count path advances its temporal frame index without
-        // dispatching interpolation shaders. The source AHB was already updated
-        // above, keeping the alternating real-frame history coherent for the next
-        // nonzero Adaptive cycle.
-        std::vector<int> noOutSems;
-        const auto historyAdvanceStart = RuntimeMetrics::Clock::now();
-        if (conf.performance)
-            LSFG_3_1P::presentContextWithCount(
-                *this->lsfgCtxId, -1, noOutSems, 0);
-        else
-            LSFG_3_1::presentContextWithCount(
-                *this->lsfgCtxId, -1, noOutSems, 0);
-        metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
-            RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
-        metrics.windowAdaptiveZeroGenerationCycles++;
-        metrics.totalAdaptiveZeroGenerationCycles++;
-        this->requiresSourceHistoryWarmup_ = false;
-        this->lastGeneratedFrameCount_ = 0;
-
-        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
-        const VkPresentInfoKHR adaptiveSourcePresentInfo{
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = pNext,
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &sourceReady,
-            .swapchainCount = 1,
-            .pSwapchains = &this->swapchain,
-            .pImageIndices = &presentIdx,
-        };
-        const auto adaptiveSourceResult = Layer::ovkQueuePresentKHR(
-            queue, &adaptiveSourcePresentInfo);
-        if (adaptiveSourceResult != VK_SUCCESS
-                && adaptiveSourceResult != VK_SUBOPTIMAL_KHR) {
-            metrics.windowSourcePresentFailures++;
-            metrics.totalSourcePresentFailures++;
-            throw LSFG::vulkan_error(adaptiveSourceResult,
-                "Failed to present Adaptive zero-generation source frame");
-        }
-        if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset) {
-            std::cerr << "lsfg-vk: runtime stage=adaptive-history-advance"
-                      << " generated=0 history_valid=1"
-                      << " discontinuity=" << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
-                      << "\n";
-        }
-        return finishSourcePresent(adaptiveSourceResult, "pre-copy-adaptive-zero");
     }
 
     if (warmupSourceHistory) {
@@ -980,12 +931,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // 5. Present the actual game frame after generated frames using the signal
     // reserved for this present, rather than waiting a second time on the
     // generated-present semaphore.
-    VkSemaphore lastPrevPostCopySemaphore = generatedFrameCount > 0
-        ? pass.prevPostCopySemaphores.at(generatedFrameCount - 1).handle()
-        : pass.preCopySemaphores.at(0).handle();
+    const VkSemaphore lastPrevPostCopySemaphore =
+        pass.prevPostCopySemaphores.at(generatedFrameCount - 1).handle();
     const VkPresentInfoKHR finalPresentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = generatedFrameCount == 0 ? pNext : nullptr,
+        .pNext = nullptr,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &lastPrevPostCopySemaphore,
         .swapchainCount = 1,
@@ -1112,6 +1062,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 #ifdef __ANDROID__
 void LsContext::enterSourceOnlyBypass() {
     this->lastGeneratedFrameCount_ = 0;
+    this->fixedGovernor_.reset();
     this->requiresSourceHistoryWarmup_ = true;
     this->previousSourceCopySignalValid_ = false;
 }

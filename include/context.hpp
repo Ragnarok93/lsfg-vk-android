@@ -8,7 +8,7 @@
 #endif
 
 #include "hooks.hpp"
-#include "adaptive_scheduler.hpp"
+#include "fixed_frame_governor.hpp"
 #include "mini/commandbuffer.hpp"
 #include "mini/commandpool.hpp"
 #include "mini/image.hpp"
@@ -81,7 +81,7 @@ private:
     size_t lastGeneratedFrameCount_{0};
 
 #ifdef __ANDROID__
-    AdaptiveFrameScheduler adaptiveScheduler_;
+    FixedFrameGovernor fixedGovernor_;
     bool requiresSourceHistoryWarmup_{false};
     bool previousSourceCopySignalValid_{false};
     // Optional fast path only. If either logical device cannot share an
@@ -104,18 +104,18 @@ private:
         uint64_t totalSourcePresentFailures{0};
         uint64_t totalGeneratedPresentFailures{0};
 
-        uint64_t windowAdaptiveZeroGenerationCycles{0};
-        uint64_t totalAdaptiveZeroGenerationCycles{0};
-        uint64_t windowAdaptiveRateSnaps{0};
-        uint64_t totalAdaptiveRateSnaps{0};
-        uint64_t windowAdaptiveCostRaises{0};
-        uint64_t totalAdaptiveCostRaises{0};
-        uint64_t windowAdaptiveCostBackoffs{0};
-        uint64_t totalAdaptiveCostBackoffs{0};
-        uint64_t windowAdaptiveCostProbes{0};
-        uint64_t totalAdaptiveCostProbes{0};
-        uint64_t windowAdaptiveDiscontinuities{0};
-        uint64_t totalAdaptiveDiscontinuities{0};
+        uint64_t windowGovernorRateSnaps{0};
+        uint64_t totalGovernorRateSnaps{0};
+        uint64_t windowGovernorCostRaises{0};
+        uint64_t totalGovernorCostRaises{0};
+        uint64_t windowGovernorCostBackoffs{0};
+        uint64_t totalGovernorCostBackoffs{0};
+        uint64_t windowGovernorCostProbes{0};
+        uint64_t totalGovernorCostProbes{0};
+        uint64_t windowGovernorRefreshLimits{0};
+        uint64_t totalGovernorRefreshLimits{0};
+        uint64_t windowGovernorDiscontinuities{0};
+        uint64_t totalGovernorDiscontinuities{0};
         uint64_t windowAsyncHandoffs{0};
         uint64_t totalAsyncHandoffs{0};
         uint64_t windowSyncHandoffs{0};

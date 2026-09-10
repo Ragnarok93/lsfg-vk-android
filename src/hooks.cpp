@@ -299,7 +299,7 @@ namespace {
     void publishRuntimeState(const std::string& configFile, const char* state,
             bool active, bool generationReady, bool resident, bool sourceOnly,
             bool generationInitialized, bool generatedPresented, bool degraded, int multiplier,
-            bool performance, bool adaptive, uint32_t targetFps) {
+            bool performance, bool fixedGovernor, uint32_t displayRefreshHz) {
         if (configFile.empty())
             return;
 
@@ -325,8 +325,8 @@ namespace {
                 << "generated_frames_total=0\n"
                 << "present_failures=0\n"
                 << "multiplier=" << multiplier << '\n'
-                << "adaptive=" << (adaptive ? 1 : 0) << '\n'
-                << "target_fps=" << targetFps << '\n'
+                << "fixed_governor=" << (fixedGovernor ? 1 : 0) << '\n'
+                << "display_refresh_hz=" << displayRefreshHz << '\n'
                 << "performance=" << (performance ? 1 : 0) << '\n';
             out.close();
             if (!out)
@@ -355,7 +355,7 @@ namespace {
             bool generationInitialized, bool generatedPresented, bool degraded,
             double outputFps, double sourceFps, double generatedFps,
             const RuntimeOutputStats& stats, int multiplier, bool performance,
-            bool adaptive, uint32_t targetFps) {
+            bool fixedGovernor, uint32_t displayRefreshHz) {
         if (configFile.empty())
             return;
 
@@ -382,8 +382,8 @@ namespace {
                 << "generated_frames_total=" << stats.totalGeneratedFrames << '\n'
                 << "present_failures=" << stats.presentFailures << '\n'
                 << "multiplier=" << multiplier << '\n'
-                << "adaptive=" << (adaptive ? 1 : 0) << '\n'
-                << "target_fps=" << targetFps << '\n'
+                << "fixed_governor=" << (fixedGovernor ? 1 : 0) << '\n'
+                << "display_refresh_hz=" << displayRefreshHz << '\n'
                 << "performance=" << (performance ? 1 : 0) << '\n';
             out.close();
             if (!out)
@@ -409,7 +409,7 @@ namespace {
 
     void recordSuccessfulOutputCycle(VkSwapchainKHR swapchain,
             const std::string& configFile, uint64_t generated,
-            int multiplier, bool performance, bool adaptive, uint32_t targetFps) {
+            int multiplier, bool performance, bool fixedGovernor, uint32_t displayRefreshHz) {
         auto& stats = runtimeOutputStats[swapchain];
         stats.windowSourceFrames++;
         stats.totalSourceFrames++;
@@ -432,7 +432,7 @@ namespace {
             generationActive, generationActive, true, !generationActive, true,
             generatedPresented, false,
             outputFps, sourceFps, generatedFps, stats, multiplier, performance,
-            adaptive, targetFps);
+            fixedGovernor, displayRefreshHz);
 
         stats.windowStart = now;
         stats.windowSourceFrames = 0;
@@ -565,7 +565,7 @@ namespace {
                 publishRuntimeState(activeConf.config_file, "pass_through",
                     false, false, false, false, false, false, false,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
-                    activeConf.adaptiveFramegen, activeConf.fpsLimit);
+                    activeConf.fixedGovernor, activeConf.displayRefreshHz);
 #endif
                 std::cerr << "lsfg-vk: init stage=swapchain-pass-through reason="
                           << reason
@@ -716,7 +716,7 @@ namespace {
                 generationActive, generationActive, true, !generationActive, true,
                 false, false,
                 static_cast<int>(activeConf.multiplier), activeConf.performance,
-                activeConf.adaptiveFramegen, activeConf.fpsLimit);
+                activeConf.fixedGovernor, activeConf.displayRefreshHz);
 #endif
 
             std::cerr << "lsfg-vk: Swapchain context " <<
@@ -750,7 +750,7 @@ namespace {
                 publishRuntimeState(activeConf.config_file, "degraded",
                     false, false, false, false, false, false, true,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
-                    activeConf.adaptiveFramegen, activeConf.fpsLimit);
+                    activeConf.fixedGovernor, activeConf.displayRefreshHz);
 #endif
                 std::cerr << "lsfg-vk: init stage=swapchain-fallback-pass-through"
                              " reason=ls-context-failed\n";
@@ -810,8 +810,8 @@ namespace {
                         previousConf, Config::activeConf);
                     std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
                               << Config::activeConf.multiplier
-                              << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
-                              << " targetFps=" << Config::activeConf.fpsLimit
+                              << " fixed_governor=" << (Config::activeConf.fixedGovernor ? 1 : 0)
+                              << " displayRefreshHz=" << Config::activeConf.displayRefreshHz
                               << " presentMode=" << Config::activeConf.e_present
                               << " enabled=" << (Config::activeConf.enable ? 1 : 0)
                               << " recreateSwapchain=" << (recreateSwapchain ? 1 : 0)
@@ -843,8 +843,8 @@ namespace {
                     false, false, false, false, false, false, true,
                     static_cast<int>(Config::activeConf.multiplier),
                     Config::activeConf.performance,
-                    Config::activeConf.adaptiveFramegen,
-                    Config::activeConf.fpsLimit);
+                    Config::activeConf.fixedGovernor,
+                    Config::activeConf.displayRefreshHz);
 #endif
                 Layer::ovkQueuePresentKHR(queue, pPresentInfo);
                 return VK_ERROR_OUT_OF_DATE_KHR;
@@ -896,7 +896,7 @@ namespace {
             if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
                 recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
                     conf.config_file, 0, 1, conf.performance,
-                    conf.adaptiveFramegen, conf.fpsLimit);
+                    conf.fixedGovernor, conf.displayRefreshHz);
                 Utils::resetLimitN("swapPresent");
             } else {
                 recordOutputFailure(*pPresentInfo->pSwapchains);
@@ -922,7 +922,7 @@ namespace {
             recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
                 conf.config_file, swapchain.lastGeneratedFrameCount(),
                 conf.multiplier, conf.performance,
-                conf.adaptiveFramegen, conf.fpsLimit);
+                conf.fixedGovernor, conf.displayRefreshHz);
 #endif
             Utils::resetLimitN("swapPresent");
             return res;
@@ -932,7 +932,7 @@ namespace {
             publishRuntimeState(conf.config_file, "degraded",
                 false, false, false, false, false, false, true,
                 static_cast<int>(conf.multiplier), conf.performance,
-                conf.adaptiveFramegen, conf.fpsLimit);
+                conf.fixedGovernor, conf.displayRefreshHz);
 #endif
             Utils::logLimitN("swapPresent", 5,
                 "An error occurred while presenting the swapchain; degrading to native presentation:\n"

@@ -90,33 +90,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
                 "Framegen completion and teardown must use bounded context fences rather than an uninterruptible device-wide idle wait",
             )
 
-    def test_adaptive_path_uses_variable_count_without_owning_source_pacing(self) -> None:
-        scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-
-        self.assertIn("AdaptiveFrameScheduler adaptiveScheduler_", header)
-        self.assertIn("AdaptiveSchedulerTelemetry", scheduler_header)
-        self.assertIn("lastGeneratedFrameCount", header)
-        self.assertNotIn("delayUntilNextSourceOutput", scheduler_header)
-        for token in (
-            "adaptiveScheduler_.configure",
-            "adaptiveScheduler_.plan(sourceInterval)",
-            "adaptiveScheduler_.telemetry()",
-            "presentContextWithCount",
-            "adaptiveZeroGeneration",
-            "stage=adaptive-history-advance",
-        ):
-            self.assertIn(token, source)
-
-        self.assertNotIn("std::this_thread::sleep_for(delay)", source)
-        self.assertIn("swapchain.lastGeneratedFrameCount()", hooks)
-        self.assertIn('"adaptive="', hooks)
-        self.assertIn('"target_fps="', hooks)
-
     def test_framegen_runtime_reconfigures_instead_of_reusing_incompatible_outputs(self) -> None:
-        """Regression: adaptive 4x left generationCount=3 active for fixed 2x's one AHB."""
+        """A higher fixed-mode capacity must not leak into a lower fixed-mode request."""
         for backend in ("v3.1_src", "v3.1p_src"):
             source = (ROOT / "framegen" / backend / "lsfg.cpp").read_text(encoding="utf-8")
 
@@ -140,22 +115,6 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             delete_body = source[delete_start:finalize_start]
             self.assertIn("if (contexts.empty())", delete_body)
             self.assertIn("resetRuntime", delete_body)
-
-    def test_adaptive_zero_generation_crosses_handoff_and_advances_history(self) -> None:
-        """Fractional zero-generation cadence must update temporal history, not enter Off."""
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        present_start = source.index("VkResult LsContext::present")
-        handoff_start = source.index("submitAndWaitForAhbHandoff", present_start)
-        zero_start = source.index("if (adaptiveZeroGeneration)", handoff_start)
-        warmup_start = source.index("if (warmupSourceHistory)", zero_start)
-        zero_block = source[zero_start:warmup_start]
-
-        self.assertGreater(zero_start, handoff_start)
-        self.assertIn("presentContextWithCount", zero_block)
-        self.assertIn("adaptive-history-advance", zero_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", zero_block)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", zero_block)
-        self.assertNotIn("source-direct-present", source[present_start:handoff_start])
 
     def test_generation_resumes_only_after_source_only_history_warmup(self) -> None:
         """Actual source-only bypass must invalidate history before fixed generation resumes."""
@@ -195,20 +154,6 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn('toml::find_or(gameTable, "multiplier", 2U)', source)
         self.assertNotIn('.enable = toml::find_or(gameTable, "enabled", true)', source)
 
-    def test_adaptive_target_reload_does_not_recreate_the_swapchain(self) -> None:
-        """Limiter adjustments must not create multi-second black transition windows."""
-        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        self.assertIn("requiresSwapchainRecreation", source)
-        self.assertIn("const auto previousConf = conf", source)
-        self.assertIn("recreateSwapchain = requiresSwapchainRecreation", source)
-        self.assertIn("if (recreateSwapchain)", source)
-
-        helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("VkResult myvkCreateInstance", helper_start)
-        helper = source[helper_start:helper_end]
-        self.assertNotIn("adaptiveFramegen", helper)
-        self.assertNotIn("fpsLimit", helper)
-
     def test_gamenative_resident_target_can_toggle_multiplier_without_recreate(self) -> None:
         """GameNative runtime Off/2x/3x/4x changes stay inside one resident swapchain context."""
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
@@ -233,6 +178,20 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn('generationActive ? "generating" : "source_only"', hooks)
         self.assertIn("runtime stage=config-reload-soft-toggle", hooks)
         self.assertIn("recreateSwapchain=0", hooks)
+
+    def test_fixed_governor_never_turns_enabled_mode_into_source_only(self) -> None:
+        header = (ROOT / "include/fixed_frame_governor.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/fixed_frame_governor.cpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("never turns an enabled", header)
+        self.assertIn("std::clamp<std::size_t>(costLimit_, 1, requestedGeneratedFrames_)", source)
+        self.assertIn("fixedGovernor_.plan(sourceInterval)", context)
+        self.assertNotIn("generatedFrameCount == 0", context)
+        self.assertNotIn("delayUntilNextSourceOutput", context)
+        self.assertIn('"fixed_governor"', config)
+        self.assertIn('"display_refresh_hz"', config)
 
 
 if __name__ == "__main__":

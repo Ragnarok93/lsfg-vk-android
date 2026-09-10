@@ -35,7 +35,6 @@ jobs:
           python3 tests/android_wsi_loader_bridge_test.py
           python3 tests/android_wsi_provenance_test.py
           python3 tests/android_runtime_stability_test.py
-          python3 tests/android_adaptive_history_test.py
           python3 tests/android_capability_architecture_test.py
 
       - name: Install Vulkan headers
@@ -54,10 +53,10 @@ jobs:
           /tmp/lsfg-capabilities-test
           g++ -std=c++20 -Wall -Wextra -Werror \
             -Iinclude \
-            src/adaptive_scheduler.cpp \
-            tests/adaptive_scheduler_test.cpp \
-            -o /tmp/lsfg-adaptive-scheduler-test
-          /tmp/lsfg-adaptive-scheduler-test
+            src/fixed_frame_governor.cpp \
+            tests/fixed_frame_governor_test.cpp \
+            -o /tmp/lsfg-fixed-frame-governor-test
+          /tmp/lsfg-fixed-frame-governor-test
 
   build:
     name: Build ${{ matrix.abi }}
