@@ -80,24 +80,27 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
                 "Framegen completion and teardown must use bounded context fences rather than an uninterruptible device-wide idle wait",
             )
 
-    def test_adaptive_path_skips_unneeded_gpu_work_and_keeps_binary_signals_valid(self) -> None:
+    def test_adaptive_path_uses_variable_count_without_owning_source_pacing(self) -> None:
+        scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
         self.assertIn("AdaptiveFrameScheduler adaptiveScheduler_", header)
+        self.assertIn("AdaptiveSchedulerTelemetry", scheduler_header)
         self.assertIn("lastGeneratedFrameCount", header)
+        self.assertNotIn("delayUntilNextSourceOutput", scheduler_header)
         for token in (
             "adaptiveScheduler_.configure",
             "adaptiveScheduler_.plan(sourceInterval)",
+            "adaptiveScheduler_.telemetry()",
             "presentContextWithCount",
-            "if (generatedFrameCount == 0)",
-            "pass.preCopySemaphores.at(0).handle(),",
-            "pass.preCopySemaphores.at(1).handle(),",
-            "return finishSourcePresent(directResult, \"game-render\")",
+            "adaptiveZeroGeneration",
+            "stage=adaptive-history-advance",
         ):
             self.assertIn(token, source)
 
+        self.assertNotIn("std::this_thread::sleep_for(delay)", source)
         self.assertIn("swapchain.lastGeneratedFrameCount()", hooks)
         self.assertIn('"adaptive="', hooks)
         self.assertIn('"target_fps="', hooks)
@@ -128,26 +131,33 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             self.assertIn("if (contexts.empty())", delete_body)
             self.assertIn("resetRuntime", delete_body)
 
-    def test_zero_generation_uses_direct_source_present(self) -> None:
-        """Regression: target-matched adaptive frames must not cross the AHB boundary."""
+    def test_adaptive_zero_generation_crosses_handoff_and_advances_history(self) -> None:
+        """Fractional zero-generation cadence must update temporal history, not enter Off."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present_start = source.index("VkResult LsContext::present")
         handoff_start = source.index("submitAndWaitForAhbHandoff", present_start)
-        before_handoff = source[present_start:handoff_start]
+        zero_start = source.index("if (adaptiveZeroGeneration)", handoff_start)
+        warmup_start = source.index("if (warmupSourceHistory)", zero_start)
+        zero_block = source[zero_start:warmup_start]
 
-        self.assertIn("if (generatedFrameCount == 0)", before_handoff)
-        self.assertIn("source-direct-present", before_handoff)
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, &directPresentInfo)", before_handoff)
-        self.assertIn("return finishSourcePresent", before_handoff)
+        self.assertGreater(zero_start, handoff_start)
+        self.assertIn("presentContextWithCount", zero_block)
+        self.assertIn("adaptive-history-advance", zero_block)
+        self.assertIn("requiresSourceHistoryWarmup_ = false", zero_block)
+        self.assertNotIn("requiresSourceHistoryWarmup_ = true", zero_block)
+        self.assertNotIn("source-direct-present", source[present_start:handoff_start])
 
-    def test_generation_resumes_only_after_source_history_warmup(self) -> None:
-        """Regression: a direct-present run must not interpolate against stale AHB input."""
+    def test_generation_resumes_only_after_source_only_history_warmup(self) -> None:
+        """Actual source-only bypass must invalidate history before fixed generation resumes."""
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn("requiresSourceHistoryWarmup_", header)
         self.assertIn("previousSourceCopySignalValid_", header)
-        self.assertIn("requiresSourceHistoryWarmup_ = true", source)
+        bypass_start = source.index("void LsContext::enterSourceOnlyBypass")
+        bypass = source[bypass_start:]
+        self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
+        self.assertIn("previousSourceCopySignalValid_ = false", bypass)
         self.assertIn("const bool warmupSourceHistory", source)
         self.assertIn("if (this->previousSourceCopySignalValid_)", source)
         self.assertIn("stage=source-history-warmup", source)
