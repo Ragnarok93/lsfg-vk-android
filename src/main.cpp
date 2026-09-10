@@ -56,8 +56,9 @@ namespace {
         std::cerr << "  Flow Scale: " << conf.flowScale << '\n';
         std::cerr << "  Performance Mode: " << (conf.performance ? "Enabled" : "Disabled") << '\n';
         std::cerr << "  HDR Mode: " << (conf.hdr ? "Enabled" : "Disabled") << '\n';
-        std::cerr << "  Adaptive FrameGen: " << (conf.adaptiveFramegen ? "Enabled" : "Disabled") << '\n';
-        if (conf.adaptiveFramegen) std::cerr << "  Output FPS Cap: " << conf.fpsLimit << '\n';
+        std::cerr << "  Fixed Governor: " << (conf.fixedGovernor ? "Enabled" : "Disabled") << '\n';
+        if (conf.displayRefreshHz > 0)
+            std::cerr << "  Display Refresh: " << conf.displayRefreshHz << " Hz\n";
         if (conf.e_present != 2) std::cerr << "  ! Present Mode: " << conf.e_present << '\n';
 
         // remove mesa var in favor of config
