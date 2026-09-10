@@ -55,17 +55,45 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             "A zero-submit is not a completion wait and cannot synchronize the shared AHB across VkDevices",
         )
         self.assertIn("PFN_vkWaitForFences", source)
-        self.assertIn("submitAndWaitForAhbHandoff", source)
         self.assertIn("LSFG_VK_WAIT_TIMEOUT_MS", source)
+
+        wait_helper = source.split("void waitForAhbHandoff", 1)[1].split(
+            "void submitAndWaitForAhbHandoff", 1
+        )[0]
         self.assertIn(
-            "waitForFences(device, 1, &fence, VK_TRUE, runtimeWaitTimeoutNs())",
-            source,
-            "Cross-device AHB handoff must remain a real fence wait while using a finite timeout",
+            "waitForFences(",
+            wait_helper,
+            "The compatibility handoff must perform a real Vulkan fence wait",
+        )
+        self.assertIn(
+            "runtimeWaitTimeoutNs()",
+            wait_helper,
+            "The compatibility fence wait must remain bounded by the configured finite timeout",
         )
         self.assertNotIn(
-            "waitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX)",
-            source,
+            "UINT64_MAX",
+            wait_helper,
             "A stuck ICD must not be able to block the frame-generation handoff forever",
+        )
+
+        fallback_helper = source.split("void submitAndWaitForAhbHandoff", 1)[1].split(
+            "#endif", 1
+        )[0]
+        self.assertIn(
+            "waitForAhbHandoff(device, fence, waitForFences)",
+            fallback_helper,
+            "The compatibility submission helper must still invoke the bounded fence wait",
+        )
+
+        present = source.split("VkResult LsContext::present", 1)[1]
+        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        self.assertIn("this->asyncAhbHandoffEnabled_", android_present)
+        self.assertIn("&& generatedFrameCount > 0", android_present)
+        self.assertIn("&& !warmupSourceHistory", android_present)
+        self.assertIn(
+            "submitAndWaitForAhbHandoff",
+            android_present,
+            "Unsupported, warm-up, and non-generated cycles must retain the proven host-fence fallback",
         )
 
     def test_generated_ahb_uses_external_ownership_copy_path(self) -> None:
