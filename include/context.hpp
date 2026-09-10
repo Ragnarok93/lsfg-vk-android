@@ -84,6 +84,10 @@ private:
     AdaptiveFrameScheduler adaptiveScheduler_;
     bool requiresSourceHistoryWarmup_{false};
     bool previousSourceCopySignalValid_{false};
+    // Optional fast path only. If either logical device cannot share an
+    // OPAQUE_FD semaphore, or an export fails at runtime, this is disabled for
+    // the life of the context and the established synchronous fence path wins.
+    bool asyncAhbHandoffEnabled_{false};
     struct RuntimeMetrics {
         using Clock = std::chrono::steady_clock;
 
@@ -112,6 +116,11 @@ private:
         uint64_t totalAdaptiveCostProbes{0};
         uint64_t windowAdaptiveDiscontinuities{0};
         uint64_t totalAdaptiveDiscontinuities{0};
+        uint64_t windowAsyncHandoffs{0};
+        uint64_t totalAsyncHandoffs{0};
+        uint64_t windowSyncHandoffs{0};
+        uint64_t totalSyncHandoffs{0};
+        uint64_t totalAsyncFallbacks{0};
 
         double windowCycleMs{0.0};
         double windowCycleMaxMs{0.0};
@@ -124,8 +133,11 @@ private:
         uint64_t windowSourceIntervals{0};
     } runtimeMetrics;
 
-    // Reused for the game-device -> framegen AHB handoff. The handoff
-    // is fully waited before reuse, so one fence per swapchain context is enough.
+    // Reused for the game-device -> framegen AHB handoff. Async generated
+    // cycles still attach this fence to the source-copy submit; by the time the
+    // framegen completion wait returns, that submit has necessarily completed,
+    // so the fence is safe to reset on the next cycle. Warm-up/fallback cycles
+    // continue to wait it synchronously exactly as before.
     std::shared_ptr<VkFence> ahbHandoffFence;
     PFN_vkResetFences resetHandoffFences{nullptr};
     PFN_vkWaitForFences waitHandoffFences{nullptr};
@@ -134,6 +146,11 @@ private:
     struct RenderPassInfo {
         Mini::CommandBuffer preCopyBuf; // copy from swapchain image to frame_0/frame_1
         std::array<Mini::Semaphore, 2> preCopySemaphores; // signal when preCopyBuf is done
+#ifdef __ANDROID__
+        // Dedicated cross-device signal. It is never shared with source-present
+        // or next-source-copy waits, so each binary semaphore has one consumer.
+        Mini::Semaphore framegenInputSemaphore;
+#endif
 
         std::vector<Mini::Semaphore> renderSemaphores; // signal when lsfg is done with frame n
 

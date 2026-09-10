@@ -34,6 +34,11 @@ struct BackendDiagnostics {
     bool ahbR16fTransferDst{false};
     bool ahbR8Storage{false};
     AhbTransportMode ahbTransportMode{AhbTransportMode::Unsupported};
+    // True only when the selected physical device advertises an OPAQUE_FD
+    // external semaphore payload that is both exportable and importable. Android
+    // uses this solely as an optional GPU-to-GPU AHB handoff optimization; the
+    // established host-fence path remains the fallback when it is unavailable.
+    bool externalSemaphoreOpaqueFd{false};
 };
 
 inline constexpr uint64_t DEFAULT_DRIVER_WAIT_TIMEOUT_NS = 500'000'000ULL;

@@ -99,15 +99,52 @@ namespace {
             });
     }
 
+#ifdef __ANDROID__
+    bool supportsOpaqueFdSemaphore(VkPhysicalDevice physicalDevice) {
+        if (!supportsDeviceExtension(
+                physicalDevice, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
+            return false;
+
+        auto getExternalSemaphoreProperties =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(
+                Layer::ovkGetInstanceProcAddr(
+                    layerInstance, "vkGetPhysicalDeviceExternalSemaphoreProperties"));
+        if (getExternalSemaphoreProperties == nullptr) {
+            getExternalSemaphoreProperties =
+                reinterpret_cast<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(
+                    Layer::ovkGetInstanceProcAddr(
+                        layerInstance, "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR"));
+        }
+        if (getExternalSemaphoreProperties == nullptr)
+            return false;
+
+        const VkPhysicalDeviceExternalSemaphoreInfo info{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
+            .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+        };
+        VkExternalSemaphoreProperties properties{
+            .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+        };
+        getExternalSemaphoreProperties(physicalDevice, &info, &properties);
+
+        constexpr VkExternalSemaphoreFeatureFlags required =
+            VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT
+            | VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
+        return (properties.externalSemaphoreFeatures & required) == required
+            && (properties.compatibleHandleTypes
+                & VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT) != 0;
+    }
+#endif
+
     VkResult myvkCreateInstance(
             const VkInstanceCreateInfo* pCreateInfo,
             const VkAllocationCallbacks* pAllocator,
             VkInstance* pInstance) {
 #ifdef __ANDROID__
-        // The Android game-side AHB path does not consume any of the desktop
-        // external-memory capability instance extensions. Preserve the game's
-        // instance extension list exactly so promoted/omitted KHR aliases on a
-        // stock ICD cannot make an otherwise valid instance creation fail.
+        // The Android game-side AHB path does not require any additional
+        // instance extensions. Preserve the game's instance extension list
+        // exactly; optional external-semaphore support is Vulkan 1.1 core and
+        // is probed after instance creation.
         auto res = Layer::ovkCreateInstance(pCreateInfo, pAllocator, pInstance);
 #else
         auto extensions = Utils::addExtensions(
@@ -151,11 +188,22 @@ namespace {
                          "creating game device without LSFG AHB augmentation\n";
             return Layer::ovkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
         }
+
+        std::vector<const char*> requestedExtensions{
+            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
+        };
+        const bool opaqueFdSemaphoreSupported = supportsOpaqueFdSemaphore(physicalDevice);
+        if (opaqueFdSemaphoreSupported)
+            requestedExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+
         auto extensions = Utils::addExtensions(
             pCreateInfo->ppEnabledExtensionNames,
             pCreateInfo->enabledExtensionCount,
-            { VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME }
+            requestedExtensions
         );
+        std::cerr << "lsfg-vk: init stage=android-sync-capability opaqueFdSemaphore="
+                  << (opaqueFdSemaphoreSupported ? 1 : 0)
+                  << " fallback=host-fence\n";
 #else
         auto extensions = Utils::addExtensions(
             pCreateInfo->ppEnabledExtensionNames,
@@ -187,8 +235,10 @@ namespace {
 #ifdef __ANDROID__
         const bool androidAhbSupported = supportsDeviceExtension(physicalDevice,
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+        const bool androidOpaqueFdSemaphoreSupported = supportsOpaqueFdSemaphore(physicalDevice);
 #else
         const bool androidAhbSupported = true;
+        const bool androidOpaqueFdSemaphoreSupported = false;
 #endif
         auto getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
             Layer::ovkGetInstanceProcAddr(layerInstance, "vkGetPhysicalDeviceProperties2"));
@@ -207,7 +257,8 @@ namespace {
             .identity = identity.value_or(LSFG::DeviceIdentity{}),
             .identityValid = identity.has_value(),
             .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
-            .androidAhbSupported = androidAhbSupported
+            .androidAhbSupported = androidAhbSupported,
+            .androidOpaqueFdSemaphoreSupported = androidOpaqueFdSemaphoreSupported,
         });
         return VK_SUCCESS;
     }

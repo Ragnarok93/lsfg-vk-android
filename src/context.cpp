@@ -235,26 +235,46 @@ void copyExternalAhbToSwapchain(VkCommandBuffer buf,
         static_cast<uint32_t>(std::size(releaseBarriers)), releaseBarriers);
 }
 
-// AHardwareBuffer makes memory visible to both VkDevices, but it does not make
-// an unfinished queue submission visible. Attach a fence to the game-device
-// copy and wait on the host before framegen submits work on its separate device.
+void submitAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuffer,
+        VkQueue queue, const std::vector<VkSemaphore>& waitSemaphores,
+        const std::vector<VkSemaphore>& signalSemaphores,
+        VkFence fence, PFN_vkResetFences resetFences) {
+    if (fence == VK_NULL_HANDLE || resetFences == nullptr)
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+            "Android AHB handoff fence is unavailable");
+
+    const auto resetRes = resetFences(device, 1, &fence);
+    if (resetRes != VK_SUCCESS)
+        throw LSFG::vulkan_error(resetRes,
+            "Failed resetting Android AHB handoff fence");
+
+    commandBuffer.submit(queue, waitSemaphores, signalSemaphores, fence);
+}
+
+void waitForAhbHandoff(VkDevice device, VkFence fence,
+        PFN_vkWaitForFences waitForFences) {
+    if (fence == VK_NULL_HANDLE || waitForFences == nullptr)
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+            "Android AHB handoff wait is unavailable");
+
+    const auto res = waitForFences(
+        device, 1, &fence, VK_TRUE, runtimeWaitTimeoutNs());
+    if (res != VK_SUCCESS)
+        throw LSFG::vulkan_error(res,
+            "Failed waiting for Android AHB handoff copy");
+}
+
+// Proven compatibility fallback: host-wait the game-device source copy before
+// framegen's separate VkDevice acquires the AHB. The async path below only
+// replaces this wait when both devices explicitly support a shared semaphore FD.
 void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuffer,
         VkQueue queue, const std::vector<VkSemaphore>& waitSemaphores,
         const std::vector<VkSemaphore>& signalSemaphores,
         VkFence fence, PFN_vkResetFences resetFences,
         PFN_vkWaitForFences waitForFences) {
-    if (fence == VK_NULL_HANDLE || resetFences == nullptr || waitForFences == nullptr)
-        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
-            "Android AHB handoff fence is unavailable");
-
-    auto res = resetFences(device, 1, &fence);
-    if (res != VK_SUCCESS)
-        throw LSFG::vulkan_error(res, "Failed resetting Android AHB handoff fence");
-
-    commandBuffer.submit(queue, waitSemaphores, signalSemaphores, fence);
-    res = waitForFences(device, 1, &fence, VK_TRUE, runtimeWaitTimeoutNs());
-    if (res != VK_SUCCESS)
-        throw LSFG::vulkan_error(res, "Failed waiting for Android AHB handoff copy");
+    submitAhbHandoff(device, commandBuffer, queue, waitSemaphores,
+        signalSemaphores, fence, resetFences);
+    waitForAhbHandoff(device, fence, waitForFences);
 }
 
 #endif
@@ -383,10 +403,10 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     unsetenv("DISABLE_LSFG"); // NOLINT
 
-
-    // Resolve and allocate the handoff fence once per swapchain context. The old
-    // path looked up three entrypoints and created/destroyed a fence every source
-    // frame even though each handoff is synchronously completed before the next.
+    // Resolve and allocate one handoff fence per swapchain context. It remains
+    // authoritative for compatibility fallback and is also attached to async
+    // source-copy submissions so their lifetime can be proven complete before
+    // the next reset/reuse.
     const auto createHandoffFence = reinterpret_cast<PFN_vkCreateFence>(
         Layer::ovkGetDeviceProcAddr(info.device, "vkCreateFence"));
     this->resetHandoffFences = reinterpret_cast<PFN_vkResetFences>(
@@ -420,7 +440,17 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             }
         });
 
-    std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId << ")\n";
+    const auto gameGetSemaphoreFd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkGetSemaphoreFdKHR"));
+    this->asyncAhbHandoffEnabled_ =
+        info.androidOpaqueFdSemaphoreSupported
+        && backendDiagnostics.externalSemaphoreOpaqueFd
+        && gameGetSemaphoreFd != nullptr;
+
+    std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
+              << ", handoff="
+              << (this->asyncAhbHandoffEnabled_ ? "gpu-semaphore" : "host-fence")
+              << ")\n";
 
 #else
     // Desktop Linux path: use OPAQUE_FD-based image sharing
@@ -616,6 +646,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " cycle_avg_ms=" << cycleAvgMs
                       << " cycle_max_ms=" << metrics.windowCycleMaxMs
                       << " ahb_handoff_avg_ms=" << handoffAvgMs
+                      << " ahb_async_handoffs=" << metrics.windowAsyncHandoffs
+                      << " ahb_async_handoffs_total=" << metrics.totalAsyncHandoffs
+                      << " ahb_sync_handoffs=" << metrics.windowSyncHandoffs
+                      << " ahb_sync_handoffs_total=" << metrics.totalSyncHandoffs
+                      << " ahb_async_fallbacks_total=" << metrics.totalAsyncFallbacks
                       << " framegen_dispatch_avg_ms=" << dispatchAvgMs
                       << " framegen_wait_avg_ms=" << waitIdleAvgMs
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
@@ -656,6 +691,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowAdaptiveCostBackoffs = 0;
             metrics.windowAdaptiveCostProbes = 0;
             metrics.windowAdaptiveDiscontinuities = 0;
+            metrics.windowAsyncHandoffs = 0;
+            metrics.windowSyncHandoffs = 0;
             metrics.windowCycleMs = 0.0;
             metrics.windowCycleMaxMs = 0.0;
             metrics.windowHandoffMs = 0.0;
@@ -672,8 +709,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     };
 
     // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
-    // PR #8 presentation sequence intact, but make the external-memory handoff
-    // explicit and synchronized instead of relying on Turnip-specific behavior.
+    // validated presentation sequence and EXTERNAL ownership barriers intact.
 
     // 1. Copy every active Adaptive source frame into frame_0/frame_1, even on
     // a zero-generation cadence cycle. That zero is cadence, not lifecycle: it
@@ -696,23 +732,55 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
             .preCopySemaphores.at(1).handle());
 
-    // The AHB is shared memory, not implicit synchronization. Wait for the
-    // game-device release barrier/copy to complete before the framegen VkDevice
-    // performs its matching external acquire.
     const auto handoffStart = RuntimeMetrics::Clock::now();
     std::vector<VkSemaphore> preCopySignals{
         pass.preCopySemaphores.at(0).handle(),
         pass.preCopySemaphores.at(1).handle(),
     };
-    submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
-        gameRenderSemaphores2, preCopySignals,
-        *this->ahbHandoffFence, this->resetHandoffFences,
-        this->waitHandoffFences);
+
+    // Warm-up and zero-generation cycles deliberately retain the proven host
+    // fence path. Only ordinary generated cycles can use the optional dedicated
+    // cross-device semaphore, keeping source-only/history transitions unchanged.
+    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
+        && generatedFrameCount > 0
+        && !warmupSourceHistory;
+    int framegenInputSemaphoreFd = -1;
+    if (useAsyncHandoff) {
+        try {
+            pass.framegenInputSemaphore =
+                Mini::Semaphore(info.device, &framegenInputSemaphoreFd);
+            preCopySignals.emplace_back(pass.framegenInputSemaphore.handle());
+        } catch (const std::exception& e) {
+            this->asyncAhbHandoffEnabled_ = false;
+            useAsyncHandoff = false;
+            framegenInputSemaphoreFd = -1;
+            metrics.totalAsyncFallbacks++;
+            std::cerr << "lsfg-vk: Android async AHB handoff disabled after export failure: "
+                      << e.what() << "; falling back to host fence\n";
+        }
+    }
+
+    if (useAsyncHandoff) {
+        submitAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
+            gameRenderSemaphores2, preCopySignals,
+            *this->ahbHandoffFence, this->resetHandoffFences);
+        metrics.windowAsyncHandoffs++;
+        metrics.totalAsyncHandoffs++;
+    } else {
+        submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
+            gameRenderSemaphores2, preCopySignals,
+            *this->ahbHandoffFence, this->resetHandoffFences,
+            this->waitHandoffFences);
+        metrics.windowSyncHandoffs++;
+        metrics.totalSyncHandoffs++;
+    }
     this->previousSourceCopySignalValid_ = true;
     metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - handoffStart).count();
-    if (firstPresentDiagnostic)
-        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\n";
+    if (firstPresentDiagnostic) {
+        std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready mode="
+                  << (useAsyncHandoff ? "gpu-semaphore" : "host-fence") << "\n";
+    }
 
     if (adaptiveZeroGeneration) {
         // The framegen zero-count path advances its temporal frame index without
@@ -787,27 +855,33 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     // 2. Tell framegen to generate intermediary frames. It acquires the input
-    //    and output AHBs from EXTERNAL and releases them back to EXTERNAL.
+    //    and output AHBs from EXTERNAL and releases them back to EXTERNAL. The
+    //    optional input FD makes the framegen GPU wait directly for the game
+    //    source-copy submission instead of stalling this presentation thread.
     std::vector<int> noOutSems;
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
                   << (conf.performance ? "performance" : "quality")
-                  << " generated=" << generatedFrameCount << "\n";
+                  << " generated=" << generatedFrameCount
+                  << " handoff=" << (useAsyncHandoff ? "gpu-semaphore" : "host-fence")
+                  << "\n";
     }
     const auto dispatchStart = RuntimeMetrics::Clock::now();
     if (conf.performance)
         LSFG_3_1P::presentContextWithCount(
-            *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
+            *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, generatedFrameCount);
     else
         LSFG_3_1::presentContextWithCount(
-            *this->lsfgCtxId, -1, noOutSems, generatedFrameCount);
+            *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, generatedFrameCount);
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-returned\n";
 
     // 3. Ensure framegen's separate VkDevice has completed its release barriers
-    //    before the game device acquires generated AHBs for readback/blit.
+    //    before the game device acquires generated AHBs for readback/blit. Keep
+    //    this existing bounded completion wait for correctness; the optimization
+    //    only removes the earlier source-copy host wait.
     const auto waitIdleStart = RuntimeMetrics::Clock::now();
     const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
     const bool framegenReady = conf.performance
