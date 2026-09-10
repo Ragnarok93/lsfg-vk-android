@@ -29,6 +29,13 @@ int main() {
     }
 
     {
+        // Adaptive generation must ramp GPU cost instead of jumping directly
+        // to the maximum interpolation load on the first slow source frame.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        assert(scheduler.plan(40ms) == 1);
+    }
+
+    {
         AdaptiveFrameScheduler scheduler(120, 3);
         assert(scheduler.plan(50ms) == 3);
         assert(scheduler.plan(1s) == 0);
