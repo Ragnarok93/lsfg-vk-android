@@ -36,33 +36,100 @@ int main() {
     }
 
     {
-        // A sustained unmet target may raise generation cost one level after
-        // the observation interval, never directly from 1 to the user maximum.
+        // The S25 FE logs contain short present bursts around 100+ FPS while
+        // the real game cadence remains near 30 FPS. Three isolated fast
+        // samples must not replace the stable source-rate estimate.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(33333333ns);
+
+        bool snapped = false;
+        for (int frame = 0; frame < 3; ++frame) {
+            scheduler.plan(9ms);
+            snapped = snapped || scheduler.telemetry().sourceRateSnapped;
+        }
+        scheduler.plan(33333333ns);
+
+        assert(!snapped);
+        assert(scheduler.telemetry().smoothedSourceFps < 40.0);
+    }
+
+    {
+        // A real sustained increase in source rate must still be recognized;
+        // it just requires stronger confirmation than a slowdown so transient
+        // present bursts cannot zero Adaptive generation.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(33333333ns);
+
+        bool snapped = false;
+        for (int frame = 0; frame < 8; ++frame) {
+            scheduler.plan(10ms);
+            snapped = snapped || scheduler.telemetry().sourceRateSnapped;
+        }
+
+        assert(snapped);
+        assert(scheduler.telemetry().smoothedSourceFps > 80.0);
+    }
+
+    {
+        // A genuine slowdown must remain responsive: three consistent slow
+        // intervals should snap the estimate quickly so Adaptive can react to
+        // a heavier scene without several seconds of EMA lag.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(16ms);
+
+        bool snapped = false;
+        for (int frame = 0; frame < 3; ++frame) {
+            scheduler.plan(34ms);
+            snapped = snapped || scheduler.telemetry().sourceRateSnapped;
+        }
+
+        assert(snapped);
+        assert(scheduler.telemetry().smoothedSourceFps < 35.0);
+    }
+
+    {
+        // A high target alone must not raise generation cost after only a few
+        // frames. Require sustained unmet demand before probing the next level.
         AdaptiveFrameScheduler scheduler(120, 3);
+        bool raisedEarly = false;
+        for (int frame = 0; frame < 12; ++frame) {
+            scheduler.plan(40ms);
+            raisedEarly = raisedEarly || scheduler.telemetry().costRaised;
+        }
+        assert(!raisedEarly);
+        assert(scheduler.telemetry().costLimit == 1);
+
         bool sawRaise = false;
-        for (int frame = 0; frame < 10; ++frame) {
+        for (int frame = 0; frame < 8; ++frame) {
             scheduler.plan(40ms);
             sawRaise = sawRaise || scheduler.telemetry().costRaised;
         }
         assert(sawRaise);
-        assert(scheduler.telemetry().costLimit >= 2);
+        assert(scheduler.telemetry().costLimit == 2);
     }
 
     {
-        // If source FPS collapses shortly after a cost raise, attribute the
-        // correlated drop to framegen and return to the lower cost ceiling.
+        // If source FPS collapses shortly after a confirmed cost raise,
+        // attribute the correlated drop to framegen and return to the lower
+        // cost ceiling.
         AdaptiveFrameScheduler scheduler(120, 3);
         bool sawRaise = false;
-        for (int frame = 0; frame < 7; ++frame) {
+        for (int frame = 0; frame < 24; ++frame) {
             scheduler.plan(40ms);
             sawRaise = sawRaise || scheduler.telemetry().costRaised;
+            if (sawRaise)
+                break;
         }
+        assert(sawRaise);
+
         bool sawBackoff = false;
         for (int frame = 0; frame < 3; ++frame) {
             scheduler.plan(60ms);
             sawBackoff = sawBackoff || scheduler.telemetry().costBackedOff;
         }
-        assert(sawRaise);
         assert(sawBackoff);
         assert(scheduler.telemetry().costLimit == 1);
     }
@@ -71,28 +138,33 @@ int main() {
         // A natural source-rate transition with no preceding cost raise must
         // snap the source estimate without falsely blaming frame generation.
         AdaptiveFrameScheduler scheduler(60, 3);
-        for (int frame = 0; frame < 4; ++frame)
+        for (int frame = 0; frame < 8; ++frame)
             scheduler.plan(16ms);
         bool sawRateSnap = false;
         bool sawBackoff = false;
+        bool sawRaise = false;
         for (int frame = 0; frame < 3; ++frame) {
             scheduler.plan(34ms);
             sawRateSnap = sawRateSnap || scheduler.telemetry().sourceRateSnapped;
             sawBackoff = sawBackoff || scheduler.telemetry().costBackedOff;
+            sawRaise = sawRaise || scheduler.telemetry().costRaised;
         }
         assert(sawRateSnap);
         assert(!sawBackoff);
+        assert(!sawRaise);
     }
 
     {
         // Discontinuities reset both fractional scheduling and the conservative
-        // generation-cost ceiling; a resumed source must probe upward again.
+        // generation-cost ceiling; a resumed source must re-establish demand
+        // before probing upward again.
         AdaptiveFrameScheduler scheduler(120, 3);
         assert(scheduler.plan(50ms) == 1);
         assert(scheduler.plan(1s) == 0);
         assert(scheduler.telemetry().discontinuityReset);
         assert(scheduler.telemetry().costLimit == 1);
         assert(scheduler.plan(50ms) == 1);
+        assert(!scheduler.telemetry().costRaised);
     }
 
     {
