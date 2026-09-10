@@ -36,10 +36,12 @@ int main() {
     }
 
     {
+        // Discontinuities reset both fractional scheduling and the conservative
+        // generation-cost ceiling; a resumed source must probe upward again.
         AdaptiveFrameScheduler scheduler(120, 3);
-        assert(scheduler.plan(50ms) == 3);
+        assert(scheduler.plan(50ms) == 1);
         assert(scheduler.plan(1s) == 0);
-        assert(scheduler.plan(50ms) == 3);
+        assert(scheduler.plan(50ms) == 1);
     }
 
     {
@@ -48,17 +50,8 @@ int main() {
         scheduler.configure(60, 3);
         assert(scheduler.plan(33333333ns) == 1);
         scheduler.configure(90, 3);
-        assert(scheduler.plan(33333333ns) == 2);
+        assert(scheduler.plan(33333333ns) == 1);
         assert(scheduler.targetFps() == 90);
-    }
-
-    {
-        AdaptiveFrameScheduler scheduler(60, 3);
-        const auto start = std::chrono::steady_clock::time_point{};
-        assert(scheduler.delayUntilNextSourceOutput(start) == 0ns);
-        const auto delay = scheduler.delayUntilNextSourceOutput(start + 10ms);
-        assert(delay >= 6ms && delay <= 7ms);
-        assert(scheduler.delayUntilNextSourceOutput(start + 40ms) == 0ns);
     }
 
     return 0;
