@@ -43,6 +43,8 @@ public:
 
 private:
     void resetRuntimeState();
+    void resetRateChangeCandidates();
+    void resetUnmetDemand();
     void updateSourceRate(double intervalSeconds);
     void updateCostLimit(double wantedGeneratedFrames);
 
@@ -51,7 +53,16 @@ private:
     double fractionalGeneratedBudget_{};
     double smoothedSourceIntervalSeconds_{};
     bool hasSmoothedInterval_{false};
-    unsigned rapidRateChangeSamples_{};
+
+    // Source-rate decreases need to be recognized quickly so a heavier scene
+    // can receive more generation. Apparent source-rate increases are held to
+    // a stricter confirmation threshold because Android/WSI present bursts can
+    // contain several very short intervals without representing sustainable
+    // game throughput.
+    unsigned slowRateChangeSamples_{};
+    unsigned fastRateChangeSamples_{};
+    double slowIntervalAccumulatorSeconds_{};
+    double fastIntervalAccumulatorSeconds_{};
 
     double observedTimeSeconds_{};
     std::size_t costLimit_{};
@@ -63,6 +74,15 @@ private:
     double lastCostChangeTimeSeconds_{-1.0};
     double lastBackoffTimeSeconds_{-1.0};
     double successfulProbeHoldUntilSeconds_{};
+    double raiseHoldUntilSeconds_{};
+
+    // Raising the generation ceiling requires a sustained output deficit. The
+    // source-rate average collected during that observation period becomes the
+    // pre-raise baseline used to decide whether the additional LSFG work caused
+    // a subsequent source-FPS regression.
+    double unmetDemandSinceSeconds_{-1.0};
+    double unmetSourceFpsSum_{};
+    std::size_t unmetSourceFpsSamples_{};
 
     AdaptiveSchedulerTelemetry telemetry_{};
 };
