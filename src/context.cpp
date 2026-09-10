@@ -511,9 +511,51 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     const size_t generatedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
         : static_cast<size_t>(conf.multiplier - 1);
+    const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
+    const bool adaptiveZeroGeneration = conf.adaptiveFramegen && generatedFrameCount == 0;
     const bool warmupSourceHistory =
         generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
     this->lastGeneratedFrameCount_ = generatedFrameCount;
+
+    if (conf.adaptiveFramegen) {
+        if (adaptiveTelemetry.sourceRateSnapped) {
+            metrics.windowAdaptiveRateSnaps++;
+            metrics.totalAdaptiveRateSnaps++;
+        }
+        if (adaptiveTelemetry.costRaised) {
+            metrics.windowAdaptiveCostRaises++;
+            metrics.totalAdaptiveCostRaises++;
+        }
+        if (adaptiveTelemetry.costBackedOff) {
+            metrics.windowAdaptiveCostBackoffs++;
+            metrics.totalAdaptiveCostBackoffs++;
+        }
+        if (adaptiveTelemetry.costProbe) {
+            metrics.windowAdaptiveCostProbes++;
+            metrics.totalAdaptiveCostProbes++;
+        }
+        if (adaptiveTelemetry.discontinuityReset) {
+            metrics.windowAdaptiveDiscontinuities++;
+            metrics.totalAdaptiveDiscontinuities++;
+        }
+
+        if (adaptiveTelemetry.sourceRateSnapped || adaptiveTelemetry.costRaised
+                || adaptiveTelemetry.costBackedOff || adaptiveTelemetry.costProbe
+                || adaptiveTelemetry.discontinuityReset) {
+            std::cerr << "lsfg-vk: adaptive-event"
+                      << " source_fps=" << adaptiveTelemetry.sourceFps
+                      << " smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
+                      << " wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
+                      << " cost_limit=" << adaptiveTelemetry.costLimit
+                      << " final_generated=" << adaptiveTelemetry.generatedFrames
+                      << " rate_snap=" << (adaptiveTelemetry.sourceRateSnapped ? 1 : 0)
+                      << " cost_raise=" << (adaptiveTelemetry.costRaised ? 1 : 0)
+                      << " cost_backoff=" << (adaptiveTelemetry.costBackedOff ? 1 : 0)
+                      << " cost_probe=" << (adaptiveTelemetry.costProbe ? 1 : 0)
+                      << " discontinuity=" << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
+                      << "\n";
+        }
+    }
 
     const bool firstPresentDiagnostic = this->frameIdx == 0;
     if (firstPresentDiagnostic) {
@@ -579,6 +621,24 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
                       << " source_interval_avg_ms=" << sourceIntervalAvgMs
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
+                      << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
+                      << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
+                      << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
+                      << " adaptive_cost_limit=" << adaptiveTelemetry.costLimit
+                      << " adaptive_final_generated=" << adaptiveTelemetry.generatedFrames
+                      << " adaptive_zero_cycles=" << metrics.windowAdaptiveZeroGenerationCycles
+                      << " adaptive_zero_cycles_total=" << metrics.totalAdaptiveZeroGenerationCycles
+                      << " adaptive_rate_snaps=" << metrics.windowAdaptiveRateSnaps
+                      << " adaptive_rate_snaps_total=" << metrics.totalAdaptiveRateSnaps
+                      << " adaptive_cost_raises=" << metrics.windowAdaptiveCostRaises
+                      << " adaptive_cost_raises_total=" << metrics.totalAdaptiveCostRaises
+                      << " adaptive_cost_backoffs=" << metrics.windowAdaptiveCostBackoffs
+                      << " adaptive_cost_backoffs_total=" << metrics.totalAdaptiveCostBackoffs
+                      << " adaptive_cost_probes=" << metrics.windowAdaptiveCostProbes
+                      << " adaptive_cost_probes_total=" << metrics.totalAdaptiveCostProbes
+                      << " adaptive_discontinuities=" << metrics.windowAdaptiveDiscontinuities
+                      << " adaptive_discontinuities_total=" << metrics.totalAdaptiveDiscontinuities
+                      << " source_history_valid=" << (this->requiresSourceHistoryWarmup_ ? 0 : 1)
                       << " multiplier=" << conf.multiplier
                       << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                       << " target_fps=" << conf.fpsLimit
@@ -590,6 +650,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedFrames = 0;
             metrics.windowSourcePresentFailures = 0;
             metrics.windowGeneratedPresentFailures = 0;
+            metrics.windowAdaptiveZeroGenerationCycles = 0;
+            metrics.windowAdaptiveRateSnaps = 0;
+            metrics.windowAdaptiveCostRaises = 0;
+            metrics.windowAdaptiveCostBackoffs = 0;
+            metrics.windowAdaptiveCostProbes = 0;
+            metrics.windowAdaptiveDiscontinuities = 0;
             metrics.windowCycleMs = 0.0;
             metrics.windowCycleMaxMs = 0.0;
             metrics.windowHandoffMs = 0.0;
@@ -605,41 +671,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return result;
     };
 
-    if (generatedFrameCount == 0) {
-        this->requiresSourceHistoryWarmup_ = true;
-        this->previousSourceCopySignalValid_ = false;
-        const auto delay = this->adaptiveScheduler_.delayUntilNextSourceOutput(
-            AdaptiveFrameScheduler::Clock::now());
-        if (delay > std::chrono::nanoseconds::zero())
-            std::this_thread::sleep_for(delay);
-
-        const VkPresentInfoKHR directPresentInfo{
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = pNext,
-            .waitSemaphoreCount = static_cast<uint32_t>(gameRenderSemaphores.size()),
-            .pWaitSemaphores = gameRenderSemaphores.data(),
-            .swapchainCount = 1,
-            .pSwapchains = &this->swapchain,
-            .pImageIndices = &presentIdx,
-        };
-        const auto directResult = Layer::ovkQueuePresentKHR(queue, &directPresentInfo);
-        if (directResult != VK_SUCCESS && directResult != VK_SUBOPTIMAL_KHR) {
-            metrics.windowSourcePresentFailures++;
-            metrics.totalSourcePresentFailures++;
-            throw LSFG::vulkan_error(directResult, "Failed to present source frame directly");
-        }
-        if (firstPresentDiagnostic)
-            std::cerr << "lsfg-vk: runtime stage=source-direct-present"
-                      << " state=source_only resident=1 generation_ready=0\n";
-        return finishSourcePresent(directResult, "game-render");
-    }
-
     // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
     // PR #8 presentation sequence intact, but make the external-memory handoff
     // explicit and synchronized instead of relying on Turnip-specific behavior.
 
-    // 1. Copy the game swapchain image into frame_0/frame_1, then release the
-    //    AHB to VK_QUEUE_FAMILY_EXTERNAL for framegen.
+    // 1. Copy every active Adaptive source frame into frame_0/frame_1, even on
+    // a zero-generation cadence cycle. That zero is cadence, not lifecycle: it
+    // must refresh temporal history instead of entering the Off/source-only path.
     pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
     pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
@@ -675,6 +713,54 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         RuntimeMetrics::Clock::now() - handoffStart).count();
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready\n";
+
+    if (adaptiveZeroGeneration) {
+        // The framegen zero-count path advances its temporal frame index without
+        // dispatching interpolation shaders. The source AHB was already updated
+        // above, keeping the alternating real-frame history coherent for the next
+        // nonzero Adaptive cycle.
+        std::vector<int> noOutSems;
+        const auto historyAdvanceStart = RuntimeMetrics::Clock::now();
+        if (conf.performance)
+            LSFG_3_1P::presentContextWithCount(
+                *this->lsfgCtxId, -1, noOutSems, 0);
+        else
+            LSFG_3_1::presentContextWithCount(
+                *this->lsfgCtxId, -1, noOutSems, 0);
+        metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
+        metrics.windowAdaptiveZeroGenerationCycles++;
+        metrics.totalAdaptiveZeroGenerationCycles++;
+        this->requiresSourceHistoryWarmup_ = false;
+        this->lastGeneratedFrameCount_ = 0;
+
+        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+        const VkPresentInfoKHR adaptiveSourcePresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = pNext,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &sourceReady,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        const auto adaptiveSourceResult = Layer::ovkQueuePresentKHR(
+            queue, &adaptiveSourcePresentInfo);
+        if (adaptiveSourceResult != VK_SUCCESS
+                && adaptiveSourceResult != VK_SUBOPTIMAL_KHR) {
+            metrics.windowSourcePresentFailures++;
+            metrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(adaptiveSourceResult,
+                "Failed to present Adaptive zero-generation source frame");
+        }
+        if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset) {
+            std::cerr << "lsfg-vk: runtime stage=adaptive-history-advance"
+                      << " generated=0 history_valid=1"
+                      << " discontinuity=" << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
+                      << "\n";
+        }
+        return finishSourcePresent(adaptiveSourceResult, "pre-copy-adaptive-zero");
+    }
 
     if (warmupSourceHistory) {
         this->requiresSourceHistoryWarmup_ = false;
