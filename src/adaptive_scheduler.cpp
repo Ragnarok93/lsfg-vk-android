@@ -5,13 +5,18 @@
 
 namespace {
 constexpr double kIntervalSmoothing = 0.15;
-constexpr double kRapidIntervalHigh = 1.40;
-constexpr double kRapidIntervalLow = 0.70;
-constexpr unsigned kRapidSamplesRequired = 3;
+constexpr double kSlowIntervalHigh = 1.40;
+constexpr double kFastIntervalLow = 0.70;
+constexpr unsigned kSlowSamplesRequired = 3;
+constexpr unsigned kFastSamplesRequired = 6;
 constexpr double kDiscontinuitySeconds = 0.250;
 
-constexpr double kRaiseIntervalSeconds = 0.250;
-constexpr double kProbeIntervalSeconds = 0.500;
+// Governor timing intentionally favors stability over quickly chasing an
+// unreachable output target. The source-rate estimator is allowed to settle
+// before additional GPU work is introduced.
+constexpr double kSustainedDemandSeconds = 0.600;
+constexpr double kPostRateChangeRaiseHoldSeconds = 0.750;
+constexpr double kProbeIntervalSeconds = 1.000;
 constexpr double kBlameWindowSeconds = 1.250;
 constexpr double kSourceDropRatio = 0.90;
 constexpr double kRecoveryRatio = 0.97;
@@ -52,9 +57,9 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     if (!(intervalSeconds > 0.0) || !std::isfinite(intervalSeconds))
         return 0;
 
-    // A pause, app switch, or shader-compilation stall is not a useful source
-    // cadence sample. Reset controller state rather than accumulating output
-    // debt or blaming frame generation for a discontinuity.
+    // A pause, app switch, shader-compilation stall, or Quick Menu suspension
+    // is not a useful source cadence sample. Reset controller state rather than
+    // accumulating output debt or blaming frame generation for a discontinuity.
     if (intervalSeconds >= kDiscontinuitySeconds) {
         resetRuntimeState();
         telemetry_.discontinuityReset = true;
@@ -92,27 +97,75 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     return clamped;
 }
 
+void AdaptiveFrameScheduler::resetRateChangeCandidates() {
+    slowRateChangeSamples_ = 0;
+    fastRateChangeSamples_ = 0;
+    slowIntervalAccumulatorSeconds_ = 0.0;
+    fastIntervalAccumulatorSeconds_ = 0.0;
+}
+
+void AdaptiveFrameScheduler::resetUnmetDemand() {
+    unmetDemandSinceSeconds_ = -1.0;
+    unmetSourceFpsSum_ = 0.0;
+    unmetSourceFpsSamples_ = 0;
+}
+
 void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
     telemetry_.sourceFps = 1.0 / intervalSeconds;
 
     if (!hasSmoothedInterval_) {
         smoothedSourceIntervalSeconds_ = intervalSeconds;
         hasSmoothedInterval_ = true;
-        rapidRateChangeSamples_ = 0;
+        resetRateChangeCandidates();
     } else {
-        const bool rapidChange =
-            intervalSeconds > smoothedSourceIntervalSeconds_ * kRapidIntervalHigh
-            || intervalSeconds < smoothedSourceIntervalSeconds_ * kRapidIntervalLow;
+        const bool slowerCadence =
+            intervalSeconds > smoothedSourceIntervalSeconds_ * kSlowIntervalHigh;
+        const bool fasterCadence =
+            intervalSeconds < smoothedSourceIntervalSeconds_ * kFastIntervalLow;
 
-        if (rapidChange) {
-            rapidRateChangeSamples_++;
-            if (rapidRateChangeSamples_ >= kRapidSamplesRequired) {
-                smoothedSourceIntervalSeconds_ = intervalSeconds;
-                rapidRateChangeSamples_ = 0;
+        if (slowerCadence) {
+            // A heavier scene needs a prompt response. Three consistent slower
+            // samples are enough, but snap to their mean rather than the last
+            // interval so one outlier cannot dominate the new baseline.
+            slowRateChangeSamples_++;
+            slowIntervalAccumulatorSeconds_ += intervalSeconds;
+            fastRateChangeSamples_ = 0;
+            fastIntervalAccumulatorSeconds_ = 0.0;
+
+            if (slowRateChangeSamples_ >= kSlowSamplesRequired) {
+                smoothedSourceIntervalSeconds_ =
+                    slowIntervalAccumulatorSeconds_
+                    / static_cast<double>(slowRateChangeSamples_);
+                resetRateChangeCandidates();
+                resetUnmetDemand();
+                raiseHoldUntilSeconds_ = std::max(
+                    raiseHoldUntilSeconds_,
+                    observedTimeSeconds_ + kPostRateChangeRaiseHoldSeconds);
+                telemetry_.sourceRateSnapped = true;
+            }
+        } else if (fasterCadence) {
+            // Android/WSI can present a handful of frames in a short burst after
+            // a stall or UI transition. Requiring twice as many confirming
+            // samples for a source-rate increase prevents those bursts from
+            // being interpreted as a sustainable 100-300 FPS game cadence.
+            fastRateChangeSamples_++;
+            fastIntervalAccumulatorSeconds_ += intervalSeconds;
+            slowRateChangeSamples_ = 0;
+            slowIntervalAccumulatorSeconds_ = 0.0;
+
+            if (fastRateChangeSamples_ >= kFastSamplesRequired) {
+                smoothedSourceIntervalSeconds_ =
+                    fastIntervalAccumulatorSeconds_
+                    / static_cast<double>(fastRateChangeSamples_);
+                resetRateChangeCandidates();
+                resetUnmetDemand();
+                raiseHoldUntilSeconds_ = std::max(
+                    raiseHoldUntilSeconds_,
+                    observedTimeSeconds_ + kPostRateChangeRaiseHoldSeconds);
                 telemetry_.sourceRateSnapped = true;
             }
         } else {
-            rapidRateChangeSamples_ = 0;
+            resetRateChangeCandidates();
             smoothedSourceIntervalSeconds_ +=
                 kIntervalSmoothing * (intervalSeconds - smoothedSourceIntervalSeconds_);
         }
@@ -126,6 +179,7 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
 void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
     if (maxGeneratedFrames_ == 0) {
         costLimit_ = 0;
+        resetUnmetDemand();
         return;
     }
 
@@ -135,6 +189,9 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
 
     const double sourceFps = telemetry_.smoothedSourceFps;
 
+    // First evaluate a generation level that was already raised. A confirmed
+    // source-rate collapse inside the blame window is a stronger signal than a
+    // new demand calculation and should back off immediately.
     if (pendingCostRaise_) {
         const double sinceRaise = observedTimeSeconds_ - pendingRaiseTimeSeconds_;
         const bool sourceDropped = pendingRaiseBaselineFps_ > 0.0
@@ -147,6 +204,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             probeAfterBackoff_ = true;
             pendingRaiseWasProbe_ = false;
             lastBackoffTimeSeconds_ = observedTimeSeconds_;
+            resetUnmetDemand();
             telemetry_.costBackedOff = true;
             return;
         }
@@ -161,14 +219,42 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         }
     }
 
-    if (costLimit_ >= maxGeneratedFrames_)
+    if (costLimit_ >= maxGeneratedFrames_) {
+        resetUnmetDemand();
         return;
-    if (wantedGeneratedFrames <= static_cast<double>(costLimit_) + 0.001)
+    }
+
+    if (wantedGeneratedFrames <= static_cast<double>(costLimit_) + 0.001) {
+        resetUnmetDemand();
+        return;
+    }
+
+    // Observe a persistent deficit before adding more GPU work. This replaces
+    // the old 250 ms raise cadence, which could repeatedly climb during short
+    // timing disturbances. The average source rate gathered during this window
+    // becomes the pre-raise causal baseline.
+    if (unmetDemandSinceSeconds_ < 0.0) {
+        unmetDemandSinceSeconds_ = observedTimeSeconds_;
+        unmetSourceFpsSum_ = sourceFps;
+        unmetSourceFpsSamples_ = 1;
+        return;
+    }
+
+    unmetSourceFpsSum_ += sourceFps;
+    unmetSourceFpsSamples_++;
+
+    if (observedTimeSeconds_ - unmetDemandSinceSeconds_ < kSustainedDemandSeconds)
         return;
     if (pendingCostRaise_)
         return;
     if (observedTimeSeconds_ < successfulProbeHoldUntilSeconds_)
         return;
+    if (observedTimeSeconds_ < raiseHoldUntilSeconds_)
+        return;
+
+    const double baselineSourceFps = unmetSourceFpsSamples_ > 0
+        ? unmetSourceFpsSum_ / static_cast<double>(unmetSourceFpsSamples_)
+        : sourceFps;
 
     if (probeAfterBackoff_) {
         if (lastBackoffTimeSeconds_ < 0.0
@@ -182,26 +268,22 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         pendingCostRaise_ = true;
         pendingRaiseWasProbe_ = true;
         probeAfterBackoff_ = false;
-        pendingRaiseBaselineFps_ = sourceFps;
+        pendingRaiseBaselineFps_ = baselineSourceFps;
         pendingRaiseTimeSeconds_ = observedTimeSeconds_;
         lastCostChangeTimeSeconds_ = observedTimeSeconds_;
+        resetUnmetDemand();
         telemetry_.costRaised = true;
         telemetry_.costProbe = true;
         return;
     }
 
-    if (lastCostChangeTimeSeconds_ >= 0.0
-            && observedTimeSeconds_ - lastCostChangeTimeSeconds_ < kRaiseIntervalSeconds)
-        return;
-    if (observedTimeSeconds_ < kRaiseIntervalSeconds)
-        return;
-
     costLimit_++;
     pendingCostRaise_ = true;
     pendingRaiseWasProbe_ = false;
-    pendingRaiseBaselineFps_ = sourceFps;
+    pendingRaiseBaselineFps_ = baselineSourceFps;
     pendingRaiseTimeSeconds_ = observedTimeSeconds_;
     lastCostChangeTimeSeconds_ = observedTimeSeconds_;
+    resetUnmetDemand();
     telemetry_.costRaised = true;
 }
 
@@ -209,7 +291,7 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
     fractionalGeneratedBudget_ = 0.0;
     smoothedSourceIntervalSeconds_ = 0.0;
     hasSmoothedInterval_ = false;
-    rapidRateChangeSamples_ = 0;
+    resetRateChangeCandidates();
     observedTimeSeconds_ = 0.0;
     costLimit_ = maxGeneratedFrames_ == 0 ? 0 : 1;
     pendingCostRaise_ = false;
@@ -220,6 +302,8 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
     lastCostChangeTimeSeconds_ = -1.0;
     lastBackoffTimeSeconds_ = -1.0;
     successfulProbeHoldUntilSeconds_ = 0.0;
+    raiseHoldUntilSeconds_ = 0.0;
+    resetUnmetDemand();
     telemetry_ = {};
     telemetry_.costLimit = costLimit_;
 }
