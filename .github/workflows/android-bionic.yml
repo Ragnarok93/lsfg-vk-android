@@ -32,6 +32,7 @@ jobs:
       - name: Run Android portability contract tests
         run: |
           python3 tests/android_ahb_portability_test.py
+          python3 tests/android_external_semaphore_regression_test.py
           python3 tests/android_wsi_loader_bridge_test.py
           python3 tests/android_wsi_provenance_test.py
           python3 tests/android_runtime_stability_test.py
