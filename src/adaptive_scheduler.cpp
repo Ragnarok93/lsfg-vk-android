@@ -118,15 +118,22 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
         hasSmoothedInterval_ = true;
         resetRateChangeCandidates();
     } else {
+        // Classify against the estimate that existed before observing this
+        // sample. Every valid source interval still contributes to the EMA;
+        // the confirmation counters below control only hard baseline snaps.
+        // This is important for alternating cadences such as 20/50 ms, where
+        // waiting for three consecutive slow samples would otherwise discard
+        // every long interval and substantially overestimate source FPS.
+        const double previousSmoothedInterval = smoothedSourceIntervalSeconds_;
         const bool slowerCadence =
-            intervalSeconds > smoothedSourceIntervalSeconds_ * kSlowIntervalHigh;
+            intervalSeconds > previousSmoothedInterval * kSlowIntervalHigh;
         const bool fasterCadence =
-            intervalSeconds < smoothedSourceIntervalSeconds_ * kFastIntervalLow;
+            intervalSeconds < previousSmoothedInterval * kFastIntervalLow;
 
         if (slowerCadence) {
             // A heavier scene needs a prompt response. Three consistent slower
-            // samples are enough, but snap to their mean rather than the last
-            // interval so one outlier cannot dominate the new baseline.
+            // samples still trigger a hard snap, but provisional slow samples
+            // now influence the EMA so mixed cadences cannot hide them.
             slowRateChangeSamples_++;
             slowIntervalAccumulatorSeconds_ += intervalSeconds;
             fastRateChangeSamples_ = 0;
@@ -142,12 +149,17 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
                     raiseHoldUntilSeconds_,
                     observedTimeSeconds_ + kPostRateChangeRaiseHoldSeconds);
                 telemetry_.sourceRateSnapped = true;
+            } else {
+                smoothedSourceIntervalSeconds_ +=
+                    kIntervalSmoothing * (intervalSeconds - smoothedSourceIntervalSeconds_);
             }
         } else if (fasterCadence) {
             // Android/WSI can present a handful of frames in a short burst after
             // a stall or UI transition. Requiring twice as many confirming
             // samples for a source-rate increase prevents those bursts from
             // being interpreted as a sustainable 100-300 FPS game cadence.
+            // Provisional fast samples still contribute through the low-alpha
+            // EMA, so legitimate mixed cadence is measured instead of frozen.
             fastRateChangeSamples_++;
             fastIntervalAccumulatorSeconds_ += intervalSeconds;
             slowRateChangeSamples_ = 0;
@@ -163,6 +175,9 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
                     raiseHoldUntilSeconds_,
                     observedTimeSeconds_ + kPostRateChangeRaiseHoldSeconds);
                 telemetry_.sourceRateSnapped = true;
+            } else {
+                smoothedSourceIntervalSeconds_ +=
+                    kIntervalSmoothing * (intervalSeconds - smoothedSourceIntervalSeconds_);
             }
         } else {
             resetRateChangeCandidates();
