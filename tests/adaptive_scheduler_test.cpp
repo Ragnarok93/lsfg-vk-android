@@ -91,6 +91,30 @@ int main() {
     }
 
     {
+        // Regression: generated-frame presentation can produce an alternating
+        // short/long source cadence (roughly 20 ms / 50 ms on Xclipse 940).
+        // Waiting for three *consecutive* slow samples makes the old estimator
+        // ignore every 50 ms interval and overestimate source throughput near
+        // 40-50 FPS. Adaptive then oscillates between 0/1 generated frames and
+        // misses a 60 FPS target. The estimator must account for every valid
+        // interval while retaining the burst-confirmation rules above.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(25ms);
+
+        bool reachedSecondCostLevel = false;
+        for (int frame = 0; frame < 40; ++frame) {
+            scheduler.plan((frame % 2 == 0) ? 20ms : 50ms);
+            reachedSecondCostLevel = reachedSecondCostLevel
+                || scheduler.telemetry().costLimit >= 2;
+        }
+
+        assert(scheduler.telemetry().smoothedSourceFps < 35.0);
+        assert(scheduler.telemetry().wantedGeneratedFrames > 1.0);
+        assert(reachedSecondCostLevel);
+    }
+
+    {
         // A high target alone must not raise generation cost after only a few
         // frames. Require sustained unmet demand before probing the next level.
         AdaptiveFrameScheduler scheduler(120, 3);
