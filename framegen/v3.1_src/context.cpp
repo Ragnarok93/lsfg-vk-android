@@ -95,7 +95,6 @@ void emit_external_barriers(const Core::CommandBuffer& buf,
     LSFG::Utils::cmdPipelineBarrier2(buf.handle(), &dependencyInfo);
 }
 
-
 void add_external_transfer_acquire(std::vector<VkImageMemoryBarrier2>& barriers,
         Vulkan& vk, Core::Image& image, VkImageLayout newLayout,
         VkAccessFlags2 dstAccessMask) {
@@ -180,7 +179,6 @@ void copy_same_format(const Core::CommandBuffer& buf,
 Context::Context(Vulkan& vk,
         int in0, int in1, const std::vector<int>& outN,
         VkExtent2D extent, VkFormat format) {
-    // import input images
     this->inImg_0 = Core::Image(vk.device, extent, format,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT, in0);
@@ -188,7 +186,6 @@ Context::Context(Vulkan& vk,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT, in1);
 
-    // prepare render data
     for (size_t i = 0; i < 8; i++) {
         auto& data = this->data.at(i);
         data.internalSemaphores.resize(vk.generationCount);
@@ -197,7 +194,6 @@ Context::Context(Vulkan& vk,
         data.cmdBuffers2.resize(vk.generationCount);
     }
 
-    // create shader chains
     this->mipmaps = Shaders::Mipmaps(vk, this->inImg_0, this->inImg_1);
     for (size_t i = 0; i < 7; i++)
         this->alpha.at(i) = Shaders::Alpha(vk, this->mipmaps.getOutImages().at(i));
@@ -234,7 +230,6 @@ void Context::present(Vulkan& vk,
     }
     auto& data = this->data.at(this->frameIdx % 8);
 
-    // 3. wait for completion of previous frame in this slot
     if (data.shouldWait)
         for (size_t i = 0; i < data.generationCount; ++i)
             if (!data.completionFences.at(i).wait(vk.device, framegenWaitTimeoutNs()))
@@ -242,7 +237,6 @@ void Context::present(Vulkan& vk,
     data.shouldWait = true;
     data.generationCount = generationCount;
 
-    // 1. create mipmaps and process input image
     if (inSem >= 0) data.inSemaphore = Core::Semaphore(vk.device, inSem);
     for (size_t i = 0; i < generationCount; i++)
         data.internalSemaphores.at(i) = Core::Semaphore(vk.device);
@@ -303,11 +297,13 @@ void Context::present(Vulkan& vk,
         waits, std::nullopt,
         activeInternalSemaphores, std::nullopt);
 
-    // 2. generate intermediary frames
     for (size_t pass = 0; pass < generationCount; pass++) {
         auto& internalSemaphore = data.internalSemaphores.at(pass);
         auto& outSemaphore = data.outSemaphores.at(pass);
-        if (inSem >= 0) outSemaphore = Core::Semaphore(vk.device, outSem.empty() ? -1 : outSem.at(pass));
+        const bool hasOutSemaphore =
+            pass < outSem.size() && outSem.at(pass) >= 0;
+        if (hasOutSemaphore)
+            outSemaphore = Core::Semaphore(vk.device, outSem.at(pass));
         auto& completionFence = data.completionFences.at(pass);
         completionFence = Core::Fence(vk.device);
 
@@ -366,8 +362,9 @@ void Context::present(Vulkan& vk,
 #endif
 
         buf2.end();
-        std::vector<Core::Semaphore> signals = { outSemaphore };
-        if (inSem < 0) signals.clear();
+        std::vector<Core::Semaphore> signals;
+        if (hasOutSemaphore)
+            signals.emplace_back(outSemaphore);
         buf2.submit(vk.device.getComputeQueue(), completionFence,
             { internalSemaphore }, std::nullopt,
             signals, std::nullopt);
@@ -447,7 +444,6 @@ Context::Context(Vulkan& vk,
             outImgs.emplace_back(vk.device, extent, format,
                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     } else {
-        // Fast path: exactly the established direct shader-storage AHB binding.
         this->inImg_0 = Core::Image(vk.device, extent, format,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT, in0);
