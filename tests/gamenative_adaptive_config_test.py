@@ -5,20 +5,28 @@ CONFIG = Path(__file__).resolve().parents[1] / "src" / "config" / "config.cpp"
 SOURCE = CONFIG.read_text(encoding="utf-8")
 
 
-def test_gamenative_adaptive_uses_separate_overlay():
-    assert '"gamenative-adaptive.toml"' in SOURCE
+def test_gamenative_adaptive_uses_authoritative_conf_toml():
     assert '"adaptive_framegen"' in SOURCE
-    assert '"target_output_fps"' in SOURCE
+    assert '"fps_limit"' in SOURCE
+    assert '"gamenative-adaptive.toml"' not in SOURCE
+    assert "GameNativeAdaptiveOverride" not in SOURCE
+    assert "read_gamenative_adaptive_override" not in SOURCE
 
 
-def test_overlay_overrides_only_adaptive_target_fields():
-    assert "game.adaptiveFramegen = gameNativeAdaptive->enabled;" in SOURCE
-    assert "game.fpsLimit = gameNativeAdaptive->enabled" in SOURCE
-    assert "game.multiplier =" not in SOURCE.split("if (gameNativeAdaptive.has_value())", 1)[1].split("// validate", 1)[0]
-    assert "game.flowScale =" not in SOURCE.split("if (gameNativeAdaptive.has_value())", 1)[1].split("// validate", 1)[0]
+def test_adaptive_target_is_not_source_pacing():
+    assert "GameNative owns source-frame pacing" in SOURCE
+    assert ".adaptiveFramegen = toml::find_or(gameTable, \"adaptive_framegen\", false)" in SOURCE
+    assert ".fpsLimit = toml::find_or(gameTable, \"fps_limit\", 0U)" in SOURCE
+    assert "Adaptive frame generation requires a positive fps_limit" in SOURCE
 
 
-def test_malformed_overlay_fails_open_to_fixed_mode():
-    assert "return GameNativeAdaptiveOverride{};" in SOURCE
-    assert "falling back to fixed mode" in SOURCE
-    assert "Ignoring malformed GameNative Adaptive overlay" in SOURCE
+def test_fixed_and_source_only_do_not_require_target():
+    validation = SOURCE.split("// GameNative owns source-frame pacing.", 1)[1].split("games[exe]", 1)[0]
+    assert "if (game.adaptiveFramegen && game.fpsLimit == 0)" in validation
+    assert "if (!game.adaptiveFramegen && game.fpsLimit == 0)" not in validation
+
+
+def test_runtime_off_remains_multiplier_one_resident_semantics():
+    assert ".enable = true" in SOURCE
+    assert ".targeted = true" in SOURCE
+    assert "if (game.multiplier < 1)" in SOURCE

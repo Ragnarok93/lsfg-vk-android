@@ -40,51 +40,6 @@ namespace {
             return VkPresentModeKHR::VK_PRESENT_MODE_IMMEDIATE_KHR;
         return VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR;
     }
-
-    struct GameNativeAdaptiveOverride {
-        bool enabled = false;
-        unsigned int targetOutputFps = 0;
-    };
-
-    /// GameNative owns source-frame pacing. Its experimental Adaptive controls
-    /// therefore live in a separate overlay beside conf.toml so the ordinary
-    /// GameNative FPS limiter can never be mistaken for an Adaptive output target.
-    /// Missing overlays preserve ordinary lsfg-vk configuration semantics;
-    /// malformed overlays fail open to fixed-multiplier mode.
-    std::optional<GameNativeAdaptiveOverride> read_gamenative_adaptive_override(
-        const std::string& configFile
-    ) {
-        const auto overlayPath = std::filesystem::path(configFile).parent_path()
-            / "gamenative-adaptive.toml";
-        if (!std::filesystem::exists(overlayPath))
-            return std::nullopt;
-
-        try {
-            const auto overlay = toml::parse(overlayPath.string());
-            if (!overlay.contains("version") || overlay.at("version").as_integer() != 1)
-                throw std::runtime_error("unsupported or missing version");
-
-            const bool enabled = toml::find_or(overlay, "adaptive_framegen", false);
-            const unsigned int targetOutputFps =
-                toml::find_or(overlay, "target_output_fps", 0U);
-            if (enabled && targetOutputFps == 0) {
-                std::cerr
-                    << "lsfg-vk: GameNative Adaptive overlay requested Adaptive without "
-                    << "a positive target_output_fps; falling back to fixed mode\n";
-                return GameNativeAdaptiveOverride{};
-            }
-
-            return GameNativeAdaptiveOverride{
-                .enabled = enabled,
-                .targetOutputFps = enabled ? targetOutputFps : 0U,
-            };
-        } catch (const std::exception& e) {
-            std::cerr
-                << "lsfg-vk: Ignoring malformed GameNative Adaptive overlay at "
-                << overlayPath << ": " << e.what() << '\n';
-            return GameNativeAdaptiveOverride{};
-        }
-    }
 }
 
 void Config::updateConfig(const std::string& file) {
@@ -118,7 +73,7 @@ void Config::updateConfig(const std::string& file) {
     // parse global configuration
     const toml::value globalTable = toml::find_or_default<toml::table>(toml, "global");
     const Configuration global{
-        .dll =   toml::find_or(globalTable, "dll", std::string()),
+        .dll = toml::find_or(globalTable, "dll", std::string()),
         .config_file = file,
         .timestamp = std::filesystem::last_write_time(file)
     };
@@ -128,8 +83,6 @@ void Config::updateConfig(const std::string& file) {
         throw std::runtime_error("Global Multiplier cannot be less than 2");
     if (global.flowScale < 0.25F || global.flowScale > 1.0F)
         throw std::runtime_error("Flow scale must be between 0.25 and 1.0");
-
-    const auto gameNativeAdaptive = read_gamenative_adaptive_override(file);
 
     // parse game-specific configuration
     std::unordered_map<std::string, Configuration> games;
@@ -156,19 +109,13 @@ void Config::updateConfig(const std::string& file) {
             .hdr = toml::find_or(gameTable, "hdr_mode", false),
             .adaptiveFramegen = toml::find_or(gameTable, "adaptive_framegen", false),
             .fpsLimit = toml::find_or(gameTable, "fps_limit", 0U),
-            .e_present =   into_present(toml::find_or(gameTable, "experimental_present_mode", "")),
+            .e_present = into_present(toml::find_or(gameTable, "experimental_present_mode", "")),
             .config_file = file,
             .timestamp = global.timestamp
         };
 
-        if (gameNativeAdaptive.has_value()) {
-            game.adaptiveFramegen = gameNativeAdaptive->enabled;
-            game.fpsLimit = gameNativeAdaptive->enabled
-                ? gameNativeAdaptive->targetOutputFps
-                : 0U;
-        }
-
-        // validate the configuration
+        // GameNative owns source-frame pacing. In this config fps_limit is only
+        // the Adaptive output target; fixed/source-only modes must leave it zero.
         if (game.multiplier < 1)
             throw std::runtime_error("Multiplier cannot be less than 1");
         if (game.flowScale < 0.25F || game.flowScale > 1.0F)
