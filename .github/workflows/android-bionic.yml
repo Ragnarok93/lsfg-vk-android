@@ -92,6 +92,7 @@ jobs:
         env:
           ANDROID_ABI: ${{ matrix.abi }}
           HOST_TAG: linux-x86_64
+          LSFGVK_ZERO_STAGE_PROFILE: "1"
         shell: bash
         run: |
           set -o pipefail
