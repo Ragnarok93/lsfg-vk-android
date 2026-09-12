@@ -120,10 +120,8 @@ class AndroidZeroStageProfileContractTest(unittest.TestCase):
 
                 command_end = present.index("data.cmdBuffer1.end()")
                 zero_start = present.index("if (generationCount == 0) {", command_end)
-                second_stage = present.index(
-                    "for (size_t pass = 0; pass < generationCount; pass++)", zero_start
-                )
-                zero_block = present[zero_start:second_stage]
+                zero_end = present.index("        return;", zero_start) + len("        return;")
+                zero_block = present[zero_start:zero_end]
                 self.assertEqual(
                     zero_block.count("data.cmdBuffer1.submit"),
                     1,
