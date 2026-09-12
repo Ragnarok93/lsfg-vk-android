@@ -181,8 +181,8 @@ def patch_loader(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     text = replace_exact(
         text,
-        "            return Extract::translateShader(dxbc);\n",
-        "            return Extract::translateShader(dxbc, name);\n",
+        "            auto spirv = Extract::translateShader(dxbc);\n",
+        "            auto spirv = Extract::translateShader(dxbc, name);\n",
         count=1,
         label=f"{path}: shader-name propagation",
     )
