@@ -26,6 +26,8 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
         required_files = (
             Path("framegen/public/lsfg_backend.hpp"),
             Path("framegen/src/core/device.cpp"),
+            Path("framegen/include/core/timestampquerypool.hpp"),
+            Path("framegen/src/core/timestampquerypool.cpp"),
             Path("framegen/v3.1_include/v3_1/context.hpp"),
             Path("framegen/v3.1_src/context.cpp"),
             Path("framegen/v3.1_include/v3_1/shaders/mipmaps.hpp"),
