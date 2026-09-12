@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidMipmapsShaderProfileContractTest(unittest.TestCase):
-    def test_android_profile_transform_logs_mipmaps_spirv_metadata_and_effective_scale(self) -> None:
+    def test_android_profile_transform_logs_mipmaps_spirv_structure_and_effective_scale(self) -> None:
         zero_stage_patcher = ROOT / "scripts/apply-zero-stage-profile.py"
         shader_patcher = ROOT / "scripts/apply-mipmaps-shader-profile.py"
         self.assertTrue(zero_stage_patcher.exists(), zero_stage_patcher.as_posix())
@@ -60,9 +60,47 @@ class AndroidMipmapsShaderProfileContractTest(unittest.TestCase):
                 "instruction_count=",
                 "local_size=",
                 "workgroup_variables=",
+                "workgroup_bytes=",
+                "control_barriers=",
+                "memory_barriers=",
+                "image_reads=",
+                "image_writes=",
+                "image_samples=",
+                "local_invocation_id=",
+                "workgroup_id=",
                 "valid_spirv=",
             ):
                 self.assertIn(field, trans_source)
+
+            for token in (
+                "kOpTypeInt",
+                "kOpTypeFloat",
+                "kOpTypeVector",
+                "kOpTypeArray",
+                "kOpTypeStruct",
+                "kOpTypePointer",
+                "kOpConstant",
+                "kOpDecorate",
+                "kDecorationBuiltIn",
+                "kBuiltInWorkgroupId",
+                "kBuiltInLocalInvocationId",
+                "kOpControlBarrier",
+                "kOpMemoryBarrier",
+                "kOpImageSampleImplicitLod",
+                "kOpImageSampleExplicitLod",
+                "kOpImageFetch",
+                "kOpImageRead",
+                "kOpImageWrite",
+            ):
+                self.assertIn(token, trans_source)
+
+            self.assertIn("zero-stage-shader-spirv-chunk", trans_source)
+            for field in ("chunk=", "chunks=", "hex="):
+                self.assertIn(field, trans_source)
+            self.assertIn("kSpirvDumpBytesPerChunk", trans_source)
+            self.assertIn("std::hex", trans_source)
+            self.assertIn("std::setfill", trans_source)
+
             self.assertIn("kOpExecutionMode", trans_source)
             self.assertIn("kExecutionModeLocalSize", trans_source)
             self.assertIn("kOpVariable", trans_source)
