@@ -118,7 +118,8 @@ class AndroidZeroStageProfileContractTest(unittest.TestCase):
                     self.assertIn(f"alpha{alpha}_avg_ms=", present, source_rel.as_posix())
                 self.assertIn("gpu_total_avg_ms=", present, source_rel.as_posix())
 
-                zero_start = present.index("if (generationCount == 0)")
+                command_end = present.index("data.cmdBuffer1.end()")
+                zero_start = present.index("if (generationCount == 0) {", command_end)
                 second_stage = present.index(
                     "for (size_t pass = 0; pass < generationCount; pass++)", zero_start
                 )
