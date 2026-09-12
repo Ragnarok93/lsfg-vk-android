@@ -284,7 +284,8 @@ void Context::present(Vulkan& vk,
     this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);
     for (size_t i = 0; i < 7; i++)
         this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
-    this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
+    if (generationCount > 0)
+        this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
 
 #ifdef __ANDROID__
     if (generationCount == 0 && !this->transportOnly) {
