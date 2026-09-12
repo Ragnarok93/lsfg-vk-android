@@ -135,6 +135,39 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
                 source_path.as_posix(),
             )
 
+    def test_generated_passes_reuse_internal_semaphores(self) -> None:
+        backend_sources = (
+            ROOT / "framegen/v3.1_src/context.cpp",
+            ROOT / "framegen/v3.1p_src/context.cpp",
+        )
+
+        for source_path in backend_sources:
+            source = source_path.read_text(encoding="utf-8")
+            present_start = source.index("void Context::present")
+            wait_start = source.index("bool Context::waitForLastPresent", present_start)
+            present = source[present_start:wait_start]
+
+            self.assertGreaterEqual(
+                source.count("for (auto& internalSemaphore : data.internalSemaphores)"),
+                2,
+                source_path.as_posix(),
+            )
+            self.assertNotIn(
+                "data.internalSemaphores.at(i) = Core::Semaphore(vk.device)",
+                present,
+                source_path.as_posix(),
+            )
+            self.assertIn(
+                "data.internalSemaphores.begin()",
+                present,
+                source_path.as_posix(),
+            )
+            self.assertIn(
+                "{ internalSemaphore }",
+                present,
+                source_path.as_posix(),
+            )
+
     def test_source_only_bypass_remains_lifecycle_reset(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
