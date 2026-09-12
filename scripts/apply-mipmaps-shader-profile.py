@@ -180,7 +180,7 @@ def patch_loader(path: Path) -> None:
         text,
         "Extract::translateShader(dxbc)",
         "Extract::translateShader(dxbc, name)",
-        count=1,
+        count=2,
         label=f"{path}: shader-name propagation",
     )
     path.write_text(text, encoding="utf-8")
