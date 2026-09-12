@@ -58,6 +58,40 @@ PFN_vkCmdPipelineBarrier next_vkCmdPipelineBarrier{};
 PFN_vkCmdBlitImage next_vkCmdBlitImage{};
 PFN_vkAcquireNextImageKHR next_vkAcquireNextImageKHR{};
 
+struct PrivateInstanceDispatch {
+    PFN_vkGetInstanceProcAddr GetInstanceProcAddr{};
+    PFN_vkDestroyInstance DestroyInstance{};
+};
+
+std::unordered_map<VkInstance, PrivateInstanceDispatch> privateInstanceDispatchTables;
+std::shared_mutex privateInstanceDispatchMutex;
+
+bool loadPrivateInstanceDispatch(VkInstance instance, PrivateInstanceDispatch* dispatch) {
+    if (instance == VK_NULL_HANDLE || !dispatch) return false;
+    std::shared_lock lock(privateInstanceDispatchMutex);
+    const auto it = privateInstanceDispatchTables.find(instance);
+    if (it == privateInstanceDispatchTables.end()) return false;
+    *dispatch = it->second;
+    return true;
+}
+
+void storePrivateInstanceDispatch(VkInstance instance, PFN_vkGetInstanceProcAddr getInstanceProcAddr) {
+    if (instance == VK_NULL_HANDLE || !getInstanceProcAddr) return;
+    PrivateInstanceDispatch dispatch{
+        .GetInstanceProcAddr = getInstanceProcAddr,
+        .DestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+            getInstanceProcAddr(instance, "vkDestroyInstance")),
+    };
+    std::unique_lock lock(privateInstanceDispatchMutex);
+    privateInstanceDispatchTables[instance] = dispatch;
+}
+
+void erasePrivateInstanceDispatch(VkInstance instance) {
+    if (instance == VK_NULL_HANDLE) return;
+    std::unique_lock lock(privateInstanceDispatchMutex);
+    privateInstanceDispatchTables.erase(instance);
+}
+
 // The Vulkan loader contract is distributed-dispatch: device entry points
 // returned by vkGetDeviceProcAddr belong to the queried logical device.  Some
 // Android vendor wrappers return device-specific thunks, so sharing one global
@@ -234,6 +268,19 @@ void logPresentationHookResolution(const char* resolver, const std::string& name
     }
 }
 
+void layer_vkDestroyPrivateInstance(
+        VkInstance instance,
+        const VkAllocationCallbacks* pAllocator) {
+    PrivateInstanceDispatch dispatch{};
+    if (!loadPrivateInstanceDispatch(instance, &dispatch))
+        return;
+    erasePrivateInstanceDispatch(instance);
+    if (dispatch.DestroyInstance) {
+        std::cerr << "lsfg-vk: runtime stage=private-framegen-instance-destroy-pass-through\n";
+        dispatch.DestroyInstance(instance, pAllocator);
+    }
+}
+
 VkResult layer_vkCreateInstance(
         const VkInstanceCreateInfo* pCreateInfo,
         const VkAllocationCallbacks* pAllocator,
@@ -250,12 +297,36 @@ VkResult layer_vkCreateInstance(
             throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
                 "No layer creation info found in pNext chain");
 
-        next_vkGetInstanceProcAddr = layerDesc->u.pLayerInfo->pfnNextGetInstanceProcAddr;
+        const auto downstreamGipa = layerDesc->u.pLayerInfo->pfnNextGetInstanceProcAddr;
         layerDesc->u.pLayerInfo = layerDesc->u.pLayerInfo->pNext;
 
-        if (!initInstanceFunc(nullptr, "vkCreateInstance", &next_vkCreateInstance))
+        const auto* appInfo = pCreateInfo ? pCreateInfo->pApplicationInfo : nullptr;
+        const bool isPrivateFramegenInstance = appInfo
+            && appInfo->pApplicationName
+            && appInfo->pEngineName
+            && std::strcmp(appInfo->pApplicationName, "lsfg-vk-base") == 0
+            && std::strcmp(appInfo->pEngineName, "lsfg-vk-base") == 0;
+        const auto downstreamCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+            downstreamGipa(nullptr, "vkCreateInstance"));
+        if (!downstreamCreateInstance)
             throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
                 "Failed to get instance function pointer for vkCreateInstance");
+
+        // LsContext owns a private Vulkan instance for the frame-generation
+        // backend. GameNative force-enables this layer, so that private
+        // vkCreateInstance re-enters us. It must not replace the game
+        // instance's process-global compatibility dispatch or run the
+        // active game-instance hook a second time.
+        if (isPrivateFramegenInstance) {
+            std::cerr << "lsfg-vk: runtime stage=private-framegen-instance-pass-through\n";
+            const auto res = downstreamCreateInstance(pCreateInfo, pAllocator, pInstance);
+            if (res == VK_SUCCESS && pInstance && *pInstance != VK_NULL_HANDLE)
+                storePrivateInstanceDispatch(*pInstance, downstreamGipa);
+            return res;
+        }
+
+        next_vkGetInstanceProcAddr = downstreamGipa;
+        next_vkCreateInstance = downstreamCreateInstance;
 
         if (!Config::activeConf.enable) {
             auto res = next_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
@@ -421,6 +492,16 @@ const std::unordered_map<std::string, PFN_vkVoidFunction> layerFunctions = {
 
 PFN_vkVoidFunction layer_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     const std::string name(pName);
+    PrivateInstanceDispatch privateDispatch{};
+    if (instance != VK_NULL_HANDLE
+            && loadPrivateInstanceDispatch(instance, &privateDispatch)) {
+        if (name == "vkDestroyInstance")
+            return reinterpret_cast<PFN_vkVoidFunction>(&layer_vkDestroyPrivateInstance);
+        return privateDispatch.GetInstanceProcAddr
+            ? privateDispatch.GetInstanceProcAddr(instance, pName)
+            : nullptr;
+    }
+
     auto it = layerFunctions.find(name);
     if (it != layerFunctions.end()) return it->second;
     it = Hooks::hooks.find(name);
