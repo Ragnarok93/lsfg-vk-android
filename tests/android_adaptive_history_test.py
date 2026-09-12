@@ -49,14 +49,18 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
 
             mipmaps = present.index("this->mipmaps.Dispatch")
             alpha = present.index("this->alpha.at", mipmaps)
-            beta = present.index("this->beta.Dispatch", alpha)
+            self.assertIn("if (generationCount > 0)", present, source_path.as_posix())
+            beta_guard = present.index("if (generationCount > 0)", alpha)
+            beta = present.index("this->beta.Dispatch", beta_guard)
             zero_finish = present.index("if (generationCount == 0)", beta)
             second_stage = present.index(
                 "for (size_t pass = 0; pass < generationCount; pass++)", zero_finish)
             zero_block = present[zero_finish:second_stage]
 
             self.assertLess(mipmaps, alpha)
-            self.assertLess(alpha, beta)
+            self.assertLess(alpha, beta_guard)
+            self.assertLess(beta_guard, beta)
+            self.assertLess(beta, zero_finish)
             self.assertIn("preprocessingFence.wait", zero_block)
             self.assertIn("framegenWaitTimeoutNs()", zero_block)
             self.assertIn("this->frameIdx++", zero_block)
