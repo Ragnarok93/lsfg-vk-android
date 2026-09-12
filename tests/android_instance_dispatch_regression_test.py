@@ -6,58 +6,58 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
-    def test_android_instance_dispatch_is_per_instance_and_physical_device(self) -> None:
+    def test_private_framegen_instance_cannot_replace_game_instance_dispatch(self) -> None:
         layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
-        header = (ROOT / "include/layer.hpp").read_text(encoding="utf-8")
-        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        framegen_instance = (ROOT / "framegen/src/core/instance.cpp").read_text(encoding="utf-8")
 
-        # Crisis Core creates and destroys LSFG's private framegen Vulkan
-        # instance while the game's Vulkan instance remains live. Instance-level
-        # dispatch must therefore be owned by the exact instance/physical device,
-        # just like device-level dispatch already is. A process-global instance
-        # handle or PFN table can be overwritten by the private framegen instance
-        # and later queried after that private instance has been destroyed.
+        # LsContext constructs a private Vulkan instance named lsfg-vk-base.
+        # Because GameNative force-enables the implicit LSFG layer, that private
+        # vkCreateInstance re-enters this layer. It must be passed directly to
+        # the next layer before any process-global compatibility PFNs or the
+        # Hooks::vkCreateInstance path can be touched.
+        self.assertIn('pApplicationName = "lsfg-vk-base"', framegen_instance)
+        self.assertIn('pEngineName = "lsfg-vk-base"', framegen_instance)
         for token in (
-            "struct InstanceDispatch",
-            "instanceDispatchTables",
-            "instanceDispatchKey",
-            "storeInstanceDispatch",
-            "loadInstanceDispatch",
-            "eraseInstanceDispatchKey",
-            "ovkGetPhysicalDeviceProcAddr",
+            "isPrivateFramegenInstance",
+            '"lsfg-vk-base"',
+            "downstreamGipa",
+            "downstreamCreateInstance",
+            "runtime stage=private-framegen-instance-pass-through",
         ):
-            self.assertIn(token, layer + header)
+            self.assertIn(token, layer)
 
-        self.assertNotIn("static VkInstance layerInstance{}", hooks)
-        self.assertNotIn("ovkGetInstanceProcAddr(layerInstance", hooks)
+        create_start = layer.index("VkResult layer_vkCreateInstance")
+        create_end = layer.index("VkResult layer_vkCreateDevice", create_start)
+        create = layer[create_start:create_end]
 
-        # Every capability query used while constructing/recreating an LSFG
-        # swapchain must resolve through the physical device's owning instance,
-        # not whichever VkInstance happened to be created most recently.
-        self.assertGreaterEqual(
-            hooks.count("Layer::ovkGetPhysicalDeviceProcAddr(physicalDevice"),
-            4,
-        )
+        private_check = create.index("if (isPrivateFramegenInstance")
+        global_gipa_assignment = create.index("next_vkGetInstanceProcAddr =")
+        active_hook = create.index('Hooks::hooks["vkCreateInstance"]')
+        self.assertLess(private_check, global_gipa_assignment)
+        self.assertLess(private_check, active_hook)
 
-    def test_instance_lifetime_cleanup_cannot_leave_stale_dispatch(self) -> None:
+        private_body_end = create.index("next_vkGetInstanceProcAddr =", private_check)
+        private_body = create[private_check:private_body_end]
+        self.assertIn("downstreamCreateInstance(pCreateInfo, pAllocator, pInstance)", private_body)
+        self.assertNotIn("next_vkGetInstanceProcAddr =", private_body)
+        self.assertNotIn('Hooks::hooks["vkCreateInstance"]', private_body)
+
+    def test_game_instance_path_and_device_dispatch_contract_remain_unchanged(self) -> None:
         layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
 
-        destroy_start = layer.index("void ovkDestroyInstance")
-        destroy_body = layer[destroy_start:destroy_start + 1200]
-        self.assertIn("loadInstanceDispatch", destroy_body)
-        self.assertIn("eraseInstanceDispatchKey", destroy_body)
-
-        # Physical-device wrappers used after LSFG's private instance teardown
-        # must also select the matching instance dispatch table.
-        for signature in (
-            "void ovkGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice a",
-            "void ovkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice a",
-            "void ovkGetPhysicalDeviceProperties(VkPhysicalDevice a",
-            "VkResult ovkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice a",
+        # The fix is intentionally outside the steady-state presentation path.
+        # Preserve the existing game-instance hook and the validated per-device
+        # dispatch snapshot that eliminated helper-device/Wine WSI corruption.
+        for token in (
+            'Hooks::hooks["vkCreateInstance"]',
+            "struct DeviceDispatch",
+            "deviceDispatchTables",
+            "storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())",
+            "loadDeviceDispatch(device, &dispatch)",
+            "dispatch.presentationDevice",
+            "runtime stage=device-dispatch-ready presentation=1",
         ):
-            start = layer.index(signature)
-            body = layer[start:start + 900]
-            self.assertIn("loadInstanceDispatch(a, &dispatch)", body)
+            self.assertIn(token, layer)
 
 
 if __name__ == "__main__":
