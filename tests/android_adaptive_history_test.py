@@ -57,7 +57,6 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
 
             self.assertLess(mipmaps, alpha)
             self.assertLess(alpha, beta)
-            self.assertIn("Core::Fence preprocessingFence(vk.device)", zero_block)
             self.assertIn("preprocessingFence.wait", zero_block)
             self.assertIn("framegenWaitTimeoutNs()", zero_block)
             self.assertIn("this->frameIdx++", zero_block)
@@ -68,6 +67,43 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
             self.assertIn("add_external_release", android_release)
             self.assertIn("this->inImg_0", android_release)
             self.assertIn("this->inImg_1", android_release)
+
+    def test_zero_generation_reuses_preprocessing_fences(self) -> None:
+        backend_pairs = (
+            (
+                ROOT / "framegen/v3.1_include/v3_1/context.hpp",
+                ROOT / "framegen/v3.1_src/context.cpp",
+            ),
+            (
+                ROOT / "framegen/v3.1p_include/v3_1p/context.hpp",
+                ROOT / "framegen/v3.1p_src/context.cpp",
+            ),
+        )
+
+        for header_path, source_path in backend_pairs:
+            header = header_path.read_text(encoding="utf-8")
+            source = source_path.read_text(encoding="utf-8")
+            present_start = source.index("void Context::present")
+            wait_start = source.index("bool Context::waitForLastPresent", present_start)
+            present = source[present_start:wait_start]
+            zero_start = present.index("if (generationCount == 0)")
+            second_stage = present.index(
+                "for (size_t pass = 0; pass < generationCount; pass++)", zero_start)
+            zero_block = present[zero_start:second_stage]
+
+            self.assertIn("Core::Fence preprocessingFence", header, header_path.as_posix())
+            self.assertNotIn(
+                "Core::Fence preprocessingFence(vk.device)",
+                zero_block,
+                source_path.as_posix(),
+            )
+            self.assertIn(
+                "data.preprocessingFence.reset(vk.device)",
+                zero_block,
+                source_path.as_posix(),
+            )
+            self.assertIn("data.preprocessingFence", zero_block, source_path.as_posix())
+            self.assertIn("data.preprocessingFence.wait", zero_block, source_path.as_posix())
 
     def test_source_only_bypass_remains_lifecycle_reset(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
