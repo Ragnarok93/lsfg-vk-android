@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from adreno_evidence_capabilities import (patch_backend_header, patch_device_source, patch_hooks_header, patch_hooks_source)
 from adreno_evidence_outer import patch_outer_header, patch_outer_source
-from adreno_evidence_framegen import patch_framegen_header, patch_framegen_source
+from adreno_evidence_framegen import patch_framegen_header, patch_framegen_source, patch_timestamp_query_pool
 
 FRAMEGEN_HEADERS = (
     Path("framegen/v3.1_include/v3_1/context.hpp"),
@@ -28,6 +28,10 @@ def main() -> None:
     patch_hooks_source(root / "src/hooks.cpp")
     patch_outer_header(root / "include/context.hpp")
     patch_outer_source(root / "src/context.cpp")
+    patch_timestamp_query_pool(
+        root / "framegen/include/core/timestampquerypool.hpp",
+        root / "framegen/src/core/timestampquerypool.cpp",
+    )
     for rel in FRAMEGEN_HEADERS:
         patch_framegen_header(root / rel)
     for rel, backend in FRAMEGEN_SOURCES:
