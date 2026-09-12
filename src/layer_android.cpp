@@ -250,12 +250,33 @@ VkResult layer_vkCreateInstance(
             throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
                 "No layer creation info found in pNext chain");
 
-        next_vkGetInstanceProcAddr = layerDesc->u.pLayerInfo->pfnNextGetInstanceProcAddr;
+        const auto downstreamGipa = layerDesc->u.pLayerInfo->pfnNextGetInstanceProcAddr;
         layerDesc->u.pLayerInfo = layerDesc->u.pLayerInfo->pNext;
 
-        if (!initInstanceFunc(nullptr, "vkCreateInstance", &next_vkCreateInstance))
+        const auto* appInfo = pCreateInfo ? pCreateInfo->pApplicationInfo : nullptr;
+        const bool isPrivateFramegenInstance = appInfo
+            && appInfo->pApplicationName
+            && appInfo->pEngineName
+            && std::strcmp(appInfo->pApplicationName, "lsfg-vk-base") == 0
+            && std::strcmp(appInfo->pEngineName, "lsfg-vk-base") == 0;
+        const auto downstreamCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+            downstreamGipa(nullptr, "vkCreateInstance"));
+        if (!downstreamCreateInstance)
             throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
                 "Failed to get instance function pointer for vkCreateInstance");
+
+        // LsContext owns a private Vulkan instance for the frame-generation
+        // backend. GameNative force-enables this layer, so that private
+        // vkCreateInstance re-enters us. It must not replace the game
+        // instance's process-global compatibility dispatch or run the
+        // active game-instance hook a second time.
+        if (isPrivateFramegenInstance) {
+            std::cerr << "lsfg-vk: runtime stage=private-framegen-instance-pass-through\n";
+            return downstreamCreateInstance(pCreateInfo, pAllocator, pInstance);
+        }
+
+        next_vkGetInstanceProcAddr = downstreamGipa;
+        next_vkCreateInstance = downstreamCreateInstance;
 
         if (!Config::activeConf.enable) {
             auto res = next_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
