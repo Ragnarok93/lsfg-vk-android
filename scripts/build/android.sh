@@ -41,6 +41,7 @@ if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
     echo "[lsfg-vk] Enabling temporary zero-stage GPU profiling instrumentation"
     python3 "${REPO_ROOT}/scripts/apply-zero-stage-profile.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-mipmaps-shader-profile.py" --root "${REPO_ROOT}"
+    python3 "${REPO_ROOT}/scripts/apply-adreno-evidence-profile.py" --root "${REPO_ROOT}"
 fi
 
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
