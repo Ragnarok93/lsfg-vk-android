@@ -189,6 +189,7 @@ Context::Context(Vulkan& vk,
 
     for (size_t i = 0; i < 8; i++) {
         auto& data = this->data.at(i);
+        data.preprocessingFence = Core::Fence(vk.device);
         data.internalSemaphores.resize(vk.generationCount);
         data.outSemaphores.resize(vk.generationCount);
         data.completionFences.resize(vk.generationCount);
@@ -301,10 +302,10 @@ void Context::present(Vulkan& vk,
     if (inSem < 0) waits.clear();
 
     if (generationCount == 0) {
-        Core::Fence preprocessingFence(vk.device);
-        data.cmdBuffer1.submit(vk.device.getComputeQueue(), preprocessingFence,
+        data.preprocessingFence.reset(vk.device);
+        data.cmdBuffer1.submit(vk.device.getComputeQueue(), data.preprocessingFence,
             waits, std::nullopt, {}, std::nullopt);
-        if (!preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))
+        if (!data.preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))
             throw LSFG::vulkan_error(VK_TIMEOUT,
                 "Temporal preprocessing fence wait timed out");
         this->frameIdx++;
@@ -479,6 +480,7 @@ Context::Context(Vulkan& vk,
 
     for (size_t i = 0; i < 8; i++) {
         auto& data = this->data.at(i);
+        data.preprocessingFence = Core::Fence(vk.device);
         data.internalSemaphores.resize(vk.generationCount);
         data.outSemaphores.resize(vk.generationCount);
         data.completionFences.resize(vk.generationCount);
