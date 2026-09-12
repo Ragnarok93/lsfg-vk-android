@@ -190,6 +190,8 @@ Context::Context(Vulkan& vk,
         auto& data = this->data.at(i);
         data.preprocessingFence = Core::Fence(vk.device);
         data.internalSemaphores.resize(vk.generationCount);
+        for (auto& internalSemaphore : data.internalSemaphores)
+            internalSemaphore = Core::Semaphore(vk.device);
         data.outSemaphores.resize(vk.generationCount);
         data.completionFences.resize(vk.generationCount);
         for (auto& completionFence : data.completionFences)
@@ -237,8 +239,6 @@ void Context::present(Vulkan& vk,
     data.generationCount = generationCount;
 
     if (inSem >= 0) data.inSemaphore = Core::Semaphore(vk.device, inSem);
-    for (size_t i = 0; i < generationCount; i++)
-        data.internalSemaphores.at(i) = Core::Semaphore(vk.device);
 
     data.cmdBuffer1 = Core::CommandBuffer(vk.device, vk.commandPool);
     data.cmdBuffer1.begin();
@@ -483,6 +483,8 @@ Context::Context(Vulkan& vk,
         auto& data = this->data.at(i);
         data.preprocessingFence = Core::Fence(vk.device);
         data.internalSemaphores.resize(vk.generationCount);
+        for (auto& internalSemaphore : data.internalSemaphores)
+            internalSemaphore = Core::Semaphore(vk.device);
         data.outSemaphores.resize(vk.generationCount);
         data.completionFences.resize(vk.generationCount);
         for (auto& completionFence : data.completionFences)
