@@ -12,6 +12,7 @@
 # Usage:
 #   ANDROID_NDK=/path/to/android-ndk-r27d ./scripts/build/android.sh [Release|Debug]
 #   ANDROID_ABI=x86_64 ANDROID_NDK=/path/to/android-ndk-r27d ./scripts/build/android.sh
+#   LSFGVK_ZERO_STAGE_PROFILE=1 ... ./scripts/build/android.sh   # profiling build
 
 set -euo pipefail
 
@@ -35,6 +36,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." &>/dev/null && pwd)"
 BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build-android-${ABI}}"
 DIST_DIR="${DIST_DIR:-${BUILD_DIR}/dist}"
+
+if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
+    echo "[lsfg-vk] Enabling temporary zero-stage GPU profiling instrumentation"
+    python3 "${REPO_ROOT}/scripts/apply-zero-stage-profile.py" --root "${REPO_ROOT}"
+fi
 
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
 
