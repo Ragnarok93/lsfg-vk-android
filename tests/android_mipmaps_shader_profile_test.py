@@ -27,8 +27,7 @@ class AndroidMipmapsShaderProfileContractTest(unittest.TestCase):
             Path("framegen/v3.1p_src/shaders/mipmaps.cpp"),
             Path("include/extract/trans.hpp"),
             Path("src/extract/trans.cpp"),
-            Path("framegen/v3.1_src/lsfg.cpp"),
-            Path("framegen/v3.1p_src/lsfg.cpp"),
+            Path("src/context.cpp"),
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -50,8 +49,7 @@ class AndroidMipmapsShaderProfileContractTest(unittest.TestCase):
 
             trans_header = (temp_root / "include/extract/trans.hpp").read_text(encoding="utf-8")
             trans_source = (temp_root / "src/extract/trans.cpp").read_text(encoding="utf-8")
-            quality_loader = (temp_root / "framegen/v3.1_src/lsfg.cpp").read_text(encoding="utf-8")
-            performance_loader = (temp_root / "framegen/v3.1p_src/lsfg.cpp").read_text(encoding="utf-8")
+            loader_source = (temp_root / "src/context.cpp").read_text(encoding="utf-8")
 
             self.assertIn("const std::string& shaderName", trans_header)
             self.assertIn("zero-stage-shader-profile", trans_source)
@@ -70,8 +68,7 @@ class AndroidMipmapsShaderProfileContractTest(unittest.TestCase):
             self.assertIn("kOpVariable", trans_source)
             self.assertIn("kStorageClassWorkgroup", trans_source)
             self.assertIn("<< std::endl;", trans_source)
-            self.assertIn("Extract::translateShader(dxbc, name)", quality_loader)
-            self.assertIn("Extract::translateShader(dxbc, name)", performance_loader)
+            self.assertIn("Extract::translateShader(dxbc, name)", loader_source)
 
             for rel in (
                 Path("framegen/v3.1_src/shaders/mipmaps.cpp"),

@@ -13,10 +13,7 @@ from pathlib import Path
 
 TRANSLATION_HEADER = Path("include/extract/trans.hpp")
 TRANSLATION_SOURCE = Path("src/extract/trans.cpp")
-LOADER_PATHS = (
-    Path("framegen/v3.1_src/lsfg.cpp"),
-    Path("framegen/v3.1p_src/lsfg.cpp"),
-)
+LOADER_PATHS = (Path("src/context.cpp"),)
 MIPMAP_PATHS = (
     Path("framegen/v3.1_src/shaders/mipmaps.cpp"),
     Path("framegen/v3.1p_src/shaders/mipmaps.cpp"),
@@ -181,8 +178,8 @@ def patch_loader(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     text = replace_exact(
         text,
-        "            auto spirv = Extract::translateShader(dxbc);\n",
-        "            auto spirv = Extract::translateShader(dxbc, name);\n",
+        "Extract::translateShader(dxbc)",
+        "Extract::translateShader(dxbc, name)",
         count=1,
         label=f"{path}: shader-name propagation",
     )
