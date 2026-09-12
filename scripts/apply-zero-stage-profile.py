@@ -53,17 +53,18 @@ def patch_header(path: Path) -> None:
         count=1,
         label=f"{path}: timestamp include",
     )
-    text = replace_exact(
-        text,
-        "        std::array<RenderData, 8> data;\n\n        Shaders::Mipmaps mipmaps;",
-        "        std::array<RenderData, 8> data;\n\n"
-        "        Core::TimestampQueryPool zeroStageQueryPool;\n"
-        "        std::array<double, 9> zeroStageProfileTotalsMs{};\n"
-        "        uint32_t zeroStageProfileSamples{0};\n\n"
-        "        Shaders::Mipmaps mipmaps;",
-        count=1,
-        label=f"{path}: profiler members",
-    )
+    if "Core::TimestampQueryPool zeroStageQueryPool;" not in text:
+        text = replace_exact(
+            text,
+            "        std::array<RenderData, 8> data;\n\n        Shaders::Mipmaps mipmaps;",
+            "        std::array<RenderData, 8> data;\n\n"
+            "        Core::TimestampQueryPool zeroStageQueryPool;\n"
+            "        std::array<double, 9> zeroStageProfileTotalsMs{};\n"
+            "        uint32_t zeroStageProfileSamples{0};\n\n"
+            "        Shaders::Mipmaps mipmaps;",
+            count=1,
+            label=f"{path}: profiler members",
+        )
     path.write_text(text, encoding="utf-8")
 
 
