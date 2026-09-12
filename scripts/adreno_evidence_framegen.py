@@ -3,6 +3,51 @@ from __future__ import annotations
 from pathlib import Path
 from adreno_evidence_common import replace_exact
 
+
+def patch_timestamp_query_pool(header_path: Path, source_path: Path) -> None:
+    header = header_path.read_text(encoding="utf-8")
+    if "writeAtStage" not in header:
+        header = replace_exact(
+            header,
+            "        void write(VkCommandBuffer commandBuffer, uint32_t queryIndex) const;\n",
+            "        void write(VkCommandBuffer commandBuffer, uint32_t queryIndex) const;\n"
+            "        void writeAtStage(VkCommandBuffer commandBuffer, uint32_t queryIndex,\n"
+            "            VkPipelineStageFlagBits stage) const;\n",
+            count=1,
+            label=f"{header_path}: stage-aware timestamp declaration",
+        )
+        header_path.write_text(header, encoding="utf-8")
+
+    source = source_path.read_text(encoding="utf-8")
+    if "TimestampQueryPool::writeAtStage" not in source:
+        source = replace_exact(
+            source,
+            "void TimestampQueryPool::write(\n"
+            "        VkCommandBuffer commandBuffer, uint32_t queryIndex) const {\n"
+            "    if (!this->supported() || queryIndex >= this->queryCount_)\n"
+            "        return;\n"
+            "    vkCmdWriteTimestamp(\n"
+            "        commandBuffer,\n"
+            "        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,\n"
+            "        *this->queryPool,\n"
+            "        queryIndex);\n"
+            "}\n",
+            "void TimestampQueryPool::write(\n"
+            "        VkCommandBuffer commandBuffer, uint32_t queryIndex) const {\n"
+            "    this->writeAtStage(commandBuffer, queryIndex, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);\n"
+            "}\n\n"
+            "void TimestampQueryPool::writeAtStage(\n"
+            "        VkCommandBuffer commandBuffer, uint32_t queryIndex,\n"
+            "        VkPipelineStageFlagBits stage) const {\n"
+            "    if (!this->supported() || queryIndex >= this->queryCount_)\n"
+            "        return;\n"
+            "    vkCmdWriteTimestamp(commandBuffer, stage, *this->queryPool, queryIndex);\n"
+            "}\n",
+            count=1,
+            label=f"{source_path}: stage-aware timestamp implementation",
+        )
+        source_path.write_text(source, encoding="utf-8")
+
 def patch_framegen_header(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     if "generatedPreQueryPool" in text:
@@ -139,7 +184,8 @@ def patch_framegen_source(path: Path, backend: str) -> None:
         "        profileGenerated = data.generatedPassQueryPools.at(pass).supported();\n"
         "    if (profileGenerated) {\n"
         "        data.generatedPreQueryPool.reset(data.cmdBuffer1.handle());\n"
-        "        data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 0);\n"
+        "        data.generatedPreQueryPool.writeAtStage(\n"
+        "            data.cmdBuffer1.handle(), 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);\n"
         "    }\n\n",
         count=1,
         label=f"{path}: generated first-stage profiling start",
@@ -150,7 +196,8 @@ def patch_framegen_source(path: Path, backend: str) -> None:
         "#endif\n\n    const bool profileZeroStage = generationCount == 0\n",
         "#endif\n\n"
         "    if (profileGenerated)\n"
-        "        data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 1);\n\n"
+        "        data.generatedPreQueryPool.writeAtStage(\n"
+        "            data.cmdBuffer1.handle(), 1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);\n\n"
         "    const bool profileZeroStage = generationCount == 0\n",
         count=1,
         label=f"{path}: input transport timestamp",
@@ -255,7 +302,8 @@ def patch_framegen_source(path: Path, backend: str) -> None:
         "#endif\n\n        buf2.end();\n",
         "#endif\n\n"
         "        if (generatedPassProfile != nullptr)\n"
-        "            generatedPassProfile->write(buf2.handle(), generatedPassQueryIndex++);\n"
+        "            generatedPassProfile->writeAtStage(\n"
+        "                buf2.handle(), generatedPassQueryIndex++, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);\n"
         "        buf2.end();\n",
         count=1,
         label=f"{path}: output transport timestamp",
