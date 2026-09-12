@@ -105,6 +105,36 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
             self.assertIn("data.preprocessingFence", zero_block, source_path.as_posix())
             self.assertIn("data.preprocessingFence.wait", zero_block, source_path.as_posix())
 
+    def test_generated_passes_reuse_completion_fences(self) -> None:
+        backend_sources = (
+            ROOT / "framegen/v3.1_src/context.cpp",
+            ROOT / "framegen/v3.1p_src/context.cpp",
+        )
+
+        for source_path in backend_sources:
+            source = source_path.read_text(encoding="utf-8")
+            present_start = source.index("void Context::present")
+            wait_start = source.index("bool Context::waitForLastPresent", present_start)
+            present = source[present_start:wait_start]
+            pass_start = present.index("for (size_t pass = 0; pass < generationCount; pass++)")
+            pass_block = present[pass_start:]
+
+            self.assertGreaterEqual(
+                source.count("for (auto& completionFence : data.completionFences)"),
+                2,
+                source_path.as_posix(),
+            )
+            self.assertNotIn(
+                "completionFence = Core::Fence(vk.device)",
+                pass_block,
+                source_path.as_posix(),
+            )
+            self.assertIn(
+                "completionFence.reset(vk.device)",
+                pass_block,
+                source_path.as_posix(),
+            )
+
     def test_source_only_bypass_remains_lifecycle_reset(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
