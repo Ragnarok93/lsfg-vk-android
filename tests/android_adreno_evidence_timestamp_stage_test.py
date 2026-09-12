@@ -11,11 +11,11 @@ class AndroidAdrenoEvidenceTimestampStageTest(unittest.TestCase):
         helper = (ROOT / "scripts/adreno_evidence_framegen.py").read_text(encoding="utf-8")
 
         self.assertIn("patch_timestamp_query_pool", main)
+        self.assertIn("framegen/include/core/timestampquerypool.hpp", main)
+        self.assertIn("framegen/src/core/timestampquerypool.cpp", main)
         self.assertIn("writeAtStage", helper)
         self.assertIn("VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT", helper)
         self.assertIn("VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT", helper)
-        self.assertIn("timestampquerypool.hpp", helper)
-        self.assertIn("timestampquerypool.cpp", helper)
 
         # Compute-stage timestamps remain the default for shader boundaries;
         # only transport boundaries need top/bottom-of-pipe placement.
