@@ -101,8 +101,14 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
                 "ahb_submit_cpu_avg_ms=",
                 "ahb_host_wait_avg_ms=",
                 "ahb_async_submit_cpu_avg_ms=",
+                "source_copy_gpu_avg_ms=",
             ):
                 self.assertIn(field, outer_source)
+            self.assertIn("gameSourceCopyQueryPool", outer_header)
+            self.assertIn("VK_QUERY_TYPE_TIMESTAMP", outer_source)
+            self.assertIn("VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT", outer_source)
+            self.assertIn("VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT", outer_source)
+            self.assertIn("VK_QUERY_RESULT_64_BIT", outer_source)
             self.assertIn("submitAhbHandoff(info.device", outer_source)
             self.assertIn("waitForAhbHandoff(info.device", outer_source)
 
@@ -134,6 +140,7 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             # adding a new queue submission or host wait edge.
             self.assertEqual(perf_source.count("data.cmdBuffer1.submit("), 2)
             self.assertNotIn("generatedProfileFence", perf_source)
+            self.assertNotIn("sourceCopyProfileFence", outer_source)
 
 
 if __name__ == "__main__":
