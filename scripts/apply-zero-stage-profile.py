@@ -3,8 +3,8 @@
 
 This profiling transform is intentionally isolated from the checked-in framegen
 algorithm. It adds timestamp queries around the Mipmaps barriers/compute work
-and Alpha6..Alpha0 only on zero-generation cycles, without adding submissions,
-fences, or wait edges.
+and Alpha6..Alpha0 only on zero-generation cycles, plus translated Mipmaps
+SPIR-V metadata, without adding submissions, fences, or wait edges.
 """
 
 from __future__ import annotations
@@ -32,6 +32,12 @@ MIPMAP_PATHS = (
         Path("framegen/v3.1p_src/shaders/mipmaps.cpp"),
         "performance",
     ),
+)
+TRANSLATION_HEADER = Path("include/extract/trans.hpp")
+TRANSLATION_SOURCE = Path("src/extract/trans.cpp")
+LOADER_PATHS = (
+    Path("framegen/v3.1_src/lsfg.cpp"),
+    Path("framegen/v3.1p_src/lsfg.cpp"),
 )
 
 
@@ -67,6 +73,160 @@ def patch_header(path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def patch_translation_header(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    text = replace_exact(
+        text,
+        "#include <cstdint>\n#include <vector>\n",
+        "#include <cstdint>\n#include <string>\n#include <vector>\n",
+        count=1,
+        label=f"{path}: string include",
+    )
+    text = replace_exact(
+        text,
+        "    std::vector<uint8_t> translateShader(std::vector<uint8_t> bytecode);\n",
+        "    std::vector<uint8_t> translateShader(\n"
+        "        std::vector<uint8_t> bytecode, const std::string& shaderName = {});\n",
+        count=1,
+        label=f"{path}: named shader translation",
+    )
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_translation_source(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    if "zero-stage-shader-profile" in text:
+        return
+
+    text = replace_exact(
+        text,
+        "#include <cstdint>\n#include <cstddef>\n#include <algorithm>\n#include <vector>\n",
+        "#include <cstdint>\n#include <cstddef>\n#include <algorithm>\n#include <cstring>\n#include <iostream>\n#include <string>\n#include <vector>\n",
+        count=1,
+        label=f"{path}: profiling includes",
+    )
+
+    marker = "using namespace Extract;\n\n"
+    helper = """using namespace Extract;
+
+namespace {
+    constexpr uint32_t kSpirvMagic = 0x07230203U;
+    constexpr uint16_t kOpExecutionMode = 16U;
+    constexpr uint16_t kOpVariable = 59U;
+    constexpr uint32_t kExecutionModeLocalSize = 17U;
+    constexpr uint32_t kStorageClassWorkgroup = 4U;
+
+    uint32_t readSpirvWord(const std::vector<uint8_t>& bytecode, size_t wordIndex) {
+        uint32_t word = 0;
+        std::memcpy(
+            &word,
+            bytecode.data() + wordIndex * sizeof(uint32_t),
+            sizeof(uint32_t));
+        return word;
+    }
+
+    void logMipmapsSpirvProfile(
+            const std::string& shaderName,
+            const std::vector<uint8_t>& bytecode) {
+        if (shaderName != "mipmaps" && shaderName != "p_mipmaps")
+            return;
+
+        const size_t wordCount = bytecode.size() / sizeof(uint32_t);
+        size_t instructionCount = 0;
+        size_t workgroupVariables = 0;
+        uint32_t localSizeX = 0;
+        uint32_t localSizeY = 0;
+        uint32_t localSizeZ = 0;
+        bool validSpirv = bytecode.size() % sizeof(uint32_t) == 0
+            && wordCount >= 5
+            && readSpirvWord(bytecode, 0) == kSpirvMagic;
+
+        if (validSpirv) {
+            size_t cursor = 5;
+            while (cursor < wordCount) {
+                const uint32_t firstWord = readSpirvWord(bytecode, cursor);
+                const uint16_t instructionWordCount =
+                    static_cast<uint16_t>(firstWord >> 16U);
+                const uint16_t opCode = static_cast<uint16_t>(firstWord & 0xffffU);
+                if (instructionWordCount == 0
+                        || cursor + instructionWordCount > wordCount) {
+                    validSpirv = false;
+                    break;
+                }
+
+                ++instructionCount;
+                if (opCode == kOpExecutionMode && instructionWordCount >= 6) {
+                    const uint32_t executionMode = readSpirvWord(bytecode, cursor + 2);
+                    if (executionMode == kExecutionModeLocalSize) {
+                        localSizeX = readSpirvWord(bytecode, cursor + 3);
+                        localSizeY = readSpirvWord(bytecode, cursor + 4);
+                        localSizeZ = readSpirvWord(bytecode, cursor + 5);
+                    }
+                } else if (opCode == kOpVariable && instructionWordCount >= 4) {
+                    const uint32_t storageClass = readSpirvWord(bytecode, cursor + 3);
+                    if (storageClass == kStorageClassWorkgroup)
+                        ++workgroupVariables;
+                }
+
+                cursor += instructionWordCount;
+            }
+        }
+
+        std::cerr << "lsfg-vk: zero-stage-shader-profile"
+            << " shader=" << shaderName
+            << " spirv_bytes=" << bytecode.size()
+            << " spirv_words=" << wordCount
+            << " instruction_count=" << instructionCount
+            << " local_size=" << localSizeX << 'x' << localSizeY << 'x' << localSizeZ
+            << " workgroup_variables=" << workgroupVariables
+            << " valid_spirv=" << (validSpirv ? 1 : 0)
+            << '\n';
+    }
+}
+
+"""
+    text = replace_exact(
+        text,
+        marker,
+        helper,
+        count=1,
+        label=f"{path}: SPIR-V profiling helper",
+    )
+    text = replace_exact(
+        text,
+        "std::vector<uint8_t> Extract::translateShader(std::vector<uint8_t> bytecode) {\n",
+        "std::vector<uint8_t> Extract::translateShader(\n"
+        "        std::vector<uint8_t> bytecode, const std::string& shaderName) {\n",
+        count=1,
+        label=f"{path}: named shader translation signature",
+    )
+    text = replace_exact(
+        text,
+        "    std::copy_n(reinterpret_cast<uint8_t*>(code.data()),\n"
+        "        code.size(), spirvBytecode.data());\n"
+        "    return spirvBytecode;\n",
+        "    std::copy_n(reinterpret_cast<uint8_t*>(code.data()),\n"
+        "        code.size(), spirvBytecode.data());\n"
+        "    logMipmapsSpirvProfile(shaderName, spirvBytecode);\n"
+        "    return spirvBytecode;\n",
+        count=1,
+        label=f"{path}: SPIR-V profiling log",
+    )
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_loader(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    text = replace_exact(
+        text,
+        "            return Extract::translateShader(dxbc);\n",
+        "            return Extract::translateShader(dxbc, name);\n",
+        count=1,
+        label=f"{path}: shader-name propagation",
+    )
+    path.write_text(text, encoding="utf-8")
+
+
 def patch_mipmaps_header(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     text = replace_exact(
@@ -90,7 +250,8 @@ def patch_mipmaps_header(path: Path) -> None:
 
 def patch_mipmaps_source(path: Path, backend: str) -> None:
     text = path.read_text(encoding="utf-8")
-    if f"zero-stage-profile-config backend={backend}" in text:
+    if (f"zero-stage-profile-config backend={backend}" in text
+            and "effective_flow_scale=" in text):
         return
 
     text = replace_exact(
@@ -117,6 +278,7 @@ def patch_mipmaps_source(path: Path, backend: str) -> None:
         f"    std::cerr << \"lsfg-vk: zero-stage-profile-config backend={backend}\"\n"
         "        << \" source_extent=\" << sourceExtent.width << 'x' << sourceExtent.height\n"
         "        << \" flow_scale=\" << vk.flowScale\n"
+        "        << \" effective_flow_scale=\" << (1.0F / vk.flowScale)\n"
         "        << \" flow_extent=\" << flowExtent.width << 'x' << flowExtent.height\n"
         "        << \" dispatch_grid=\" << profileThreadsX << 'x' << profileThreadsY\n"
         "        << '\\n';\n"
@@ -299,6 +461,10 @@ def main() -> None:
     args = parser.parse_args()
     root = args.root.resolve()
 
+    patch_translation_header(root / TRANSLATION_HEADER)
+    patch_translation_source(root / TRANSLATION_SOURCE)
+    for rel in LOADER_PATHS:
+        patch_loader(root / rel)
     for rel in HEADER_PATHS:
         patch_header(root / rel)
     for header_rel, source_rel, backend in MIPMAP_PATHS:
