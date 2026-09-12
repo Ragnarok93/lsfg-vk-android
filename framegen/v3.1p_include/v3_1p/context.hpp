@@ -89,6 +89,7 @@ namespace LSFG_3_1P {
             std::vector<Core::Semaphore> internalSemaphores; // signaled when first step is done
             std::vector<Core::Semaphore> outSemaphores; // signaled when each pass is done
             std::vector<Core::Fence> completionFences; // fence for completion of each pass
+            Core::Fence preprocessingFence; // reused for zero-generation temporal preprocessing
 
             Core::CommandBuffer cmdBuffer1;
             std::vector<Core::CommandBuffer> cmdBuffers2; // command buffers for second step
