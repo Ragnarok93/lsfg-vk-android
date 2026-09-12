@@ -225,17 +225,13 @@ void Context::present(Vulkan& vk,
         int inSem, const std::vector<int>& outSem,
         size_t activeGenerationCount) {
     const size_t generationCount = std::min(activeGenerationCount, vk.generationCount);
-    if (generationCount == 0) {
-        this->frameIdx++;
-        return;
-    }
     auto& data = this->data.at(this->frameIdx % 8);
 
     if (data.shouldWait)
         for (size_t i = 0; i < data.generationCount; ++i)
             if (!data.completionFences.at(i).wait(vk.device, framegenWaitTimeoutNs()))
                 throw LSFG::vulkan_error(VK_TIMEOUT, "Fence wait timed out");
-    data.shouldWait = true;
+    data.shouldWait = generationCount > 0;
     data.generationCount = generationCount;
 
     if (inSem >= 0) data.inSemaphore = Core::Semaphore(vk.device, inSem);
@@ -288,9 +284,33 @@ void Context::present(Vulkan& vk,
         this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
     this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
 
+#ifdef __ANDROID__
+    if (generationCount == 0 && !this->transportOnly) {
+        std::vector<VkImageMemoryBarrier2> releaseBarriers;
+        releaseBarriers.reserve(2);
+        add_external_release(releaseBarriers, vk, this->inImg_0,
+            VK_ACCESS_2_SHADER_READ_BIT);
+        add_external_release(releaseBarriers, vk, this->inImg_1,
+            VK_ACCESS_2_SHADER_READ_BIT);
+        emit_external_barriers(data.cmdBuffer1, releaseBarriers);
+    }
+#endif
+
     data.cmdBuffer1.end();
     std::vector<Core::Semaphore> waits = { data.inSemaphore };
     if (inSem < 0) waits.clear();
+
+    if (generationCount == 0) {
+        Core::Fence preprocessingFence(vk.device);
+        data.cmdBuffer1.submit(vk.device.getComputeQueue(), preprocessingFence,
+            waits, std::nullopt, {}, std::nullopt);
+        if (!preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))
+            throw LSFG::vulkan_error(VK_TIMEOUT,
+                "Temporal preprocessing fence wait timed out");
+        this->frameIdx++;
+        return;
+    }
+
     const std::vector<Core::Semaphore> activeInternalSemaphores(
         data.internalSemaphores.begin(),
         data.internalSemaphores.begin() + static_cast<std::ptrdiff_t>(generationCount));
