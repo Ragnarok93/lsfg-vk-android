@@ -38,6 +38,7 @@ jobs:
           python3 tests/android_runtime_stability_test.py
           python3 tests/android_adaptive_history_test.py
           python3 tests/android_zero_stage_profile_test.py
+          python3 tests/android_mipmaps_shader_profile_test.py
           python3 tests/android_capability_architecture_test.py
 
       - name: Install Vulkan headers
