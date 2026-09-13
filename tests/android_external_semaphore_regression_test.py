@@ -63,24 +63,19 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
 
         for marker in (
-            "pendingHistoryCompletionFds_",
-            "pendingHistoryCompletionValid_",
-            "historySlot",
+            "std::array<int, 2> pendingHistoryCompletionFds_",
+            "std::array<bool, 2> pendingHistoryCompletionValid_",
+            "historySlot = static_cast<size_t>(this->frameIdx % 2)",
             "waitPendingHistoryCompletionFd(size_t historySlot",
             "pendingHistoryCompletionFds_.at(historySlot)",
             "pendingHistoryCompletionValid_.at(historySlot)",
+            "waitPendingHistoryCompletionFd(historySlot, true)",
             "zeroGenerationDirectStorage",
             "activeHistoryInput",
-            "LSFG::AhbTransportMode::DirectStorage",
+            "ahbTransportMode==LSFG::AhbTransportMode::DirectStorage",
         ):
             self.assertIn(marker, transform)
 
-        self.assertNotIn("int pendingHistoryCompletionFd_{-1}", transform)
-        self.assertNotIn("bool pendingHistoryCompletionValid_{false}", transform)
-        self.assertNotIn(
-            "if (this->pendingHistoryCompletionValid_) this->waitPendingHistoryCompletionFd(true);",
-            transform,
-        )
         self.assertNotIn("delayUntilNextSourceOutput", transform)
         self.assertNotIn("sleep_for", transform)
 
@@ -89,20 +84,16 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
 
         for marker in (
-            "generationCount == 0 && !this->transportOnly",
-            "activeHistoryInput",
+            "zeroGenerationDirectStorage = generationCount == 0 && !this->transportOnly",
+            "activeHistoryInput = (this->frameIdx % 2 == 0)",
             "add_external_acquire(acquireBarriers, vk, activeHistoryInput",
             "add_external_release(releaseBarriers, vk, activeHistoryInput",
+            "this->asyncZeroHistoryEnabled_=",
+            "this->asyncAhbHandoffEnabled_ && ",
+            "this->asyncAhbHandoffHandleType_==VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT && ",
+            "ahbTransportMode==LSFG::AhbTransportMode::DirectStorage",
         ):
             self.assertIn(marker, transform)
-
-        self.assertIn(
-            "this->asyncZeroHistoryEnabled_="
-            "this->asyncAhbHandoffEnabled_ && "
-            "this->asyncAhbHandoffHandleType_==VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT && "
-            "ahbTransportMode==LSFG::AhbTransportMode::DirectStorage",
-            transform,
-        )
 
     def test_async_zero_history_hardens_lifecycle_and_public_api(self) -> None:
         """Deferred zero-history work must be drained on bypass/teardown without hiding waitContext."""
