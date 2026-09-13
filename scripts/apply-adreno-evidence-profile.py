@@ -7,6 +7,7 @@ from pathlib import Path
 from adreno_evidence_capabilities import (patch_backend_header, patch_device_source, patch_hooks_header, patch_hooks_source)
 from adreno_evidence_outer import patch_outer_header, patch_outer_source
 from adreno_evidence_framegen import patch_framegen_header, patch_framegen_source, patch_timestamp_query_pool
+from adreno_evidence_common import replace_exact
 from adreno_syncfd_handoff import apply as apply_syncfd_handoff
 
 FRAMEGEN_HEADERS = (
@@ -17,6 +18,41 @@ FRAMEGEN_SOURCES = (
     (Path("framegen/v3.1_src/context.cpp"), "quality"),
     (Path("framegen/v3.1p_src/context.cpp"), "performance"),
 )
+
+
+def normalize_sync_fd_import_initializer(path: Path) -> None:
+    """Keep the validation transform valid under Android NDK C++20 rules."""
+    text = path.read_text(encoding="utf-8")
+    invalid = '''        const VkImportSemaphoreFdInfoKHR importInfo{
+            .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+            .flags = handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
+                ? VK_SEMAPHORE_IMPORT_TEMPORARY_BIT : 0,
+            .semaphore = semaphoreHandle,
+            .handleType = handleType,
+            .fd = fd,
+        };
+'''
+    if invalid not in text:
+        return
+    corrected = '''        const VkImportSemaphoreFdInfoKHR importInfo{
+            .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+            .semaphore = semaphoreHandle,
+            .flags = handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
+                ? static_cast<VkSemaphoreImportFlags>(VK_SEMAPHORE_IMPORT_TEMPORARY_BIT)
+                : VkSemaphoreImportFlags{0},
+            .handleType = handleType,
+            .fd = fd,
+        };
+'''
+    text = replace_exact(
+        text,
+        invalid,
+        corrected,
+        count=1,
+        label=f"{path}: C++20-valid SYNC_FD import initializer",
+    )
+    path.write_text(text, encoding="utf-8")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -38,6 +74,8 @@ def main() -> None:
     for rel, backend in FRAMEGEN_SOURCES:
         patch_framegen_source(root / rel, backend)
     apply_syncfd_handoff(root)
+    normalize_sync_fd_import_initializer(root / "framegen/src/core/semaphore.cpp")
+
 
 if __name__ == "__main__":
     main()
