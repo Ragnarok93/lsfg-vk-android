@@ -82,6 +82,22 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
             "Candidate A must patch the already slot-aware/release-overlapped Android source",
         )
 
+    def test_candidate_a_checkpoint_reports_reprime_time_and_preserves_present_result(self) -> None:
+        finalize = ROOT / "scripts/adreno_deferred_zero_history_finalize.py"
+        self.assertTrue(finalize.exists(), "missing Candidate A checkpoint finalization transform")
+        text = finalize.read_text(encoding="utf-8")
+        self.assertIn("deferred_zero_reprime_time_ms", text)
+        self.assertIn("deferredReprimeStart", text)
+        self.assertIn("finishResult", text)
+        self.assertIn("VK_ERROR_OUT_OF_DATE_KHR", text)
+
+        bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
+        self.assertIn("apply_deferred_zero_history_finalize(root)", bundle)
+        self.assertLess(
+            bundle.index("apply_deferred_zero_history(root)"),
+            bundle.index("apply_deferred_zero_history_finalize(root)"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
