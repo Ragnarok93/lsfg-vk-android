@@ -153,17 +153,16 @@ def patch_public(h: Path, s: Path, ns: str) -> None:
     if not h.exists() or not s.exists(): return
     t=h.read_text()
     if "presentContextWithCountAndHistoryFd" not in t:
+        marker = (
+            "    __attribute__((visibility(\"default\")))\n"
+            "    bool waitContext(int32_t id, uint64_t timeoutNs);\n"
+        )
         declaration = (
             "    __attribute__((visibility(\"default\")))\n"
             "    int presentContextWithCountAndHistoryFd(int32_t id,int inSem,"
             "const std::vector<int>& outSem,size_t activeGenerationCount);\n"
         )
-        t=insert_before(
-            t,
-            "    bool waitContext(int32_t id, uint64_t timeoutNs);\n",
-            declaration,
-            f"{h}: history api",
-        )
+        t=insert_before(t, marker, declaration, f"{h}: history api")
         h.write_text(t)
     t=s.read_text()
     if "presentContextWithCountAndHistoryFd" in t: return

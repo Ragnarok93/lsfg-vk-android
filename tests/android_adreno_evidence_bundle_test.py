@@ -27,6 +27,8 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
 
         required_files = (
             Path("framegen/public/lsfg_backend.hpp"),
+            Path("framegen/public/lsfg_3_1.hpp"),
+            Path("framegen/public/lsfg_3_1p.hpp"),
             Path("framegen/src/core/device.cpp"),
             Path("framegen/include/core/semaphore.hpp"),
             Path("framegen/src/core/semaphore.cpp"),
@@ -34,10 +36,12 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             Path("framegen/src/core/timestampquerypool.cpp"),
             Path("framegen/v3.1_include/v3_1/context.hpp"),
             Path("framegen/v3.1_src/context.cpp"),
+            Path("framegen/v3.1_src/lsfg.cpp"),
             Path("framegen/v3.1_include/v3_1/shaders/mipmaps.hpp"),
             Path("framegen/v3.1_src/shaders/mipmaps.cpp"),
             Path("framegen/v3.1p_include/v3_1p/context.hpp"),
             Path("framegen/v3.1p_src/context.cpp"),
+            Path("framegen/v3.1p_src/lsfg.cpp"),
             Path("framegen/v3.1p_include/v3_1p/shaders/mipmaps.hpp"),
             Path("framegen/v3.1p_src/shaders/mipmaps.cpp"),
             Path("include/context.hpp"),
@@ -73,6 +77,14 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
 
             backend_header = (temp_root / "framegen/public/lsfg_backend.hpp").read_text(
                 encoding="utf-8"
+            )
+            public_headers = (
+                (temp_root / "framegen/public/lsfg_3_1.hpp").read_text(encoding="utf-8"),
+                (temp_root / "framegen/public/lsfg_3_1p.hpp").read_text(encoding="utf-8"),
+            )
+            public_sources = (
+                (temp_root / "framegen/v3.1_src/lsfg.cpp").read_text(encoding="utf-8"),
+                (temp_root / "framegen/v3.1p_src/lsfg.cpp").read_text(encoding="utf-8"),
             )
             device_source = (temp_root / "framegen/src/core/device.cpp").read_text(
                 encoding="utf-8"
@@ -118,6 +130,19 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             self.assertIn("VkExternalSemaphoreHandleTypeFlagBits handleType", mini_source)
             self.assertIn("VK_SEMAPHORE_IMPORT_TEMPORARY_BIT", core_semaphore)
             self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", core_semaphore)
+
+            for public_header in public_headers:
+                self.assertIn("presentContextWithCountAndHistoryFd", public_header)
+                self.assertIn(
+                    '__attribute__((visibility("default")))\n    int presentContextWithCountAndHistoryFd',
+                    public_header,
+                )
+                self.assertIn(
+                    '__attribute__((visibility("default")))\n    bool waitContext',
+                    public_header,
+                )
+            for public_source in public_sources:
+                self.assertIn("presentContextWithCountAndHistoryFd", public_source)
 
             submit_pos = outer_source.index("submitAhbHandoff(info.device")
             export_pos = outer_source.index("framegenInputSemaphore.exportFd(", submit_pos)
