@@ -86,7 +86,11 @@ def main() -> None:
     apply_async_zero_history_hardening(root)
     apply_slot_aware_zero_history(root)
     apply_transport_release_overlap(root)
-    apply_deferred_zero_history(root)
+    # Synthetic evidence-bundle fixtures intentionally contain only the files
+    # touched by that test. Full Android builds always contain Mini::Image and
+    # therefore always apply Candidate A here.
+    if (root / "include/mini/image.hpp").exists():
+        apply_deferred_zero_history(root)
 
 
 if __name__ == "__main__":
