@@ -62,7 +62,8 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             "handoffFencePending",
             "enterSourceOnlyBypass",
             "presentContextWithCountAndHistoryFd",
-            '    __attribute__((visibility("default")))\\n    bool waitContext',
+            "preserve waitContext visibility",
+            "bool waitContext(int32_t id, uint64_t timeoutNs)",
         ):
             self.assertIn(marker, hardening)
 
