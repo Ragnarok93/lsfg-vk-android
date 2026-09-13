@@ -29,8 +29,8 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
                 f"{relative}: negative output fd sentinels must never reach Core::Semaphore(fd)",
             )
 
-    def test_adaptive_zero_generation_has_reverse_sync_fd_contract(self) -> None:
-        """Zero-generation history preprocessing must complete GPU-to-GPU, not by an immediate host wait."""
+    def test_adaptive_zero_generation_defers_completion_fd_without_reverse_vulkan_import(self) -> None:
+        """Zero-generation completion must not import a framegen sync fd into the game VkDevice."""
         transform = "\n".join(
             (ROOT / relative).read_text(encoding="utf-8")
             for relative in (
@@ -39,14 +39,23 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             )
         )
 
-        self.assertIn("historyCompletionFd", transform)
-        self.assertIn("pendingHistoryCompletionSemaphore_", transform)
-        self.assertIn("importFd", transform)
-        self.assertIn("adaptiveZeroGeneration", transform)
-        self.assertIn("zero-history-sync-fd", transform)
-        self.assertIn("preprocessingPending", transform)
-        self.assertIn("handoffFencePending", transform)
-        self.assertIn("presentContextWithCountAndHistoryFd", transform)
+        for marker in (
+            "historyCompletionFd",
+            "pendingHistoryCompletionFd_",
+            "waitPendingHistoryCompletionFd",
+            "adaptiveZeroGeneration",
+            "zero-history-sync-fd",
+            "preprocessingPending",
+            "handoffFencePending",
+            "presentContextWithCountAndHistoryFd",
+        ):
+            self.assertIn(marker, transform)
+
+        self.assertNotIn("pendingHistoryCompletionSemaphore_", transform)
+        self.assertNotIn(
+            "pendingHistoryCompletionSemaphore_=Mini::Semaphore::importFd",
+            transform,
+        )
 
     def test_async_zero_history_hardens_lifecycle_and_public_api(self) -> None:
         """Deferred zero-history work must be drained on bypass/teardown without hiding waitContext."""
