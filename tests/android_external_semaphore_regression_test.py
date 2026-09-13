@@ -95,6 +95,32 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         ):
             self.assertIn(marker, transform)
 
+    def test_zero_generation_transport_only_owns_only_active_shared_history(self) -> None:
+        """Transport-only zero passes must copy one parity AHB so slot-aware retirement is safe."""
+        transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
+
+        for marker in (
+            "zeroGenerationTransportOnly = generationCount == 0 && this->transportOnly",
+            "activeSharedHistoryInput = (this->frameIdx % 2 == 0)",
+            "activePrivateHistoryInput = (this->frameIdx % 2 == 0)",
+            "copy_same_format(data.cmdBuffer1, activeSharedHistoryInput, activePrivateHistoryInput)",
+            "zero-generation transport-only active input acquire",
+            "zero-generation transport-only active input release",
+            "ahbTransportMode==LSFG::AhbTransportMode::TransportOnly",
+        ):
+            self.assertIn(marker, transform)
+
+        self.assertIn(
+            "copy_same_format(data.cmdBuffer1, this->sharedInImg_0, this->inImg_0)",
+            transform,
+        )
+        self.assertIn(
+            "copy_same_format(data.cmdBuffer1, this->sharedInImg_1, this->inImg_1)",
+            transform,
+        )
+        self.assertNotIn("delayUntilNextSourceOutput", transform)
+        self.assertNotIn("sleep_for", transform)
+
     def test_async_zero_history_hardens_lifecycle_and_public_api(self) -> None:
         """Deferred zero-history work must be drained on bypass/teardown without hiding waitContext."""
         hardening_path = ROOT / "scripts/adreno_async_zero_history_hardening.py"
