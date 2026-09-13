@@ -14,11 +14,13 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
         zero_stage = ROOT / "scripts/apply-zero-stage-profile.py"
         shader_profile = ROOT / "scripts/apply-mipmaps-shader-profile.py"
         evidence_profile = ROOT / "scripts/apply-adreno-evidence-profile.py"
+        syncfd_profile = ROOT / "scripts/adreno_syncfd_handoff.py"
         build_script = ROOT / "scripts/build/android.sh"
 
         self.assertTrue(zero_stage.exists(), zero_stage.as_posix())
         self.assertTrue(shader_profile.exists(), shader_profile.as_posix())
         self.assertTrue(evidence_profile.exists(), evidence_profile.as_posix())
+        self.assertTrue(syncfd_profile.exists(), syncfd_profile.as_posix())
 
         build_text = build_script.read_text(encoding="utf-8")
         self.assertIn("apply-adreno-evidence-profile.py", build_text)
@@ -26,6 +28,8 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
         required_files = (
             Path("framegen/public/lsfg_backend.hpp"),
             Path("framegen/src/core/device.cpp"),
+            Path("framegen/include/core/semaphore.hpp"),
+            Path("framegen/src/core/semaphore.cpp"),
             Path("framegen/include/core/timestampquerypool.hpp"),
             Path("framegen/src/core/timestampquerypool.cpp"),
             Path("framegen/v3.1_include/v3_1/context.hpp"),
@@ -38,8 +42,10 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             Path("framegen/v3.1p_src/shaders/mipmaps.cpp"),
             Path("include/context.hpp"),
             Path("include/hooks.hpp"),
+            Path("include/mini/semaphore.hpp"),
             Path("src/context.cpp"),
             Path("src/hooks.cpp"),
+            Path("src/mini/semaphore.cpp"),
             Path("include/extract/trans.hpp"),
             Path("src/extract/trans.cpp"),
         )
@@ -71,10 +77,15 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             device_source = (temp_root / "framegen/src/core/device.cpp").read_text(
                 encoding="utf-8"
             )
+            core_semaphore = (temp_root / "framegen/src/core/semaphore.cpp").read_text(
+                encoding="utf-8"
+            )
             hooks_header = (temp_root / "include/hooks.hpp").read_text(encoding="utf-8")
             hooks_source = (temp_root / "src/hooks.cpp").read_text(encoding="utf-8")
             outer_header = (temp_root / "include/context.hpp").read_text(encoding="utf-8")
             outer_source = (temp_root / "src/context.cpp").read_text(encoding="utf-8")
+            mini_header = (temp_root / "include/mini/semaphore.hpp").read_text(encoding="utf-8")
+            mini_source = (temp_root / "src/mini/semaphore.cpp").read_text(encoding="utf-8")
             perf_header = (temp_root / "framegen/v3.1p_include/v3_1p/context.hpp").read_text(
                 encoding="utf-8"
             )
@@ -88,14 +99,33 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             self.assertIn("externalSemaphoreSyncFd", backend_header)
             self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", device_source)
             self.assertIn("externalSemaphoreSyncFd=", device_source)
+            self.assertIn("diagnostics.externalSemaphoreSyncFd", device_source)
             for field in ("subgroupSize=", "subgroupStages=", "subgroupOperations="):
                 self.assertIn(field, device_source)
 
             self.assertIn("androidSyncFdSemaphoreSupported", hooks_header)
             self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", hooks_source)
             self.assertIn("syncFdSemaphore=", hooks_source)
+            self.assertIn('"sync-fd"', hooks_source)
+            self.assertIn("opaqueFdSemaphoreSupported || syncFdSemaphoreSupported", hooks_source)
             self.assertIn("lastDiagnosticStage()", outer_header)
             self.assertIn("present-error stage=", hooks_source)
+
+            self.assertIn("asyncAhbHandoffHandleType_", outer_header)
+            self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", outer_source)
+            self.assertIn("gpu-sync-fd", outer_source)
+            self.assertIn("int exportFd(", mini_header)
+            self.assertIn("VkExternalSemaphoreHandleTypeFlagBits handleType", mini_source)
+            self.assertIn("VK_SEMAPHORE_IMPORT_TEMPORARY_BIT", core_semaphore)
+            self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", core_semaphore)
+
+            submit_pos = outer_source.index("submitAhbHandoff(info.device")
+            export_pos = outer_source.index("framegenInputSemaphore.exportFd(", submit_pos)
+            dispatch_pos = outer_source.index("presentContextWithCount", export_pos)
+            self.assertLess(submit_pos, export_pos,
+                "SYNC_FD export must happen only after its queue signal is pending")
+            self.assertLess(export_pos, dispatch_pos,
+                "framegen must receive the exported synchronization payload after submission")
 
             for field in (
                 "ahb_submit_cpu_avg_ms=",

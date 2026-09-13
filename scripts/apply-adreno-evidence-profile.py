@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inject bundled, diagnostic-only Adreno evidence profiling into Android LSFG builds."""
+"""Inject bundled Adreno evidence profiling plus the SYNC_FD validation fast path."""
 from __future__ import annotations
 
 import argparse
@@ -7,6 +7,7 @@ from pathlib import Path
 from adreno_evidence_capabilities import (patch_backend_header, patch_device_source, patch_hooks_header, patch_hooks_source)
 from adreno_evidence_outer import patch_outer_header, patch_outer_source
 from adreno_evidence_framegen import patch_framegen_header, patch_framegen_source, patch_timestamp_query_pool
+from adreno_syncfd_handoff import apply as apply_syncfd_handoff
 
 FRAMEGEN_HEADERS = (
     Path("framegen/v3.1_include/v3_1/context.hpp"),
@@ -36,6 +37,7 @@ def main() -> None:
         patch_framegen_header(root / rel)
     for rel, backend in FRAMEGEN_SOURCES:
         patch_framegen_source(root / rel, backend)
+    apply_syncfd_handoff(root)
 
 if __name__ == "__main__":
     main()
