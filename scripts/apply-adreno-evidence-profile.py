@@ -14,6 +14,7 @@ from adreno_async_zero_history_hardening import apply as apply_async_zero_histor
 from adreno_slot_aware_zero_history import apply as apply_slot_aware_zero_history
 from adreno_transport_release_overlap import apply as apply_transport_release_overlap
 from adreno_deferred_zero_history_build import apply as apply_deferred_zero_history
+from adreno_deferred_zero_history_finalize import apply as apply_deferred_zero_history_finalize
 
 FRAMEGEN_HEADERS = (
     Path("framegen/v3.1_include/v3_1/context.hpp"),
@@ -91,6 +92,7 @@ def main() -> None:
     # therefore always apply Candidate A here.
     if (root / "include/mini/image.hpp").exists():
         apply_deferred_zero_history(root)
+        apply_deferred_zero_history_finalize(root)
 
 
 if __name__ == "__main__":
