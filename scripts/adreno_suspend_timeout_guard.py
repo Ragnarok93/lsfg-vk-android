@@ -29,21 +29,19 @@ NEW_WAIT = '''    const auto waitIdleStart = RuntimeMetrics::Clock::now();
         static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             RuntimeMetrics::Clock::now() - waitIdleStart).count());
 
-    // SIGSTOP/SIGCONT can expire a Vulkan fence timeout while the guest is
-    // suspended. Only a gross (>2x) wall-time overshoot is treated as that
-    // lifecycle signature. Give resumed GPU work one tiny fresh timeout, then
-    // retain the existing source-present/swapchain-recreation recovery path.
-    // This is intentionally not a pacing delay and never runs in steady state.
-    constexpr uint64_t resumeCompletionRecheckNs = 2'000'000ULL;
-    if (!framegenReady
-            && framegenCompletionWaitElapsedNs > framegenCompletionTimeoutNs * 2) {
+    // SIGSTOP/SIGCONT can leave the first bounded fence wait stale even when
+    // resumed GPU work is healthy. Any timeout gets exactly one fresh bounded
+    // wait. This is an error/lifecycle recovery path only: it never executes
+    // during steady-state pacing and does not change the normal timeout budget.
+    constexpr uint64_t resumeCompletionRecheckNs = 32'000'000ULL;
+    if (!framegenReady) {
         const auto resumeRecheckStart = RuntimeMetrics::Clock::now();
         framegenReady = waitFramegenCompletion(resumeCompletionRecheckNs);
         const double resumeRecheckMs = std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - resumeRecheckStart).count();
         std::cerr << "lsfg-vk: runtime stage=framegen-completion-resume-recheck"
                   << " recovered=" << (framegenReady ? 1 : 0)
-                  << " overshoot_ms="
+                  << " initial_wait_ms="
                   << (static_cast<double>(framegenCompletionWaitElapsedNs) / 1000000.0)
                   << " recheck_ms=" << resumeRecheckMs << "\\n";
     }
