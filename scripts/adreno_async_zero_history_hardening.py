@@ -76,9 +76,15 @@ void LsContext::flushPendingAndroidWork(bool throwOnTimeout) {
     if (!needsDrain)
         return;
 
-    // First retire every game-device source-copy submission. A later source copy
-    // may itself wait on the reverse history SYNC_FD, so this also proves that
-    // any consumed reverse dependency has completed before its semaphore dies.
+    // The reverse completion stays a Linux sync_file fd. Retire it at the CPU
+    // boundary instead of importing it into the wrapper/game VkDevice. This
+    // keeps the zero-history submission overlapped with the frame interval while
+    // avoiding the unstable framegen -> wrapper Vulkan semaphore import path.
+    if (this->pendingHistoryCompletionValid_)
+        this->waitPendingHistoryCompletionFd(throwOnTimeout);
+
+    // Retire every game-device source-copy submission before command buffers,
+    // export semaphores, or AHB-backed images can be destroyed.
     if (this->androidDevice_ != VK_NULL_HANDLE && this->waitHandoffFences != nullptr) {
         for (auto& pass : this->passInfos) {
             if (!pass.handoffFencePending || !pass.handoffFence)
@@ -98,9 +104,9 @@ void LsContext::flushPendingAndroidWork(bool throwOnTimeout) {
         }
     }
 
-    // The framegen zero-count path may still own AHB reads even after its input
-    // copy completed. Drain that private-device work before temporal state,
-    // imported reverse semaphores, AHBs, or the framegen context can be reset.
+    // The framegen zero-count path retains its private preprocessing fence and
+    // export semaphore until waitContext observes completion. Drain those
+    // private-device objects before temporal state or the context is reset.
     if (this->lsfgCtxId) {
         const bool framegenReady = this->performanceBackend_
             ? LSFG_3_1P::waitContext(*this->lsfgCtxId, runtimeWaitTimeoutNs())
@@ -114,10 +120,8 @@ void LsContext::flushPendingAndroidWork(bool throwOnTimeout) {
         }
     }
 
-    this->pendingHistoryCompletionSemaphore_ = Mini::Semaphore{};
+    this->pendingHistoryCompletionFd_ = -1;
     this->pendingHistoryCompletionValid_ = false;
-    for (auto& pass : this->passInfos)
-        pass.historyCompletionWaitSemaphore = Mini::Semaphore{};
     std::cerr << "lsfg-vk: zero-history-lifecycle-drain ready=1\\n";
 }
 #endif

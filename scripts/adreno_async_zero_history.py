@@ -125,7 +125,7 @@ def patch_fg_source(p: Path) -> None:
                 data.preprocessingPending=true;
                 try {
                     *historyCompletionFd=data.historyCompletionSemaphore.exportFd(vk.device,VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
-                    std::cerr << "lsfg-vk: zero-history-sync-fd framegen-submit fd=1\n";
+                    std::cerr << "lsfg-vk: zero-history-sync-fd framegen-submit fd=" << *historyCompletionFd << '\n';
                     this->frameIdx++; return;
                 } catch (const std::exception& e) {
                     if (!data.preprocessingFence.wait(vk.device,framegenWaitTimeoutNs())) throw LSFG::vulkan_error(VK_TIMEOUT,"Temporal preprocessing fallback wait timed out");
@@ -173,19 +173,22 @@ def patch_public(h: Path, s: Path, ns: str) -> None:
 
 def patch_outer_header(p: Path) -> None:
     t=p.read_text()
-    if "pendingHistoryCompletionSemaphore_" not in t:
+    if "pendingHistoryCompletionFd_" not in t:
         t=once(t,"    bool asyncAhbHandoffEnabled_{false};\n",
-            "    bool asyncAhbHandoffEnabled_{false};\n    bool asyncZeroHistoryEnabled_{false};\n    Mini::Semaphore pendingHistoryCompletionSemaphore_;\n    bool pendingHistoryCompletionValid_{false};\n    VkDevice androidDevice_{VK_NULL_HANDLE};\n",f"{p}: history state")
+            "    bool asyncAhbHandoffEnabled_{false};\n    bool asyncZeroHistoryEnabled_{false};\n    int pendingHistoryCompletionFd_{-1};\n    bool pendingHistoryCompletionValid_{false};\n    VkDevice androidDevice_{VK_NULL_HANDLE};\n    void waitPendingHistoryCompletionFd(bool throwOnTimeout);\n",f"{p}: history state")
     if "handoffFencePending" not in t:
         t=once(t,"        Mini::Semaphore framegenInputSemaphore;\n",
-            "        Mini::Semaphore framegenInputSemaphore;\n        Mini::Semaphore historyCompletionWaitSemaphore;\n        std::shared_ptr<VkFence> handoffFence;\n        bool handoffFencePending{false};\n",f"{p}: pass lifetime")
+            "        Mini::Semaphore framegenInputSemaphore;\n        std::shared_ptr<VkFence> handoffFence;\n        bool handoffFencePending{false};\n",f"{p}: pass lifetime")
     if "~LsContext();" not in t: t=once(t,"    ~LsContext() = default;\n","    ~LsContext();\n",f"{p}: destructor")
     p.write_text(t)
 
 
 def patch_outer(p: Path) -> None:
     t=p.read_text()
-    if "zero-history-sync-fd armed=1" in t: return
+    if "zero-history-sync-fd deferred=1" in t: return
+    if "#include <poll.h>" not in t:
+        t=once(t,"#include <android/log.h>\n",
+            "#include <android/log.h>\n#include <poll.h>\n#include <unistd.h>\n#include <cerrno>\n",f"{p}: deferred sync-fd poll includes")
     t=once(t,"#ifdef __ANDROID__\n    // Select and validate the exact framegen ICD before allocating any shared AHB.\n",
         "#ifdef __ANDROID__\n    this->androidDevice_=info.device;\n    // Select and validate the exact framegen ICD before allocating any shared AHB.\n",f"{p}: store device")
     t=once(t,"    this->asyncAhbHandoffHandleType_ = syncFdHandoffSupported\n        ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT\n        : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;\n",
@@ -198,10 +201,68 @@ def patch_outer(p: Path) -> None:
     t=once(t,old,new,f"{p}: fence ring")
     d='''LsContext::~LsContext() {\n#ifdef __ANDROID__\n    if (this->androidDevice_!=VK_NULL_HANDLE && this->waitHandoffFences) for (auto& pass:this->passInfos) if (pass.handoffFencePending && pass.handoffFence) { const VkFence f=*pass.handoffFence; (void)this->waitHandoffFences(this->androidDevice_,1,&f,VK_TRUE,runtimeWaitTimeoutNs()); pass.handoffFencePending=false; }\n#endif\n}\n\n'''
     t=insert_before(t,"VkResult LsContext::present(",d,f"{p}: destructor impl")
+    wait_helper=r'''#ifdef __ANDROID__
+void LsContext::waitPendingHistoryCompletionFd(bool throwOnTimeout) {
+    if (!this->pendingHistoryCompletionValid_)
+        return;
+    const int fd = this->pendingHistoryCompletionFd_;
+    if (fd < 0) {
+        this->pendingHistoryCompletionValid_ = false;
+        return;
+    }
+
+    pollfd descriptor{.fd = fd, .events = POLLIN, .revents = 0};
+    const auto pollCompletion = [&descriptor](int timeoutMs) {
+        int result = -1;
+        do {
+            result = ::poll(&descriptor, 1, timeoutMs);
+        } while (result < 0 && errno == EINTR);
+        return result;
+    };
+
+    int result = pollCompletion(0);
+    const bool blocked = result == 0;
+    const auto waitStart = RuntimeMetrics::Clock::now();
+    if (blocked) {
+        const int timeoutMs = static_cast<int>(
+            (runtimeWaitTimeoutNs() + 999999ULL) / 1000000ULL);
+        result = pollCompletion(timeoutMs);
+    }
+    const bool ready = result > 0
+        && (descriptor.revents & POLLIN) != 0
+        && (descriptor.revents & (POLLERR | POLLNVAL)) == 0;
+    if (!ready) {
+        if (throwOnTimeout) {
+            if (result == 0)
+                throw LSFG::vulkan_error(VK_TIMEOUT,
+                    "Timed out waiting for deferred zero-generation history completion");
+            throw LSFG::vulkan_error(VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                "Deferred zero-generation history sync fd became invalid");
+        }
+        ::close(fd);
+        this->pendingHistoryCompletionFd_ = -1;
+        this->pendingHistoryCompletionValid_ = false;
+        return;
+    }
+
+    ::close(fd);
+    this->pendingHistoryCompletionFd_ = -1;
+    this->pendingHistoryCompletionValid_ = false;
+    if (blocked) {
+        const double waitMs = std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - waitStart).count();
+        std::cerr << "lsfg-vk: zero-history-sync-fd host-retire wait_ms="
+                  << waitMs << '\n';
+    }
+}
+#endif
+
+'''
+    t=insert_before(t,"LsContext::~LsContext() {",wait_helper,f"{p}: deferred history fd wait")
     t=once(t,"    auto& metrics = this->runtimeMetrics;\n    const auto cycleStart = RuntimeMetrics::Clock::now();\n",
-        "    auto& metrics = this->runtimeMetrics;\n    const auto cycleStart = RuntimeMetrics::Clock::now();\n    if (pass.handoffFencePending) { const auto w=RuntimeMetrics::Clock::now(); waitForAhbHandoff(info.device,*pass.handoffFence,this->waitHandoffFences); metrics.windowHandoffHostWaitMs += std::chrono::duration<double,std::milli>(RuntimeMetrics::Clock::now()-w).count(); pass.handoffFencePending=false; pass.historyCompletionWaitSemaphore=Mini::Semaphore{}; }\n",f"{p}: retire slot")
+        "    auto& metrics = this->runtimeMetrics;\n    const auto cycleStart = RuntimeMetrics::Clock::now();\n    if (pass.handoffFencePending) { const auto w=RuntimeMetrics::Clock::now(); waitForAhbHandoff(info.device,*pass.handoffFence,this->waitHandoffFences); metrics.windowHandoffHostWaitMs += std::chrono::duration<double,std::milli>(RuntimeMetrics::Clock::now()-w).count(); pass.handoffFencePending=false; }\n",f"{p}: retire slot")
     t=once(t,"    std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;\n    if (this->previousSourceCopySignalValid_)\n",
-        "    std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;\n    if (this->pendingHistoryCompletionValid_) { pass.historyCompletionWaitSemaphore=this->pendingHistoryCompletionSemaphore_; gameRenderSemaphores2.emplace_back(pass.historyCompletionWaitSemaphore.handle()); this->pendingHistoryCompletionSemaphore_=Mini::Semaphore{}; this->pendingHistoryCompletionValid_=false; }\n    if (this->previousSourceCopySignalValid_)\n",f"{p}: consume reverse")
+        "    std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;\n    if (this->pendingHistoryCompletionValid_) this->waitPendingHistoryCompletionFd(true);\n    if (this->previousSourceCopySignalValid_)\n",f"{p}: consume reverse")
     t=once(t,"    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_\n        && generatedFrameCount > 0\n        && !warmupSourceHistory;\n",
         "    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_ && !warmupSourceHistory && (generatedFrameCount>0 || (adaptiveZeroGeneration && this->asyncZeroHistoryEnabled_));\n",f"{p}: async zero")
     t=t.replace("*this->ahbHandoffFence","*pass.handoffFence")
@@ -216,9 +277,12 @@ def patch_outer(p: Path) -> None:
         else if (conf.performance) LSFG_3_1P::presentContextWithCount(*this->lsfgCtxId,-1,noOutSems,0); else LSFG_3_1::presentContextWithCount(*this->lsfgCtxId,-1,noOutSems,0);
         metrics.windowDispatchMs += std::chrono::duration<double,std::milli>(RuntimeMetrics::Clock::now()-historyAdvanceStart).count();
         if (useAsyncHandoff) {
-            if (historyCompletionFd>=0) try { this->pendingHistoryCompletionSemaphore_=Mini::Semaphore::importFd(info.device,historyCompletionFd,VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT); this->pendingHistoryCompletionValid_=true; if(firstPresentDiagnostic||adaptiveTelemetry.discontinuityReset) std::cerr << "lsfg-vk: zero-history-sync-fd armed=1\n"; }
-            catch (const std::exception& e) { this->asyncZeroHistoryEnabled_=false; const bool ready=conf.performance ? LSFG_3_1P::waitContext(*this->lsfgCtxId,runtimeWaitTimeoutNs()) : LSFG_3_1::waitContext(*this->lsfgCtxId,runtimeWaitTimeoutNs()); if(!ready) throw LSFG::vulkan_error(VK_TIMEOUT,"Zero-generation history fallback wait timed out"); std::cerr << "lsfg-vk: zero-history-sync-fd import fallback: " << e.what() << '\n'; }
-            else { this->asyncZeroHistoryEnabled_=false; std::cerr << "lsfg-vk: zero-history-sync-fd disabled after framegen fallback\n"; }
+            if (historyCompletionFd>=0) {
+                if (this->pendingHistoryCompletionValid_) { ::close(historyCompletionFd); throw LSFG::vulkan_error(VK_ERROR_UNKNOWN,"Overlapping zero-generation history completion fd"); }
+                this->pendingHistoryCompletionFd_=historyCompletionFd;
+                this->pendingHistoryCompletionValid_=true;
+                if(firstPresentDiagnostic||adaptiveTelemetry.discontinuityReset) std::cerr << "lsfg-vk: zero-history-sync-fd deferred=1 fd=" << historyCompletionFd << '\n';
+            } else { this->asyncZeroHistoryEnabled_=false; std::cerr << "lsfg-vk: zero-history-sync-fd disabled after framegen fallback\n"; }
         }
 '''
     t=t[:zs]+block[:a]+mid+block[b:]+t[ze:]
