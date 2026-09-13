@@ -58,6 +58,25 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, transform)
 
+    def test_reprime_uses_normal_game_to_framegen_sync_fd_handoff(self) -> None:
+        transform = (ROOT / "scripts/adreno_deferred_zero_history.py").read_text(encoding="utf-8")
+        start = transform.index("// deferred-zero reprime-begin")
+        end = transform.index("deferred-zero reprime-complete source_only=1", start)
+        reprime = transform[start:end]
+
+        for marker in (
+            "Mini::Semaphore replayInputSemaphore",
+            "VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT",
+            "replayInputSemaphore.exportFd",
+            "replayInputSemaphoreFd",
+            "presentContextWithCountAndHistoryFd",
+            "deferred-zero reprime input-sync-fd",
+        ):
+            self.assertIn(marker, reprime)
+
+        self.assertIn("{ replayInputSemaphore.handle() }", reprime)
+        self.assertNotIn("*this->lsfgCtxId, -1, noOutSems, 0", reprime)
+
     def test_failure_and_lifecycle_paths_fall_back_without_changing_scheduler(self) -> None:
         transform = (ROOT / "scripts/adreno_deferred_zero_history.py").read_text(encoding="utf-8")
         for marker in (
