@@ -51,6 +51,11 @@ if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
     python3 "${REPO_ROOT}/scripts/apply-candidate-b-shader-hot-path.py" --root "${REPO_ROOT}"
 fi
 
+# Candidate B translation cleanup runs after optional profiling composition so
+# profiling keeps matching the original translator while measuring the optimized
+# SPIR-V that is ultimately compiled into the Android runtime.
+python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "${REPO_ROOT}"
+
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
 
 cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
