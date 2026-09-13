@@ -8,25 +8,27 @@ ROOT = Path(__file__).resolve().parents[1]
 class AndroidBatchOptimizationTest(unittest.TestCase):
     def test_android_last_context_keeps_private_runtime_resident(self) -> None:
         """Android swapchain churn must not destroy the private Vulkan runtime from deleteContext()."""
-        for backend, namespace in (("v3.1_src", "LSFG_3_1"), ("v3.1p_src", "LSFG_3_1P")):
+        transform = ROOT / "scripts/adreno_android_runtime_residency.py"
+        self.assertTrue(transform.exists(), "missing Android private-runtime residency transform")
+        text = transform.read_text(encoding="utf-8")
+        for marker in (
+            "framegen runtime retained after last Android context",
+            "#ifndef __ANDROID__",
+            "resetRuntime();",
+            "explicit finalize() path",
+            "contexts.erase(it)",
+        ):
+            self.assertIn(marker, text)
+
+        build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
+        self.assertIn("adreno_android_runtime_residency.py", build)
+        profile_gate = build.index('if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]')
+        runtime_patch = build.index("adreno_android_runtime_residency.py")
+        self.assertLess(runtime_patch, profile_gate, "runtime residency must apply to every Android build")
+
+        for backend in ("v3.1_src", "v3.1p_src"):
             source = (ROOT / "framegen" / backend / "lsfg.cpp").read_text(encoding="utf-8")
-            delete_start = source.index(f"void {namespace}::deleteContext")
-            finalize_start = source.index(f"void {namespace}::finalize", delete_start)
-            delete_body = source[delete_start:finalize_start]
-            finalize_body = source[finalize_start:]
-
-            self.assertIn("contexts.erase(it)", delete_body)
-            self.assertIn("#ifndef __ANDROID__", delete_body)
-            self.assertIn("framegen runtime retained after last Android context", delete_body)
-            self.assertIn("resetRuntime()", delete_body)
-            self.assertIn("resetRuntime()", finalize_body)
-
-            android_guard = delete_body.index("#ifndef __ANDROID__")
-            reset = delete_body.index("resetRuntime()", android_guard)
-            android_else = delete_body.index("#else", android_guard)
-            android_end = delete_body.index("#endif", android_else)
-            self.assertLess(reset, android_else)
-            self.assertLess(android_else, android_end)
+            self.assertIn("if (contexts.empty())\n        resetRuntime();", source)
 
     def test_android_config_reload_skips_legacy_100ms_sleep(self) -> None:
         """GameNative writes config atomically; Android must not add a fixed transition stall."""
