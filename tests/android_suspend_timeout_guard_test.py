@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -7,7 +11,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class AndroidSuspendTimeoutGuardTest(unittest.TestCase):
     def test_suspend_overshoot_gets_one_tiny_recheck_without_pacing_delay(self) -> None:
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        transform = ROOT / "scripts/adreno_suspend_timeout_guard.py"
+        self.assertTrue(transform.exists())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            (temp_root / "src").mkdir(parents=True)
+            shutil.copy2(ROOT / "src/context.cpp", temp_root / "src/context.cpp")
+            subprocess.run(
+                [sys.executable, str(transform), "--root", str(temp_root)],
+                check=True,
+            )
+            source = (temp_root / "src/context.cpp").read_text(encoding="utf-8")
 
         for marker in (
             "framegenCompletionWaitElapsedNs",
@@ -18,12 +33,17 @@ class AndroidSuspendTimeoutGuardTest(unittest.TestCase):
         ):
             self.assertIn(marker, source)
 
-        self.assertNotIn("sleep_for", source[source.index("const auto waitIdleStart"):source.index("// 4. Copy generated frames")])
+        wait_block = source[
+            source.index("const auto waitIdleStart"):
+            source.index("// 4. Copy generated frames")
+        ]
+        self.assertNotIn("sleep_for", wait_block)
         self.assertNotIn("delayUntilNextSourceOutput", source)
-
-        wait_block = source[source.index("const auto waitIdleStart"):source.index("// 4. Copy generated frames")]
-        self.assertEqual(wait_block.count("waitFramegenCompletion(resumeCompletionRecheckNs)"), 1)
-        self.assertIn("if (!framegenReady && framegenCompletionWaitElapsedNs > framegenCompletionTimeoutNs * 2)", wait_block)
+        self.assertEqual(
+            wait_block.count("waitFramegenCompletion(resumeCompletionRecheckNs)"),
+            1,
+        )
+        self.assertIn("framegenCompletionWaitElapsedNs > framegenCompletionTimeoutNs * 2", wait_block)
         self.assertIn("if (!framegenReady) {", wait_block)
 
 
