@@ -55,10 +55,12 @@ class AndroidCandidateBShaderHotPathContractTest(unittest.TestCase):
         self.assertTrue(patcher.exists(), patcher.as_posix())
         patch_source = patcher.read_text(encoding="utf-8")
 
+        # The patcher contains escaped C++ source strings; validate the durable
+        # implementation markers here, then inspect the transformed C++ below.
         for token in (
-            'shaderName == "p_mipmaps"',
-            'shaderName == "p_beta[4]"',
-            "info.options.supportsTightIcbPacking = true",
+            "p_mipmaps",
+            "p_beta[4]",
+            "supportsTightIcbPacking",
             "shader-hot-path-opt",
         ):
             self.assertIn(token, patch_source)
