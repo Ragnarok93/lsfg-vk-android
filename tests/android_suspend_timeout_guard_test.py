@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidSuspendTimeoutGuardTest(unittest.TestCase):
-    def test_suspend_overshoot_gets_one_tiny_recheck_without_pacing_delay(self) -> None:
+    def test_timeout_gets_one_fresh_bounded_recheck_without_pacing_delay(self) -> None:
         transform = ROOT / "scripts/adreno_suspend_timeout_guard.py"
         self.assertTrue(transform.exists())
 
@@ -26,10 +26,10 @@ class AndroidSuspendTimeoutGuardTest(unittest.TestCase):
 
         for marker in (
             "framegenCompletionWaitElapsedNs",
-            "framegenCompletionTimeoutNs * 2",
-            "resumeCompletionRecheckNs = 2'000'000ULL",
+            "resumeCompletionRecheckNs = 32'000'000ULL",
             "framegen-completion-resume-recheck",
             "waitFramegenCompletion(resumeCompletionRecheckNs)",
+            "initial_wait_ms=",
         ):
             self.assertIn(marker, source)
 
@@ -39,12 +39,13 @@ class AndroidSuspendTimeoutGuardTest(unittest.TestCase):
         ]
         self.assertNotIn("sleep_for", wait_block)
         self.assertNotIn("delayUntilNextSourceOutput", source)
+        self.assertNotIn("framegenCompletionTimeoutNs * 2", wait_block)
         self.assertEqual(
             wait_block.count("waitFramegenCompletion(resumeCompletionRecheckNs)"),
             1,
         )
-        self.assertIn("framegenCompletionWaitElapsedNs > framegenCompletionTimeoutNs * 2", wait_block)
         self.assertIn("if (!framegenReady) {", wait_block)
+        self.assertIn("if (!framegenReady) {", wait_block[wait_block.index("resumeCompletionRecheckNs"):])
 
 
 if __name__ == "__main__":
