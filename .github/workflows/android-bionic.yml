@@ -43,6 +43,7 @@ jobs:
           python3 tests/android_zero_stage_profile_test.py
           python3 tests/android_mipmaps_shader_profile_test.py
           python3 tests/android_candidate_b_shader_hot_path_test.py
+          python3 tests/android_candidate_b_shader_optimization_test.py
           python3 tests/android_adreno_evidence_bundle_test.py
           python3 tests/android_adreno_evidence_timestamp_stage_test.py
           python3 tests/android_capability_architecture_test.py
