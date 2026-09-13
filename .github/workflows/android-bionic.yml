@@ -39,6 +39,7 @@ jobs:
           python3 tests/android_runtime_stability_test.py
           python3 tests/android_suspend_timeout_guard_test.py
           python3 tests/android_adaptive_history_test.py
+          python3 tests/android_batch_optimization_test.py
           python3 tests/android_zero_stage_profile_test.py
           python3 tests/android_mipmaps_shader_profile_test.py
           python3 tests/android_adreno_evidence_bundle_test.py
@@ -115,7 +116,7 @@ jobs:
         run: |
           file "build-android-${{ matrix.abi }}/dist/liblsfg-vk-${{ matrix.abi }}.so"
           "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
-            -h -d "build-android-${{ matrix.abi }}/dist/liblsfg-vk-${{ matrix.abi }}.so"
+            -h -d "build-android-${ANDROID_ABI}/dist/liblsfg-vk-${ANDROID_ABI}.so"
 
       - name: Upload ${{ matrix.abi }} artifact
         uses: actions/upload-artifact@v4
