@@ -9,6 +9,7 @@ from adreno_evidence_outer import patch_outer_header, patch_outer_source
 from adreno_evidence_framegen import patch_framegen_header, patch_framegen_source, patch_timestamp_query_pool
 from adreno_evidence_common import replace_exact
 from adreno_syncfd_handoff import apply as apply_syncfd_handoff
+from adreno_async_zero_history import apply as apply_async_zero_history
 
 FRAMEGEN_HEADERS = (
     Path("framegen/v3.1_include/v3_1/context.hpp"),
@@ -75,6 +76,7 @@ def main() -> None:
         patch_framegen_source(root / rel, backend)
     apply_syncfd_handoff(root)
     normalize_sync_fd_import_initializer(root / "framegen/src/core/semaphore.cpp")
+    apply_async_zero_history(root)
 
 
 if __name__ == "__main__":
