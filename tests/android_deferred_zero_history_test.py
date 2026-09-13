@@ -59,10 +59,9 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
             self.assertIn(marker, transform)
 
     def test_reprime_uses_normal_game_to_framegen_sync_fd_handoff(self) -> None:
-        transform = (ROOT / "scripts/adreno_deferred_zero_history.py").read_text(encoding="utf-8")
-        start = transform.index("// deferred-zero reprime-begin")
-        end = transform.index("deferred-zero reprime-complete source_only=1", start)
-        reprime = transform[start:end]
+        sync_transform = ROOT / "scripts/adreno_deferred_zero_reprime_sync.py"
+        self.assertTrue(sync_transform.exists(), "missing synchronized re-prime transform")
+        reprime = sync_transform.read_text(encoding="utf-8")
 
         for marker in (
             "Mini::Semaphore replayInputSemaphore",
@@ -71,11 +70,23 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
             "replayInputSemaphoreFd",
             "presentContextWithCountAndHistoryFd",
             "deferred-zero reprime input-sync-fd",
+            "asyncZeroHistoryEnabled_",
         ):
             self.assertIn(marker, reprime)
 
         self.assertIn("{ replayInputSemaphore.handle() }", reprime)
         self.assertNotIn("*this->lsfgCtxId, -1, noOutSems, 0", reprime)
+
+        bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
+        self.assertIn("apply_deferred_zero_reprime_sync(root)", bundle)
+        self.assertLess(
+            bundle.index("apply_deferred_zero_history(root)"),
+            bundle.index("apply_deferred_zero_reprime_sync(root)"),
+        )
+        self.assertLess(
+            bundle.index("apply_deferred_zero_reprime_sync(root)"),
+            bundle.index("apply_deferred_zero_history_finalize(root)"),
+        )
 
     def test_failure_and_lifecycle_paths_fall_back_without_changing_scheduler(self) -> None:
         transform = (ROOT / "scripts/adreno_deferred_zero_history.py").read_text(encoding="utf-8")
