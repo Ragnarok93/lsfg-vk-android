@@ -166,9 +166,11 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             ):
                 self.assertIn(field, perf_source)
 
-            # Profiling must use the existing command buffers/fences rather than
-            # adding a new queue submission or host wait edge.
-            self.assertEqual(perf_source.count("data.cmdBuffer1.submit("), 2)
+            # Profiling still reuses the established command buffers/fences. The
+            # third first-stage submit is the functional async zero-history path,
+            # which signals a reverse completion semaphore instead of host-waiting.
+            self.assertEqual(perf_source.count("data.cmdBuffer1.submit("), 3)
+            self.assertIn("historyCompletionSemaphore", perf_source)
             self.assertNotIn("generatedProfileFence", perf_source)
             self.assertNotIn("sourceCopyProfileFence", outer_source)
 
