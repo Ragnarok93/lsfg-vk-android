@@ -46,6 +46,16 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         self.assertIn("const bool generationActive = activeConf.multiplier > 1", hooks)
         self.assertIn('generationActive ? "generating" : "source_only"', hooks)
 
+    def test_resident_context_sizes_present_resources_to_runtime_capacity(self) -> None:
+        """A 2x resident context must already own the slots needed by later 3x/4x hot toggles."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        allocation_start = source.index("for (size_t i = 0; i < 8; i++)")
+        allocation_end = source.index("\n    }\n}", allocation_start)
+        allocation = source[allocation_start:allocation_end]
+
+        self.assertGreaterEqual(allocation.count("resize(runtimeMultiplier - 1)"), 5)
+        self.assertNotIn("resize(conf.multiplier - 1)", allocation)
+
 
 if __name__ == "__main__":
     unittest.main()
