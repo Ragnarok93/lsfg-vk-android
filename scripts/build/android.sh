@@ -38,8 +38,10 @@ BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build-android-${ABI}}"
 DIST_DIR="${DIST_DIR:-${BUILD_DIR}/dist}"
 
 # Android runtime hardening is part of the runtime itself, not profiling. Keep
-# the resume recheck bounded and independent of all source pacing/cadence code.
+# lifecycle/config behavior deterministic for every Android/Bionic build.
 python3 "${REPO_ROOT}/scripts/adreno_suspend_timeout_guard.py" --root "${REPO_ROOT}"
+python3 "${REPO_ROOT}/scripts/adreno_android_runtime_residency.py" --root "${REPO_ROOT}"
+python3 "${REPO_ROOT}/scripts/adreno_android_config_reload.py" --root "${REPO_ROOT}"
 
 if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
     echo "[lsfg-vk] Enabling temporary zero-stage GPU profiling instrumentation"
