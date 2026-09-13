@@ -36,12 +36,13 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             for relative in (
                 "scripts/adreno_syncfd_handoff.py",
                 "scripts/adreno_async_zero_history.py",
+                "scripts/adreno_slot_aware_zero_history.py",
             )
         )
 
         for marker in (
             "historyCompletionFd",
-            "pendingHistoryCompletionFd_",
+            "pendingHistoryCompletionFds_",
             "waitPendingHistoryCompletionFd",
             "adaptiveZeroGeneration",
             "zero-history-sync-fd",
@@ -59,7 +60,7 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
 
     def test_zero_history_retirement_is_slot_aware_without_pacing_delay(self) -> None:
         """A zero pass may overlap the next frame but must retire before its input slot is reused."""
-        transform = (ROOT / "scripts/adreno_async_zero_history.py").read_text(encoding="utf-8")
+        transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
 
         for marker in (
             "pendingHistoryCompletionFds_",
@@ -85,7 +86,7 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
 
     def test_zero_generation_direct_storage_owns_only_active_input(self) -> None:
         """Slot-aware retirement is safe only when zero preprocessing owns the parity input alone."""
-        transform = (ROOT / "scripts/adreno_async_zero_history.py").read_text(encoding="utf-8")
+        transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
 
         for marker in (
             "generationCount == 0 && !this->transportOnly",
@@ -108,6 +109,7 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         hardening_path = ROOT / "scripts/adreno_async_zero_history_hardening.py"
         self.assertTrue(hardening_path.exists(), "missing async zero-history lifecycle hardening transform")
         hardening = hardening_path.read_text(encoding="utf-8")
+        slot_aware = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
         apply_bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
 
         for marker in (
@@ -122,7 +124,21 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         ):
             self.assertIn(marker, hardening)
 
+        for marker in (
+            "pendingHistoryCompletionValid_.at(0)",
+            "pendingHistoryCompletionValid_.at(1)",
+            "waitPendingHistoryCompletionFd(historySlot, throwOnTimeout)",
+            "pendingHistoryCompletionFds_.fill(-1)",
+            "pendingHistoryCompletionValid_.fill(false)",
+        ):
+            self.assertIn(marker, slot_aware)
+
         self.assertIn("apply_async_zero_history_hardening(root)", apply_bundle)
+        self.assertIn("apply_slot_aware_zero_history(root)", apply_bundle)
+        self.assertLess(
+            apply_bundle.index("apply_async_zero_history_hardening(root)"),
+            apply_bundle.index("apply_slot_aware_zero_history(root)"),
+        )
 
 
 if __name__ == "__main__":
