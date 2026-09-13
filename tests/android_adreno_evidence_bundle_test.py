@@ -191,10 +191,14 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             ):
                 self.assertIn(field, perf_source)
 
-            # Profiling still reuses the established command buffers/fences. The
-            # third first-stage submit is the functional async zero-history path,
-            # which signals a reverse completion semaphore instead of host-waiting.
-            self.assertEqual(perf_source.count("data.cmdBuffer1.submit("), 3)
+            # Profiling keeps the established submits and adds exactly one
+            # TransportOnly preprocessing submit behind an internal semaphore.
+            # The exported history-completion semaphore is signaled by the
+            # preceding shared-AHB release submit, not by private mipmaps/alpha.
+            self.assertEqual(perf_source.count("data.cmdBuffer1.submit("), 4)
+            self.assertIn("data.transportReleaseCommandBuffer.submit(", perf_source)
+            self.assertIn("{data.historyCompletionSemaphore,data.transportReadySemaphore}", perf_source)
+            self.assertIn("{data.transportReadySemaphore}", perf_source)
             self.assertIn("historyCompletionSemaphore", perf_source)
             self.assertNotIn("generatedProfileFence", perf_source)
             self.assertNotIn("sourceCopyProfileFence", outer_source)
