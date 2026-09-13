@@ -13,7 +13,7 @@ from adreno_async_zero_history import apply as apply_async_zero_history
 from adreno_async_zero_history_hardening import apply as apply_async_zero_history_hardening
 from adreno_slot_aware_zero_history import apply as apply_slot_aware_zero_history
 from adreno_transport_release_overlap import apply as apply_transport_release_overlap
-from adreno_deferred_zero_history import apply as apply_deferred_zero_history
+from adreno_deferred_zero_history_build import apply as apply_deferred_zero_history
 
 FRAMEGEN_HEADERS = (
     Path("framegen/v3.1_include/v3_1/context.hpp"),
