@@ -31,7 +31,13 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
 
     def test_adaptive_zero_generation_has_reverse_sync_fd_contract(self) -> None:
         """Zero-generation history preprocessing must complete GPU-to-GPU, not by an immediate host wait."""
-        transform = (ROOT / "scripts/adreno_syncfd_handoff.py").read_text(encoding="utf-8")
+        transform = "\n".join(
+            (ROOT / relative).read_text(encoding="utf-8")
+            for relative in (
+                "scripts/adreno_syncfd_handoff.py",
+                "scripts/adreno_async_zero_history.py",
+            )
+        )
 
         self.assertIn("historyCompletionFd", transform)
         self.assertIn("pendingHistoryCompletionSemaphore_", transform)
@@ -39,6 +45,8 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         self.assertIn("adaptiveZeroGeneration", transform)
         self.assertIn("zero-history-sync-fd", transform)
         self.assertIn("preprocessingPending", transform)
+        self.assertIn("handoffFencePending", transform)
+        self.assertIn("presentContextWithCountAndHistoryFd", transform)
 
 
 if __name__ == "__main__":
