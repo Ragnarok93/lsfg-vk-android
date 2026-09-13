@@ -39,8 +39,8 @@ def patch_outer_header(path: Path) -> None:
 
     text = once(
         text,
-        "    VkDevice androidDevice_{VK_NULL_HANDLE};\n",
-        "    VkDevice androidDevice_{VK_NULL_HANDLE};\n"
+        "    void waitPendingHistoryCompletionFd(bool throwOnTimeout);\n",
+        "    void waitPendingHistoryCompletionFd(bool throwOnTimeout);\n"
         "    bool performanceBackend_{false};\n"
         "    void flushPendingAndroidWork(bool throwOnTimeout);\n",
         f"{path}: lifecycle drain declaration",
