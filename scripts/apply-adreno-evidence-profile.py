@@ -15,6 +15,7 @@ from adreno_slot_aware_zero_history import apply as apply_slot_aware_zero_histor
 from adreno_transport_release_overlap import apply as apply_transport_release_overlap
 from adreno_deferred_zero_history_build import apply as apply_deferred_zero_history
 from adreno_deferred_zero_reprime_sync import apply as apply_deferred_zero_reprime_sync
+from adreno_deferred_zero_reprime_guard import apply as apply_deferred_zero_reprime_guard
 from adreno_deferred_zero_history_finalize import apply as apply_deferred_zero_history_finalize
 
 FRAMEGEN_HEADERS = (
@@ -94,6 +95,7 @@ def main() -> None:
     if (root / "include/mini/image.hpp").exists():
         apply_deferred_zero_history(root)
         apply_deferred_zero_reprime_sync(root)
+        apply_deferred_zero_reprime_guard(root)
         apply_deferred_zero_history_finalize(root)
 
 
