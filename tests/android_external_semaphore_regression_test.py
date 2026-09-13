@@ -48,6 +48,26 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         self.assertIn("handoffFencePending", transform)
         self.assertIn("presentContextWithCountAndHistoryFd", transform)
 
+    def test_async_zero_history_hardens_lifecycle_and_public_api(self) -> None:
+        """Deferred zero-history work must be drained on bypass/teardown without hiding waitContext."""
+        hardening_path = ROOT / "scripts/adreno_async_zero_history_hardening.py"
+        self.assertTrue(hardening_path.exists(), "missing async zero-history lifecycle hardening transform")
+        hardening = hardening_path.read_text(encoding="utf-8")
+        apply_bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
+
+        for marker in (
+            "flushPendingAndroidWork",
+            "performanceBackend_",
+            "pendingHistoryCompletionValid_",
+            "handoffFencePending",
+            "enterSourceOnlyBypass",
+            "presentContextWithCountAndHistoryFd",
+            '    __attribute__((visibility("default")))\\n    bool waitContext',
+        ):
+            self.assertIn(marker, hardening)
+
+        self.assertIn("apply_async_zero_history_hardening(root)", apply_bundle)
+
 
 if __name__ == "__main__":
     unittest.main()
