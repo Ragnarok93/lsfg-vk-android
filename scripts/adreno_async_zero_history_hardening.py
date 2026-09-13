@@ -91,7 +91,7 @@ void LsContext::flushPendingAndroidWork(bool throwOnTimeout) {
                     throw LSFG::vulkan_error(result,
                         "Timed out draining Android AHB handoff before lifecycle reset");
                 std::cerr << "lsfg-vk: zero-history-lifecycle-drain game-fence result="
-                          << result << "\n";
+                          << result << "\\n";
                 return;
             }
             pass.handoffFencePending = false;
@@ -109,7 +109,7 @@ void LsContext::flushPendingAndroidWork(bool throwOnTimeout) {
             if (throwOnTimeout)
                 throw LSFG::vulkan_error(VK_TIMEOUT,
                     "Timed out draining zero-generation preprocessing before lifecycle reset");
-            std::cerr << "lsfg-vk: zero-history-lifecycle-drain framegen-timeout=1\n";
+            std::cerr << "lsfg-vk: zero-history-lifecycle-drain framegen-timeout=1\\n";
             return;
         }
     }
@@ -118,7 +118,7 @@ void LsContext::flushPendingAndroidWork(bool throwOnTimeout) {
     this->pendingHistoryCompletionValid_ = false;
     for (auto& pass : this->passInfos)
         pass.historyCompletionWaitSemaphore = Mini::Semaphore{};
-    std::cerr << "lsfg-vk: zero-history-lifecycle-drain ready=1\n";
+    std::cerr << "lsfg-vk: zero-history-lifecycle-drain ready=1\\n";
 }
 #endif
 
@@ -128,7 +128,7 @@ LsContext::~LsContext() {
         this->flushPendingAndroidWork(false);
     } catch (const std::exception& error) {
         std::cerr << "lsfg-vk: zero-history-lifecycle-drain destructor-error: "
-                  << error.what() << "\n";
+                  << error.what() << "\\n";
     }
 #endif
 }
