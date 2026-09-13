@@ -61,7 +61,10 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
     def test_reprime_uses_normal_game_to_framegen_sync_fd_handoff(self) -> None:
         sync_transform = ROOT / "scripts/adreno_deferred_zero_reprime_sync.py"
         self.assertTrue(sync_transform.exists(), "missing synchronized re-prime transform")
-        reprime = sync_transform.read_text(encoding="utf-8")
+        transform_text = sync_transform.read_text(encoding="utf-8")
+        replacement_start = transform_text.index("new_replay =")
+        replacement_end = transform_text.index("text = once(", replacement_start)
+        reprime = transform_text[replacement_start:replacement_end]
 
         for marker in (
             "Mini::Semaphore replayInputSemaphore",
