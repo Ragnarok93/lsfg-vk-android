@@ -19,10 +19,106 @@ def patch_framegen_source(path: Path) -> None:
         "#ifdef __ANDROID__\n    if (this->transportOnly) {\n",
         "#ifdef __ANDROID__\n"
         "    const bool zeroGenerationDirectStorage = generationCount == 0 && !this->transportOnly;\n"
+        "    const bool zeroGenerationTransportOnly = generationCount == 0 && this->transportOnly;\n"
         "    Core::Image& activeHistoryInput = (this->frameIdx % 2 == 0)\n"
         "        ? this->inImg_0 : this->inImg_1;\n"
+        "    Core::Image& activeSharedHistoryInput = (this->frameIdx % 2 == 0)\n"
+        "        ? this->sharedInImg_0 : this->sharedInImg_1;\n"
+        "    Core::Image& activePrivateHistoryInput = (this->frameIdx % 2 == 0)\n"
+        "        ? this->inImg_0 : this->inImg_1;\n"
         "    if (this->transportOnly) {\n",
-        f"{path}: identify active zero-history input",
+        f"{path}: identify active zero-history inputs",
+    )
+
+    old_transport = """    if (this->transportOnly) {
+        std::vector<VkImageMemoryBarrier2> barriers;
+        barriers.reserve(4);
+        add_external_transfer_acquire(barriers, vk, this->sharedInImg_0,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        add_external_transfer_acquire(barriers, vk, this->sharedInImg_1,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        add_local_transition(barriers, this->inImg_0, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        add_local_transition(barriers, this->inImg_1, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        emit_external_barriers(data.cmdBuffer1, barriers);
+        copy_same_format(data.cmdBuffer1, this->sharedInImg_0, this->inImg_0);
+        copy_same_format(data.cmdBuffer1, this->sharedInImg_1, this->inImg_1);
+        barriers.clear();
+        add_local_transition(barriers, this->inImg_0, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+        add_local_transition(barriers, this->inImg_1, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+        add_external_transfer_release(barriers, vk, this->sharedInImg_0,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        add_external_transfer_release(barriers, vk, this->sharedInImg_1,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        emit_external_barriers(data.cmdBuffer1, barriers);
+    } else {
+"""
+    new_transport = """    if (this->transportOnly) {
+        std::vector<VkImageMemoryBarrier2> barriers;
+        barriers.reserve(4);
+        if (zeroGenerationTransportOnly) {
+            // zero-generation transport-only active input acquire
+            add_external_transfer_acquire(barriers, vk, activeSharedHistoryInput,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+            add_local_transition(barriers, activePrivateHistoryInput,
+                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        } else {
+            add_external_transfer_acquire(barriers, vk, this->sharedInImg_0,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+            add_external_transfer_acquire(barriers, vk, this->sharedInImg_1,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+            add_local_transition(barriers, this->inImg_0, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            add_local_transition(barriers, this->inImg_1, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        }
+        emit_external_barriers(data.cmdBuffer1, barriers);
+        if (zeroGenerationTransportOnly) {
+            copy_same_format(data.cmdBuffer1, activeSharedHistoryInput, activePrivateHistoryInput);
+        } else {
+            copy_same_format(data.cmdBuffer1, this->sharedInImg_0, this->inImg_0);
+            copy_same_format(data.cmdBuffer1, this->sharedInImg_1, this->inImg_1);
+        }
+        barriers.clear();
+        if (zeroGenerationTransportOnly) {
+            add_local_transition(barriers, activePrivateHistoryInput,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL);
+            // zero-generation transport-only active input release
+            add_external_transfer_release(barriers, vk, activeSharedHistoryInput,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        } else {
+            add_local_transition(barriers, this->inImg_0, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            add_local_transition(barriers, this->inImg_1, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            add_external_transfer_release(barriers, vk, this->sharedInImg_0,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+            add_external_transfer_release(barriers, vk, this->sharedInImg_1,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT);
+        }
+        emit_external_barriers(data.cmdBuffer1, barriers);
+    } else {
+"""
+    text = once(
+        text,
+        old_transport,
+        new_transport,
+        f"{path}: zero-generation transport-only active input acquire/release",
     )
 
     old_acquire = """        std::vector<VkImageMemoryBarrier2> acquireBarriers;
@@ -100,9 +196,10 @@ def patch_outer_source(path: Path) -> None:
         "    this->asyncZeroHistoryEnabled_="
         "this->asyncAhbHandoffEnabled_ && "
         "this->asyncAhbHandoffHandleType_==VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT && "
-        "ahbTransportMode==LSFG::AhbTransportMode::DirectStorage;\n"
+        "(ahbTransportMode==LSFG::AhbTransportMode::DirectStorage || "
+        "ahbTransportMode==LSFG::AhbTransportMode::TransportOnly);\n"
     )
-    text = once(text, old_enable, new_enable, f"{path}: direct-storage zero-history gate")
+    text = once(text, old_enable, new_enable, f"{path}: supported transport zero-history gate")
 
     old_helper = r'''#ifdef __ANDROID__
 void LsContext::waitPendingHistoryCompletionFd(bool throwOnTimeout) {
