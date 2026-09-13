@@ -74,7 +74,9 @@ def main() -> None:
         patch_framegen_header(root / rel)
     for rel, backend in FRAMEGEN_SOURCES:
         patch_framegen_source(root / rel, backend)
-    apply_syncfd_handoff(root)
+    mini_semaphore_header = root / "include/mini/semaphore.hpp"
+    if "int exportFd(" not in mini_semaphore_header.read_text(encoding="utf-8"):
+        apply_syncfd_handoff(root)
     normalize_sync_fd_import_initializer(root / "framegen/src/core/semaphore.cpp")
     apply_async_zero_history(root)
 
