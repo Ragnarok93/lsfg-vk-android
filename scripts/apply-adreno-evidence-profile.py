@@ -13,10 +13,6 @@ from adreno_async_zero_history import apply as apply_async_zero_history
 from adreno_async_zero_history_hardening import apply as apply_async_zero_history_hardening
 from adreno_slot_aware_zero_history import apply as apply_slot_aware_zero_history
 from adreno_transport_release_overlap import apply as apply_transport_release_overlap
-from adreno_deferred_zero_history_build import apply as apply_deferred_zero_history
-from adreno_deferred_zero_reprime_sync import apply as apply_deferred_zero_reprime_sync
-from adreno_deferred_zero_reprime_guard import apply as apply_deferred_zero_reprime_guard
-from adreno_deferred_zero_history_finalize import apply as apply_deferred_zero_history_finalize
 
 FRAMEGEN_HEADERS = (
     Path("framegen/v3.1_include/v3_1/context.hpp"),
@@ -89,14 +85,6 @@ def main() -> None:
     apply_async_zero_history_hardening(root)
     apply_slot_aware_zero_history(root)
     apply_transport_release_overlap(root)
-    # Synthetic evidence-bundle fixtures intentionally contain only the files
-    # touched by that test. Full Android builds always contain Mini::Image and
-    # therefore always apply Candidate A here.
-    if (root / "include/mini/image.hpp").exists():
-        apply_deferred_zero_history(root)
-        apply_deferred_zero_reprime_sync(root)
-        apply_deferred_zero_reprime_guard(root)
-        apply_deferred_zero_history_finalize(root)
 
 
 if __name__ == "__main__":
