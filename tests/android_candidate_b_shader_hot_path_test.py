@@ -46,6 +46,37 @@ class AndroidCandidateBShaderHotPathContractTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, source)
 
+    def test_candidate_b_translation_cleanup_is_android_only_and_hot_path_scoped(self) -> None:
+        header = (ROOT / "include/extract/trans.hpp").read_text(encoding="utf-8")
+        translator = (ROOT / "src/extract/trans.cpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "translateShader(std::vector<uint8_t> bytecode, const std::string& shaderName)",
+            header,
+        )
+        self.assertIn('shaderName == "p_mipmaps"', translator)
+        self.assertIn('shaderName == "p_beta[4]"', translator)
+        self.assertIn("info.options.supportsTightIcbPacking = true", translator)
+        self.assertIn("shader-hot-path-opt", translator)
+
+        android_section = context.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        desktop_section = context.rsplit("#else", 1)[1]
+        self.assertIn("Extract::translateShader(dxbc, name)", android_section)
+        self.assertIn("Extract::translateShader(dxbc)", desktop_section)
+
+        # Candidate B level-1 cleanup must not mutate algorithm topology or quality.
+        for forbidden in (
+            "OpExecutionMode",
+            "ExecutionModeLocalSize",
+            "LocalSize",
+            "VK_FORMAT_R8_UNORM",
+            "VK_FORMAT_R16",
+            "forceComputeUavBarriers = true",
+            "forceVolatileTgsmAccess = true",
+        ):
+            self.assertNotIn(forbidden, translator)
+
 
 if __name__ == "__main__":
     unittest.main()
