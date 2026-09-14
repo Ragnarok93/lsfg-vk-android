@@ -58,6 +58,13 @@ fi
 # SPIR-V that is ultimately compiled into the Android runtime.
 python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "${REPO_ROOT}"
 
+# Candidate B4 is deliberately opt-in until the exact Adreno 650 module proves
+# the required device-side gain. The transform itself fingerprints p_beta[4]
+# and leaves any non-matching module byte-for-byte unchanged.
+if [[ "${LSFGVK_CANDIDATE_B4_BETA4_PREDICATES:-0}" == "1" ]]; then
+    python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate-canonicalization.py" --root "${REPO_ROOT}"
+fi
+
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
 
 cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
