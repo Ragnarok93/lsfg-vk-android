@@ -49,6 +49,7 @@ if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
     python3 "${REPO_ROOT}/scripts/apply-mipmaps-shader-profile.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-adreno-evidence-profile.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-candidate-b-shader-hot-path.py" --root "${REPO_ROOT}"
+    python3 "${REPO_ROOT}/scripts/apply-candidate-b2-mipmaps-dependency-profile.py" --root "${REPO_ROOT}"
 fi
 
 # Candidate B translation cleanup runs after optional profiling composition so

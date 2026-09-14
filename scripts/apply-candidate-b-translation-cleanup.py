@@ -4,7 +4,10 @@
 This transform intentionally runs after optional shader profiling transforms so
 those already-validated transforms can keep matching the original source. It is
 safe in profiling and non-profiling builds and changes only DXBC translation for
-p_mipmaps and p_beta[4].
+p_mipmaps and p_beta[4]. The first Candidate B device run did not demonstrate a
+large enough gain from tight ICB packing, so that experiment is now developer
+opt-in through LSFGVK_CANDIDATE_B_TIGHT_ICB=1 instead of being silently baked
+into every Android build.
 """
 from __future__ import annotations
 
@@ -55,6 +58,12 @@ def patch_translator(path: Path) -> None:
     if "shader-hot-path-opt" in text:
         return
 
+    if "#include <cstdlib>" not in text:
+        insert_after = "#include <algorithm>\n"
+        if insert_after not in text:
+            raise RuntimeError(f"{path}: algorithm include anchor missing")
+        text = text.replace(insert_after, insert_after + "#include <cstdlib>\n", 1)
+
     if "#include <iostream>" not in text:
         insert_after = "#include <algorithm>\n"
         if insert_after not in text:
@@ -83,10 +92,15 @@ def patch_translator(path: Path) -> None:
         "    dxvk::DxbcModuleInfo info{};\n"
         "    const bool optimizeHotPath = shaderName == \"p_mipmaps\"\n"
         "        || shaderName == \"p_beta[4]\";\n"
-        "    if (optimizeHotPath) {\n"
+        "    const char* tightIcbEnv = std::getenv(\"LSFGVK_CANDIDATE_B_TIGHT_ICB\");\n"
+        "    const bool tightIcbEnabled = tightIcbEnv != nullptr\n"
+        "        && tightIcbEnv[0] == '1' && tightIcbEnv[1] == '\\0';\n"
+        "    if (optimizeHotPath && tightIcbEnabled) {\n"
         "        info.options.supportsTightIcbPacking = true;\n"
+        "    }\n"
+        "    if (optimizeHotPath) {\n"
         "        std::cerr << \"lsfg-vk: shader-hot-path-opt shader=\" << shaderName\n"
-        "                  << \" tight_icb=1\" << std::endl;\n"
+        "                  << \" tight_icb=\" << (tightIcbEnabled ? 1 : 0) << std::endl;\n"
         "    }\n"
         "    auto code = module.compile(info, \"CS\");\n"
     )
