@@ -57,6 +57,9 @@ fi
 # profiling keeps matching the original translator while measuring the optimized
 # SPIR-V that is ultimately compiled into the Android runtime.
 python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "${REPO_ROOT}"
+# Candidate B4 rewrites only the exact fingerprinted Performance Beta-4 predicate
+# chains after shader-name propagation and optional evidence instrumentation.
+python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate-opt.py" --root "${REPO_ROOT}"
 
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
 
