@@ -63,6 +63,11 @@ python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "
 # builds; when profiling is enabled it executes before the B3 evidence log call.
 python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate.py" --root "${REPO_ROOT}"
 
+# Candidate B5 applies the same exact-module predicate canonicalization to the
+# Mipmaps reduction chain. It runs after B4 and before profiling observes the
+# translated Mipmaps module; fingerprint mismatch is a safe no-op.
+python3 "${REPO_ROOT}/scripts/apply-candidate-b5-mipmaps-predicate.py" --root "${REPO_ROOT}"
+
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
 
 cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
