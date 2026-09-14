@@ -37,7 +37,7 @@ class AndroidCandidateB6MipmapsPhase0SsaContractTest(unittest.TestCase):
             trans = root / 'src/extract/trans.cpp'
             trans.parent.mkdir(parents=True)
             trans.write_text(
-                '#include <cstddef>\n#include <algorithm>\nstruct BindingOffsets {\n    int unused;\n};\n'
+                '#include <cstdint>\n#include <cstddef>\n#include <algorithm>\nstruct BindingOffsets {\n    int unused;\n};\n'
                 'void translated(const std::string& shaderName, std::vector<uint8_t>& spirvBytecode) {\n'
                 '    applyCandidateB4Beta4PredicateCanonicalization(shaderName, spirvBytecode);\n'
                 '    logMipmapsSpirvProfile(shaderName, spirvBytecode);\n}\n', encoding='utf-8')
