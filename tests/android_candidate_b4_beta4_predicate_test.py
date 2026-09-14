@@ -47,7 +47,7 @@ class AndroidCandidateB4Beta4PredicateContractTest(unittest.TestCase):
             trans.write_text(
                 '#include <cstddef>\n#include <algorithm>\nnamespace {\n'
                 '    void logBeta4DependencyProfile(const std::string&, const std::vector<uint8_t>&) {}\n'
-                '}\nstruct BindingOffsets { int unused; };\n'
+                '}\nstruct BindingOffsets {\n    int unused;\n};\n'
                 'void translated(const std::string& shaderName, std::vector<uint8_t>& spirvBytecode) {\n'
                 '    logMipmapsSpirvProfile(shaderName, spirvBytecode);\n'
                 '    logBeta4DependencyProfile(shaderName, spirvBytecode);\n}\n', encoding='utf-8')
@@ -66,7 +66,7 @@ class AndroidCandidateB4Beta4PredicateContractTest(unittest.TestCase):
             trans = root / 'src/extract/trans.cpp'
             trans.parent.mkdir(parents=True)
             trans.write_text(
-                '#include <cstddef>\n#include <algorithm>\nstruct BindingOffsets { int unused; };\n'
+                '#include <cstddef>\n#include <algorithm>\nstruct BindingOffsets {\n    int unused;\n};\n'
                 'std::vector<uint8_t> translated(const std::string& shaderName, std::vector<uint8_t> spirvBytecode) {\n'
                 '    return spirvBytecode;\n}\n', encoding='utf-8')
             subprocess.run([sys.executable, str(patcher), '--root', str(root)], check=True)
