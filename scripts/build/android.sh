@@ -58,6 +58,11 @@ fi
 # SPIR-V that is ultimately compiled into the Android runtime.
 python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "${REPO_ROOT}"
 
+# Candidate B4 is an exact, lossless post-translation rewrite. Run it after the
+# named-shader cleanup so it is active in both profiling and production Android
+# builds; when profiling is enabled it executes before the B3 evidence log call.
+python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate.py" --root "${REPO_ROOT}"
+
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
 
 cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
