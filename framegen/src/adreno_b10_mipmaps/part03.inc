@@ -38,7 +38,7 @@
     const uint32_t sixteenU = module.constu32(16);
     const uint32_t thirtyTwoU = module.constu32(32);
     const uint32_t scope = module.constu32(static_cast<uint32_t>(spv::ScopeWorkgroup));
-    const uint32_t semantics = module.constu32(0x6108u);
+    const uint32_t semantics = module.constu32(0x0108u);
     const uint32_t quarter = module.constf32(0.25f);
 
     const uint32_t local = module.opLoad(vec3uType, localIdVar);

@@ -1,3 +1,7 @@
+#ifndef VK_NO_PROTOTYPES
+#define VK_NO_PROTOTYPES
+#endif
+
 #include "adreno_b10_mipmaps/part00.inc"
 #include "adreno_b10_mipmaps/part01.inc"
 #include "adreno_b10_mipmaps/part02.inc"
