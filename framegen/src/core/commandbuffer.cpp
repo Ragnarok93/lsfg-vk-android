@@ -17,7 +17,6 @@
 using namespace LSFG::Core;
 
 CommandBuffer::CommandBuffer(const Core::Device& device, const CommandPool& pool) {
-    // create command buffer
     const VkCommandBufferAllocateInfo desc{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = pool.handle(),
@@ -29,7 +28,6 @@ CommandBuffer::CommandBuffer(const Core::Device& device, const CommandPool& pool
     if (res != VK_SUCCESS || commandBufferHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Unable to allocate command buffer");
 
-    // store command buffer in shared ptr
     this->state = std::make_shared<CommandBufferState>(CommandBufferState::Empty);
     this->commandBuffer = std::shared_ptr<VkCommandBuffer>(
         new VkCommandBuffer(commandBufferHandle),
@@ -39,36 +37,41 @@ CommandBuffer::CommandBuffer(const Core::Device& device, const CommandPool& pool
     );
 }
 
+void CommandBuffer::reset() {
+    if (!this->state || !this->commandBuffer || *this->state != CommandBufferState::Submitted)
+        throw std::logic_error("Command buffer is not in Submitted state");
+    const auto res = vkResetCommandBuffer(*this->commandBuffer, 0);
+    if (res != VK_SUCCESS)
+        throw LSFG::vulkan_error(res, "Unable to reset command buffer");
+    *this->state = CommandBufferState::Empty;
+}
+
 void CommandBuffer::begin() {
     if (*this->state != CommandBufferState::Empty)
         throw std::logic_error("Command buffer is not in Empty state");
 
-    const VkCommandBufferBeginInfo beginInfo = {
+    const VkCommandBufferBeginInfo beginInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
     };
     auto res = vkBeginCommandBuffer(*this->commandBuffer, &beginInfo);
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Unable to begin command buffer");
-
     *this->state = CommandBufferState::Recording;
 }
 
 void CommandBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z) const {
     if (*this->state != CommandBufferState::Recording)
         throw std::logic_error("Command buffer is not in Recording state");
-
     vkCmdDispatch(*this->commandBuffer, x, y, z);
 }
 
 void CommandBuffer::end() {
     if (*this->state != CommandBufferState::Recording)
         throw std::logic_error("Command buffer is not in Recording state");
-
     auto res = vkEndCommandBuffer(*this->commandBuffer);
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Unable to end command buffer");
-
     *this->state = CommandBufferState::Full;
 }
 
@@ -86,13 +89,11 @@ void CommandBuffer::submit(VkQueue queue, std::optional<Fence> fence,
         .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
     };
     if (waitSemaphoreValues.has_value()) {
-        timelineInfo.waitSemaphoreValueCount =
-            static_cast<uint32_t>(waitSemaphoreValues->size());
+        timelineInfo.waitSemaphoreValueCount = static_cast<uint32_t>(waitSemaphoreValues->size());
         timelineInfo.pWaitSemaphoreValues = waitSemaphoreValues->data();
     }
     if (signalSemaphoreValues.has_value()) {
-        timelineInfo.signalSemaphoreValueCount =
-            static_cast<uint32_t>(signalSemaphoreValues->size());
+        timelineInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalSemaphoreValues->size());
         timelineInfo.pSignalSemaphoreValues = signalSemaphoreValues->data();
     }
 
@@ -120,6 +121,5 @@ void CommandBuffer::submit(VkQueue queue, std::optional<Fence> fence,
     auto res = vkQueueSubmit(queue, 1, &submitInfo, fence ? fence->handle() : VK_NULL_HANDLE);
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Unable to submit command buffer");
-
     *this->state = CommandBufferState::Submitted;
 }
