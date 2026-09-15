@@ -2,10 +2,12 @@
 #include "core/shadermodule.hpp"
 #include "core/device.hpp"
 #include "core/pipeline.hpp"
+#include "adreno_b10_mipmaps.hpp"
 
 #include <vulkan/vulkan_core.h>
 
 #include <cstddef>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -21,12 +23,41 @@ Core::ShaderModule ShaderPool::getShader(
     if (it != shaders.end())
         return it->second;
 
-    // grab the shader
-    auto bytecode = this->source(name);
+    std::vector<uint8_t> bytecode;
+#ifdef LSFGVK_ADRENO_B10_MIPMAPS
+    const bool b10Supported = Optimizations::AdrenoB10::isRuntimeSupported(device);
+    if (name == "p_mipmaps_b10_tail") {
+        if (!b10Supported)
+            throw std::runtime_error("B10 Mipmaps tail requested on unsupported device");
+        bytecode = Optimizations::AdrenoB10::buildTailSpirv();
+        std::cerr << "lsfg-vk: candidate-b10-mipmaps-tail generated=1 bytes="
+                  << bytecode.size() << " local=16x16\n";
+    } else
+#endif
+    {
+        bytecode = this->source(name);
+    }
+
     if (bytecode.empty())
         throw std::runtime_error("Shader code is empty: " + name);
 
-    // create the shader module
+#ifdef LSFGVK_ADRENO_B10_MIPMAPS
+    if (name == "p_mipmaps" && b10Supported) {
+        Optimizations::AdrenoB10::HeadTransformStats stats;
+        if (!Optimizations::AdrenoB10::transformHead(bytecode, stats)) {
+            throw std::runtime_error("B10 Mipmaps head transform rejected: " + stats.reason);
+        }
+        std::cerr << "lsfg-vk: candidate-b10-mipmaps-head applied=1 function="
+                  << stats.targetFunction
+                  << " samples=" << stats.imageSamplesBefore << "->" << stats.imageSamplesAfter
+                  << " writes=" << stats.imageWritesBefore << "->" << stats.imageWritesAfter
+                  << " barriers=" << stats.barriersBefore << "->" << stats.barriersAfter
+                  << " wg_stores=" << stats.workgroupStoresBeforePhase0 << "->"
+                  << stats.workgroupStoresAfter
+                  << " bytes=" << bytecode.size() << '\n';
+    }
+#endif
+
     Core::ShaderModule shader(device, bytecode, types);
     shaders[name] = shader;
     return shader;

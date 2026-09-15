@@ -56,6 +56,14 @@ namespace LSFG_3_1P::Shaders {
 
         Core::Image inImg_0, inImg_1;
         std::array<Core::Image, 7> outImgs;
+
+#ifdef LSFGVK_ADRENO_B10_MIPMAPS
+        bool b10Enabled{false};
+        Core::Image b10Scratch;
+        Core::ShaderModule b10TailShaderModule;
+        Core::Pipeline b10TailPipeline;
+        Core::DescriptorSet b10TailDescriptorSet;
+#endif
     };
 
 }

@@ -47,6 +47,7 @@ jobs:
           python3 tests/android_candidate_b3_beta4_analysis_test.py
           python3 tests/android_candidate_b4_beta4_predicate_test.py
           python3 tests/android_candidate_b9_beta4_spill_collapse_test.py
+          python3 tests/android_candidate_b10_mipmaps_split_test.py
           python3 tests/android_candidate_b6_pipeline_executable_profile_test.py
           python3 tests/android_candidate_b8_mipmaps_matrix_test.py
           python3 tests/android_final_nonadaptive_sweep_test.py
@@ -55,10 +56,10 @@ jobs:
           python3 tests/android_adreno_evidence_timestamp_stage_test.py
           python3 tests/android_capability_architecture_test.py
 
-      - name: Install Vulkan headers
+      - name: Install native test tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ libvulkan-dev
+          sudo apt-get install -y g++ libvulkan-dev cmake ninja-build spirv-tools
 
       - name: Build and run capability policy tests
         run: |
@@ -75,6 +76,18 @@ jobs:
             tests/adaptive_scheduler_test.cpp \
             -o /tmp/lsfg-adaptive-scheduler-test
           /tmp/lsfg-adaptive-scheduler-test
+
+      - name: Build and validate B10 host self-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B /tmp/lsfg-b10-host -G Ninja \
+            -DLSFGVK_ADRENO_B10_MIPMAPS=ON \
+            -DBUILD_TESTING=ON
+          cmake --build /tmp/lsfg-b10-host --target lsfg-adreno-b10-mipmaps-test
+          B10_TAIL_SPV_OUT=/tmp/b10-tail.spv \
+            /tmp/lsfg-b10-host/framegen/lsfg-adreno-b10-mipmaps-test
+          spirv-val --target-env vulkan1.1 /tmp/b10-tail.spv
 
   build:
     name: Build ${{ matrix.abi }}
@@ -137,6 +150,61 @@ jobs:
           path: build-android-${{ matrix.abi }}/dist/liblsfg-vk-${{ matrix.abi }}.so
           if-no-files-found: error
 
+  build-b10-arm64:
+    name: Build arm64-v8a B10 candidate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build file
+          sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_ROOT=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build B10 arm64-v8a
+        env:
+          ANDROID_ABI: arm64-v8a
+          HOST_TAG: linux-x86_64
+          LSFGVK_ZERO_STAGE_PROFILE: "1"
+          LSFGVK_EXPERIMENTAL_B10: "1"
+        shell: bash
+        run: |
+          set -o pipefail
+          BUILD_DIR="$GITHUB_WORKSPACE/build-android-arm64-v8a-b10" \
+            bash ./scripts/build/android.sh Release 2>&1 | tee android-build-arm64-v8a-b10.log
+
+      - name: Upload B10 build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-log-arm64-v8a-b10
+          path: android-build-arm64-v8a-b10.log
+          if-no-files-found: warn
+
+      - name: Inspect B10 artifact
+        run: |
+          file "build-android-arm64-v8a-b10/dist/liblsfg-vk-arm64-v8a.so"
+          "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            -h -d "build-android-arm64-v8a-b10/dist/liblsfg-vk-arm64-v8a.so"
+
+      - name: Upload B10 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: liblsfg-vk-arm64-v8a-b10
+          path: build-android-arm64-v8a-b10/dist/liblsfg-vk-arm64-v8a.so
+          if-no-files-found: error
+
   tag_release:
     name: Tag Android release
     needs: [capability-policy, build]
@@ -146,7 +214,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout4
         with:
           fetch-depth: 0
       - name: Create next Android release tag

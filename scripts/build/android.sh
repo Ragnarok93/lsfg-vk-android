@@ -16,6 +16,7 @@
 #   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_B8_DIAGNOSTICS=1 ...     # legacy B8 diagnostic matrix
 #   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_FINAL_NONADAPTIVE_SWEEP=1 ... # deferred final sweep
 #   LSFGVK_EXPERIMENTAL_B9=1 ... ./scripts/build/android.sh      # experimental Beta4 scheduler
+#   LSFGVK_EXPERIMENTAL_B10=1 ... ./scripts/build/android.sh     # Adreno 6xx Mipmaps split
 
 set -euo pipefail
 
@@ -39,6 +40,15 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." &>/dev/null && pwd)"
 BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build-android-${ABI}}"
 DIST_DIR="${DIST_DIR:-${BUILD_DIR}/dist}"
+B10_CMAKE=OFF
+if [[ "${LSFGVK_EXPERIMENTAL_B10:-0}" == "1" ]]; then
+    if [[ "${LSFGVK_FINAL_NONADAPTIVE_SWEEP:-0}" == "1" || "${LSFGVK_B8_DIAGNOSTICS:-0}" == "1" ]]; then
+        echo "error: B10 cannot be composed with the legacy B8/final non-adaptive Mipmaps probes" >&2
+        exit 2
+    fi
+    echo "[lsfg-vk] Enabling experimental B10 Adreno 6xx Mipmaps split"
+    B10_CMAKE=ON
+fi
 
 python3 "${REPO_ROOT}/scripts/adreno_suspend_timeout_guard.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/adreno_android_runtime_residency.py" --root "${REPO_ROOT}"
@@ -46,13 +56,24 @@ python3 "${REPO_ROOT}/scripts/adreno_android_config_reload.py" --root "${REPO_RO
 
 if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
     echo "[lsfg-vk] Enabling temporary zero-stage GPU profiling instrumentation"
-    python3 "${REPO_ROOT}/scripts/apply-zero-stage-profile.py" --root "${REPO_ROOT}"
+    if [[ "${LSFGVK_EXPERIMENTAL_B10:-0}" == "1" ]]; then
+        python3 "${REPO_ROOT}/scripts/apply-zero-stage-profile-b10.py" --root "${REPO_ROOT}"
+    else
+        python3 "${REPO_ROOT}/scripts/apply-zero-stage-profile.py" --root "${REPO_ROOT}"
+    fi
     python3 "${REPO_ROOT}/scripts/apply-mipmaps-shader-profile.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-adreno-evidence-profile.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-candidate-b-shader-hot-path.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-candidate-b2-mipmaps-dependency-profile.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-candidate-b3-beta4-analysis.py" --root "${REPO_ROOT}"
-    if [[ "${LSFGVK_FINAL_NONADAPTIVE_SWEEP:-0}" == "1" ]]; then
+    if [[ "${LSFGVK_EXPERIMENTAL_B10:-0}" == "1" ]]; then
+        # B10 changes the production p_mipmaps bytecode and adds a tail pipeline.
+        # Profile those two real pipelines directly; do not let the legacy B8
+        # matrix replace the B10 head with an untransformed baseline module.
+        echo "[lsfg-vk] Enabling B10 head/tail pipeline diagnostics"
+        python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
+        python3 "${REPO_ROOT}/scripts/apply-b10-pipeline-executable-prefix.py" --root "${REPO_ROOT}"
+    elif [[ "${LSFGVK_FINAL_NONADAPTIVE_SWEEP:-0}" == "1" ]]; then
         echo "[lsfg-vk] Enabling deferred final non-adaptive compiler sweep"
         python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
         python3 "${REPO_ROOT}/scripts/apply-candidate-b8-mipmaps-matrix.py" --root "${REPO_ROOT}"
@@ -86,6 +107,7 @@ cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DANDROID_PLATFORM="${API}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
     -DLSFGVK_ANDROID_WINE=ON \
+    -DLSFGVK_ADRENO_B10_MIPMAPS="${B10_CMAKE}" \
     -DVOLK_STATIC_DEFINES=VK_USE_PLATFORM_ANDROID_KHR \
     -DCMAKE_CXX_FLAGS="-DVK_USE_PLATFORM_ANDROID_KHR" \
     -DCMAKE_C_FLAGS="-DVK_USE_PLATFORM_ANDROID_KHR"

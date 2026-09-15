@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.10)
 # When ON: builds liblsfg-vk.so for the NDK toolchain, skips the GTK4 UI,
 # and defines LSFGVK_ANDROID_WINE=1 for the C++ code.
 option(LSFGVK_ANDROID_WINE "Build for GameNative / Wine-on-Android" OFF)
+option(LSFGVK_ADRENO_B10_MIPMAPS "Enable experimental Adreno 6xx B10 Mipmaps split" OFF)
 
 set(CMAKE_SKIP_RPATH ON)
 set(CMAKE_C_VISIBILITY_PRESET "hidden")
@@ -11,6 +12,9 @@ set(CMAKE_CXX_VISIBILITY_PRESET "hidden")
 
 if(LSFGVK_ANDROID_WINE)
     add_compile_definitions(LSFGVK_ANDROID_WINE=1)
+endif()
+if(LSFGVK_ADRENO_B10_MIPMAPS)
+    add_compile_definitions(LSFGVK_ADRENO_B10_MIPMAPS=1)
 endif()
 
 # subprojects
