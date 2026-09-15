@@ -44,84 +44,40 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         self.assertNotIn("submitAhbHandoff", deferred_block)
         self.assertNotIn("submitAndWaitForAhbHandoff", deferred_block)
 
-    def test_reprime_replays_oldest_to_newest_and_consumes_one_source_only_cycle(self) -> None:
-        transform = (ROOT / "scripts/adreno_deferred_zero_history.py").read_text(encoding="utf-8")
+    def test_reprime_exit_uses_three_real_source_history_advances(self) -> None:
+        safe = ROOT / "scripts/adreno_deferred_zero_safe_reprime.py"
+        self.assertTrue(safe.exists(), "missing safe DeferredZero re-prime transform")
+        text = safe.read_text(encoding="utf-8")
+
         for marker in (
-            "deferred-zero reprime-begin",
-            "orderedRawHistorySlots",
-            "for (size_t replayIndex = 0; replayIndex < 3; ++replayIndex)",
-            "copyRawHistoryToExternalAhb",
-            "presentContextWithCountAndHistoryFd",
-            "framegenHistoryEpoch_++",
+            "kDeferredZeroWarmupFrames = 3",
+            "deferredZeroWarmupFramesRemaining_",
+            "deferredReprimeStart_",
+            "deferredReprimeWarmup",
+            "adaptiveZeroGeneration || deferredReprimeWarmup",
+            "deferred-zero reprime-warmup-begin",
+            "deferred-zero reprime-warmup-progress",
             "deferred-zero reprime-complete source_only=1",
-            "lastGeneratedFrameCount_ = 0",
-        ):
-            self.assertIn(marker, transform)
-
-    def test_reprime_uses_normal_game_to_framegen_sync_fd_handoff(self) -> None:
-        sync_transform = ROOT / "scripts/adreno_deferred_zero_reprime_sync.py"
-        self.assertTrue(sync_transform.exists(), "missing synchronized re-prime transform")
-        transform_text = sync_transform.read_text(encoding="utf-8")
-        replacement_start = transform_text.index("new_replay =")
-        replacement_end = transform_text.index("text = once(", replacement_start)
-        reprime = transform_text[replacement_start:replacement_end]
-
-        for marker in (
-            "Mini::Semaphore replayInputSemaphore",
-            "VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT",
-            "replayInputSemaphore.exportFd",
-            "replayInputSemaphoreFd",
-            "presentContextWithCountAndHistoryFd",
-            "deferred-zero reprime input-sync-fd",
-            "asyncZeroHistoryEnabled_",
-        ):
-            self.assertIn(marker, reprime)
-
-        self.assertIn("{ replayInputSemaphore.handle() }", reprime)
-        self.assertNotIn("*this->lsfgCtxId, -1, noOutSems, 0", reprime)
-
-        bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
-        self.assertIn("apply_deferred_zero_reprime_sync(root)", bundle)
-        self.assertLess(
-            bundle.index("apply_deferred_zero_history(root)"),
-            bundle.index("apply_deferred_zero_reprime_sync(root)"),
-        )
-        self.assertLess(
-            bundle.index("apply_deferred_zero_reprime_sync(root)"),
-            bundle.index("apply_deferred_zero_history_finalize(root)"),
-        )
-
-    def test_reprime_current_source_capture_is_local_async_and_guarded(self) -> None:
-        guard = ROOT / "scripts/adreno_deferred_zero_reprime_guard.py"
-        self.assertTrue(guard.exists(), "missing guarded re-prime transition transform")
-        text = guard.read_text(encoding="utf-8")
-        for marker in (
-            "deferred-zero reprime capture-record",
-            "deferred-zero reprime capture-submit",
-            "deferred-zero reprime capture-submitted",
-            "deferred-zero reprime replay-enter",
-            "pass.preCopyBuf.submit",
-            "reprime-fallback stage=",
+            "framegenHistoryEpoch_++",
         ):
             self.assertIn(marker, text)
 
-        replacement_start = text.index("new_transition =")
-        replacement_end = text.index("text = once(", replacement_start)
-        transition = text[replacement_start:replacement_end]
-        self.assertNotIn("submitAndWaitForAhbHandoff", transition)
-        self.assertNotIn("waitForAhbHandoff", transition)
-        self.assertLess(transition.index("try {"), transition.index("copySwapchainToRawHistory"))
-        self.assertLess(transition.index("copySwapchainToRawHistory"), transition.index("replay-enter"))
+        # The crashing raw-history -> shared-AHB replay must not survive into
+        # the final transformed source. Re-prime is performed by the existing
+        # proven source->AHB zero-history maintenance path over real presents.
+        self.assertIn("reprime_start_marker", text)
+        self.assertIn("normal_history_marker", text)
+        self.assertNotIn("copyRawHistoryToExternalAhb(", text)
+        self.assertNotIn("replayInputSemaphore", text)
 
+    def test_safe_reprime_supersedes_legacy_replay_after_checkpoint_transforms(self) -> None:
         bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
-        self.assertIn("apply_deferred_zero_reprime_guard(root)", bundle)
+        self.assertIn("apply_deferred_zero_safe_reprime", bundle)
+        self.assertIn("apply_deferred_zero_safe_reprime(root)", bundle)
         self.assertLess(
-            bundle.index("apply_deferred_zero_reprime_sync(root)"),
-            bundle.index("apply_deferred_zero_reprime_guard(root)"),
-        )
-        self.assertLess(
-            bundle.index("apply_deferred_zero_reprime_guard(root)"),
             bundle.index("apply_deferred_zero_history_finalize(root)"),
+            bundle.index("apply_deferred_zero_safe_reprime(root)"),
+            "safe re-prime must be the final Candidate A lifecycle transform",
         )
 
     def test_failure_and_lifecycle_paths_fall_back_without_changing_scheduler(self) -> None:
@@ -135,6 +91,12 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
             "enterSourceOnlyBypass",
         ):
             self.assertIn(marker, transform)
+
+        safe = ROOT / "scripts/adreno_deferred_zero_safe_reprime.py"
+        if safe.exists():
+            safe_text = safe.read_text(encoding="utf-8")
+            self.assertNotIn("AdaptiveFrameScheduler::plan", safe_text)
+            self.assertNotIn("src/adaptive_scheduler.cpp", safe_text)
 
         self.assertNotIn("AdaptiveFrameScheduler::plan", transform)
         self.assertNotIn("src/adaptive_scheduler.cpp", transform)
