@@ -47,6 +47,7 @@ jobs:
           python3 tests/android_candidate_b3_beta4_analysis_test.py
           python3 tests/android_candidate_b4_beta4_predicate_test.py
           python3 tests/android_candidate_b6_pipeline_executable_profile_test.py
+          python3 tests/android_candidate_b7_mipmaps_live_range_test.py
           python3 tests/android_adreno_evidence_bundle_test.py
           python3 tests/android_adreno_evidence_timestamp_stage_test.py
           python3 tests/android_capability_architecture_test.py
