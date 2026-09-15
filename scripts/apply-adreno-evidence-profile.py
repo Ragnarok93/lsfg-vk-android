@@ -17,6 +17,7 @@ from adreno_deferred_zero_history_build import apply as apply_deferred_zero_hist
 from adreno_deferred_zero_reprime_sync import apply as apply_deferred_zero_reprime_sync
 from adreno_deferred_zero_reprime_guard import apply as apply_deferred_zero_reprime_guard
 from adreno_deferred_zero_history_finalize import apply as apply_deferred_zero_history_finalize
+from adreno_deferred_zero_safe_reprime import apply as apply_deferred_zero_safe_reprime
 
 FRAMEGEN_HEADERS = (
     Path("framegen/v3.1_include/v3_1/context.hpp"),
@@ -97,6 +98,9 @@ def main() -> None:
         apply_deferred_zero_reprime_sync(root)
         apply_deferred_zero_reprime_guard(root)
         apply_deferred_zero_history_finalize(root)
+        # Final Candidate A lifecycle transform: remove the crash-prone retained
+        # raw-history replay and rebuild framegen history across live presents.
+        apply_deferred_zero_safe_reprime(root)
 
 
 if __name__ == "__main__":
