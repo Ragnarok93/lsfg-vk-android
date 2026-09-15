@@ -55,17 +55,8 @@ def main() -> None:
         second = snapshot(temp_root)
         assert first == second, "B8 source transform is not idempotent"
 
-        device_cpp = first["framegen/src/core/device.cpp"]
         pipeline_cpp = first["framegen/src/core/pipeline.cpp"]
         shaderpool = first["framegen/src/pool/shaderpool.cpp"]
-
-        # Regression guard: B8 is diagnostic-only. A normal launch must not
-        # enable pipeline-executable capture or compile the matrix unless
-        # LSFGVK_B8_MIPMAPS_MATRIX=1 is explicitly requested.
-        require(device_cpp,
-            "LSFGVK_B8_MIPMAPS_MATRIX",
-            "b8MipmapsMatrixEnabled",
-            "enablePipelineExecutableProperties")
 
         require(pipeline_cpp,
             'shaderName.rfind("p_mipmaps", 0) == 0',
@@ -74,9 +65,6 @@ def main() -> None:
 
         require(shaderpool,
             "candidate-b8-mipmaps-matrix",
-            "LSFGVK_B8_MIPMAPS_MATRIX",
-            "b8MipmapsMatrixEnabled",
-            "baseline-default",
             '"baseline"',
             '"pow-equivalent"',
             '"transfer-bypass-upper-bound"',
@@ -100,6 +88,10 @@ def main() -> None:
         assert "spv::" not in shaderpool
 
     build = read(ROOT, "scripts/build/android.sh")
+    b6_invocation = (
+        'python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" '
+        '--root "${REPO_ROOT}"'
+    )
     invocation = (
         'python3 "${REPO_ROOT}/scripts/apply-candidate-b8-mipmaps-matrix.py" '
         '--root "${REPO_ROOT}"'
@@ -108,13 +100,19 @@ def main() -> None:
         'python3 "${REPO_ROOT}/scripts/apply-candidate-b8-local-spirv-constants.py" '
         '--root "${REPO_ROOT}"'
     )
-    require(build, invocation, constants_invocation)
+    diagnostic_gate = 'if [[ "${LSFGVK_B8_DIAGNOSTICS:-0}" == "1" ]]; then'
+    require(build, b6_invocation, invocation, constants_invocation, diagnostic_gate)
+
     profile_start = build.index('if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]')
     profile_end = build.index("\nfi\n", profile_start)
+    diagnostic_start = build.index(diagnostic_gate, profile_start)
+    diagnostic_end = build.index("\n    fi\n", diagnostic_start)
+    b6_index = build.index(b6_invocation)
     invocation_index = build.index(invocation)
     constants_index = build.index(constants_invocation)
-    assert profile_start < invocation_index < constants_index < profile_end, (
-        "B8 candidate matrix and constants fix must remain profiling-build-only and ordered"
+    assert profile_start < diagnostic_start < b6_index < invocation_index < constants_index < diagnostic_end < profile_end, (
+        "B6/B8 executable capture and matrix transforms must be explicit opt-in diagnostics "
+        "inside zero-stage profiling; normal profiling builds must retain the B4 runtime path"
     )
 
     print("Candidate B8 mipmaps matrix contract satisfied")
