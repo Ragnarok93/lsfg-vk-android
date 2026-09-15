@@ -70,6 +70,40 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         self.assertNotIn("copyRawHistoryToExternalAhb(", text)
         self.assertNotIn("replayInputSemaphore", text)
 
+    def test_deferred_zero_exit_requires_dense_scheduler_requests_before_reprime(self) -> None:
+        gate = ROOT / "scripts/adreno_deferred_zero_exit_persistence.py"
+        self.assertTrue(gate.exists(), "missing DeferredZero exit-persistence transform")
+        text = gate.read_text(encoding="utf-8")
+
+        for marker in (
+            "kDeferredZeroWakeRequestThreshold = 2",
+            "kDeferredZeroWakeRequestWindowMs = 500",
+            "deferredZeroWakeRequestCount_",
+            "deferredZeroWakeWindowStart_",
+            "deferred-zero reprime-deferred",
+            "deferred-zero reprime-warmup-begin",
+            "historyMaintenanceState_ == HistoryMaintenanceState::DeferredZero",
+            "generatedFrameCount > 0",
+        ):
+            self.assertIn(marker, text)
+
+        # The bridge may delay an expensive history wake, but it must not
+        # rewrite the scheduler policy itself. While the request-density gate
+        # is pending, DeferredZero remains on the source-only raw-ring path.
+        self.assertNotIn("AdaptiveFrameScheduler::plan", text)
+        self.assertNotIn("src/adaptive_scheduler.cpp", text)
+        self.assertIn("if (this->historyMaintenanceState_ == HistoryMaintenanceState::DeferredZero) {", text)
+        self.assertIn("if (adaptiveZeroGeneration) {", text)
+
+        bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
+        self.assertIn("apply_deferred_zero_exit_persistence", bundle)
+        self.assertIn("apply_deferred_zero_exit_persistence(root)", bundle)
+        self.assertLess(
+            bundle.index("apply_deferred_zero_safe_reprime(root)"),
+            bundle.index("apply_deferred_zero_exit_persistence(root)"),
+            "exit-persistence gate must compose after the validated safe live re-prime transform",
+        )
+
     def test_safe_reprime_lifecycle_reset_is_method_bounded(self) -> None:
         safe = (ROOT / "scripts/adreno_deferred_zero_safe_reprime.py").read_text(encoding="utf-8")
         self.assertIn("invalidate_start_marker", safe)
