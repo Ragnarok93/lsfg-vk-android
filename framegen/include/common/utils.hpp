@@ -44,9 +44,7 @@ namespace LSFG::Utils {
     public:
         /// Create a barrier builder.
         BarrierBuilder(const Core::CommandBuffer& buffer)
-                : commandBuffer(&buffer) {
-            this->barriers.reserve(16); // this is performance critical
-        }
+                : commandBuffer(&buffer) {}
 
         // Add a resource to the barrier builder.
         BarrierBuilder& addR2W(Core::Image& image);
@@ -75,9 +73,10 @@ namespace LSFG::Utils {
         /// Finish building the barrier
         void build() const;
     private:
+        static constexpr size_t kInlineBarrierCapacity = 16;
         const Core::CommandBuffer* commandBuffer;
-
-        std::vector<VkImageMemoryBarrier2> barriers;
+        std::array<VkImageMemoryBarrier2, kInlineBarrierCapacity> barriers{};
+        size_t barrierCount{0};
     };
 
     ///
@@ -89,7 +88,7 @@ namespace LSFG::Utils {
     /// @param path The path to the DDS file.
     ///
     /// @throws std::system_error If the file cannot be opened or read.
-    /// @throws ls:vulkan_error If the Vulkan image cannot be created or updated.
+    /// @throws ls:vulkan_error If the Vulkan image cannot be cleared.
     ///
     void uploadImage(const Core::Device& device,
         const Core::CommandPool& commandPool,
