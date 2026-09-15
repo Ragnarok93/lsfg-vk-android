@@ -81,12 +81,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          gzip -dc framegen/tests/fixtures/p_mipmaps-adreno650-20260915.spv.gz \
+            > /tmp/b10-production-head.spv
+          echo "68c68ffd7308d0cc742aa3e9ecbd00f44c92893c23df5cd62e1318cdb75b9046  /tmp/b10-production-head.spv" \
+            | sha256sum -c -
+          test "$(wc -c < /tmp/b10-production-head.spv)" -eq 28832
+          spirv-val --target-env vulkan1.1 /tmp/b10-production-head.spv
           cmake -S . -B /tmp/lsfg-b10-host -G Ninja \
             -DLSFGVK_ADRENO_B10_MIPMAPS=ON \
             -DBUILD_TESTING=ON
           cmake --build /tmp/lsfg-b10-host --target lsfg-adreno-b10-mipmaps-test
+          B10_PRODUCTION_HEAD_SPV=/tmp/b10-production-head.spv \
+          B10_HEAD_SPV_OUT=/tmp/b10-transformed-head.spv \
           B10_TAIL_SPV_OUT=/tmp/b10-tail.spv \
             /tmp/lsfg-b10-host/framegen/lsfg-adreno-b10-mipmaps-test
+          spirv-val --target-env vulkan1.1 /tmp/b10-transformed-head.spv
           spirv-val --target-env vulkan1.1 /tmp/b10-tail.spv
 
   build:

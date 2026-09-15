@@ -96,13 +96,58 @@ int main() {
     assert(!isAdreno6xxDevice(0x13B5u, "Mali-G715"));
     assert(!isAdreno6xxDevice(0x144Du, "Samsung Xclipse 940"));
 
+    // CI supplies the exact 28,832-byte p_mipmaps module captured from the
+    // failing Adreno 650 device run. transformHead() itself verifies its
+    // production size/bound/FNV fingerprint, so this exercises the exact
+    // shader shape that the original synthetic test failed to model.
+    if (const char* captured = std::getenv("B10_PRODUCTION_HEAD_SPV");
+            captured != nullptr && *captured != '\0') {
+        std::ifstream file(captured, std::ios::binary | std::ios::ate);
+        assert(file.good());
+        const auto size = file.tellg();
+        assert(size == static_cast<std::streamoff>(28832));
+        file.seekg(0, std::ios::beg);
+        std::vector<uint8_t> productionHead(static_cast<size_t>(size));
+        file.read(reinterpret_cast<char*>(productionHead.data()), size);
+        assert(file.good());
+
+        HeadTransformStats productionStats;
+        if (!transformHead(productionHead, productionStats)) {
+            std::cerr << "B10 production head transform failed: "
+                      << productionStats.reason << '\n';
+            return 2;
+        }
+        assert(productionStats.applied && productionStats.reason == "ok");
+        assert(productionStats.imageSamplesBefore == 4);
+        assert(productionStats.imageWritesBefore == 10);
+        assert(productionStats.barriersBefore == 5);
+        assert(productionStats.imageSamplesAfter == 4);
+        assert(productionStats.imageWritesAfter == 6);
+        assert(productionStats.barriersAfter == 0);
+        assert(productionStats.workgroupStoresBeforePhase0 == 1);
+        assert(productionStats.workgroupStoresAfter == 0);
+        assert(productionStats.scratchMirrorsWorkgroupSeed);
+
+        if (const char* out = std::getenv("B10_HEAD_SPV_OUT");
+                out != nullptr && *out != '\0') {
+            std::ofstream output(out, std::ios::binary | std::ios::trunc);
+            assert(output.good());
+            output.write(reinterpret_cast<const char*>(productionHead.data()),
+                static_cast<std::streamsize>(productionHead.size()));
+            assert(output.good());
+        }
+    }
+
     auto head = syntheticHead();
     const auto original = head;
     HeadTransformStats productionRejected;
     assert(!transformHead(head, productionRejected));
     assert(productionRejected.reason == "production-fingerprint");
     HeadTransformStats stats;
-    assert(transformHeadForSelfTest(head, stats));
+    if (!transformHeadForSelfTest(head, stats)) {
+        std::cerr << "B10 synthetic head transform failed: " << stats.reason << '\n';
+        return 3;
+    }
     assert(stats.applied && stats.reason == "ok");
     assert(stats.imageSamplesBefore == 4 && stats.imageWritesBefore == 10 && stats.barriersBefore == 5);
     assert(stats.imageSamplesAfter == 4 && stats.imageWritesAfter == 6 && stats.barriersAfter == 0);
@@ -183,6 +228,6 @@ int main() {
             assertSameBits(oldLevels[level], compactLevels[level]);
     }
 
-    std::cout << "B10 self-test: fingerprint fail-closed, exact TGSM seed mirror, head 4/10/5 -> 4/6/0, tail local16 reads=4 writes=5 queries=5 barriers=4, bounded outputs + padded edges covered, 128 exact pyramids\n";
+    std::cout << "B10 self-test: production capture + synthetic TGSM seed mirror, head 4/10/5 -> 4/6/0, tail local16 reads=4 writes=5 queries=5 barriers=4, bounded outputs + padded edges covered, 128 exact pyramids\n";
     return 0;
 }
