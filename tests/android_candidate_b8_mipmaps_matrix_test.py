@@ -100,18 +100,18 @@ def main() -> None:
         'python3 "${REPO_ROOT}/scripts/apply-candidate-b8-local-spirv-constants.py" '
         '--root "${REPO_ROOT}"'
     )
-    diagnostic_gate = 'if [[ "${LSFGVK_B8_DIAGNOSTICS:-0}" == "1" ]]; then'
+    diagnostic_gate = 'elif [[ "${LSFGVK_B8_DIAGNOSTICS:-0}" == "1" ]]; then'
     require(build, b6_invocation, invocation, constants_invocation, diagnostic_gate)
 
     profile_start = build.index('if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]')
     profile_end = build.index("\nfi\n", profile_start)
     diagnostic_start = build.index(diagnostic_gate, profile_start)
     diagnostic_end = build.index("\n    fi\n", diagnostic_start)
-    b6_index = build.index(b6_invocation)
-    invocation_index = build.index(invocation)
-    constants_index = build.index(constants_invocation)
+    b6_index = build.index(b6_invocation, diagnostic_start)
+    invocation_index = build.index(invocation, diagnostic_start)
+    constants_index = build.index(constants_invocation, diagnostic_start)
     assert profile_start < diagnostic_start < b6_index < invocation_index < constants_index < diagnostic_end < profile_end, (
-        "B6/B8 executable capture and matrix transforms must be explicit opt-in diagnostics "
+        "B6/B8 executable capture and matrix transforms must remain explicit B8 opt-in diagnostics "
         "inside zero-stage profiling; normal profiling builds must retain the B4 runtime path"
     )
 
