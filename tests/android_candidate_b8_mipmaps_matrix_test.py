@@ -55,8 +55,17 @@ def main() -> None:
         second = snapshot(temp_root)
         assert first == second, "B8 source transform is not idempotent"
 
+        device_cpp = first["framegen/src/core/device.cpp"]
         pipeline_cpp = first["framegen/src/core/pipeline.cpp"]
         shaderpool = first["framegen/src/pool/shaderpool.cpp"]
+
+        # Regression guard: B8 is diagnostic-only. A normal launch must not
+        # enable pipeline-executable capture or compile the matrix unless
+        # LSFGVK_B8_MIPMAPS_MATRIX=1 is explicitly requested.
+        require(device_cpp,
+            "LSFGVK_B8_MIPMAPS_MATRIX",
+            "b8MipmapsMatrixEnabled",
+            "enablePipelineExecutableProperties")
 
         require(pipeline_cpp,
             'shaderName.rfind("p_mipmaps", 0) == 0',
@@ -65,6 +74,9 @@ def main() -> None:
 
         require(shaderpool,
             "candidate-b8-mipmaps-matrix",
+            "LSFGVK_B8_MIPMAPS_MATRIX",
+            "b8MipmapsMatrixEnabled",
+            "baseline-default",
             '"baseline"',
             '"pow-equivalent"',
             '"transfer-bypass-upper-bound"',
