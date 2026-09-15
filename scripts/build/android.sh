@@ -13,6 +13,7 @@
 #   ANDROID_NDK=/path/to/android-ndk-r27d ./scripts/build/android.sh [Release|Debug]
 #   ANDROID_ABI=x86_64 ANDROID_NDK=/path/to/android-ndk-r27d ./scripts/build/android.sh
 #   LSFGVK_ZERO_STAGE_PROFILE=1 ... ./scripts/build/android.sh   # profiling build
+#   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_B8_DIAGNOSTICS=1 ...     # B8 diagnostic matrix
 
 set -euo pipefail
 
@@ -51,9 +52,12 @@ if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
     python3 "${REPO_ROOT}/scripts/apply-candidate-b-shader-hot-path.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-candidate-b2-mipmaps-dependency-profile.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-candidate-b3-beta4-analysis.py" --root "${REPO_ROOT}"
-    python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
-    python3 "${REPO_ROOT}/scripts/apply-candidate-b8-mipmaps-matrix.py" --root "${REPO_ROOT}"
-    python3 "${REPO_ROOT}/scripts/apply-candidate-b8-local-spirv-constants.py" --root "${REPO_ROOT}"
+    if [[ "${LSFGVK_B8_DIAGNOSTICS:-0}" == "1" ]]; then
+        echo "[lsfg-vk] Enabling opt-in B8 pipeline-executable and mipmaps-matrix diagnostics"
+        python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
+        python3 "${REPO_ROOT}/scripts/apply-candidate-b8-mipmaps-matrix.py" --root "${REPO_ROOT}"
+        python3 "${REPO_ROOT}/scripts/apply-candidate-b8-local-spirv-constants.py" --root "${REPO_ROOT}"
+    fi
 fi
 
 # Candidate B translation cleanup runs after optional profiling composition so
