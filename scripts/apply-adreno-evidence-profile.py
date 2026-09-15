@@ -18,6 +18,7 @@ from adreno_deferred_zero_reprime_sync import apply as apply_deferred_zero_repri
 from adreno_deferred_zero_reprime_guard import apply as apply_deferred_zero_reprime_guard
 from adreno_deferred_zero_history_finalize import apply as apply_deferred_zero_history_finalize
 from adreno_deferred_zero_safe_reprime import apply as apply_deferred_zero_safe_reprime
+from adreno_deferred_zero_exit_persistence import apply as apply_deferred_zero_exit_persistence
 
 FRAMEGEN_HEADERS = (
     Path("framegen/v3.1_include/v3_1/context.hpp"),
@@ -101,6 +102,9 @@ def main() -> None:
         # Final Candidate A lifecycle transform: remove the crash-prone retained
         # raw-history replay and rebuild framegen history across live presents.
         apply_deferred_zero_safe_reprime(root)
+        # Preserve the validated live re-prime, but only wake it when scheduler
+        # generation requests are dense enough to amortize the three-frame cost.
+        apply_deferred_zero_exit_persistence(root)
 
 
 if __name__ == "__main__":
