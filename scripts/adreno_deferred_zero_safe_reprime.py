@@ -87,7 +87,7 @@ def patch_source(path: Path) -> None:
             this->historyMaintenanceState_ = HistoryMaintenanceState::ReprimeHistory;
         } else if (this->historyMaintenanceState_ == HistoryMaintenanceState::LiveHistory) {
 '''
-    new_transition = '''        if (this->historyMaintenanceState_ == HistoryMaintenanceState::DeferredZero) {
+    new_transition = r'''        if (this->historyMaintenanceState_ == HistoryMaintenanceState::DeferredZero) {
             this->historyMaintenanceState_ = HistoryMaintenanceState::ReprimeHistory;
             this->deferredZeroWarmupFramesRemaining_ = kDeferredZeroWarmupFrames;
             this->deferredReprimeStart_ = cycleStart;
@@ -144,7 +144,7 @@ def patch_source(path: Path) -> None:
         metrics.totalAdaptiveZeroGenerationCycles++;
         this->requiresSourceHistoryWarmup_ = false;
 '''
-    new_counters = '''        this->framegenHistoryEpoch_++;
+    new_counters = r'''        this->framegenHistoryEpoch_++;
         if (adaptiveZeroGeneration) {
             metrics.windowAdaptiveZeroGenerationCycles++;
             metrics.totalAdaptiveZeroGenerationCycles++;
