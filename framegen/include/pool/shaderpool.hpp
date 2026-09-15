@@ -56,10 +56,21 @@ namespace LSFG::Pool {
         ///
         Core::Pipeline getPipeline(
             const Core::Device& device, const std::string& name);
+
+        ///
+        /// Whether the cached p_mipmaps module actually contains the B10 head
+        /// transform. A rejected experimental transform falls back to the
+        /// baseline module and leaves this false so callers never bind B10
+        /// scratch/tail resources to an unmodified shader.
+        ///
+        bool isB10MipmapsHeadActive() const noexcept {
+            return this->b10MipmapsHeadActive;
+        }
     private:
         std::function<std::vector<uint8_t>(const std::string&)> source;
         std::unordered_map<std::string, Core::ShaderModule> shaders;
         std::unordered_map<std::string, Core::Pipeline> pipelines;
+        bool b10MipmapsHeadActive{false};
     };
 
 }

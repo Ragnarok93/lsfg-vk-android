@@ -24,6 +24,7 @@ Core::ShaderModule ShaderPool::getShader(
         return it->second;
 
     std::vector<uint8_t> bytecode;
+    bool b10HeadTransformed = false;
 #ifdef LSFGVK_ADRENO_B10_MIPMAPS
     const bool b10Supported = Optimizations::AdrenoB10::isRuntimeSupported(device);
     if (name == "p_mipmaps_b10_tail") {
@@ -44,21 +45,28 @@ Core::ShaderModule ShaderPool::getShader(
 #ifdef LSFGVK_ADRENO_B10_MIPMAPS
     if (name == "p_mipmaps" && b10Supported) {
         Optimizations::AdrenoB10::HeadTransformStats stats;
-        if (!Optimizations::AdrenoB10::transformHead(bytecode, stats)) {
-            throw std::runtime_error("B10 Mipmaps head transform rejected: " + stats.reason);
+        auto candidate = bytecode;
+        if (Optimizations::AdrenoB10::transformHead(candidate, stats)) {
+            bytecode = std::move(candidate);
+            b10HeadTransformed = true;
+            std::cerr << "lsfg-vk: candidate-b10-mipmaps-head applied=1 function="
+                      << stats.targetFunction
+                      << " samples=" << stats.imageSamplesBefore << "->" << stats.imageSamplesAfter
+                      << " writes=" << stats.imageWritesBefore << "->" << stats.imageWritesAfter
+                      << " barriers=" << stats.barriersBefore << "->" << stats.barriersAfter
+                      << " wg_stores=" << stats.workgroupStoresBeforePhase0 << "->"
+                      << stats.workgroupStoresAfter
+                      << " bytes=" << bytecode.size() << '\n';
+        } else {
+            std::cerr << "lsfg-vk: candidate-b10-mipmaps-head applied=0 reason="
+                      << stats.reason << " fallback=baseline\n";
         }
-        std::cerr << "lsfg-vk: candidate-b10-mipmaps-head applied=1 function="
-                  << stats.targetFunction
-                  << " samples=" << stats.imageSamplesBefore << "->" << stats.imageSamplesAfter
-                  << " writes=" << stats.imageWritesBefore << "->" << stats.imageWritesAfter
-                  << " barriers=" << stats.barriersBefore << "->" << stats.barriersAfter
-                  << " wg_stores=" << stats.workgroupStoresBeforePhase0 << "->"
-                  << stats.workgroupStoresAfter
-                  << " bytes=" << bytecode.size() << '\n';
     }
 #endif
 
     Core::ShaderModule shader(device, bytecode, types);
+    if (name == "p_mipmaps")
+        this->b10MipmapsHeadActive = b10HeadTransformed;
     shaders[name] = shader;
     return shader;
 }
