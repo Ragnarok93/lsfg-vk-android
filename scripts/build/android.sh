@@ -58,7 +58,7 @@ if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
         python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
         python3 "${REPO_ROOT}/scripts/apply-candidate-b8-mipmaps-matrix.py" --root "${REPO_ROOT}"
         python3 "${REPO_ROOT}/scripts/apply-candidate-b8-local-spirv-constants.py" --root "${REPO_ROOT}"
-        python3 "${REPO_ROOT}/scripts/apply-final-nonadaptive-sweep.py" --root "${REPO_ROOT}"
+        python3 "${REPO_ROOT}/scripts/apply-final-nonadaptive-sweep-v2.py" --root "${REPO_ROOT}"
     elif [[ "${LSFGVK_B8_DIAGNOSTICS:-0}" == "1" ]]; then
         echo "[lsfg-vk] Enabling opt-in B8 pipeline-executable and mipmaps-matrix diagnostics"
         python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
