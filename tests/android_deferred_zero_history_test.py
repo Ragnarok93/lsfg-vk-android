@@ -70,6 +70,18 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         self.assertNotIn("copyRawHistoryToExternalAhb(", text)
         self.assertNotIn("replayInputSemaphore", text)
 
+    def test_safe_reprime_lifecycle_reset_is_method_bounded(self) -> None:
+        safe = (ROOT / "scripts/adreno_deferred_zero_safe_reprime.py").read_text(encoding="utf-8")
+        self.assertIn("invalidate_start_marker", safe)
+        self.assertIn("ordered_slots_marker", safe)
+        self.assertIn("invalidate_start = text.find", safe)
+        self.assertIn("ordered_slots_start = text.find", safe)
+        self.assertNotIn(
+            '"    this->zeroDemandStart_ = {};\\n}\\n#endif\\n\\n"',
+            safe,
+            "safe re-prime must not depend on preprocessor adjacency around invalidateDeferredZeroHistory",
+        )
+
     def test_safe_reprime_supersedes_legacy_replay_after_checkpoint_transforms(self) -> None:
         bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
         self.assertIn("apply_deferred_zero_safe_reprime", bundle)
