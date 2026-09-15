@@ -55,16 +55,31 @@ def patch_source(path: Path) -> None:
         raise RuntimeError(f"{path}: DeferredZero raw replay helper markers not found")
     text = text[:helper_start] + text[helper_end:]
 
-    # Lifecycle resets must also cancel any in-progress live warmup.
-    text = once(
-        text,
-        "    this->zeroDemandStart_ = {};\n}\n#endif\n\n",
-        "    this->zeroDemandStart_ = {};\n"
-        "    this->deferredZeroWarmupFramesRemaining_ = 0;\n"
-        "    this->deferredReprimeStart_ = {};\n"
-        "}\n#endif\n\n",
-        f"{path}: reset safe DeferredZero warmup",
+    # Lifecycle resets must also cancel any in-progress live warmup. Bound the
+    # edit to the method itself rather than assuming anything about the nearby
+    # Android preprocessor blocks; earlier transforms legitimately change that
+    # surrounding structure.
+    invalidate_start_marker = "void LsContext::invalidateDeferredZeroHistory() {\n"
+    ordered_slots_marker = "std::array<size_t, 3> LsContext::orderedRawHistorySlots() const {\n"
+    invalidate_start = text.find(invalidate_start_marker)
+    ordered_slots_start = text.find(ordered_slots_marker, invalidate_start)
+    if invalidate_start < 0 or ordered_slots_start < 0:
+        raise RuntimeError(f"{path}: DeferredZero lifecycle method boundaries not found")
+    invalidate_block = text[invalidate_start:ordered_slots_start]
+    reset_anchor = "    this->zeroDemandStart_ = {};\n"
+    if invalidate_block.count(reset_anchor) != 1:
+        raise RuntimeError(
+            f"{path}: DeferredZero lifecycle reset anchor expected once in method, "
+            f"found {invalidate_block.count(reset_anchor)}"
+        )
+    invalidate_block = invalidate_block.replace(
+        reset_anchor,
+        reset_anchor
+        + "    this->deferredZeroWarmupFramesRemaining_ = 0;\n"
+        + "    this->deferredReprimeStart_ = {};\n",
+        1,
     )
+    text = text[:invalidate_start] + invalidate_block + text[ordered_slots_start:]
 
     # When demand for generated frames returns, do not synchronously replay the
     # retained ring. Start a three-present live-history warmup instead.
