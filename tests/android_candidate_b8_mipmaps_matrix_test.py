@@ -51,10 +51,18 @@ def main() -> None:
         second = snapshot(temp_root)
         assert first == second, "B8 source transform is not idempotent"
 
-        pipeline_h = first["framegen/include/core/pipeline.hpp"]
         pipeline_cpp = first["framegen/src/core/pipeline.cpp"]
         shaderpool = first["framegen/src/pool/shaderpool.cpp"]
 
+        # B6's existing detailed executable-stat/IR dump must be extended from
+        # exactly p_mipmaps to the uniquely named B8 variants.
+        require(pipeline_cpp,
+            'shaderName.rfind("p_mipmaps", 0) == 0',
+            "pipeline-exec-stat shader=p_mipmaps",
+            "pipeline-exec-ir-line shader=p_mipmaps")
+
+        # One launch compiles baseline plus independent probes. Risky probes are
+        # compile-only; pow can be explicitly selected later in the same APK.
         require(shaderpool,
             "candidate-b8-mipmaps-matrix",
             '"baseline"',
@@ -63,33 +71,12 @@ def main() -> None:
             '"no-u0-writes-upper-bound"',
             '"local16-occupancy-probe"',
             '"local8-occupancy-probe"',
-            "compile_only=",
-            "semantics_preserving=")
-
-        require(pipeline_h,
-            "PipelineExecutableSummary",
-            "maxWaves",
-            "instructionCount",
-            "nopCount",
-            "registerCount",
-            "ssStallCycles",
-            "syStallCycles",
-            "stpCount",
-            "ldpCount")
-        require(pipeline_cpp,
-            "pipeline-exec-summary",
-            "Estimated cycles stalled on SS",
-            "Estimated cycles stalled on SY",
-            "STP Count",
-            "LDP Count")
-
-        require(shaderpool,
-            "mipmaps-variant-score",
+            "mipmaps-variant-begin",
+            "mipmaps-variant-end",
             "mipmaps-variant-selected",
             "LSFGVK_B8_MIPMAPS_VARIANT",
             "compileOnly",
-            "semanticsPreserving",
-            "strictlyBetterMipmapsVariant")
+            "semanticsPreserving")
 
     build = read(ROOT, "scripts/build/android.sh")
     invocation = (
