@@ -37,8 +37,8 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." &>/dev/null && pwd)"
 BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build-android-${ABI}}"
 DIST_DIR="${DIST_DIR:-${BUILD_DIR}/dist}"
 
-# Android runtime hardening is part of the runtime itself, not profiling. Keep
-# lifecycle/config behavior deterministic for every Android/Bionic build.
+# Android runtime lifecycle/config behavior stays deterministic for every
+# Android/Bionic build; profiling transforms remain gated below.
 python3 "${REPO_ROOT}/scripts/adreno_suspend_timeout_guard.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/adreno_android_runtime_residency.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/adreno_android_config_reload.py" --root "${REPO_ROOT}"
@@ -52,6 +52,7 @@ if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
     python3 "${REPO_ROOT}/scripts/apply-candidate-b2-mipmaps-dependency-profile.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-candidate-b3-beta4-analysis.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
+    python3 "${REPO_ROOT}/scripts/apply-candidate-b8-mipmaps-matrix.py" --root "${REPO_ROOT}"
 fi
 
 # Candidate B translation cleanup runs after optional profiling composition so
