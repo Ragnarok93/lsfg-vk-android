@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import gzip
+import hashlib
 import random
 import struct
 import subprocess
@@ -93,6 +95,7 @@ class B10Contract(unittest.TestCase):
         self.shaderpool = (ROOT / 'framegen/src/pool/shaderpool.cpp').read_text()
         self.mipmap = (ROOT / 'framegen/v3.1p_src/shaders/mipmaps.cpp').read_text()
         self.build = (ROOT / 'scripts/build/android.sh').read_text()
+        self.workflow = (ROOT / '.github/workflows/android-bionic.yml').read_text()
 
     def test_production_fingerprint_matches_existing_b8_baseline(self):
         b8 = (ROOT / 'scripts/apply-candidate-b8-mipmaps-matrix.py').read_text()
@@ -105,6 +108,23 @@ class B10Contract(unittest.TestCase):
         self.assertIn('kB8ExpectedBytes = 28832', b8)
         self.assertIn('kB8ExpectedBound = 1270', b8)
         self.assertIn('kB8ExpectedFnv = 0x65d3c6a69e9f9b07ULL', b8)
+
+    def test_captured_production_shader_fixture_is_exact_and_ci_validated(self):
+        fixture = ROOT / 'framegen/tests/fixtures/p_mipmaps-adreno650-20260915.spv.gz'
+        raw = gzip.decompress(fixture.read_bytes())
+        self.assertEqual(len(raw), 28832)
+        self.assertEqual(
+            hashlib.sha256(raw).hexdigest(),
+            '68c68ffd7308d0cc742aa3e9ecbd00f44c92893c23df5cd62e1318cdb75b9046',
+        )
+        for token in (
+            'p_mipmaps-adreno650-20260915.spv.gz',
+            'B10_PRODUCTION_HEAD_SPV=/tmp/b10-production-head.spv',
+            'B10_HEAD_SPV_OUT=/tmp/b10-transformed-head.spv',
+            'spirv-val --target-env vulkan1.1 /tmp/b10-production-head.spv',
+            'spirv-val --target-env vulkan1.1 /tmp/b10-transformed-head.spv',
+        ):
+            self.assertIn(token, self.workflow)
 
     def test_head_is_fail_closed_and_exact(self):
         for token in (
