@@ -46,6 +46,7 @@ jobs:
           python3 tests/android_candidate_b2_mipmaps_dependency_test.py
           python3 tests/android_candidate_b3_beta4_analysis_test.py
           python3 tests/android_candidate_b4_beta4_predicate_test.py
+          python3 tests/android_candidate_b9_beta4_spill_collapse_test.py
           python3 tests/android_candidate_b6_pipeline_executable_profile_test.py
           python3 tests/android_candidate_b8_mipmaps_matrix_test.py
           python3 tests/android_final_nonadaptive_sweep_test.py
