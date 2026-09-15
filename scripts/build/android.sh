@@ -64,6 +64,11 @@ python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "
 # builds; when profiling is enabled it executes before the B3 evidence log call.
 python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate.py" --root "${REPO_ROOT}"
 
+# Candidate B7 preserves the retained-B4 Mipmaps math and side-effect graph but
+# shortens phase-0 sample/intermediate live ranges before driver compilation.
+# Exact input/intermediate/output fingerprints make translator drift a safe no-op.
+python3 "${REPO_ROOT}/scripts/apply-candidate-b7-mipmaps-live-range.py" --root "${REPO_ROOT}"
+
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
 
 cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
