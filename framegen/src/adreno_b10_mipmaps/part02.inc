@@ -33,27 +33,75 @@
         return false;
     }
 
-    // The compact tail must receive the exact value that the original shader
-    // seeded into TGSM, including padded edge lanes. The production shader
-    // writes u1 as a vec4 replicate of that same scalar. Prove that relation
-    // structurally before cloning the u1 image write into the padded R32F
-    // scratch image; do not infer it from instruction proximity.
+    // Mirror the exact value the production shader stores into TGSM. The real
+    // p_mipmaps SSA does not use the same result id for the u1 texel and the
+    // later TGSM store: it writes component 1 to u1, mutates another component,
+    // reloads component 1, bitcasts it to uint, then stores those bits to TGSM.
+    // Reconstructing scratch from the TGSM store itself is both simpler and
+    // stronger than trying to prove equivalence through that mutable SSA chain.
     const auto& phase0WorkgroupStore = parsed.instructions[phase0WorkgroupStores.front()];
     const uint32_t workgroupSeedValue = words[phase0WorkgroupStore.offset + 2];
+    const uint32_t u1CoordinateValue = words[u1Write.offset + 2];
     const uint32_t u1TexelValue = words[u1Write.offset + 3];
-    bool u1ReplicatesWorkgroupSeed = false;
+
+    auto resultType = [&](uint32_t resultId) -> std::optional<uint32_t> {
+        for (const auto& inst : parsed.instructions) {
+            if (inst.wordCount < 3 || words[inst.offset + 2] != resultId)
+                continue;
+            switch (inst.op) {
+            case spv::OpLoad:
+            case spv::OpCompositeConstruct:
+            case spv::OpCompositeExtract:
+            case spv::OpCompositeInsert:
+            case spv::OpVectorShuffle:
+            case spv::OpBitcast:
+            case spv::OpCopyObject:
+                return words[inst.offset + 1];
+            default:
+                break;
+            }
+        }
+        return std::nullopt;
+    };
+
+    const auto u1TexelType = resultType(u1TexelValue);
+    const auto workgroupSeedType = resultType(workgroupSeedValue);
+    if (!u1TexelType || !workgroupSeedType) {
+        stats.reason = "u1-workgroup-seed-mismatch";
+        return false;
+    }
+
+    uint32_t scratchScalarType = 0;
     for (const auto& inst : parsed.instructions) {
-        if (inst.op != spv::OpCompositeConstruct || inst.wordCount != 7)
+        if (inst.op != spv::OpTypeVector || inst.wordCount < 4
+                || words[inst.offset + 1] != *u1TexelType)
             continue;
-        if (words[inst.offset + 2] != u1TexelValue)
-            continue;
-        u1ReplicatesWorkgroupSeed = true;
-        for (size_t operand = 3; operand < 7; ++operand)
-            u1ReplicatesWorkgroupSeed = u1ReplicatesWorkgroupSeed
-                && words[inst.offset + operand] == workgroupSeedValue;
+        if (words[inst.offset + 3] != 4) {
+            stats.reason = "u1-texel-vector-width";
+            return false;
+        }
+        scratchScalarType = words[inst.offset + 2];
         break;
     }
-    if (!u1ReplicatesWorkgroupSeed) {
+    if (scratchScalarType == 0) {
+        stats.reason = "u1-texel-type";
+        return false;
+    }
+
+    bool scalarIsFloat32 = false;
+    bool seedIsUint32 = false;
+    for (const auto& inst : parsed.instructions) {
+        if (inst.op == spv::OpTypeFloat && inst.wordCount >= 3
+                && words[inst.offset + 1] == scratchScalarType
+                && words[inst.offset + 2] == 32)
+            scalarIsFloat32 = true;
+        if (inst.op == spv::OpTypeInt && inst.wordCount >= 4
+                && words[inst.offset + 1] == *workgroupSeedType
+                && words[inst.offset + 2] == 32
+                && words[inst.offset + 3] == 0)
+            seedIsUint32 = true;
+    }
+    if (!scalarIsFloat32 || !seedIsUint32) {
         stats.reason = "u1-workgroup-seed-mismatch";
         return false;
     }
@@ -93,15 +141,17 @@
     const uint32_t scratchImageType = scratchPointeeIt->second;
 
     const uint32_t newImageId = words[3];
-    if (newImageId == std::numeric_limits<uint32_t>::max()) {
+    if (newImageId > std::numeric_limits<uint32_t>::max() - 3u) {
         stats.reason = "id-bound-overflow";
         return false;
     }
+    const uint32_t newScalarId = newImageId + 1u;
+    const uint32_t newTexelId = newImageId + 2u;
 
     std::vector<uint32_t> output;
     output.reserve(words.size());
     output.insert(output.end(), words.begin(), words.begin() + 5);
-    output[3] = newImageId + 1;
+    output[3] = newImageId + 3u;
 
     bool inTarget = false;
     bool truncated = false;
@@ -133,21 +183,24 @@
 
         if (inst.op == spv::OpStore && inst.wordCount >= 3) {
             const auto storage = pointerStorage(parsed, words[inst.offset + 1]);
-            if (storage && *storage == spv::StorageClassWorkgroup)
+            if (storage && *storage == spv::StorageClassWorkgroup) {
+                if (i == phase0WorkgroupStores.front()) {
+                    putOp(output, spv::OpLoad,
+                        {scratchImageType, newImageId, scratchVariable});
+                    putOp(output, spv::OpBitcast,
+                        {scratchScalarType, newScalarId, workgroupSeedValue});
+                    putOp(output, spv::OpCompositeConstruct,
+                        {*u1TexelType, newTexelId,
+                         newScalarId, newScalarId, newScalarId, newScalarId});
+                    putOp(output, spv::OpImageWrite,
+                        {newImageId, u1CoordinateValue, newTexelId});
+                    scratchWriteInserted = true;
+                }
                 continue;
+            }
         }
 
         appendInstruction(output, words, inst);
-        if (i == phase0Writes[4]) {
-            putOp(output, spv::OpLoad,
-                {scratchImageType, newImageId, scratchVariable});
-            std::vector<uint32_t> scratchWrite(
-                words.begin() + static_cast<std::ptrdiff_t>(u1Write.offset),
-                words.begin() + static_cast<std::ptrdiff_t>(u1Write.offset + u1Write.wordCount));
-            scratchWrite[1] = newImageId;
-            output.insert(output.end(), scratchWrite.begin(), scratchWrite.end());
-            scratchWriteInserted = true;
-        }
     }
 
     if (inTarget || truncated || !scratchWriteInserted) {
