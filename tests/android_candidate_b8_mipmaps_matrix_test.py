@@ -8,9 +8,11 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+B6_PATCHER = ROOT / "scripts/apply-candidate-b6-pipeline-executable-profile.py"
 PATCHER = ROOT / "scripts/apply-candidate-b8-mipmaps-matrix.py"
 SOURCE_PATHS = (
-    "src/extract/trans.cpp",
+    "framegen/include/core/device.hpp",
+    "framegen/src/core/device.cpp",
     "framegen/include/core/pipeline.hpp",
     "framegen/src/core/pipeline.cpp",
     "framegen/src/pool/shaderpool.cpp",
@@ -31,9 +33,10 @@ def snapshot(root: Path) -> dict[str, str]:
 
 
 def main() -> None:
+    assert B6_PATCHER.is_file(), B6_PATCHER
     assert PATCHER.is_file(), PATCHER
 
-    # B8 composes after the existing B6 profiler and B4 production rewrite.
+    # B8 composes on the already-proven B6 pipeline-executable profiler.
     with tempfile.TemporaryDirectory() as td:
         temp_root = Path(td)
         for relative in SOURCE_PATHS:
@@ -42,6 +45,10 @@ def main() -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
 
+        subprocess.run(
+            [sys.executable, str(B6_PATCHER), "--root", str(temp_root)],
+            check=True,
+        )
         subprocess.run(
             [sys.executable, str(PATCHER), "--root", str(temp_root)],
             check=True,
@@ -54,22 +61,22 @@ def main() -> None:
         second = snapshot(temp_root)
         assert first == second, "B8 source transform is not idempotent"
 
-        trans = first["src/extract/trans.cpp"]
         pipeline_h = first["framegen/include/core/pipeline.hpp"]
         pipeline_cpp = first["framegen/src/core/pipeline.cpp"]
         shaderpool = first["framegen/src/pool/shaderpool.cpp"]
 
         # One device run must compile a useful candidate matrix from one exact
         # p_mipmaps input. Only semantics-preserving variants may be selected.
-        require(trans,
+        require(shaderpool,
             "candidate-b8-mipmaps-matrix",
-            "baseline",
-            "b7-control",
-            "pow-equivalent",
-            "transfer-bypass-upper-bound",
-            "no-u0-writes-upper-bound",
-            "local16-occupancy-probe",
-            "compile_only=1")
+            '"baseline"',
+            '"b7-control"',
+            '"pow-equivalent"',
+            '"transfer-bypass-upper-bound"',
+            '"no-u0-writes-upper-bound"',
+            '"local16-occupancy-probe"',
+            "compile_only=",
+            "semantics_preserving=")
 
         # Pipeline executable capture must return compact machine statistics so
         # ShaderPool can compare candidates without parsing its own log output.
