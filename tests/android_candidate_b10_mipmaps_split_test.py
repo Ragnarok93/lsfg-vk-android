@@ -89,6 +89,7 @@ class B10Contract(unittest.TestCase):
                 (ROOT / 'framegen/src/adreno_b10_mipmaps').glob('part*.inc')))
         self.helper = helper_main + helper_parts
         self.header = (ROOT / 'framegen/include/adreno_b10_mipmaps.hpp').read_text()
+        self.shaderpool_header = (ROOT / 'framegen/include/pool/shaderpool.hpp').read_text()
         self.shaderpool = (ROOT / 'framegen/src/pool/shaderpool.cpp').read_text()
         self.mipmap = (ROOT / 'framegen/v3.1p_src/shaders/mipmaps.cpp').read_text()
         self.build = (ROOT / 'scripts/build/android.sh').read_text()
@@ -141,7 +142,6 @@ class B10Contract(unittest.TestCase):
 
     def test_runtime_gate_is_adreno6xx_and_required_storage_features(self):
         self.assertIn('isRuntimeSupported(device)', self.shaderpool)
-        self.assertIn('isRuntimeSupported(vk.device)', self.mipmap)
         for token in (
             'isAdreno6xxDevice(properties.vendorID, properties.deviceName)',
             'shaderStorageImageReadWithoutFormat',
@@ -151,6 +151,17 @@ class B10Contract(unittest.TestCase):
         ):
             self.assertIn(token, self.helper)
         self.assertIn('VK_FORMAT_R32_SFLOAT', self.mipmap)
+
+    def test_transform_rejection_falls_back_to_baseline_inside_lsfg(self):
+        self.assertIn('isB10MipmapsHeadActive()', self.shaderpool_header)
+        self.assertIn('b10MipmapsHeadActive', self.shaderpool_header)
+        self.assertIn('candidate-b10-mipmaps-head applied=0 reason=', self.shaderpool)
+        self.assertIn('fallback=baseline', self.shaderpool)
+        self.assertNotIn('throw std::runtime_error("B10 Mipmaps head transform rejected:', self.shaderpool)
+        activation = 'this->b10Enabled = vk.shaders.isB10MipmapsHeadActive();'
+        self.assertIn(activation, self.mipmap)
+        self.assertNotIn('this->b10Enabled = Optimizations::AdrenoB10::isRuntimeSupported(vk.device);', self.mipmap)
+        self.assertLess(self.mipmap.index('this->shaderModule = vk.shaders.getShader'), self.mipmap.index(activation))
 
     def test_dispatch_preserves_profiler_anchor_and_includes_tail_cost(self):
         original_barrier = (
