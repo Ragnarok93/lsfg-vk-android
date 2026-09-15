@@ -58,6 +58,7 @@ std::vector<uint8_t> syntheticHead() {
     put(w, spv::OpDecorate, {varScratch, spv::DecorationDescriptorSet, 0});
     put(w, spv::OpDecorate, {varScratch, spv::DecorationBinding, 5});
     put(w, spv::OpTypeVoid, {voidType});
+    put(w, spv::OpTypeFloat, {valueType, 32});
     put(w, spv::OpTypeInt, {uintType, 32, 0});
     put(w, spv::OpTypeVector, {vec4Type, valueType, 4});
     put(w, spv::OpTypePointer, {imagePtr, spv::StorageClassUniformConstant, imageType});
