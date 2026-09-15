@@ -3,8 +3,9 @@
 
 Reuses the validated probe builders/pipeline changes from
 apply-final-nonadaptive-sweep.py, but places the deferred trigger at a boundary
-that survives earlier async/profile transforms and gives disposable pipelines
-the real descriptor schema of the shader being compiled.
+that survives earlier async/profile transforms, gives disposable pipelines the
+real descriptor schema of the shader being compiled, and keeps each Mipmaps
+probe independent so one failed builder cannot poison the rest of the sweep.
 """
 from __future__ import annotations
 
@@ -20,6 +21,32 @@ if spec is None or spec.loader is None:
     raise RuntimeError(f"unable to load {BASE_PATH}")
 base = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(base)
+
+
+def patch_independent_mipmaps_probes(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    marker = "sweep-independent-mipmaps-probes"
+    if marker in text:
+        return
+    old = (
+        "    if (index >= 1U && index <= 5U) {\n"
+        "        const auto variants = b8Variants(baseline);\n"
+        "        if (variants.size() != 6U) return false;\n"
+        "        out = variants.at(index).bytecode;\n"
+        "        return true;\n"
+        "    }\n"
+    )
+    new = (
+        "    // sweep-independent-mipmaps-probes: a failed optional builder must not shift\n"
+        "    // or suppress later compile-only probes in the fixed sweep index table.\n"
+        "    if (index == 1U) return b8PowEquivalent(baseline, out);\n"
+        "    if (index == 2U) return b8TransferBypass(baseline, out);\n"
+        "    if (index == 3U) return b8NoU0Writes(baseline, out);\n"
+        "    if (index == 4U) return b8Local16(baseline, out);\n"
+        "    if (index == 5U) return b8Local8(baseline, out);\n"
+    )
+    text = base.replace_exact(text, old, new, "Independent Mipmaps sweep probes")
+    path.write_text(text, encoding="utf-8")
 
 
 def patch_probe_descriptor_layout(path: Path) -> None:
@@ -90,6 +117,7 @@ def main() -> None:
     base.patch_pipeline(root / base.PIPELINE_CPP)
     base.patch_pool_hpp(root / base.POOL_HPP)
     base.patch_pool_cpp(root / base.POOL_CPP)
+    patch_independent_mipmaps_probes(root / base.POOL_CPP)
     patch_probe_descriptor_layout(root / base.POOL_CPP)
     patch_context(root / base.CONTEXT_CPP)
 
