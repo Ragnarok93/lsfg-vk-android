@@ -51,7 +51,12 @@ assert "data.cmdBuffer1 = Core::CommandBuffer(vk.device, vk.commandPool);" in co
 assert "cmdBuffer = Core::CommandBuffer(vk.device, vk.commandPool);" in context
 assert "data.cmdBuffer1.reset();" in context
 assert "buf2.reset();" in context
-present = context[context.index("void Context::present("):]
+
+# Inspect only present(). A second Android Context constructor appears later in
+# this source file and intentionally retains the one-time slot allocations.
+present_start = context.index("void Context::present(")
+present_end = context.index("bool Context::waitForLastPresent", present_start)
+present = context[present_start:present_end]
 assert "data.cmdBuffer1 = Core::CommandBuffer(vk.device, vk.commandPool);" not in present
 assert "buf2 = Core::CommandBuffer(vk.device, vk.commandPool);" not in present
 
