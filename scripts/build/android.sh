@@ -39,8 +39,6 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." &>/dev/null && pwd)"
 BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build-android-${ABI}}"
 DIST_DIR="${DIST_DIR:-${BUILD_DIR}/dist}"
 
-# Android runtime lifecycle/config behavior stays deterministic for every
-# Android/Bionic build; profiling transforms remain gated below.
 python3 "${REPO_ROOT}/scripts/adreno_suspend_timeout_guard.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/adreno_android_runtime_residency.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/adreno_android_config_reload.py" --root "${REPO_ROOT}"
@@ -67,15 +65,12 @@ if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
     fi
 fi
 
-# Candidate B translation cleanup runs after optional profiling composition so
-# profiling keeps matching the original translator while measuring the optimized
-# SPIR-V that is ultimately compiled into the Android runtime.
 python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "${REPO_ROOT}"
-
-# Candidate B4 is an exact, lossless post-translation rewrite. Run it after the
-# named-shader cleanup so it is active in both profiling and production Android
-# builds; when profiling is enabled it executes before the B3 evidence log call.
 python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate.py" --root "${REPO_ROOT}"
+
+# Apply after all optional source transforms so command-buffer reuse cannot
+# invalidate their source anchors. This is Android-only build composition.
+python3 "${REPO_ROOT}/scripts/apply-android-command-buffer-reuse.py" --root "${REPO_ROOT}"
 
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
 
