@@ -98,9 +98,16 @@ def main() -> None:
             "kSweepOpImageSampleExplicitLod",
             "kSweepOpCopyObject",
             "sweep-probe-descriptor-layout",
+            "sweep-independent-mipmaps-probes",
+            "if (index == 1U) return b8PowEquivalent(baseline, out);",
+            "if (index == 2U) return b8TransferBypass(baseline, out);",
+            "if (index == 3U) return b8NoU0Writes(baseline, out);",
+            "if (index == 4U) return b8Local16(baseline, out);",
+            "if (index == 5U) return b8Local8(baseline, out);",
             "{7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}",
             "{6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}",
         )
+        assert "if (variants.size() != 6U) return false;" not in pool_cpp
         require(
             context,
             "kAdrenoSweepWarmupFrames",
