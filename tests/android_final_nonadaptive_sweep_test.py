@@ -47,9 +47,6 @@ def main() -> None:
         for patcher in (B6, B8, B8_CONSTANTS):
             subprocess.run([sys.executable, str(patcher), "--root", str(temp)], check=True)
 
-        # The real Android profiling composition inserts deferred-preprocessing
-        # retirement immediately after the data lookup. Simulate that shape so
-        # the sweep cannot regress to depending on the original blank-line anchor.
         context_path = temp / "framegen/v3.1p_src/context.cpp"
         context_text = context_path.read_text(encoding="utf-8")
         old_data_anchor = "    auto& data = this->data.at(this->frameIdx % 8);\n\n"
@@ -100,6 +97,9 @@ def main() -> None:
             "compile_only=1",
             "kSweepOpImageSampleExplicitLod",
             "kSweepOpCopyObject",
+            "sweep-probe-descriptor-layout",
+            "{7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}",
+            "{6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}",
         )
         require(
             context,
