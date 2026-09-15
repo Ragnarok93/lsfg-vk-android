@@ -3,7 +3,8 @@
 
 Reuses the validated probe builders/pipeline changes from
 apply-final-nonadaptive-sweep.py, but places the deferred trigger at a boundary
-that survives the earlier async zero-history/profile transforms.
+that survives earlier async/profile transforms and gives disposable pipelines
+the real descriptor schema of the shader being compiled.
 """
 from __future__ import annotations
 
@@ -21,6 +22,36 @@ base = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(base)
 
 
+def patch_probe_descriptor_layout(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    marker = "sweep-probe-descriptor-layout"
+    if marker in text:
+        return
+    old = "        Core::ShaderModule shader(device, probe, {});\n"
+    new = (
+        "        // sweep-probe-descriptor-layout: pipeline layouts must match statically used bindings.\n"
+        "        std::vector<std::pair<size_t, VkDescriptorType>> descriptorTypes;\n"
+        "        if (std::string(spec.sourceName) == \"p_mipmaps\") {\n"
+        "            descriptorTypes = {\n"
+        "                {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},\n"
+        "                {1, VK_DESCRIPTOR_TYPE_SAMPLER},\n"
+        "                {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},\n"
+        "                {7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},\n"
+        "            };\n"
+        "        } else {\n"
+        "            descriptorTypes = {\n"
+        "                {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},\n"
+        "                {1, VK_DESCRIPTOR_TYPE_SAMPLER},\n"
+        "                {2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},\n"
+        "                {6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},\n"
+        "            };\n"
+        "        }\n"
+        "        Core::ShaderModule shader(device, probe, descriptorTypes);\n"
+    )
+    text = base.replace_exact(text, old, new, "Sweep probe descriptor layout")
+    path.write_text(text, encoding="utf-8")
+
+
 def patch_context(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     if "kAdrenoSweepWarmupFrames" in text:
@@ -36,10 +67,6 @@ def patch_context(path: Path) -> None:
         "Context sweep constants",
     )
 
-    # Earlier async zero-history transforms insert preprocessing-retirement work
-    # immediately after the data lookup.  The wait boundary remains stable and
-    # intentionally places probe compilation after that retirement work but
-    # before the normal per-slot completion wait.
     anchor = "    if (data.shouldWait)\n"
     insertion = (
         "#ifdef __ANDROID__\n"
@@ -63,6 +90,7 @@ def main() -> None:
     base.patch_pipeline(root / base.PIPELINE_CPP)
     base.patch_pool_hpp(root / base.POOL_HPP)
     base.patch_pool_cpp(root / base.POOL_CPP)
+    patch_probe_descriptor_layout(root / base.POOL_CPP)
     patch_context(root / base.CONTEXT_CPP)
 
 
