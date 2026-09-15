@@ -82,6 +82,12 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
             "safe re-prime must not depend on preprocessor adjacency around invalidateDeferredZeroHistory",
         )
 
+    def test_safe_reprime_cpp_templates_preserve_escape_sequences(self) -> None:
+        safe = (ROOT / "scripts/adreno_deferred_zero_safe_reprime.py").read_text(encoding="utf-8")
+        self.assertIn("new_transition = r'''", safe)
+        self.assertIn("new_counters = r'''", safe)
+        self.assertIn("<< '\\n';", safe)
+
     def test_safe_reprime_supersedes_legacy_replay_after_checkpoint_transforms(self) -> None:
         bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
         self.assertIn("apply_deferred_zero_safe_reprime", bundle)
