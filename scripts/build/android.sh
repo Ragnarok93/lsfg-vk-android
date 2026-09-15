@@ -15,6 +15,7 @@
 #   LSFGVK_ZERO_STAGE_PROFILE=1 ... ./scripts/build/android.sh   # profiling build
 #   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_B8_DIAGNOSTICS=1 ...     # legacy B8 diagnostic matrix
 #   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_FINAL_NONADAPTIVE_SWEEP=1 ... # deferred final sweep
+#   LSFGVK_EXPERIMENTAL_B9=1 ... ./scripts/build/android.sh      # experimental Beta4 scheduler
 
 set -euo pipefail
 
@@ -67,7 +68,10 @@ fi
 
 python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate.py" --root "${REPO_ROOT}"
-python3 "${REPO_ROOT}/scripts/apply-candidate-b9-beta4-spill-collapse.py" --root "${REPO_ROOT}"
+if [[ "${LSFGVK_EXPERIMENTAL_B9:-0}" == "1" ]]; then
+    echo "[lsfg-vk] Enabling experimental B9 Beta4 scheduler"
+    python3 "${REPO_ROOT}/scripts/apply-candidate-b9-beta4-spill-collapse.py" --root "${REPO_ROOT}"
+fi
 
 # Apply after all optional source transforms so command-buffer reuse cannot
 # invalidate their source anchors. This is Android-only build composition.

@@ -64,6 +64,109 @@
         return true;
     }
 
+    struct B9FunctionShape {
+        uint32_t id{};
+        size_t samples{};
+        size_t writes{};
+        size_t barriers{};
+        size_t phase0Samples{};
+        size_t predicates{};
+    };
+
+    bool b9FindBeta4HotFunction(
+            const std::vector<uint8_t>& bytecode,
+            const std::vector<B9Instruction>& instructions,
+            uint32_t& entryPointId,
+            uint32_t& targetFunctionId,
+            B9FunctionShape& targetShape) {
+        entryPointId = 0U;
+        targetFunctionId = 0U;
+        targetShape = {};
+
+        for (const auto& instruction : instructions) {
+            if (instruction.opCode != kB9OpEntryPoint || instruction.wordCount < 3U)
+                continue;
+            const uint32_t candidate = b9ReadWord(bytecode, instruction.word + 2U);
+            if (entryPointId != 0U && entryPointId != candidate)
+                return false;
+            entryPointId = candidate;
+        }
+        if (entryPointId == 0U)
+            return false;
+
+        bool inFunction = false;
+        bool phase0 = false;
+        size_t nextPredicate = 0U;
+        size_t hotFunctions = 0U;
+        B9FunctionShape shape{};
+
+        for (size_t i = 0; i < instructions.size(); ++i) {
+            const auto& instruction = instructions[i];
+            if (instruction.opCode == kB9OpFunction) {
+                if (inFunction || instruction.wordCount < 3U)
+                    return false;
+                inFunction = true;
+                phase0 = true;
+                nextPredicate = 0U;
+                shape = {};
+                shape.id = b9ReadWord(bytecode, instruction.word + 2U);
+                continue;
+            }
+
+            if (instruction.opCode == kB9OpFunctionEnd) {
+                if (!inFunction)
+                    return false;
+                if (shape.samples == 18U
+                        && shape.writes == 6U
+                        && shape.barriers == 5U
+                        && shape.phase0Samples == 18U
+                        && shape.predicates == kB9PredicateConditions.size()) {
+                    ++hotFunctions;
+                    targetFunctionId = shape.id;
+                    targetShape = shape;
+                }
+                inFunction = false;
+                phase0 = false;
+                continue;
+            }
+
+            if (!inFunction)
+                continue;
+
+            if (instruction.opCode == kB9OpImageSampleExplicitLod) {
+                ++shape.samples;
+                if (phase0)
+                    ++shape.phase0Samples;
+            } else if (instruction.opCode == kB9OpImageWrite) {
+                ++shape.writes;
+            } else if (instruction.opCode == kB9OpControlBarrier) {
+                ++shape.barriers;
+                phase0 = false;
+            }
+
+            if (instruction.opCode == kB9OpSelectionMerge
+                    && instruction.wordCount == 3U
+                    && nextPredicate < kB9MergeLabels.size()
+                    && b9ReadWord(bytecode, instruction.word + 1U)
+                        == kB9MergeLabels[nextPredicate]) {
+                if (i + 1U >= instructions.size())
+                    return false;
+                const auto& branch = instructions[i + 1U];
+                if (branch.opCode != kB9OpBranchConditional
+                        || branch.wordCount != 4U
+                        || b9ReadWord(bytecode, branch.word + 1U)
+                            != kB9PredicateConditions[nextPredicate])
+                    return false;
+                ++nextPredicate;
+                ++shape.predicates;
+            }
+        }
+
+        return !inFunction
+            && hotFunctions == 1U
+            && targetFunctionId != 0U;
+    }
+
     bool applyCandidateB9Beta4SpillCollapse(
             const std::string& shaderName,
             std::vector<uint8_t>& bytecode) {
@@ -82,15 +185,14 @@
         const B9Inventory beforeInventory = b9Inventory(bytecode, instructions);
 
         uint32_t entryPointId = 0U;
-        for (const auto& instruction : instructions) {
-            if (instruction.opCode == kB9OpEntryPoint && instruction.wordCount >= 3U) {
-                entryPointId = b9ReadWord(bytecode, instruction.word + 2U);
-                break;
-            }
-        }
-        if (entryPointId == 0U) {
+        uint32_t targetFunctionId = 0U;
+        B9FunctionShape targetShape{};
+        if (!b9FindBeta4HotFunction(bytecode, instructions,
+                entryPointId, targetFunctionId, targetShape)) {
             std::cerr << "lsfg-vk: candidate-b9-beta4-spill-collapse shader="
-                << shaderName << " applied=0 reason=entry-point" << std::endl;
+                << shaderName << " applied=0 reason=hot-function"
+                << " entry_function=" << entryPointId
+                << " target_function=" << targetFunctionId << std::endl;
             return false;
         }
 
@@ -104,8 +206,8 @@
             rewritten.push_back(b9ReadWord(bytecode, i));
 
         std::vector<B9Instruction> segment;
-        bool inEntryFunction = false;
-        bool phase0 = true;
+        bool inTargetFunction = false;
+        bool phase0 = false;
         size_t phase0Segments = 0U;
         size_t movedInstructions = 0U;
         size_t streamedSamples = 0U;
@@ -125,8 +227,9 @@
             if (instruction.opCode == kB9OpFunction && instruction.wordCount >= 3U) {
                 if (!flushSegment())
                     return false;
-                inEntryFunction =
-                    b9ReadWord(bytecode, instruction.word + 2U) == entryPointId;
+                inTargetFunction =
+                    b9ReadWord(bytecode, instruction.word + 2U) == targetFunctionId;
+                phase0 = inTargetFunction;
                 b9AppendInstruction(rewritten, bytecode, instruction);
                 continue;
             }
@@ -135,12 +238,12 @@
                 if (!flushSegment())
                     return false;
                 b9AppendInstruction(rewritten, bytecode, instruction);
-                if (inEntryFunction)
-                    inEntryFunction = false;
+                inTargetFunction = false;
+                phase0 = false;
                 continue;
             }
 
-            if (!inEntryFunction || !phase0) {
+            if (!inTargetFunction || !phase0) {
                 if (!flushSegment())
                     return false;
                 b9AppendInstruction(rewritten, bytecode, instruction);
@@ -176,6 +279,8 @@
             std::cerr << "lsfg-vk: candidate-b9-beta4-spill-collapse shader="
                 << shaderName << " applied=0 reason="
                 << (streamedSamples != 18U ? "phase0-sample-count" : "no-reorder")
+                << " entry_function=" << entryPointId
+                << " target_function=" << targetFunctionId
                 << " streamed_samples=" << streamedSamples
                 << " moved=" << movedInstructions << std::endl;
             return false;
@@ -185,12 +290,24 @@
         std::memcpy(candidate.data(), rewritten.data(), candidate.size());
 
         std::vector<B9Instruction> candidateInstructions;
+        uint32_t candidateEntryPointId = 0U;
+        uint32_t candidateTargetFunctionId = 0U;
+        B9FunctionShape candidateShape{};
         if (candidate.size() != bytecode.size()
                 || b9ReadWord(candidate, 3U) != kB9ExpectedBound
                 || !b9Parse(candidate, candidateInstructions)
                 || !b9Beta4Baseline(candidate, candidateInstructions)
                 || !b9SameInventory(beforeInventory,
-                    b9Inventory(candidate, candidateInstructions))) {
+                    b9Inventory(candidate, candidateInstructions))
+                || !b9FindBeta4HotFunction(candidate, candidateInstructions,
+                    candidateEntryPointId, candidateTargetFunctionId, candidateShape)
+                || candidateEntryPointId != entryPointId
+                || candidateTargetFunctionId != targetFunctionId
+                || candidateShape.samples != targetShape.samples
+                || candidateShape.writes != targetShape.writes
+                || candidateShape.barriers != targetShape.barriers
+                || candidateShape.phase0Samples != targetShape.phase0Samples
+                || candidateShape.predicates != targetShape.predicates) {
             std::cerr << "lsfg-vk: candidate-b9-beta4-spill-collapse shader="
                 << shaderName << " applied=0 reason=post-verify" << std::endl;
             return false;
@@ -201,6 +318,13 @@
             << shaderName
             << " applied=1"
             << " phase0=streaming-ssa"
+            << " entry_function=" << entryPointId
+            << " target_function=" << targetFunctionId
+            << " hot_samples=" << targetShape.samples
+            << " hot_writes=" << targetShape.writes
+            << " hot_barriers=" << targetShape.barriers
+            << " phase0_samples=" << targetShape.phase0Samples
+            << " predicates=" << targetShape.predicates
             << " segments=" << phase0Segments
             << " streamed_samples=" << streamedSamples
             << " moved=" << movedInstructions
@@ -212,4 +336,3 @@
         return true;
     }
 }
-
