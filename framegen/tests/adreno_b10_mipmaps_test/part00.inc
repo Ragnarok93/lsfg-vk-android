@@ -39,6 +39,7 @@ std::vector<uint8_t> syntheticHead() {
     constexpr uint32_t imageType = 2;
     constexpr uint32_t valueType = 3;
     constexpr uint32_t vec4Type = 4;
+    constexpr uint32_t uintType = 5;
     constexpr uint32_t imagePtr = 6;
     constexpr uint32_t wgPtr = 7;
     constexpr uint32_t varU0 = 11;
@@ -57,9 +58,10 @@ std::vector<uint8_t> syntheticHead() {
     put(w, spv::OpDecorate, {varScratch, spv::DecorationDescriptorSet, 0});
     put(w, spv::OpDecorate, {varScratch, spv::DecorationBinding, 5});
     put(w, spv::OpTypeVoid, {voidType});
+    put(w, spv::OpTypeInt, {uintType, 32, 0});
     put(w, spv::OpTypeVector, {vec4Type, valueType, 4});
     put(w, spv::OpTypePointer, {imagePtr, spv::StorageClassUniformConstant, imageType});
-    put(w, spv::OpTypePointer, {wgPtr, spv::StorageClassWorkgroup, valueType});
+    put(w, spv::OpTypePointer, {wgPtr, spv::StorageClassWorkgroup, uintType});
     put(w, spv::OpVariable, {imagePtr, varU0, spv::StorageClassUniformConstant});
     put(w, spv::OpVariable, {imagePtr, varU1, spv::StorageClassUniformConstant});
     put(w, spv::OpVariable, {imagePtr, varScratch, spv::StorageClassUniformConstant});
@@ -77,7 +79,10 @@ std::vector<uint8_t> syntheticHead() {
     }
     put(w, spv::OpCompositeConstruct, {vec4Type, 72, 71, 71, 71, 71});
     put(w, spv::OpImageWrite, {imageU1, 70, 72});
-    put(w, spv::OpStore, {varWg, 71});
+    // Match the production shader's relevant SSA shape: TGSM receives the
+    // bit representation of the scalar, not the same SSA id used by u1.
+    put(w, spv::OpBitcast, {uintType, 73, 71});
+    put(w, spv::OpStore, {varWg, 73});
     put(w, spv::OpControlBarrier, {80, 80, 81});
 
     for (uint32_t phase = 0; phase < 5; ++phase) {
