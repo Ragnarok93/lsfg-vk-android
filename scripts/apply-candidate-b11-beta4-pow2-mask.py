@@ -157,13 +157,14 @@ def patch_translation_source(path: Path) -> None:
     )
 
     b4_success_log = '''        std::cerr << "lsfg-vk: candidate-b4-beta4-predicate-opt shader=" << shaderName\n            << " applied=1 predicates=" << predicateIndex\n            << " old_words=" << wordCount << " new_words=" << rewritten.size()\n            << " old_bound=" << kB4ExpectedBound << " new_bound=" << nextId << std::endl;\n'''
+    b11_bound_update = '''        rewritten.at(3) = nextId;\n\n'''
     b11_log = '''        if (b11Enabled) {\n            std::cerr << "lsfg-vk: candidate-b11-beta4-pow2-mask shader=" << shaderName\n                << " applied=1 predicates=" << kB4PredicateCount\n                << " synthesized_masks=" << b11SynthesizedMaskCount << " divisors=";\n            for (size_t i = 0; i < kB4PredicateCount; ++i) {\n                if (i != 0U)\n                    std::cerr << ',';\n                std::cerr << b11StepValues[i];\n            }\n            std::cerr << std::endl;\n        } else {\n            std::cerr << "lsfg-vk: candidate-b11-beta4-pow2-mask shader=" << shaderName\n                << " applied=0 reason=" << b11Reason << std::endl;\n        }\n\n'''
     text = replace_exact(
         text,
         b4_success_log,
-        b11_log + b4_success_log,
+        b11_bound_update + b11_log + b4_success_log,
         count=1,
-        label=f"{path}: B11 telemetry",
+        label=f"{path}: B11 telemetry and bound",
     )
 
     path.write_text(text, encoding="utf-8")
