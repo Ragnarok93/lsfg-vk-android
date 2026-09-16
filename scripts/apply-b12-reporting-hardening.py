@@ -7,9 +7,8 @@ capability fallback transforms. The hardening does three things:
 * adds a checked timestamp readback API with an optional WAIT_BIT path;
 * consumes pending stage queries only after the existing slot synchronization,
   accounting for every readback attempt and reporting the first failure;
-* emits an explicit unavailable record at context creation if the query pools
-  are not usable, and emits periodic status records based on attempts rather
-  than successful samples.
+* emits an explicit availability record on the first present and periodic status
+  records based on attempts rather than successful samples.
 
 The clean runtime remains unchanged because this transform is B12-only.
 """
@@ -210,6 +209,7 @@ def patch_context_header(path: Path) -> None:
         + "        uint32_t b12Beta4Failures{0};\n"
         + "        VkResult b12MipmapsLastResult{VK_SUCCESS};\n"
         + "        VkResult b12Beta4LastResult{VK_SUCCESS};\n"
+        + "        bool b12AvailabilityLogged{false};\n"
     )
     text = replace_exact(
         text,
@@ -300,27 +300,33 @@ def patch_context_source(path: Path) -> None:
     if "b12-readback-failure" in text:
         return
 
-    init_anchor = "    this->mipmaps = Shaders::Mipmaps(vk, this->inImg_0, this->inImg_1);\n"
-    init_block = r'''    const bool b12MipmapsSupported = this->data.at(0).b12MipmapsQueryPool.supported();
-    const bool b12Beta4Supported = this->data.at(0).b12Beta4QueryPool.supported();
-    std::cout << "lsfg-vk: b12-stage-profile-init mipmaps_supported="
-        << (b12MipmapsSupported ? 1 : 0)
-        << " beta4_supported=" << (b12Beta4Supported ? 1 : 0) << std::endl;
-    if (!b12MipmapsSupported || !b12Beta4Supported) {
-        std::cout << "lsfg-vk: b12-stage-profile status=unavailable"
-            << " reason=query-pool-unsupported"
-            << " mipmaps_supported=" << (b12MipmapsSupported ? 1 : 0)
-            << " beta4_supported=" << (b12Beta4Supported ? 1 : 0)
-            << std::endl;
+    present_anchor = (
+        "    const size_t generationCount = std::min(activeGenerationCount, vk.generationCount);\n"
+        "    auto& data = this->data.at(this->frameIdx % 8);\n\n"
+    )
+    availability_block = present_anchor + r'''    if (!this->b12AvailabilityLogged) {
+        const bool mipmapsSupported = this->data.at(0).b12MipmapsQueryPool.supported();
+        const bool beta4Supported = this->data.at(0).b12Beta4QueryPool.supported();
+        std::cout << "lsfg-vk: b12-stage-profile-init mipmaps_supported="
+            << (mipmapsSupported ? 1 : 0)
+            << " beta4_supported=" << (beta4Supported ? 1 : 0) << std::endl;
+        if (!mipmapsSupported || !beta4Supported) {
+            std::cout << "lsfg-vk: b12-stage-profile status=unavailable"
+                << " reason=query-pool-unsupported"
+                << " mipmaps_supported=" << (mipmapsSupported ? 1 : 0)
+                << " beta4_supported=" << (beta4Supported ? 1 : 0)
+                << std::endl;
+        }
+        this->b12AvailabilityLogged = true;
     }
 
-''' + init_anchor
+'''
     text = replace_exact(
         text,
-        init_anchor,
-        init_block,
+        present_anchor,
+        availability_block,
         count=1,
-        label=f"{path}: B12 profiler initialization status",
+        label=f"{path}: B12 first-present availability status",
     )
 
     text = replace_one_between(
