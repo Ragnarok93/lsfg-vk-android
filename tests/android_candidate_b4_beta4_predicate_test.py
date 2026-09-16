@@ -92,17 +92,29 @@ class AndroidCandidateB4Beta4PredicateContractTest(unittest.TestCase):
             'p_beta[4]',
             'candidate-b11-beta4-pow2-mask',
             'spv::OpConstant',
+            'spv::OpFunction',
             'spv::OpBitwiseAnd',
             'spv::OpUMod',
             'kB4StepConstants',
             'kB4PredicateCount',
             'value != 0U && (value & (value - 1U)) == 0U',
             'maskValue = value - 1U',
+            'maskConstants[predicate] = 0U',
+            'maskValues[predicate] = maskValue',
+            'b11SynthesizedMaskCount',
+            'b11MaskConstantsInserted',
+            'opCode == kB11OpFunction',
+            'b4AppendOp3(rewritten, kB11OpConstant, kB4TypeUint',
+            'rewritten.at(3) = nextId',
             'applied=0 reason=',
             'applied=1 predicates=',
         )
         for token in required:
             self.assertIn(token, source)
+
+        self.assertNotIn('reason = "mask-constant-missing"', source)
+        self.assertLess(source.index('opCode == kB11OpFunction'),
+                        source.index('if (opCode == kB4OpSelectionMerge'))
 
         for forbidden in (
             'spv::OpControlBarrier',
