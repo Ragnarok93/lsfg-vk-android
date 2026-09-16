@@ -42,14 +42,14 @@ def patch_process_targeting_source(path: Path) -> None:
     if PROCESS_MARKER in text:
         return
 
-    old = '''    // GameNative / Wine-on-Android: /proc/self/exe points at the Wine loader,
+    old = r'''    // GameNative / Wine-on-Android: /proc/self/exe points at the Wine loader,
     // not the game .exe. Accept an explicit override from the launcher so
     // per-game matching in the TOML still works.
     const char* process_exe = std::getenv("LSFG_PROCESS_EXE");
     if (process_exe && *process_exe != '\0')
         return { process_exe, process_exe };
 '''
-    new = '''    // GameNative / Wine-on-Android: /proc/self/exe points at the Wine loader,
+    new = r'''    // GameNative / Wine-on-Android: /proc/self/exe points at the Wine loader,
     // not the game .exe. Accept an explicit override from the launcher so
     // per-game matching in the TOML still works. The override is inherited by
     // Wine helper processes too, so never target explorer.exe itself: it owns
@@ -122,7 +122,7 @@ def patch_hooks_source(path: Path) -> None:
 
     old = '''        const auto identity = Utils::getDeviceIdentity(physicalDevice, getProperties2);
 '''
-    new = '''        // b14-mipmaps-subgroup-capability-gate
+    new = r'''        // b14-mipmaps-subgroup-capability-gate
         VkPhysicalDeviceSubgroupProperties subgroupProperties{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
         };
