@@ -58,6 +58,8 @@ jobs:
           python3 tests/android_capability_architecture_test.py
           python3 tests/android_b12_timestamp_fallback_test.py
           python3 tests/android_mipmaps_evidence_analyzer_test.py
+          python3 tests/android_mipmaps_device_agnostic_evidence_test.py
+          python3 scripts/analyze-mipmaps-evidence.py --help >/dev/null
 
       - name: Install Vulkan headers
         run: |
@@ -147,7 +149,8 @@ jobs:
             'zero-stage-profile backend=' \
             'final-nonadaptive-sweep' \
             'b12-stage-profile' \
-            'b12-timestamp-fallback'; do
+            'b12-timestamp-fallback' \
+            'b12-device-profile'; do
             if grep -Fq "$forbidden" /tmp/lsfg-strings.txt; then
               echo "ERROR: clean benchmark artifact still contains profiler marker: $forbidden" >&2
               exit 1
@@ -209,6 +212,7 @@ jobs:
           grep -Fq 'beta4_avg_ms=' /tmp/lsfg-b12-strings.txt
           grep -Fq 'b12-timestamp-capability' /tmp/lsfg-b12-strings.txt
           grep -Fq 'b12-timestamp-fallback' /tmp/lsfg-b12-strings.txt
+          grep -Fq 'b12-device-profile' /tmp/lsfg-b12-strings.txt
           for forbidden in \
             'pipeline-exec-ir-line' \
             'generated-stage-profile backend=' \
@@ -264,7 +268,7 @@ jobs:
           HOST_TAG: linux-x86_64
           LSFGVK_ADAPTIVE_RUNTIME: "1"
           LSFGVK_B12_DUAL_STAGE_PROFILE: "1"
-          LSFGVK_B12_MIPMAPS_EXEC_PROFILE: "1"
+          LSFGVK_MIPMAPS_EXEC_PROFILE: "1"
         shell: bash
         run: |
           set -o pipefail
@@ -280,6 +284,7 @@ jobs:
           grep -Fq 'candidate-b11-beta4-pow2-mask' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
           grep -Fq 'b12-stage-profile' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
           grep -Fq 'b12-timestamp-fallback' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
+          grep -Fq 'b12-device-profile' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
           grep -Fq 'pipeline-exec-profile shader=p_mipmaps' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
           grep -Fq 'pipeline-exec-ir-line shader=p_mipmaps' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
           for forbidden in \
