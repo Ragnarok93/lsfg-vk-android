@@ -8,10 +8,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TRANSFORM = ROOT / "scripts/apply-b12-dual-stage-profile.py"
+FALLBACK = ROOT / "scripts/apply-b12-unreported-timestamp-fallback.py"
 
 
 class B12TimestampFallbackContractTest(unittest.TestCase):
     def test_b12_probes_unreported_timestamps_without_changing_clean_runtime(self) -> None:
+        self.assertTrue(FALLBACK.exists(), FALLBACK.as_posix())
         required = (
             Path("framegen/include/core/timestampquerypool.hpp"),
             Path("framegen/src/core/timestampquerypool.cpp"),
@@ -38,6 +40,10 @@ class B12TimestampFallbackContractTest(unittest.TestCase):
             for _ in range(2):
                 subprocess.run(
                     [sys.executable, str(TRANSFORM), "--root", str(temp_root)],
+                    check=True,
+                )
+                subprocess.run(
+                    [sys.executable, str(FALLBACK), "--root", str(temp_root)],
                     check=True,
                 )
 
