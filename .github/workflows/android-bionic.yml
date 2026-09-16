@@ -137,6 +137,7 @@ jobs:
           grep -Fq 'deferred-zero reprime-warmup-begin' /tmp/lsfg-strings.txt
           grep -Fq 'deferred-zero reprime-deferred request_count=' /tmp/lsfg-strings.txt
           grep -Fq 'candidate-b4-beta4-predicate-opt' /tmp/lsfg-strings.txt
+          grep -Fq 'candidate-b11-beta4-pow2-mask' /tmp/lsfg-strings.txt
 
           for forbidden in \
             'pipeline-exec-ir-line' \

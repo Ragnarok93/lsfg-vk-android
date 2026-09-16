@@ -79,6 +79,7 @@ fi
 
 python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate.py" --root "${REPO_ROOT}"
+python3 "${REPO_ROOT}/scripts/apply-candidate-b11-beta4-pow2-mask.py" --root "${REPO_ROOT}"
 if [[ "${LSFGVK_EXPERIMENTAL_B9:-0}" == "1" ]]; then
     echo "[lsfg-vk] Enabling experimental B9 Beta4 scheduler"
     python3 "${REPO_ROOT}/scripts/apply-candidate-b9-beta4-spill-collapse.py" --root "${REPO_ROOT}"
