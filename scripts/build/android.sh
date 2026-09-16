@@ -28,6 +28,7 @@ API="${ANDROID_PLATFORM:-android-28}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 B11_EVIDENCE_PROFILE="${LSFGVK_B11_EVIDENCE_PROFILE:-0}"
 B11_PROFILE_VARIANT="${LSFGVK_B11_PROFILE_VARIANT:-b11}"
+ADAPTIVE_RUNTIME="${LSFGVK_ADAPTIVE_RUNTIME:-0}"
 EXPERIMENTAL_B9="${LSFGVK_EXPERIMENTAL_B9:-0}"
 
 if [[ -z "${ANDROID_NDK:-}" ]]; then
@@ -40,7 +41,7 @@ if [[ "${B11_EVIDENCE_PROFILE}" == "1" ]]; then
         echo "error: LSFGVK_B11_PROFILE_VARIANT must be b4 or b11" >&2
         exit 1
     fi
-    if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" == "1" ]]; then
+    if [[ "${ADAPTIVE_RUNTIME}" == "1" ]]; then
         echo "error: B11 evidence profiling cannot be combined with clean adaptive runtime mode" >&2
         exit 1
     fi
