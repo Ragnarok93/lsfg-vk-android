@@ -118,9 +118,10 @@ if [[ "${LSFGVK_EXPERIMENTAL_B9:-0}" == "1" ]]; then
     python3 "${REPO_ROOT}/scripts/apply-candidate-b9-beta4-spill-collapse.py" --root "${REPO_ROOT}"
 fi
 
-# Apply after all optional source transforms so command-buffer reuse cannot
-# invalidate their source anchors. This is Android-only build composition.
+# Apply after all optional source transforms so the Android CPU hot-path
+# transforms cannot invalidate their source anchors.
 python3 "${REPO_ROOT}/scripts/apply-android-command-buffer-reuse.py" --root "${REPO_ROOT}"
+python3 "${REPO_ROOT}/scripts/apply-android-submit-hot-path.py" --root "${REPO_ROOT}"
 
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
 
