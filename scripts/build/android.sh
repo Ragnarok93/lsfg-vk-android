@@ -19,6 +19,7 @@
 #   LSFGVK_ZERO_STAGE_PROFILE=1 ... ./scripts/build/android.sh     # profiling build
 #   LSFGVK_B11_EVIDENCE_PROFILE=1 LSFGVK_B11_PROFILE_VARIANT=b4 ...  # B4-only controlled evidence
 #   LSFGVK_B11_EVIDENCE_PROFILE=1 LSFGVK_B11_PROFILE_VARIANT=b11 ... # B4+B11 controlled evidence
+#   LSFGVK_B11_EVIDENCE_PROFILE=1 LSFGVK_B11_PROFILE_VARIANT=b13 ... # B4+B11+B13 controlled evidence
 #   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_B8_DIAGNOSTICS=1 ...       # legacy B8 diagnostic matrix
 #   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_FINAL_NONADAPTIVE_SWEEP=1 ... # deferred final sweep
 #   LSFGVK_EXPERIMENTAL_B9=1 ... ./scripts/build/android.sh        # experimental Beta4 scheduler
@@ -60,8 +61,9 @@ if [[ -n "${MIPMAPS_CANDIDATE_SCRIPT}" && "${B12_DUAL_STAGE_PROFILE}" != "1" ]];
 fi
 
 if [[ "${B11_EVIDENCE_PROFILE}" == "1" ]]; then
-    if [[ "${B11_PROFILE_VARIANT}" != "b4" && "${B11_PROFILE_VARIANT}" != "b11" ]]; then
-        echo "error: LSFGVK_B11_PROFILE_VARIANT must be b4 or b11" >&2
+    if [[ "${B11_PROFILE_VARIANT}" != "b4" && "${B11_PROFILE_VARIANT}" != "b11" \
+            && "${B11_PROFILE_VARIANT}" != "b13" ]]; then
+        echo "error: LSFGVK_B11_PROFILE_VARIANT must be b4, b11, or b13" >&2
         exit 1
     fi
     if [[ "${ADAPTIVE_RUNTIME}" == "1" ]]; then
@@ -161,6 +163,11 @@ if [[ "${B11_EVIDENCE_PROFILE}" == "1" && "${B11_PROFILE_VARIANT}" == "b4" ]]; t
     echo "[lsfg-vk] Controlled B11 evidence variant: retaining B4 without B11"
 else
     python3 "${REPO_ROOT}/scripts/apply-candidate-b11-beta4-pow2-mask.py" --root "${REPO_ROOT}"
+    if [[ "${B11_EVIDENCE_PROFILE}" == "1" && "${B11_PROFILE_VARIANT}" == "b11" ]]; then
+        echo "[lsfg-vk] Controlled B13 evidence variant: retaining B4+B11 without B13"
+    else
+        python3 "${REPO_ROOT}/scripts/apply-candidate-b13-beta4-fused-mask.py" --root "${REPO_ROOT}"
+    fi
 fi
 if [[ "${LSFGVK_EXPERIMENTAL_B9:-0}" == "1" ]]; then
     echo "[lsfg-vk] Enabling experimental B9 Beta4 scheduler"

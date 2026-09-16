@@ -47,6 +47,8 @@ jobs:
           python3 tests/android_candidate_b2_mipmaps_dependency_test.py
           python3 tests/android_candidate_b3_beta4_analysis_test.py
           python3 tests/android_candidate_b4_beta4_predicate_test.py
+          python3 tests/android_candidate_b13_beta4_fused_mask_test.py
+          python3 tests/android_beta4_evidence_analyzer_test.py
           python3 tests/android_candidate_b9_beta4_spill_collapse_test.py
           python3 tests/android_candidate_b6_pipeline_executable_profile_test.py
           python3 tests/android_candidate_b8_mipmaps_matrix_test.py
@@ -60,6 +62,7 @@ jobs:
           python3 tests/android_mipmaps_evidence_analyzer_test.py
           python3 tests/android_mipmaps_device_agnostic_evidence_test.py
           python3 scripts/analyze-mipmaps-evidence.py --help >/dev/null
+          python3 scripts/analyze-beta4-evidence.py --help >/dev/null
 
       - name: Install Vulkan headers
         run: |
@@ -142,6 +145,7 @@ jobs:
           grep -Fq 'deferred-zero reprime-deferred request_count=' /tmp/lsfg-strings.txt
           grep -Fq 'candidate-b4-beta4-predicate-opt' /tmp/lsfg-strings.txt
           grep -Fq 'candidate-b11-beta4-pow2-mask' /tmp/lsfg-strings.txt
+          grep -Fq 'candidate-b13-beta4-fused-mask' /tmp/lsfg-strings.txt
 
           for forbidden in \
             'pipeline-exec-ir-line' \
@@ -212,6 +216,7 @@ jobs:
           for required in \
             'candidate-b4-beta4-predicate-opt' \
             'candidate-b11-beta4-pow2-mask' \
+            'candidate-b13-beta4-fused-mask' \
             'b12-stage-profile' \
             'b12-stage-profile-init' \
             'b12-stage-profile status=unavailable' \
@@ -303,6 +308,7 @@ jobs:
           strings "$artifact" > /tmp/lsfg-b12-mipmaps-refinement-strings.txt
           for required in \
             'candidate-b11-beta4-pow2-mask' \
+            'candidate-b13-beta4-fused-mask' \
             'b12-stage-profile' \
             'b12-stage-profile-init' \
             'b12-stage-profile status=unavailable' \
