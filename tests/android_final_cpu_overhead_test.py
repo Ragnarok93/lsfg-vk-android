@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REUSE = ROOT / "scripts/apply-android-command-buffer-reuse.py"
+SUBMIT_HOT_PATH = ROOT / "scripts/apply-android-submit-hot-path.py"
 
 utils_h = (ROOT / "framegen/include/common/utils.hpp").read_text(encoding="utf-8")
 utils_cpp = (ROOT / "framegen/src/common/utils.cpp").read_text(encoding="utf-8")
@@ -32,25 +33,56 @@ assert "CommandBuffer::reset()" in cmd_cpp
 assert "vkResetCommandBuffer" in cmd_cpp
 assert "Command buffer is not in Submitted state" in cmd_cpp
 
-# Command-buffer reuse is deliberately a final Android source transform so it
-# cannot invalidate earlier profiling/async transform anchors.
+# Android-only final transforms are composed after all profiling/shader source
+# transforms.  Apply each twice here to prove idempotence as well as the final
+# hot present()/submit() shape.
 assert REUSE.is_file(), REUSE
+assert SUBMIT_HOT_PATH.is_file(), SUBMIT_HOT_PATH
 with tempfile.TemporaryDirectory() as td:
     temp = Path(td)
-    for relative in ("framegen/v3.1_src/context.cpp", "framegen/v3.1p_src/context.cpp"):
+    for relative in (
+        "framegen/v3.1_include/v3_1/context.hpp",
+        "framegen/v3.1p_include/v3_1p/context.hpp",
+        "framegen/v3.1_src/context.cpp",
+        "framegen/v3.1p_src/context.cpp",
+        "framegen/src/core/commandbuffer.cpp",
+    ):
         src = ROOT / relative
         dst = temp / relative
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
-    subprocess.run([sys.executable, str(REUSE), "--root", str(temp)], check=True)
-    subprocess.run([sys.executable, str(REUSE), "--root", str(temp)], check=True)
+
+    for _ in range(2):
+        subprocess.run([sys.executable, str(REUSE), "--root", str(temp)], check=True)
+        subprocess.run([sys.executable, str(SUBMIT_HOT_PATH), "--root", str(temp)], check=True)
+
+    context_h = (temp / "framegen/v3.1p_include/v3_1p/context.hpp").read_text(
+        encoding="utf-8"
+    )
     context = (temp / "framegen/v3.1p_src/context.cpp").read_text(encoding="utf-8")
+    transformed_cmd = (temp / "framegen/src/core/commandbuffer.cpp").read_text(
+        encoding="utf-8"
+    )
 
 assert "android-command-buffer-reuse" in context
+assert "android-submit-hot-path" in context
 assert "data.cmdBuffer1 = Core::CommandBuffer(vk.device, vk.commandPool);" in context
 assert "cmdBuffer = Core::CommandBuffer(vk.device, vk.commandPool);" in context
 assert "data.cmdBuffer1.reset();" in context
 assert "buf2.reset();" in context
+
+# Per-slot caller scratch retains enough capacity for the exact hot-path shapes:
+# one wait, one optional output signal, and all active internal pass signals.
+for field in (
+    "submitWaitSemaphores",
+    "submitSignalSemaphores",
+    "activeInternalSemaphores",
+):
+    assert field in context_h
+assert "data.submitWaitSemaphores.reserve(1);" in context
+assert "data.submitSignalSemaphores.reserve(1);" in context
+assert "data.activeInternalSemaphores.reserve(vk.generationCount);" in context
+assert "activeInternalSemaphores.assign(" in context
 
 # Inspect only present(). A second Android Context constructor appears later in
 # this source file and intentionally retains the one-time slot allocations.
@@ -59,9 +91,36 @@ present_end = context.index("bool Context::waitForLastPresent", present_start)
 present = context[present_start:present_end]
 assert "data.cmdBuffer1 = Core::CommandBuffer(vk.device, vk.commandPool);" not in present
 assert "buf2 = Core::CommandBuffer(vk.device, vk.commandPool);" not in present
+assert "std::vector<Core::Semaphore> waits =" not in present
+assert "const std::vector<Core::Semaphore> activeInternalSemaphores(" not in present
+assert "std::vector<Core::Semaphore> signals;" not in present
+assert "{ internalSemaphore }" not in present
+assert "auto& waits = data.submitWaitSemaphores;" in present
+assert "auto& signals = data.submitSignalSemaphores;" in present
+
+# CommandBuffer::submit keeps small semaphore conversion storage inline, but it
+# must retain a heap fallback so foreign callers with >8 semaphores behave
+# identically.  Timeline payloads and queue-submit ordering remain untouched.
+assert "kInlineSubmitSemaphoreCapacity = 8" in transformed_cmd
+assert "std::array<VkPipelineStageFlags, kInlineSubmitSemaphoreCapacity>" in transformed_cmd
+assert "std::array<VkSemaphore, kInlineSubmitSemaphoreCapacity> inlineWaitHandles" in transformed_cmd
+assert "std::array<VkSemaphore, kInlineSubmitSemaphoreCapacity> inlineSignalHandles" in transformed_cmd
+assert "overflowWaitStages.assign(" in transformed_cmd
+assert "overflowWaitHandles.reserve(waitSemaphores.size())" in transformed_cmd
+assert "overflowSignalHandles.reserve(signalSemaphores.size())" in transformed_cmd
+assert ".pWaitSemaphores = waitHandleData" in transformed_cmd
+assert ".pWaitDstStageMask = waitStageData" in transformed_cmd
+assert ".pSignalSemaphores = signalHandleData" in transformed_cmd
+assert "std::vector<VkSemaphore> waitSemaphoresHandles;" not in transformed_cmd
+assert "std::vector<VkSemaphore> signalSemaphoresHandles;" not in transformed_cmd
+assert "VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT" in transformed_cmd
+assert "VkTimelineSemaphoreSubmitInfo timelineInfo" in transformed_cmd
+assert "vkQueueSubmit(queue, 1, &submitInfo" in transformed_cmd
 
 build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
 assert 'apply-android-command-buffer-reuse.py' in build
+assert 'apply-android-submit-hot-path.py' in build
 assert build.index('apply-candidate-b4-beta4-predicate.py') < build.index('apply-android-command-buffer-reuse.py')
+assert build.index('apply-android-command-buffer-reuse.py') < build.index('apply-android-submit-hot-path.py')
 
 print("Final Android CPU overhead optimization contract satisfied")
