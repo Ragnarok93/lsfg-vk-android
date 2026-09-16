@@ -100,15 +100,13 @@ def patch_hooks_header(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     if "mipmapsSubgroupBroadcastSupported" in text:
         return
-    old = '''        bool androidOpaqueFdSemaphoreSupported{false};
-    };
-'''
-    new = '''        bool androidOpaqueFdSemaphoreSupported{false};
-        // B14 is optional. Unsupported subgroup hardware keeps exact B13
-        // p_mipmaps bytecode rather than changing the game's Vulkan contract.
-        bool mipmapsSubgroupBroadcastSupported{false};
-    };
-'''
+    old = "        bool androidOpaqueFdSemaphoreSupported{false};\n"
+    new = (
+        old
+        + "        // B14 is optional. Unsupported subgroup hardware keeps exact B13\n"
+        + "        // p_mipmaps bytecode rather than changing the game's Vulkan contract.\n"
+        + "        bool mipmapsSubgroupBroadcastSupported{false};\n"
+    )
     text = replace_exact(
         text, old, new, count=1, label=f"{path}: B14 subgroup capability field"
     )
@@ -159,13 +157,11 @@ def patch_hooks_source(path: Path) -> None:
         text, old, new, count=1, label=f"{path}: B14 subgroup property query"
     )
 
-    old_init = '''            .androidOpaqueFdSemaphoreSupported = androidOpaqueFdSemaphoreSupported,
-        });
-'''
-    new_init = '''            .androidOpaqueFdSemaphoreSupported = androidOpaqueFdSemaphoreSupported,
-            .mipmapsSubgroupBroadcastSupported = mipmapsSubgroupBroadcastSupported,
-        });
-'''
+    old_init = "            .androidOpaqueFdSemaphoreSupported = androidOpaqueFdSemaphoreSupported,\n"
+    new_init = (
+        old_init
+        + "            .mipmapsSubgroupBroadcastSupported = mipmapsSubgroupBroadcastSupported,\n"
+    )
     text = replace_exact(
         text, old_init, new_init, count=1, label=f"{path}: B14 capability storage"
     )
