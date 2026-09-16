@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""Inject bundled Adreno evidence profiling plus the SYNC_FD validation fast path."""
+"""Compose retained Android runtime transforms and optional Adreno profiling."""
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from adreno_evidence_capabilities import (patch_backend_header, patch_device_source, patch_hooks_header, patch_hooks_source)
+from adreno_evidence_capabilities import (
+    patch_backend_header,
+    patch_device_source,
+    patch_hooks_header,
+    patch_hooks_source,
+)
 from adreno_evidence_outer import patch_outer_header, patch_outer_source
-from adreno_evidence_framegen import patch_framegen_header, patch_framegen_source, patch_timestamp_query_pool
+from adreno_evidence_framegen import (
+    patch_framegen_header,
+    patch_framegen_source,
+    patch_timestamp_query_pool,
+)
 from adreno_evidence_common import replace_exact
 from adreno_syncfd_handoff import apply as apply_syncfd_handoff
 from adreno_async_zero_history import apply as apply_async_zero_history
@@ -64,25 +73,15 @@ def normalize_sync_fd_import_initializer(path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    args = parser.parse_args()
-    root = args.root.resolve()
+def apply_runtime(root: Path) -> None:
+    """Apply retained Android runtime behavior without GPU/compiler profilers."""
     patch_backend_header(root / "framegen/public/lsfg_backend.hpp")
     patch_device_source(root / "framegen/src/core/device.cpp")
     patch_hooks_header(root / "include/hooks.hpp")
     patch_hooks_source(root / "src/hooks.cpp")
     patch_outer_header(root / "include/context.hpp")
     patch_outer_source(root / "src/context.cpp")
-    patch_timestamp_query_pool(
-        root / "framegen/include/core/timestampquerypool.hpp",
-        root / "framegen/src/core/timestampquerypool.cpp",
-    )
-    for rel in FRAMEGEN_HEADERS:
-        patch_framegen_header(root / rel)
-    for rel, backend in FRAMEGEN_SOURCES:
-        patch_framegen_source(root / rel, backend)
+
     mini_semaphore_header = root / "include/mini/semaphore.hpp"
     if "int exportFd(" not in mini_semaphore_header.read_text(encoding="utf-8"):
         apply_syncfd_handoff(root)
@@ -91,6 +90,7 @@ def main() -> None:
     apply_async_zero_history_hardening(root)
     apply_slot_aware_zero_history(root)
     apply_transport_release_overlap(root)
+
     # Synthetic evidence-bundle fixtures intentionally contain only the files
     # touched by that test. Full Android builds always contain Mini::Image and
     # therefore always apply Candidate A here.
@@ -105,6 +105,38 @@ def main() -> None:
         # Preserve the validated live re-prime, but only wake it when scheduler
         # generation requests are dense enough to amortize the three-frame cost.
         apply_deferred_zero_exit_persistence(root)
+
+
+def apply_profiling(root: Path) -> None:
+    """Apply heavy generated-stage timestamp instrumentation for diagnostics."""
+    patch_timestamp_query_pool(
+        root / "framegen/include/core/timestampquerypool.hpp",
+        root / "framegen/src/core/timestampquerypool.cpp",
+    )
+    for rel in FRAMEGEN_HEADERS:
+        patch_framegen_header(root / rel)
+    for rel, backend in FRAMEGEN_SOURCES:
+        patch_framegen_source(root / rel, backend)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument(
+        "--runtime-only",
+        action="store_true",
+        help="apply retained Android adaptive/runtime transforms without stage profiling",
+    )
+    args = parser.parse_args()
+    root = args.root.resolve()
+
+    # In full diagnostic mode, preserve the important historical ordering:
+    # framegen timestamp hooks are installed before the async zero-history
+    # transform optionally adjusts their zero-generation condition. Runtime-only
+    # mode skips these heavy framegen timestamp/query-pool transforms entirely.
+    if not args.runtime_only:
+        apply_profiling(root)
+    apply_runtime(root)
 
 
 if __name__ == "__main__":
