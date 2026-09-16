@@ -2,9 +2,9 @@
 """Enable a fail-closed timestamp-query probe for B12 evidence builds only.
 
 Some Android Vulkan wrappers report timestampValidBits=0 even when the selected
-underlying ICD implements timestamp queries.  The clean runtime must continue to
-honor that advertised capability.  B12 evidence builds may instead perform one
-small startup self-test on the already-selected compute queue.  The fallback is
+underlying ICD implements timestamp queries. The clean runtime must continue to
+honor that advertised capability. B12 evidence builds may instead perform one
+small startup self-test on the already-selected compute queue. The fallback is
 kept only when query-pool creation, command recording/submission, fence wait,
 and timestamp readback all succeed with an advancing counter.
 """
@@ -59,7 +59,7 @@ std::pair<uint32_t, int32_t> b12BestComputeTimestampFamily(
 }
 
 bool b12RunUnreportedTimestampProbe(
-        const Core::Device& device, VkQueryPool queryPool,
+        const LSFG::Core::Device& device, VkQueryPool queryPool,
         uint64_t* firstTimestamp, uint64_t* secondTimestamp) {
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
@@ -134,7 +134,9 @@ bool b12RunUnreportedTimestampProbe(
     }
     constexpr uint64_t timeoutNs = 1000000000ULL;
     if (vkWaitForFences(device.handle(), 1, &fence, VK_TRUE, timeoutNs) != VK_SUCCESS) {
-        cleanup();
+        // Do not destroy resources which may still be referenced by pending
+        // queue work. This evidence-only startup probe intentionally leaks the
+        // tiny self-test allocation on this exceptional timeout path.
         return false;
     }
 
@@ -155,7 +157,7 @@ bool b12RunUnreportedTimestampProbe(
 }
 
 bool b12UnreportedTimestampSupported(
-        const Core::Device& device, VkQueryPool queryPool,
+        const LSFG::Core::Device& device, VkQueryPool queryPool,
         uint64_t* firstTimestamp, uint64_t* secondTimestamp) {
     static std::mutex cacheMutex;
     static std::unordered_map<uint64_t, bool> cache;
@@ -262,7 +264,7 @@ def patch_source(path: Path) -> None:
         });
 }
 '''
-    new_constructor = '''TimestampQueryPool::TimestampQueryPool(
+    new_constructor = r'''TimestampQueryPool::TimestampQueryPool(
         const Core::Device& device, uint32_t queryCount,
         bool allowUnreportedTimestamps)
     : queryCount_(queryCount) {
@@ -340,7 +342,7 @@ def patch_source(path: Path) -> None:
             return;
         }
         // The wrapper withheld a valid-bit width, but the one-time query probe
-        // demonstrated an advancing counter.  B12 intervals are short enough
+        // demonstrated an advancing counter. B12 intervals are short enough
         // that treating the zero-extended value as 64-bit is safe for evidence;
         // the production path never uses this override.
         this->timestampValidBits_ = 64;
