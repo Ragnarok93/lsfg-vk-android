@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ANALYZER = ROOT / "scripts/analyze-adreno-mipmaps-evidence.py"
+DEVICE_AGNOSTIC_SUITE = ROOT / "tests/android_mipmaps_device_agnostic_evidence_test.py"
 
 BASELINE = '''\
 lsfg-vk: b12-stage-profile mipmaps_samples=120 mipmaps_avg_ms=5.220 beta4_samples=100 beta4_avg_ms=3.060
@@ -37,18 +38,8 @@ class MipmapsEvidenceAnalyzerContractTest(unittest.TestCase):
             baseline.write_text(BASELINE, encoding="utf-8")
             candidate.write_text(CANDIDATE, encoding="utf-8")
             result = subprocess.run(
-                [
-                    sys.executable,
-                    str(ANALYZER),
-                    "--baseline",
-                    str(baseline),
-                    "--candidate",
-                    str(candidate),
-                    "--json",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
+                [sys.executable, str(ANALYZER), "--baseline", str(baseline), "--candidate", str(candidate), "--json"],
+                check=True, capture_output=True, text=True,
             )
             report = json.loads(result.stdout)
 
@@ -76,24 +67,22 @@ class MipmapsEvidenceAnalyzerContractTest(unittest.TestCase):
             baseline.write_text(BASELINE, encoding="utf-8")
             candidate.write_text(bad, encoding="utf-8")
             result = subprocess.run(
-                [
-                    sys.executable,
-                    str(ANALYZER),
-                    "--baseline",
-                    str(baseline),
-                    "--candidate",
-                    str(candidate),
-                    "--json",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
+                [sys.executable, str(ANALYZER), "--baseline", str(baseline), "--candidate", str(candidate), "--json"],
+                check=True, capture_output=True, text=True,
             )
             report = json.loads(result.stdout)
 
         self.assertIn("spill_markers_increased", report["comparison"]["risk_flags"])
         self.assertIn("resident_waves_decreased", report["comparison"]["risk_flags"])
         self.assertEqual(report["comparison"]["verdict"], "reject")
+
+    def test_device_agnostic_contract_suite(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(DEVICE_AGNOSTIC_SUITE)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
