@@ -97,8 +97,11 @@ def main() -> None:
         '--root "${REPO_ROOT}"'
     )
     require(build, invocation)
-    profile_start = build.index('if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]')
-    profile_end = build.index("\nfi\n", profile_start)
+    profile_start = build.index('PROFILE_REQUESTED="${LSFGVK_ZERO_STAGE_PROFILE:-0}"')
+    profile_end = build.index(
+        'python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py"',
+        profile_start,
+    )
     invocation_index = build.index(invocation)
     assert profile_start < invocation_index < profile_end, (
         "B6 profiler must remain profiling-build-only"
