@@ -217,7 +217,7 @@ def patch_command_buffer_source(path: Path) -> None:
     text = replace_exact(
         text,
         conversions_old,
-        "",
+        "    // android-submit-hot-path: semaphore handles are materialized above.\n\n",
         count=1,
         label=f"{path}: remove unconditional handle vectors",
     )
