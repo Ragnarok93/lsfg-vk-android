@@ -14,7 +14,7 @@ class AndroidCleanBenchmarkModeContractTest(unittest.TestCase):
 
         self.assertIn("LSFGVK_ADAPTIVE_RUNTIME", build_script)
         runtime_start = build_script.index('if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" == "1" ]]')
-        runtime_end = build_script.index("fi", runtime_start)
+        runtime_end = build_script.index("\nfi", runtime_start)
         runtime_block = build_script[runtime_start:runtime_end]
         self.assertIn("apply-adreno-evidence-profile.py", runtime_block)
         self.assertIn("--runtime-only", runtime_block)
@@ -28,7 +28,8 @@ class AndroidCleanBenchmarkModeContractTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, runtime_block)
 
-        self.assertIn('parser.add_argument("--runtime-only"', bundle_script)
+        self.assertIn('"--runtime-only"', bundle_script)
+        self.assertIn('action="store_true"', bundle_script)
         self.assertIn("def apply_runtime(root: Path) -> None:", bundle_script)
         self.assertIn("def apply_profiling(root: Path) -> None:", bundle_script)
 
