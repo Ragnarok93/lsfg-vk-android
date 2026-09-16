@@ -86,7 +86,7 @@ def shared_access_counts(code: bytes) -> tuple[int, int]:
     loads = 0
     stores = 0
     for opcode, operands in instructions(code):
-        if opcode == 65 and len(operands) >= 3 and operands[2] in shared_pointers:
+        if opcode in (65, 66) and len(operands) >= 3 and operands[2] in shared_pointers:
             shared_pointers.add(operands[1])
         elif opcode == 61 and len(operands) >= 3 and operands[2] in shared_pointers:
             loads += 1
@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
     if (first.imageWritesBefore != 10 || first.imageWritesAfter != 10) return 14;
     if (first.tailCriticalPathLoadsBefore != 6 || first.tailCriticalPathLoadsAfter != 4) return 15;
     if (first.tailParallelLanesAfter != 4 || first.subgroupBroadcastsAfter != 4) return 16;
-    if (first.staticWorkgroupLoadsBefore != 15 || first.staticWorkgroupLoadsAfter != 16) return 17;
+    if (first.staticWorkgroupLoadsBefore != 15 || first.staticWorkgroupLoadsAfter != 13) return 17;
     writeFile(argv[2], code);
 
     const auto once = code;
@@ -209,8 +209,9 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
         candidate_ops = [opcode for opcode, _ in instructions(transformed_bytes)]
         self.assertEqual((baseline_ops.count(224), candidate_ops.count(224)), (5, 4))
         self.assertEqual((baseline_ops.count(99), candidate_ops.count(99)), (10, 10))
+        self.assertEqual(candidate_ops.count(337), 4)
         self.assertEqual(shared_access_counts(FIXTURE.read_bytes()), (15, 5))
-        self.assertEqual(shared_access_counts(transformed_bytes), (16, 4))
+        self.assertEqual(shared_access_counts(transformed_bytes), (13, 4))
 
     def test_candidate_wiring_is_idempotent_and_device_agnostic(self) -> None:
         self.assertTrue(PATCHER.exists(), PATCHER.as_posix())
@@ -220,6 +221,13 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+
+        patcher_text = PATCHER.read_text(encoding="utf-8")
+        self.assertIn("VK_SUBGROUP_FEATURE_BALLOT_BIT", patcher_text)
+        self.assertIn("mipmapsSubgroupBroadcastSupported", patcher_text)
+        self.assertIn("enableCooperativeMipmaps", patcher_text)
+        self.assertIn("fallback=b13", patcher_text)
+        self.assertIn("gamenative-helper-process-override-guard", patcher_text)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
