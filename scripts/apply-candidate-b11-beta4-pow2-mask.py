@@ -136,8 +136,8 @@ def patch_translation_source(path: Path) -> None:
         label=f"{path}: B11 fresh mask IDs",
     )
 
-    old_predicate_branch = '''            if (opCode == kB4OpSelectionMerge && instructionWordCount == 3\n'''
     new_predicate_branch = '''            if (!b11MaskConstantsInserted && opCode == kB11OpFunction) {\n                for (size_t predicate = 0; predicate < kB4PredicateCount; ++predicate) {\n                    const uint32_t maskId = b11MaskConstants[predicate];\n                    if (maskId < kB4ExpectedBound)\n                        continue;\n                    bool emitted = false;\n                    for (size_t previous = 0; previous < predicate; ++previous) {\n                        if (b11MaskConstants[previous] == maskId) {\n                            emitted = true;\n                            break;\n                        }\n                    }\n                    if (!emitted) {\n                        b4AppendOp3(rewritten, kB11OpConstant, kB4TypeUint,\n                            maskId, b11MaskValues[predicate]);\n                    }\n                }\n                b11MaskConstantsInserted = true;\n            }\n\n            if (opCode == kB4OpSelectionMerge && instructionWordCount == 3\n'''
+    old_predicate_branch = '''            if (opCode == kB4OpSelectionMerge && instructionWordCount == 3\n'''
     text = replace_exact(
         text,
         old_predicate_branch,
