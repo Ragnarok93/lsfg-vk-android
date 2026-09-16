@@ -243,17 +243,37 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
                 '}\n',
                 encoding="utf-8",
             )
+            process_source = root / "src/utils/utils.cpp"
+            process_source.parent.mkdir(parents=True, exist_ok=True)
+            process_source.write_text(
+                r'''std::pair<std::string, std::string> Utils::getProcessName() {
+    // GameNative / Wine-on-Android: /proc/self/exe points at the Wine loader,
+    // not the game .exe. Accept an explicit override from the launcher so
+    // per-game matching in the TOML still works.
+    const char* process_exe = std::getenv("LSFG_PROCESS_EXE");
+    if (process_exe && *process_exe != '\0')
+        return { process_exe, process_exe };
+}
+''',
+                encoding="utf-8",
+            )
             for _ in range(2):
                 subprocess.run(
                     [sys.executable, str(PATCHER), "--root", str(root)],
                     check=True,
                 )
             transformed = translation.read_text(encoding="utf-8")
+            transformed_process = process_source.read_text(encoding="utf-8")
 
         self.assertEqual(transformed.count("b14_mipmaps_tail_fusion.hpp"), 1)
         self.assertEqual(transformed.count("b14::fuseTail(spirvBytecode)"), 1)
         self.assertIn('shaderName == "p_mipmaps"', transformed)
         self.assertIn("candidate-b14-mipmaps-tail-fusion", transformed)
+        self.assertIn("gamenative-helper-process-override-guard", transformed_process)
+        self.assertIn("*process_exe != '\\0'", transformed_process)
+        self.assertIn("cmdline.at(cmdline_len) = '\\0';", transformed_process)
+        self.assertIn("<< \\" configured_target=\\" << process_exe << '\\n';", transformed_process)
+        self.assertNotIn("\x00", transformed_process)
 
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
         self.assertIn("LSFGVK_MIPMAPS_CANDIDATE_SCRIPT", build)
