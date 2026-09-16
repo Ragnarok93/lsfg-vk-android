@@ -86,6 +86,7 @@ if [[ "${PROFILE_REQUESTED}" == "1" ]]; then
             echo "[lsfg-vk] Enabling direct Beta4 timing and pipeline executable evidence (${B11_PROFILE_VARIANT})"
             python3 "${REPO_ROOT}/scripts/apply-b11-beta4-stage-profile.py" --root "${REPO_ROOT}"
             python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
+            python3 "${REPO_ROOT}/scripts/apply-b11-beta4-executable-profile.py" --root "${REPO_ROOT}"
         fi
         if [[ "${LSFGVK_FINAL_NONADAPTIVE_SWEEP:-0}" == "1" ]]; then
             echo "[lsfg-vk] Enabling deferred final non-adaptive compiler sweep"
