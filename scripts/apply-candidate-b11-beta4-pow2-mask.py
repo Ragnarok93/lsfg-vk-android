@@ -17,6 +17,7 @@ import argparse
 from pathlib import Path
 
 TRANSLATION_SOURCE = Path("src/extract/trans.cpp")
+TARGET_SHADER = "p_beta[4]"
 
 
 def replace_exact(text: str, old: str, new: str, *, count: int, label: str) -> str:
@@ -98,7 +99,7 @@ def patch_translation_source(path: Path) -> None:
     if "candidate-b11-beta4-pow2-mask" in text:
         return
     if "candidate-b4-beta4-predicate-opt" not in text:
-        raise RuntimeError(f"{path}: Candidate B11 requires retained Candidate B4")
+        raise RuntimeError(f"{path}: Candidate B11 requires retained Candidate B4 for {TARGET_SHADER}")
 
     text = replace_exact(
         text,
@@ -137,12 +138,12 @@ def patch_translation_source(path: Path) -> None:
         label=f"{path}: B11 predicate strength reduction",
     )
 
-    b4_log = '''        std::cerr << "lsfg-vk: candidate-b4-beta4-predicate-opt shader=" << shaderName\n'''
+    b4_success_log = '''        std::cerr << "lsfg-vk: candidate-b4-beta4-predicate-opt shader=" << shaderName\n            << " applied=1 predicates=" << predicateIndex\n            << " old_words=" << wordCount << " new_words=" << rewritten.size()\n            << " old_bound=" << kB4ExpectedBound << " new_bound=" << nextId << std::endl;\n'''
     b11_log = '''        if (b11Enabled) {\n            std::cerr << "lsfg-vk: candidate-b11-beta4-pow2-mask shader=" << shaderName\n                << " applied=1 predicates=" << kB4PredicateCount << " divisors=";\n            for (size_t i = 0; i < kB4PredicateCount; ++i) {\n                if (i != 0U)\n                    std::cerr << ',';\n                std::cerr << b11StepValues[i];\n            }\n            std::cerr << std::endl;\n        } else {\n            std::cerr << "lsfg-vk: candidate-b11-beta4-pow2-mask shader=" << shaderName\n                << " applied=0 reason=" << b11Reason << std::endl;\n        }\n\n'''
     text = replace_exact(
         text,
-        b4_log,
-        b11_log + b4_log,
+        b4_success_log,
+        b11_log + b4_success_log,
         count=1,
         label=f"{path}: B11 telemetry",
     )
