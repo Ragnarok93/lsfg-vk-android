@@ -8,6 +8,12 @@ Starting native HEAD: `46e7d7952064acc39c4677284458336600891f4d`
 
 Starting GameNative HEAD: `1cea4be160e181882b678a0ea9552cacee6692ff`
 
+Retained B13 native baseline: `6d698f8` (`perf(beta4): fuse and hoist
+reduction masks`)
+
+Retained B13 GameNative pin: `982a0386` (`build(lsfg): pin Beta4 fused-mask
+candidate`)
+
 ## Frozen observable requirements
 
 - Preserve generated image quality and temporal behavior.
@@ -17,7 +23,7 @@ Starting GameNative HEAD: `1cea4be160e181882b678a0ea9552cacee6692ff`
 - Reject average-time improvements that introduce long-tail stalls.
 - Keep profiling and compiler dumps out of clean artifacts.
 
-## Established baseline
+## Historical baseline
 
 Historical Adreno 650 evidence remains the comparison baseline:
 
@@ -28,9 +34,10 @@ Historical Adreno 650 evidence remains the comparison baseline:
   18 shared stores, 29 shared loads, 83 SS stalls, 391 SY stalls, and eight
   resident waves.
 
-The direct B12 stage reports remain evidence-only until an on-device capture
-shows successful query readback. The portable analyzer and pipeline executable
-capture remain the retention gates.
+The direct B12 stage reports remain evidence-only where query readback does not
+meet its validity contract. The portable analyzer, final pipeline executable,
+aggregate runtime behavior, and matched device captures remain retention
+evidence.
 
 ## Experiment B13: fused, hoisted Beta4 masks
 
@@ -78,30 +85,61 @@ this source-level reduction is not itself a performance claim.
 - Host `g++ -fsyntax-only` check of the fully composed translation unit passed.
 - Full Android Python contract suite passed: 115 tests.
 
-### Evidence still required
+### Retention result
 
-- Android arm64 and x86_64 clean builds.
-- B11-versus-B13 `p_beta[4]` final executable comparison.
-- On-device B13 application marker (`applied=1`).
-- Repeated Beta4/aggregate timing and source/output FPS comparison.
-- Image-quality and tail-latency review on Adreno 650.
-- Portability run on Xclipse 940 or another non-Turnip backend.
+B13 is the retained runtime baseline. In the matched sustained 4x comparison,
+pooled B11-to-B13 results showed source FPS +6.05%, output FPS +4.36%, cycle
+time -11.11%, GPU wait -11.6%, and dispatch time -7.69%. The exact-parent
+B11-to-B13 comparison showed source FPS +4.4%, output FPS +2.9%, cycle time
+-11.3%, and GPU wait -12.1%. No present failure, AHardwareBuffer fallback,
+adaptive, or DeferredZero regression was observed in the accepted captures.
 
-## Mipmaps disposition
+These results establish B13, rather than B11, as the control for all subsequent
+Mipmaps work.
 
-No Mipmaps mutation is retained yet. The prior B7 result proved that removing
-65 private stores and promoting 143 private loads changed SPIR-V but did not
-materially change the final executable or timing. Aggregate IR3 stall counts
-do not identify which shared dependency can be removed safely. A barrier,
-workgroup, subgroup, or topology rewrite without the exact producer/consumer
-mapping would be speculative and could silently change reduction output.
+## Mipmaps B14 starting point
 
-The next Mipmaps candidate must start from one paired B12 + executable capture
-and name a concrete target, such as an exact shared store/load dependency,
-address chain, spill/reload, or barrier-adjacent live range. The user's expanded
-engineering freedom supersedes the older notes that froze the five barriers and
-32x32 topology; those structures may be replaced once a candidate includes an
-independent output-equivalence check and multi-backend fallback/validation.
+The current B13 Mipmaps observation is approximately 4.00 ms under the matched
+device procedure. The B14 retention target is at most 3.20 ms, a 20% reduction.
+
+Instruction-level evidence now localizes a concrete dependency. The 16-to-4
+phase stores four reduced values to workgroup memory, all 1024 lanes execute a
+fifth workgroup barrier, and lane zero reloads those same four values for the
+4-to-1 result. B14 replaces that final rendezvous with one lane computing the
+same four values in registers, writing the same mip5 texels, and applying the
+same final reduction tree to write mip6. It preserves the exact FP32 grouping
+and targets four shared stores plus one whole-workgroup barrier.
+
+The approved design and implementation plan are recorded in:
+
+- `docs/plans/2026-09-16-b14-mipmaps-tail-fusion-design.md`
+- `docs/superpowers/plans/2026-09-16-b14-mipmaps-tail-fusion.md`
+
+### B14 host evidence completed
+
+- Exact B13 translated-shader fixture: 28,832 bytes, 7,208 words, bound 1270,
+  SHA-256 `68c68ffd7308d0cc742aa3e9ecbd00f44c92893c23df5cd62e1318cdb75b9046`.
+- B14 translated shader: 26,708 bytes, 6,677 words, bound 1383,
+  SHA-256 `c0c947bfb2314b098e729c61622b791a13b9110cec5aaf6a03ad983888ccf4a2`.
+- Parsed SPIR-V instructions: 1,508 to 1,385 (-123 / -8.2%).
+- Workgroup barriers: five to four.
+- Dynamic tail workgroup stores: four to zero.
+- Dynamic tail workgroup loads: fifteen to fifteen.
+- Static workgroup loads: fifteen to twenty-four because the lane-zero tail
+  spells out the fifteen dynamic loads instead of sharing three load opcodes
+  across active lanes.
+- Logical image outputs remain ten; static `OpImageWrite` opcodes rise from
+  ten to thirteen because mip5 now has four explicit lane-zero writes.
+- The real C++ rewriter rejects mutated baseline and candidate modules without
+  changing them, and exact second application is idempotent.
+- `spirv-val --target-env vulkan1.3` accepts the transformed SPIR-V 1.6 module.
+- The composed cleanup -> B4 -> B11 -> B13 -> B14 translation unit passes host
+  C++20 syntax compilation.
+- The complete Android policy suite passes: 118 tests.
+
+Android arm64-v8a/x86_64 builds, final backend executable evidence, and device
+timing/quality/stability remain required. The current host evidence proves a
+valid candidate, not the 3.20 ms performance target.
 
 ## Reproduction commands
 
@@ -142,11 +180,15 @@ ANDROID_NDK=/path/to/android-ndk-r27d \
 ./scripts/build/android.sh Release
 ```
 
+B14 uses the same evidence build with:
+
+```sh
+LSFGVK_MIPMAPS_CANDIDATE_SCRIPT=scripts/apply-candidate-b14-mipmaps-tail-fusion.py
+```
+
 ## Interruption checkpoint
 
-Do not update GameNative's gitlink or package a clean APK until B13 has an
-Android native commit and the clean native artifact contains the B13 marker.
-Do not call B13 retained on performance grounds until final executable and
-on-device evidence clear the gates above. Do not begin a Mipmaps topology
-rewrite from aggregate counts alone; first preserve the exact instruction-level
-capture that motivates it.
+B13 is retained and pinned. B14 is evidence-only until its structural,
+executable, timing, quality, stability, and second-backend gates pass. Do not
+update GameNative's gitlink for B14 or package B14 as a clean deliverable before
+that retention decision.

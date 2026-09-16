@@ -29,6 +29,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install host validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libvulkan-dev spirv-tools
+
       - name: Run Android portability contract tests
         run: |
           python3 tests/android_ahb_portability_test.py
@@ -48,6 +53,7 @@ jobs:
           python3 tests/android_candidate_b3_beta4_analysis_test.py
           python3 tests/android_candidate_b4_beta4_predicate_test.py
           python3 tests/android_candidate_b13_beta4_fused_mask_test.py
+          python3 tests/android_candidate_b14_mipmaps_tail_fusion_test.py
           python3 tests/android_beta4_evidence_analyzer_test.py
           python3 tests/android_candidate_b9_beta4_spill_collapse_test.py
           python3 tests/android_candidate_b6_pipeline_executable_profile_test.py
@@ -63,11 +69,6 @@ jobs:
           python3 tests/android_mipmaps_device_agnostic_evidence_test.py
           python3 scripts/analyze-mipmaps-evidence.py --help >/dev/null
           python3 scripts/analyze-beta4-evidence.py --help >/dev/null
-
-      - name: Install Vulkan headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ libvulkan-dev
 
       - name: Build and run capability policy tests
         run: |
@@ -152,6 +153,7 @@ jobs:
             'generated-stage-profile backend=' \
             'zero-stage-profile backend=' \
             'final-nonadaptive-sweep' \
+            'candidate-b14-mipmaps-tail-fusion' \
             'b12-stage-profile' \
             'b12-timestamp-fallback' \
             'b12-device-profile' \
@@ -240,6 +242,7 @@ jobs:
           done
           for forbidden in \
             'pipeline-exec-ir-line' \
+            'candidate-b14-mipmaps-tail-fusion' \
             'generated-stage-profile backend=' \
             'zero-stage-profile backend=' \
             'final-nonadaptive-sweep'; do
@@ -265,7 +268,7 @@ jobs:
           if-no-files-found: error
 
   b12-mipmaps-refinement-build:
-    name: Build B12 Mipmaps refinement arm64-v8a
+    name: Build B14 Mipmaps refinement arm64-v8a
     if: github.ref == 'refs/heads/feature/adreno-6xx-candidate-b11-beta4-pow2-mask'
     runs-on: ubuntu-latest
     steps:
@@ -294,6 +297,7 @@ jobs:
           LSFGVK_ADAPTIVE_RUNTIME: "1"
           LSFGVK_B12_DUAL_STAGE_PROFILE: "1"
           LSFGVK_MIPMAPS_EXEC_PROFILE: "1"
+          LSFGVK_MIPMAPS_CANDIDATE_SCRIPT: scripts/apply-candidate-b14-mipmaps-tail-fusion.py
         shell: bash
         run: |
           set -o pipefail
@@ -309,6 +313,7 @@ jobs:
           for required in \
             'candidate-b11-beta4-pow2-mask' \
             'candidate-b13-beta4-fused-mask' \
+            'candidate-b14-mipmaps-tail-fusion' \
             'b12-stage-profile' \
             'b12-stage-profile-init' \
             'b12-stage-profile status=unavailable' \
