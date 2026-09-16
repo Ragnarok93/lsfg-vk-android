@@ -272,7 +272,7 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
         self.assertIn("gamenative-helper-process-override-guard", transformed_process)
         self.assertIn("*process_exe != '\\0'", transformed_process)
         self.assertIn("cmdline.at(cmdline_len) = '\\0';", transformed_process)
-        self.assertIn("<< \\" configured_target=\\" << process_exe << '\\n';", transformed_process)
+        self.assertIn("<< \" configured_target=\" << process_exe << '\\n';", transformed_process)
         self.assertNotIn("\x00", transformed_process)
 
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
