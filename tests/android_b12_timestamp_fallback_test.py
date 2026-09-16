@@ -66,8 +66,7 @@ class B12TimestampFallbackContractTest(unittest.TestCase):
             self.assertIn("vkGetQueryPoolResults", source)
             self.assertIn("b12-timestamp-capability", source)
             self.assertIn("b12-timestamp-fallback", source)
-            self.assertIn("result=enabled", source)
-            self.assertIn("result=disabled", source)
+            self.assertIn('(probeSupported ? "enabled" : "disabled")', source)
             self.assertIn("TimestampQueryPool(vk.device, 2, true)", perf_context)
 
             # Evidence-only fallback must not rewrite the clean checked-in core.
