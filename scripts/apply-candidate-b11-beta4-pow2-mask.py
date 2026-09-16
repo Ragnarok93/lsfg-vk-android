@@ -73,15 +73,16 @@ def helper() -> str:
             }
 
             const uint32_t maskValue = value - 1U;
-            maskConstants[predicate] = 0U;
+            uint32_t maskId = 0U;
             for (uint32_t id = 1U; id < kB4ExpectedBound; ++id) {
                 if (constantSeen[id] != 0U && constantValues[id] == maskValue) {
-                    maskConstants[predicate] = id;
+                    maskId = id;
                     break;
                 }
             }
             stepValues[predicate] = value;
             maskValues[predicate] = maskValue;
+            maskConstants[predicate] = maskId;
         }
 
         reason = "ok";
