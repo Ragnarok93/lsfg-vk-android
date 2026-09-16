@@ -1,22 +1,9 @@
 #!/usr/bin/env python3
-"""Harden B12 timestamp evidence so a build can never fail silently.
-
-Applied only to B12 evidence builds, after the dual-stage profiler and timestamp
-capability fallback transforms. The hardening does three things:
-
-* adds a checked timestamp readback API with an optional WAIT_BIT path;
-* consumes pending stage queries only after the existing slot synchronization,
-  accounting for every readback attempt and reporting the first failure;
-* emits an explicit availability record on the first present and periodic status
-  records based on attempts rather than successful samples.
-
-The clean runtime remains unchanged because this transform is B12-only.
-"""
+"""Make B12 stage timing fail-visible without changing the clean runtime."""
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-
 from adreno_evidence_common import replace_exact
 
 HEADER = Path("framegen/include/core/timestampquerypool.hpp")
@@ -35,8 +22,7 @@ def replace_one_between(text: str, start: str, end: str, replacement: str, label
     first = text.find(start)
     if first < 0:
         raise RuntimeError(f"{label}: start anchor not found")
-    second = text.find(start, first + 1)
-    if second >= 0:
+    if text.find(start, first + 1) >= 0:
         raise RuntimeError(f"{label}: start anchor is not unique")
     finish = text.find(end, first)
     if finish < 0:
@@ -112,14 +98,9 @@ def patch_source(path: Path) -> None:
     if (waitForResults)
         flags |= VK_QUERY_RESULT_WAIT_BIT;
     const VkResult result = vkGetQueryPoolResults(
-        device.handle(),
-        *this->queryPool,
-        0,
-        this->queryCount_,
-        timestamps.size() * sizeof(uint64_t),
-        timestamps.data(),
-        sizeof(uint64_t),
-        flags);
+        device.handle(), *this->queryPool, 0, this->queryCount_,
+        timestamps.size() * sizeof(uint64_t), timestamps.data(),
+        sizeof(uint64_t), flags);
     if (result != VK_SUCCESS)
         return result;
 
@@ -127,7 +108,6 @@ def patch_source(path: Path) -> None:
     const uint64_t mask = validBits == 64
         ? std::numeric_limits<uint64_t>::max()
         : ((uint64_t{1} << validBits) - 1);
-
     durations.reserve(this->queryCount_ - 1);
     for (uint32_t i = 0; i + 1 < this->queryCount_; ++i) {
         const uint64_t start = timestamps.at(i) & mask;
@@ -136,7 +116,6 @@ def patch_source(path: Path) -> None:
         durations.emplace_back(
             (static_cast<double>(delta) * this->timestampPeriodNs_) / 1000000.0);
     }
-
     return VK_SUCCESS;
 }
 
@@ -147,13 +126,8 @@ std::vector<double> TimestampQueryPool::durationsMs(
     return durations;
 }
 '''
-        text = replace_exact(
-            text,
-            old,
-            new,
-            count=1,
-            label=f"{path}: checked timestamp readback",
-        )
+        text = replace_exact(text, old, new, count=1,
+            label=f"{path}: checked timestamp readback")
 
     if "b12-query-pool-create-failure" not in text:
         text = replace_exact(
@@ -187,7 +161,6 @@ std::vector<double> TimestampQueryPool::durationsMs(
             count=1,
             label=f"{path}: query-pool creation failure reporting",
         )
-
     path.write_text(text, encoding="utf-8")
 
 
@@ -201,27 +174,36 @@ def patch_context_header(path: Path) -> None:
         "        uint32_t b12MipmapsSamples{0};\n"
         "        uint32_t b12Beta4Samples{0};\n"
     )
-    new = (
-        old
-        + "        uint32_t b12MipmapsAttempts{0};\n"
-        + "        uint32_t b12Beta4Attempts{0};\n"
-        + "        uint32_t b12MipmapsFailures{0};\n"
-        + "        uint32_t b12Beta4Failures{0};\n"
-        + "        VkResult b12MipmapsLastResult{VK_SUCCESS};\n"
-        + "        VkResult b12Beta4LastResult{VK_SUCCESS};\n"
-        + "        bool b12AvailabilityLogged{false};\n"
+    new = old + (
+        "        uint32_t b12MipmapsAttempts{0};\n"
+        "        uint32_t b12Beta4Attempts{0};\n"
+        "        uint32_t b12MipmapsFailures{0};\n"
+        "        uint32_t b12Beta4Failures{0};\n"
+        "        VkResult b12MipmapsLastResult{VK_SUCCESS};\n"
+        "        VkResult b12Beta4LastResult{VK_SUCCESS};\n"
+        "        bool b12AvailabilityLogged{false};\n"
     )
-    text = replace_exact(
-        text,
-        old,
-        new,
-        count=1,
-        label=f"{path}: B12 attempt/failure counters",
-    )
+    text = replace_exact(text, old, new, count=1,
+        label=f"{path}: B12 attempt/failure counters")
     path.write_text(text, encoding="utf-8")
 
 
-HARDENED_COLLECTION = r'''    if (data.b12MipmapsPending) {
+HARDENED_COLLECTION = r'''    if (!this->b12AvailabilityLogged) {
+        const bool mipmapsSupported = data.b12MipmapsQueryPool.supported();
+        const bool beta4Supported = data.b12Beta4QueryPool.supported();
+        std::cout << "lsfg-vk: b12-stage-profile-init mipmaps_supported="
+            << (mipmapsSupported ? 1 : 0)
+            << " beta4_supported=" << (beta4Supported ? 1 : 0) << std::endl;
+        if (!mipmapsSupported || !beta4Supported) {
+            std::cout << "lsfg-vk: b12-stage-profile status=unavailable"
+                << " reason=query-pool-unsupported"
+                << " mipmaps_supported=" << (mipmapsSupported ? 1 : 0)
+                << " beta4_supported=" << (beta4Supported ? 1 : 0)
+                << std::endl;
+        }
+        this->b12AvailabilityLogged = true;
+    }
+    if (data.b12MipmapsPending) {
         std::vector<double> durations;
         const VkResult result = data.b12MipmapsQueryPool.durationsMsChecked(
             vk.device, durations, true);
@@ -270,16 +252,14 @@ HARDENED_COLLECTION = r'''    if (data.b12MipmapsPending) {
             << " mipmaps_last_result=" << static_cast<int>(this->b12MipmapsLastResult)
             << " mipmaps_avg_ms="
             << (this->b12MipmapsSamples > 0
-                ? this->b12MipmapsTotalMs / static_cast<double>(this->b12MipmapsSamples)
-                : 0.0)
+                ? this->b12MipmapsTotalMs / static_cast<double>(this->b12MipmapsSamples) : 0.0)
             << " beta4_attempts=" << this->b12Beta4Attempts
             << " beta4_samples=" << this->b12Beta4Samples
             << " beta4_failures=" << this->b12Beta4Failures
             << " beta4_last_result=" << static_cast<int>(this->b12Beta4LastResult)
             << " beta4_avg_ms="
             << (this->b12Beta4Samples > 0
-                ? this->b12Beta4TotalMs / static_cast<double>(this->b12Beta4Samples)
-                : 0.0)
+                ? this->b12Beta4TotalMs / static_cast<double>(this->b12Beta4Samples) : 0.0)
             << std::endl;
         this->b12MipmapsTotalMs = 0.0;
         this->b12Beta4TotalMs = 0.0;
@@ -299,36 +279,6 @@ def patch_context_source(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     if "b12-readback-failure" in text:
         return
-
-    present_anchor = (
-        "    const size_t generationCount = std::min(activeGenerationCount, vk.generationCount);\n"
-        "    auto& data = this->data.at(this->frameIdx % 8);\n\n"
-    )
-    availability_block = present_anchor + r'''    if (!this->b12AvailabilityLogged) {
-        const bool mipmapsSupported = this->data.at(0).b12MipmapsQueryPool.supported();
-        const bool beta4Supported = this->data.at(0).b12Beta4QueryPool.supported();
-        std::cout << "lsfg-vk: b12-stage-profile-init mipmaps_supported="
-            << (mipmapsSupported ? 1 : 0)
-            << " beta4_supported=" << (beta4Supported ? 1 : 0) << std::endl;
-        if (!mipmapsSupported || !beta4Supported) {
-            std::cout << "lsfg-vk: b12-stage-profile status=unavailable"
-                << " reason=query-pool-unsupported"
-                << " mipmaps_supported=" << (mipmapsSupported ? 1 : 0)
-                << " beta4_supported=" << (beta4Supported ? 1 : 0)
-                << std::endl;
-        }
-        this->b12AvailabilityLogged = true;
-    }
-
-'''
-    text = replace_exact(
-        text,
-        present_anchor,
-        availability_block,
-        count=1,
-        label=f"{path}: B12 first-present availability status",
-    )
-
     text = replace_one_between(
         text,
         "    if (data.b12MipmapsPending) {\n",
