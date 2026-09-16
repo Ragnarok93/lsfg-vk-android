@@ -191,16 +191,18 @@ def patch_android_context(path: Path) -> None:
     if "enableCooperativeMipmaps = info.mipmapsSubgroupBroadcastSupported" in text:
         return
 
-    old_init = '''    lsfgInitialize(
+    old_init = '''    setenv("DISABLE_LSFG", "1", 1); // NOLINT
+    lsfgInitialize(
         info.identity, format,
 '''
-    new_init = '''    const bool enableCooperativeMipmaps =
+    new_init = '''    setenv("DISABLE_LSFG", "1", 1); // NOLINT
+    const bool enableCooperativeMipmaps =
         info.mipmapsSubgroupBroadcastSupported;
     lsfgInitialize(
         info.identity, format,
 '''
     text = replace_exact(
-        text, old_init, new_init, count=1, label=f"{path}: B14 capability capture"
+        text, old_init, new_init, count=1, label=f"{path}: Android B14 capability capture"
     )
 
     old_callback = '''        [](const std::string& name) {
