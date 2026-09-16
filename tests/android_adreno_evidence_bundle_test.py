@@ -15,6 +15,8 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
         shader_profile = ROOT / "scripts/apply-mipmaps-shader-profile.py"
         evidence_profile = ROOT / "scripts/apply-adreno-evidence-profile.py"
         b11_stage_profile = ROOT / "scripts/apply-b11-beta4-stage-profile.py"
+        b6_exec_profile = ROOT / "scripts/apply-candidate-b6-pipeline-executable-profile.py"
+        b11_exec_profile = ROOT / "scripts/apply-b11-beta4-executable-profile.py"
         syncfd_profile = ROOT / "scripts/adreno_syncfd_handoff.py"
         build_script = ROOT / "scripts/build/android.sh"
 
@@ -22,6 +24,8 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
         self.assertTrue(shader_profile.exists(), shader_profile.as_posix())
         self.assertTrue(evidence_profile.exists(), evidence_profile.as_posix())
         self.assertTrue(b11_stage_profile.exists(), b11_stage_profile.as_posix())
+        self.assertTrue(b6_exec_profile.exists(), b6_exec_profile.as_posix())
+        self.assertTrue(b11_exec_profile.exists(), b11_exec_profile.as_posix())
         self.assertTrue(syncfd_profile.exists(), syncfd_profile.as_posix())
 
         build_text = build_script.read_text(encoding="utf-8")
@@ -30,13 +34,22 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
         self.assertIn("LSFGVK_B11_PROFILE_VARIANT", build_text)
         self.assertIn("apply-b11-beta4-stage-profile.py", build_text)
         self.assertIn("apply-candidate-b6-pipeline-executable-profile.py", build_text)
+        self.assertIn("apply-b11-beta4-executable-profile.py", build_text)
+        self.assertLess(
+            build_text.index("apply-candidate-b6-pipeline-executable-profile.py"),
+            build_text.index("apply-b11-beta4-executable-profile.py"),
+        )
         self.assertIn('"${B11_PROFILE_VARIANT}" == "b4"', build_text)
 
         required_files = (
             Path("framegen/public/lsfg_backend.hpp"),
             Path("framegen/public/lsfg_3_1.hpp"),
             Path("framegen/public/lsfg_3_1p.hpp"),
+            Path("framegen/include/core/device.hpp"),
             Path("framegen/src/core/device.cpp"),
+            Path("framegen/include/core/pipeline.hpp"),
+            Path("framegen/src/core/pipeline.cpp"),
+            Path("framegen/src/pool/shaderpool.cpp"),
             Path("framegen/include/core/semaphore.hpp"),
             Path("framegen/src/core/semaphore.cpp"),
             Path("framegen/include/core/timestampquerypool.hpp"),
@@ -89,6 +102,14 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
                     [sys.executable, str(b11_stage_profile), "--root", str(temp_root)],
                     check=True,
                 )
+                subprocess.run(
+                    [sys.executable, str(b6_exec_profile), "--root", str(temp_root)],
+                    check=True,
+                )
+                subprocess.run(
+                    [sys.executable, str(b11_exec_profile), "--root", str(temp_root)],
+                    check=True,
+                )
 
             backend_header = (temp_root / "framegen/public/lsfg_backend.hpp").read_text(
                 encoding="utf-8"
@@ -102,6 +123,9 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
                 (temp_root / "framegen/v3.1p_src/lsfg.cpp").read_text(encoding="utf-8"),
             )
             device_source = (temp_root / "framegen/src/core/device.cpp").read_text(
+                encoding="utf-8"
+            )
+            pipeline_source = (temp_root / "framegen/src/core/pipeline.cpp").read_text(
                 encoding="utf-8"
             )
             core_semaphore = (temp_root / "framegen/src/core/semaphore.cpp").read_text(
@@ -227,6 +251,25 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             beta4_end = perf_beta_source.index("beta4Profile->write(buf.handle(), 1)", beta4_bind)
             self.assertLess(beta4_reset, beta4_bind)
             self.assertLess(beta4_bind, beta4_end)
+
+            # B11 evidence must capture the actual compiled p_beta[4] executable,
+            # not only the Mipmaps executable inherited from Candidate B6.
+            self.assertIn(
+                'shaderName != "p_mipmaps" && shaderName != "p_beta[4]"',
+                pipeline_source,
+            )
+            self.assertIn(
+                '(shaderName == "p_mipmaps" || shaderName == "p_beta[4]")',
+                pipeline_source,
+            )
+            self.assertIn('pipeline-exec-stat shader=" << shaderName', pipeline_source)
+            self.assertIn('pipeline-exec-ir shader=" << shaderName', pipeline_source)
+            self.assertIn('pipeline-exec-ir-line shader=" << shaderName', pipeline_source)
+            self.assertIn(
+                "// pipeline-exec-profile shader=p_mipmaps (B6 marker retained)",
+                pipeline_source,
+            )
+            self.assertEqual(pipeline_source.count("shader=p_mipmaps"), 1)
 
             # Profiling keeps the established submits and adds exactly one
             # TransportOnly preprocessing submit behind an internal semaphore.
