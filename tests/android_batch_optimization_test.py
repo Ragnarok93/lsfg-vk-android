@@ -5,6 +5,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def profiling_gate_offset(build: str) -> int:
+    """Return the start of profiling selection, including B11 evidence builds."""
+    return build.index('PROFILE_REQUESTED="${LSFGVK_ZERO_STAGE_PROFILE:-0}"')
+
+
 class AndroidBatchOptimizationTest(unittest.TestCase):
     def test_android_last_context_keeps_private_runtime_resident(self) -> None:
         """Android swapchain churn must not destroy the private Vulkan runtime from deleteContext()."""
@@ -22,7 +27,7 @@ class AndroidBatchOptimizationTest(unittest.TestCase):
 
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
         self.assertIn("adreno_android_runtime_residency.py", build)
-        profile_gate = build.index('if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]')
+        profile_gate = profiling_gate_offset(build)
         runtime_patch = build.index("adreno_android_runtime_residency.py")
         self.assertLess(runtime_patch, profile_gate, "runtime residency must apply to every Android build")
 
@@ -44,7 +49,7 @@ class AndroidBatchOptimizationTest(unittest.TestCase):
 
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
         self.assertIn("adreno_android_config_reload.py", build)
-        profile_gate = build.index('if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]')
+        profile_gate = profiling_gate_offset(build)
         config_patch = build.index("adreno_android_config_reload.py")
         self.assertLess(config_patch, profile_gate, "config hardening must apply to every Android build")
 
