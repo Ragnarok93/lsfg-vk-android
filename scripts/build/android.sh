@@ -12,10 +12,11 @@
 # Usage:
 #   ANDROID_NDK=/path/to/android-ndk-r27d ./scripts/build/android.sh [Release|Debug]
 #   ANDROID_ABI=x86_64 ANDROID_NDK=/path/to/android-ndk-r27d ./scripts/build/android.sh
-#   LSFGVK_ZERO_STAGE_PROFILE=1 ... ./scripts/build/android.sh   # profiling build
-#   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_B8_DIAGNOSTICS=1 ...     # legacy B8 diagnostic matrix
+#   LSFGVK_ADAPTIVE_RUNTIME=1 ... ./scripts/build/android.sh       # clean retained adaptive runtime
+#   LSFGVK_ZERO_STAGE_PROFILE=1 ... ./scripts/build/android.sh     # profiling build
+#   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_B8_DIAGNOSTICS=1 ...       # legacy B8 diagnostic matrix
 #   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_FINAL_NONADAPTIVE_SWEEP=1 ... # deferred final sweep
-#   LSFGVK_EXPERIMENTAL_B9=1 ... ./scripts/build/android.sh      # experimental Beta4 scheduler
+#   LSFGVK_EXPERIMENTAL_B9=1 ... ./scripts/build/android.sh        # experimental Beta4 scheduler
 
 set -euo pipefail
 
@@ -44,7 +45,13 @@ python3 "${REPO_ROOT}/scripts/adreno_suspend_timeout_guard.py" --root "${REPO_RO
 python3 "${REPO_ROOT}/scripts/adreno_android_runtime_residency.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/adreno_android_config_reload.py" --root "${REPO_ROOT}"
 
-if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
+if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" == "1" ]]; then
+    echo "[lsfg-vk] Enabling retained adaptive runtime without GPU/compiler profiling"
+    python3 "${REPO_ROOT}/scripts/apply-adreno-evidence-profile.py" \
+        --root "${REPO_ROOT}" --runtime-only
+fi
+
+if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" != "1" && "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
     echo "[lsfg-vk] Enabling temporary zero-stage GPU profiling instrumentation"
     python3 "${REPO_ROOT}/scripts/apply-zero-stage-profile.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-mipmaps-shader-profile.py" --root "${REPO_ROOT}"
