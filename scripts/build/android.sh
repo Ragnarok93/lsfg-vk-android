@@ -14,6 +14,8 @@
 #   ANDROID_ABI=x86_64 ANDROID_NDK=/path/to/android-ndk-r27d ./scripts/build/android.sh
 #   LSFGVK_ADAPTIVE_RUNTIME=1 ... ./scripts/build/android.sh       # clean retained adaptive runtime
 #   LSFGVK_ZERO_STAGE_PROFILE=1 ... ./scripts/build/android.sh     # profiling build
+#   LSFGVK_B11_EVIDENCE_PROFILE=1 LSFGVK_B11_PROFILE_VARIANT=b4 ...  # B4-only controlled evidence
+#   LSFGVK_B11_EVIDENCE_PROFILE=1 LSFGVK_B11_PROFILE_VARIANT=b11 ... # B4+B11 controlled evidence
 #   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_B8_DIAGNOSTICS=1 ...       # legacy B8 diagnostic matrix
 #   LSFGVK_ZERO_STAGE_PROFILE=1 LSFGVK_FINAL_NONADAPTIVE_SWEEP=1 ... # deferred final sweep
 #   LSFGVK_EXPERIMENTAL_B9=1 ... ./scripts/build/android.sh        # experimental Beta4 scheduler
@@ -24,10 +26,23 @@ BUILD_TYPE="${1:-Release}"
 ABI="${ANDROID_ABI:-arm64-v8a}"
 API="${ANDROID_PLATFORM:-android-28}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
+B11_EVIDENCE_PROFILE="${LSFGVK_B11_EVIDENCE_PROFILE:-0}"
+B11_PROFILE_VARIANT="${LSFGVK_B11_PROFILE_VARIANT:-b11}"
 
 if [[ -z "${ANDROID_NDK:-}" ]]; then
     echo "error: ANDROID_NDK must be set to your NDK root (e.g. /opt/android-ndk-r27d)" >&2
     exit 1
+fi
+
+if [[ "${B11_EVIDENCE_PROFILE}" == "1" ]]; then
+    if [[ "${B11_PROFILE_VARIANT}" != "b4" && "${B11_PROFILE_VARIANT}" != "b11" ]]; then
+        echo "error: LSFGVK_B11_PROFILE_VARIANT must be b4 or b11" >&2
+        exit 1
+    fi
+    if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" == "1" ]]; then
+        echo "error: B11 evidence profiling cannot be combined with clean adaptive runtime mode" >&2
+        exit 1
+    fi
 fi
 
 TOOLCHAIN="${ANDROID_NDK}/build/cmake/android.toolchain.cmake"
@@ -51,7 +66,12 @@ if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" == "1" ]]; then
         --root "${REPO_ROOT}" --runtime-only
 fi
 
-if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
+PROFILE_REQUESTED="${LSFGVK_ZERO_STAGE_PROFILE:-0}"
+if [[ "${B11_EVIDENCE_PROFILE}" == "1" ]]; then
+    PROFILE_REQUESTED=1
+fi
+
+if [[ "${PROFILE_REQUESTED}" == "1" ]]; then
     if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" == "1" ]]; then
         echo "[lsfg-vk] Ignoring profiling request because clean adaptive runtime mode is active"
     else
@@ -62,15 +82,24 @@ if [[ "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
         python3 "${REPO_ROOT}/scripts/apply-candidate-b-shader-hot-path.py" --root "${REPO_ROOT}"
         python3 "${REPO_ROOT}/scripts/apply-candidate-b2-mipmaps-dependency-profile.py" --root "${REPO_ROOT}"
         python3 "${REPO_ROOT}/scripts/apply-candidate-b3-beta4-analysis.py" --root "${REPO_ROOT}"
+        if [[ "${B11_EVIDENCE_PROFILE}" == "1" ]]; then
+            echo "[lsfg-vk] Enabling direct Beta4 timing and pipeline executable evidence (${B11_PROFILE_VARIANT})"
+            python3 "${REPO_ROOT}/scripts/apply-b11-beta4-stage-profile.py" --root "${REPO_ROOT}"
+            python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
+        fi
         if [[ "${LSFGVK_FINAL_NONADAPTIVE_SWEEP:-0}" == "1" ]]; then
             echo "[lsfg-vk] Enabling deferred final non-adaptive compiler sweep"
-            python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
+            if [[ "${B11_EVIDENCE_PROFILE}" != "1" ]]; then
+                python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
+            fi
             python3 "${REPO_ROOT}/scripts/apply-candidate-b8-mipmaps-matrix.py" --root "${REPO_ROOT}"
             python3 "${REPO_ROOT}/scripts/apply-candidate-b8-local-spirv-constants.py" --root "${REPO_ROOT}"
             python3 "${REPO_ROOT}/scripts/apply-final-nonadaptive-sweep-v2.py" --root "${REPO_ROOT}"
         elif [[ "${LSFGVK_B8_DIAGNOSTICS:-0}" == "1" ]]; then
             echo "[lsfg-vk] Enabling opt-in B8 pipeline-executable and mipmaps-matrix diagnostics"
-            python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
+            if [[ "${B11_EVIDENCE_PROFILE}" != "1" ]]; then
+                python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
+            fi
             python3 "${REPO_ROOT}/scripts/apply-candidate-b8-mipmaps-matrix.py" --root "${REPO_ROOT}"
             python3 "${REPO_ROOT}/scripts/apply-candidate-b8-local-spirv-constants.py" --root "${REPO_ROOT}"
         fi
@@ -79,7 +108,11 @@ fi
 
 python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate.py" --root "${REPO_ROOT}"
-python3 "${REPO_ROOT}/scripts/apply-candidate-b11-beta4-pow2-mask.py" --root "${REPO_ROOT}"
+if [[ "${B11_EVIDENCE_PROFILE}" == "1" && "${B11_PROFILE_VARIANT}" == "b4" ]]; then
+    echo "[lsfg-vk] Controlled B11 evidence variant: retaining B4 without B11"
+else
+    python3 "${REPO_ROOT}/scripts/apply-candidate-b11-beta4-pow2-mask.py" --root "${REPO_ROOT}"
+fi
 if [[ "${LSFGVK_EXPERIMENTAL_B9:-0}" == "1" ]]; then
     echo "[lsfg-vk] Enabling experimental B9 Beta4 scheduler"
     python3 "${REPO_ROOT}/scripts/apply-candidate-b9-beta4-spill-collapse.py" --root "${REPO_ROOT}"
