@@ -84,6 +84,43 @@ class AndroidCandidateB4Beta4PredicateContractTest(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/android-bionic.yml').read_text(encoding='utf-8')
         self.assertIn('python3 tests/android_candidate_b4_beta4_predicate_test.py', workflow)
 
+    def test_b11_pow2_mask_is_exact_guarded_and_falls_back_to_b4(self) -> None:
+        patcher = ROOT / 'scripts/apply-candidate-b11-beta4-pow2-mask.py'
+        self.assertTrue(patcher.exists(), patcher.as_posix())
+        source = patcher.read_text(encoding='utf-8')
+        required = (
+            'p_beta[4]',
+            'candidate-b11-beta4-pow2-mask',
+            'spv::OpConstant',
+            'spv::OpBitwiseAnd',
+            'spv::OpUMod',
+            'kB4StepConstants',
+            'kB4PredicateCount',
+            'value != 0U && (value & (value - 1U)) == 0U',
+            'maskValue = value - 1U',
+            'applied=0 reason=',
+            'applied=1 predicates=',
+        )
+        for token in required:
+            self.assertIn(token, source)
+
+        for forbidden in (
+            'spv::OpControlBarrier',
+            'spv::OpImageSampleExplicitLod',
+            'spv::OpImageWrite',
+            'ExecutionModeLocalSize',
+            'VK_FORMAT_',
+            'supportsTightIcbPacking',
+            'LSFGVK_CANDIDATE_B_TIGHT_ICB',
+        ):
+            self.assertNotIn(forbidden, source)
+
+        build = (ROOT / 'scripts/build/android.sh').read_text(encoding='utf-8')
+        b4 = 'python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate.py" --root "${REPO_ROOT}"'
+        b11 = 'python3 "${REPO_ROOT}/scripts/apply-candidate-b11-beta4-pow2-mask.py" --root "${REPO_ROOT}"'
+        self.assertIn(b11, build)
+        self.assertGreater(build.index(b11), build.index(b4))
+
 
 if __name__ == '__main__':
     unittest.main()
