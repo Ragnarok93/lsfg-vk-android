@@ -28,6 +28,7 @@ API="${ANDROID_PLATFORM:-android-28}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 B11_EVIDENCE_PROFILE="${LSFGVK_B11_EVIDENCE_PROFILE:-0}"
 B11_PROFILE_VARIANT="${LSFGVK_B11_PROFILE_VARIANT:-b11}"
+EXPERIMENTAL_B9="${LSFGVK_EXPERIMENTAL_B9:-0}"
 
 if [[ -z "${ANDROID_NDK:-}" ]]; then
     echo "error: ANDROID_NDK must be set to your NDK root (e.g. /opt/android-ndk-r27d)" >&2
@@ -47,7 +48,7 @@ if [[ "${B11_EVIDENCE_PROFILE}" == "1" ]]; then
         echo "error: B11 evidence profiling cannot be combined with B8/final compiler sweeps" >&2
         exit 1
     fi
-    if [[ "${LSFGVK_EXPERIMENTAL_B9:-0}" == "1" ]]; then
+    if [[ "${EXPERIMENTAL_B9}" == "1" ]]; then
         echo "error: B11 evidence profiling cannot be combined with experimental B9" >&2
         exit 1
     fi
