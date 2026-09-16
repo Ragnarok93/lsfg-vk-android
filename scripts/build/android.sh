@@ -13,6 +13,7 @@
 #   ANDROID_NDK=/path/to/android-ndk-r27d ./scripts/build/android.sh [Release|Debug]
 #   ANDROID_ABI=x86_64 ANDROID_NDK=/path/to/android-ndk-r27d ./scripts/build/android.sh
 #   LSFGVK_ADAPTIVE_RUNTIME=1 ... ./scripts/build/android.sh       # clean retained adaptive runtime
+#   LSFGVK_B12_DUAL_STAGE_PROFILE=1 LSFGVK_ADAPTIVE_RUNTIME=1 ... # lightweight Mipmaps + Beta4 timing
 #   LSFGVK_ZERO_STAGE_PROFILE=1 ... ./scripts/build/android.sh     # profiling build
 #   LSFGVK_B11_EVIDENCE_PROFILE=1 LSFGVK_B11_PROFILE_VARIANT=b4 ...  # B4-only controlled evidence
 #   LSFGVK_B11_EVIDENCE_PROFILE=1 LSFGVK_B11_PROFILE_VARIANT=b11 ... # B4+B11 controlled evidence
@@ -28,11 +29,17 @@ API="${ANDROID_PLATFORM:-android-28}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 B11_EVIDENCE_PROFILE="${LSFGVK_B11_EVIDENCE_PROFILE:-0}"
 B11_PROFILE_VARIANT="${LSFGVK_B11_PROFILE_VARIANT:-b11}"
+B12_DUAL_STAGE_PROFILE="${LSFGVK_B12_DUAL_STAGE_PROFILE:-0}"
 ADAPTIVE_RUNTIME="${LSFGVK_ADAPTIVE_RUNTIME:-0}"
 EXPERIMENTAL_B9="${LSFGVK_EXPERIMENTAL_B9:-0}"
 
 if [[ -z "${ANDROID_NDK:-}" ]]; then
     echo "error: ANDROID_NDK must be set to your NDK root (e.g. /opt/android-ndk-r27d)" >&2
+    exit 1
+fi
+
+if [[ "${B12_DUAL_STAGE_PROFILE}" != "0" && "${B12_DUAL_STAGE_PROFILE}" != "1" ]]; then
+    echo "error: LSFGVK_B12_DUAL_STAGE_PROFILE must be 0 or 1" >&2
     exit 1
 fi
 
@@ -51,6 +58,21 @@ if [[ "${B11_EVIDENCE_PROFILE}" == "1" ]]; then
     fi
     if [[ "${EXPERIMENTAL_B9}" == "1" ]]; then
         echo "error: B11 evidence profiling cannot be combined with experimental B9" >&2
+        exit 1
+    fi
+fi
+
+if [[ "${B12_DUAL_STAGE_PROFILE}" == "1" ]]; then
+    if [[ "${B11_EVIDENCE_PROFILE}" == "1" || "${LSFGVK_ZERO_STAGE_PROFILE:-0}" == "1" ]]; then
+        echo "error: B12 dual-stage profiling cannot be combined with the heavyweight evidence profilers" >&2
+        exit 1
+    fi
+    if [[ "${LSFGVK_B8_DIAGNOSTICS:-0}" == "1" || "${LSFGVK_FINAL_NONADAPTIVE_SWEEP:-0}" == "1" ]]; then
+        echo "error: B12 dual-stage profiling cannot be combined with B8/final compiler sweeps" >&2
+        exit 1
+    fi
+    if [[ "${EXPERIMENTAL_B9}" == "1" ]]; then
+        echo "error: B12 dual-stage profiling cannot be combined with experimental B9" >&2
         exit 1
     fi
 fi
@@ -133,6 +155,11 @@ fi
 # transforms cannot invalidate their source anchors.
 python3 "${REPO_ROOT}/scripts/apply-android-command-buffer-reuse.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/apply-android-submit-hot-path.py" --root "${REPO_ROOT}"
+
+if [[ "${B12_DUAL_STAGE_PROFILE}" == "1" ]]; then
+    echo "[lsfg-vk] Enabling B12 low-overhead Mipmaps + Beta4 GPU timing"
+    python3 "${REPO_ROOT}/scripts/apply-b12-dual-stage-profile.py" --root "${REPO_ROOT}"
+fi
 
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
 
