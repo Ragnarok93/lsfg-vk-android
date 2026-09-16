@@ -14,6 +14,7 @@
 #   ANDROID_ABI=x86_64 ANDROID_NDK=/path/to/android-ndk-r27d ./scripts/build/android.sh
 #   LSFGVK_ADAPTIVE_RUNTIME=1 ... ./scripts/build/android.sh       # clean retained adaptive runtime
 #   LSFGVK_B12_DUAL_STAGE_PROFILE=1 LSFGVK_ADAPTIVE_RUNTIME=1 ... # lightweight Mipmaps + Beta4 timing
+#   LSFGVK_B12_MIPMAPS_EXEC_PROFILE=1 LSFGVK_B12_DUAL_STAGE_PROFILE=1 LSFGVK_ADAPTIVE_RUNTIME=1 ... # add p_mipmaps executable/IR capture
 #   LSFGVK_ZERO_STAGE_PROFILE=1 ... ./scripts/build/android.sh     # profiling build
 #   LSFGVK_B11_EVIDENCE_PROFILE=1 LSFGVK_B11_PROFILE_VARIANT=b4 ...  # B4-only controlled evidence
 #   LSFGVK_B11_EVIDENCE_PROFILE=1 LSFGVK_B11_PROFILE_VARIANT=b11 ... # B4+B11 controlled evidence
@@ -30,6 +31,7 @@ GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 B11_EVIDENCE_PROFILE="${LSFGVK_B11_EVIDENCE_PROFILE:-0}"
 B11_PROFILE_VARIANT="${LSFGVK_B11_PROFILE_VARIANT:-b11}"
 B12_DUAL_STAGE_PROFILE="${LSFGVK_B12_DUAL_STAGE_PROFILE:-0}"
+B12_MIPMAPS_EXEC_PROFILE="${LSFGVK_B12_MIPMAPS_EXEC_PROFILE:-0}"
 ADAPTIVE_RUNTIME="${LSFGVK_ADAPTIVE_RUNTIME:-0}"
 EXPERIMENTAL_B9="${LSFGVK_EXPERIMENTAL_B9:-0}"
 
@@ -40,6 +42,14 @@ fi
 
 if [[ "${B12_DUAL_STAGE_PROFILE}" != "0" && "${B12_DUAL_STAGE_PROFILE}" != "1" ]]; then
     echo "error: LSFGVK_B12_DUAL_STAGE_PROFILE must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "${B12_MIPMAPS_EXEC_PROFILE}" != "0" && "${B12_MIPMAPS_EXEC_PROFILE}" != "1" ]]; then
+    echo "error: LSFGVK_B12_MIPMAPS_EXEC_PROFILE must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "${B12_MIPMAPS_EXEC_PROFILE}" == "1" && "${B12_DUAL_STAGE_PROFILE}" != "1" ]]; then
+    echo "error: LSFGVK_B12_MIPMAPS_EXEC_PROFILE requires LSFGVK_B12_DUAL_STAGE_PROFILE=1" >&2
     exit 1
 fi
 
@@ -159,6 +169,11 @@ python3 "${REPO_ROOT}/scripts/apply-android-submit-hot-path.py" --root "${REPO_R
 if [[ "${B12_DUAL_STAGE_PROFILE}" == "1" ]]; then
     echo "[lsfg-vk] Enabling B12 low-overhead Mipmaps + Beta4 GPU timing"
     python3 "${REPO_ROOT}/scripts/apply-b12-dual-stage-profile.py" --root "${REPO_ROOT}"
+    python3 "${REPO_ROOT}/scripts/apply-b12-unreported-timestamp-fallback.py" --root "${REPO_ROOT}"
+    if [[ "${B12_MIPMAPS_EXEC_PROFILE}" == "1" ]]; then
+        echo "[lsfg-vk] Enabling B12 p_mipmaps pipeline executable/IR capture"
+        python3 "${REPO_ROOT}/scripts/apply-candidate-b6-pipeline-executable-profile.py" --root "${REPO_ROOT}"
+    fi
 fi
 
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
