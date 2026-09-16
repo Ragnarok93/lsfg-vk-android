@@ -154,7 +154,9 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     root = args.root.resolve()
-    patch_process_targeting_source(root / PROCESS_SOURCE)
+    process_source = root / PROCESS_SOURCE
+    if process_source.exists():
+        patch_process_targeting_source(process_source)
     patch_translation_source(root / TRANSLATION_SOURCE)
 
 
