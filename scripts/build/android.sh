@@ -43,6 +43,14 @@ if [[ "${B11_EVIDENCE_PROFILE}" == "1" ]]; then
         echo "error: B11 evidence profiling cannot be combined with clean adaptive runtime mode" >&2
         exit 1
     fi
+    if [[ "${LSFGVK_B8_DIAGNOSTICS:-0}" == "1" || "${LSFGVK_FINAL_NONADAPTIVE_SWEEP:-0}" == "1" ]]; then
+        echo "error: B11 evidence profiling cannot be combined with B8/final compiler sweeps" >&2
+        exit 1
+    fi
+    if [[ "${LSFGVK_EXPERIMENTAL_B9:-0}" == "1" ]]; then
+        echo "error: B11 evidence profiling cannot be combined with experimental B9" >&2
+        exit 1
+    fi
 fi
 
 TOOLCHAIN="${ANDROID_NDK}/build/cmake/android.toolchain.cmake"
