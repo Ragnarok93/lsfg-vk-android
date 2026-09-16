@@ -150,7 +150,11 @@ jobs:
             'final-nonadaptive-sweep' \
             'b12-stage-profile' \
             'b12-timestamp-fallback' \
-            'b12-device-profile'; do
+            'b12-device-profile' \
+            'b12-readback-failure' \
+            'b12-query-pool-' \
+            'mipmaps_attempts=' \
+            'beta4_attempts='; do
             if grep -Fq "$forbidden" /tmp/lsfg-strings.txt; then
               echo "ERROR: clean benchmark artifact still contains profiler marker: $forbidden" >&2
               exit 1
@@ -205,14 +209,30 @@ jobs:
           artifact="build-android-arm64-v8a/dist/liblsfg-vk-arm64-v8a.so"
           file "$artifact"
           strings "$artifact" > /tmp/lsfg-b12-strings.txt
-          grep -Fq 'candidate-b4-beta4-predicate-opt' /tmp/lsfg-b12-strings.txt
-          grep -Fq 'candidate-b11-beta4-pow2-mask' /tmp/lsfg-b12-strings.txt
-          grep -Fq 'b12-stage-profile' /tmp/lsfg-b12-strings.txt
-          grep -Fq 'mipmaps_avg_ms=' /tmp/lsfg-b12-strings.txt
-          grep -Fq 'beta4_avg_ms=' /tmp/lsfg-b12-strings.txt
-          grep -Fq 'b12-timestamp-capability' /tmp/lsfg-b12-strings.txt
-          grep -Fq 'b12-timestamp-fallback' /tmp/lsfg-b12-strings.txt
-          grep -Fq 'b12-device-profile' /tmp/lsfg-b12-strings.txt
+          for required in \
+            'candidate-b4-beta4-predicate-opt' \
+            'candidate-b11-beta4-pow2-mask' \
+            'b12-stage-profile' \
+            'b12-stage-profile-init' \
+            'b12-stage-profile status=unavailable' \
+            'mipmaps_avg_ms=' \
+            'beta4_avg_ms=' \
+            'mipmaps_attempts=' \
+            'mipmaps_failures=' \
+            'beta4_attempts=' \
+            'beta4_failures=' \
+            'b12-readback-failure stage=mipmaps result=' \
+            'b12-readback-failure stage=beta4 result=' \
+            'b12-query-pool-create-failure' \
+            'b12-query-pool-unavailable' \
+            'b12-timestamp-capability' \
+            'b12-timestamp-fallback' \
+            'b12-device-profile'; do
+            if ! grep -Fq "$required" /tmp/lsfg-b12-strings.txt; then
+              echo "ERROR: B12 evidence artifact is missing fail-visible reporting marker: $required" >&2
+              exit 1
+            fi
+          done
           for forbidden in \
             'pipeline-exec-ir-line' \
             'generated-stage-profile backend=' \
@@ -281,12 +301,30 @@ jobs:
           artifact="build-android-arm64-v8a/dist/liblsfg-vk-arm64-v8a.so"
           file "$artifact"
           strings "$artifact" > /tmp/lsfg-b12-mipmaps-refinement-strings.txt
-          grep -Fq 'candidate-b11-beta4-pow2-mask' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
-          grep -Fq 'b12-stage-profile' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
-          grep -Fq 'b12-timestamp-fallback' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
-          grep -Fq 'b12-device-profile' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
-          grep -Fq 'pipeline-exec-profile shader=p_mipmaps' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
-          grep -Fq 'pipeline-exec-ir-line shader=p_mipmaps' /tmp/lsfg-b12-mipmaps-refinement-strings.txt
+          for required in \
+            'candidate-b11-beta4-pow2-mask' \
+            'b12-stage-profile' \
+            'b12-stage-profile-init' \
+            'b12-stage-profile status=unavailable' \
+            'mipmaps_avg_ms=' \
+            'beta4_avg_ms=' \
+            'mipmaps_attempts=' \
+            'mipmaps_failures=' \
+            'beta4_attempts=' \
+            'beta4_failures=' \
+            'b12-readback-failure stage=mipmaps result=' \
+            'b12-readback-failure stage=beta4 result=' \
+            'b12-query-pool-create-failure' \
+            'b12-query-pool-unavailable' \
+            'b12-timestamp-fallback' \
+            'b12-device-profile' \
+            'pipeline-exec-profile shader=p_mipmaps' \
+            'pipeline-exec-ir-line shader=p_mipmaps'; do
+            if ! grep -Fq "$required" /tmp/lsfg-b12-mipmaps-refinement-strings.txt; then
+              echo "ERROR: B12 Mipmaps refinement artifact is missing required marker: $required" >&2
+              exit 1
+            fi
+          done
           for forbidden in \
             'generated-stage-profile backend=' \
             'zero-stage-profile backend=' \
