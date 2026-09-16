@@ -14,16 +14,23 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
         zero_stage = ROOT / "scripts/apply-zero-stage-profile.py"
         shader_profile = ROOT / "scripts/apply-mipmaps-shader-profile.py"
         evidence_profile = ROOT / "scripts/apply-adreno-evidence-profile.py"
+        b11_stage_profile = ROOT / "scripts/apply-b11-beta4-stage-profile.py"
         syncfd_profile = ROOT / "scripts/adreno_syncfd_handoff.py"
         build_script = ROOT / "scripts/build/android.sh"
 
         self.assertTrue(zero_stage.exists(), zero_stage.as_posix())
         self.assertTrue(shader_profile.exists(), shader_profile.as_posix())
         self.assertTrue(evidence_profile.exists(), evidence_profile.as_posix())
+        self.assertTrue(b11_stage_profile.exists(), b11_stage_profile.as_posix())
         self.assertTrue(syncfd_profile.exists(), syncfd_profile.as_posix())
 
         build_text = build_script.read_text(encoding="utf-8")
         self.assertIn("apply-adreno-evidence-profile.py", build_text)
+        self.assertIn("LSFGVK_B11_EVIDENCE_PROFILE", build_text)
+        self.assertIn("LSFGVK_B11_PROFILE_VARIANT", build_text)
+        self.assertIn("apply-b11-beta4-stage-profile.py", build_text)
+        self.assertIn("apply-candidate-b6-pipeline-executable-profile.py", build_text)
+        self.assertIn('"${B11_PROFILE_VARIANT}" == "b4"', build_text)
 
         required_files = (
             Path("framegen/public/lsfg_backend.hpp"),
@@ -39,11 +46,15 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             Path("framegen/v3.1_src/lsfg.cpp"),
             Path("framegen/v3.1_include/v3_1/shaders/mipmaps.hpp"),
             Path("framegen/v3.1_src/shaders/mipmaps.cpp"),
+            Path("framegen/v3.1_include/v3_1/shaders/beta.hpp"),
+            Path("framegen/v3.1_src/shaders/beta.cpp"),
             Path("framegen/v3.1p_include/v3_1p/context.hpp"),
             Path("framegen/v3.1p_src/context.cpp"),
             Path("framegen/v3.1p_src/lsfg.cpp"),
             Path("framegen/v3.1p_include/v3_1p/shaders/mipmaps.hpp"),
             Path("framegen/v3.1p_src/shaders/mipmaps.cpp"),
+            Path("framegen/v3.1p_include/v3_1p/shaders/beta.hpp"),
+            Path("framegen/v3.1p_src/shaders/beta.cpp"),
             Path("include/context.hpp"),
             Path("include/hooks.hpp"),
             Path("include/mini/semaphore.hpp"),
@@ -72,6 +83,10 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
                 )
                 subprocess.run(
                     [sys.executable, str(evidence_profile), "--root", str(temp_root)],
+                    check=True,
+                )
+                subprocess.run(
+                    [sys.executable, str(b11_stage_profile), "--root", str(temp_root)],
                     check=True,
                 )
 
@@ -107,6 +122,12 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             quality_source = (temp_root / "framegen/v3.1_src/context.cpp").read_text(
                 encoding="utf-8"
             )
+            perf_beta_header = (
+                temp_root / "framegen/v3.1p_include/v3_1p/shaders/beta.hpp"
+            ).read_text(encoding="utf-8")
+            perf_beta_source = (
+                temp_root / "framegen/v3.1p_src/shaders/beta.cpp"
+            ).read_text(encoding="utf-8")
 
             self.assertIn("externalSemaphoreSyncFd", backend_header)
             self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", device_source)
@@ -169,6 +190,8 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
 
             self.assertIn("generatedPreQueryPool", perf_header)
             self.assertIn("generatedPassQueryPools", perf_header)
+            self.assertIn("generatedBeta4QueryPool", perf_header)
+            self.assertIn("generatedBeta4ProfileTotalMs", perf_header)
             self.assertIn("generated-stage-profile backend=performance", perf_source)
             self.assertIn("generated-stage-profile backend=quality", quality_source)
             for field in (
@@ -176,6 +199,8 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
                 "mipmaps_avg_ms=",
                 "alpha_avg_ms=",
                 "beta_avg_ms=",
+                "beta4_profile_samples=",
+                "beta4_avg_ms=",
                 "gamma0_avg_ms=",
                 "gamma1_avg_ms=",
                 "gamma2_avg_ms=",
@@ -190,6 +215,18 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
                 "output_transport_avg_ms=",
             ):
                 self.assertIn(field, perf_source)
+
+            self.assertIn("Core::TimestampQueryPool* beta4Profile", perf_beta_header)
+            self.assertIn("beta4Profile->reset(buf.handle())", perf_beta_source)
+            self.assertIn("beta4Profile->write(buf.handle(), 0)", perf_beta_source)
+            self.assertIn("beta4Profile->write(buf.handle(), 1)", perf_beta_source)
+            self.assertEqual(perf_beta_source.count("beta4Profile->write"), 2)
+            fifth_pass = perf_beta_source.index("// fifth pass")
+            beta4_reset = perf_beta_source.index("beta4Profile->reset", fifth_pass)
+            beta4_bind = perf_beta_source.index("this->pipelines.at(4).bind", beta4_reset)
+            beta4_end = perf_beta_source.index("beta4Profile->write(buf.handle(), 1)", beta4_bind)
+            self.assertLess(beta4_reset, beta4_bind)
+            self.assertLess(beta4_bind, beta4_end)
 
             # Profiling keeps the established submits and adds exactly one
             # TransportOnly preprocessing submit behind an internal semaphore.
