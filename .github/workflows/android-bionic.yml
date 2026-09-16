@@ -53,6 +53,7 @@ jobs:
           python3 tests/android_final_nonadaptive_sweep_test.py
           python3 tests/android_final_cpu_overhead_test.py
           python3 tests/android_adreno_evidence_bundle_test.py
+          python3 tests/android_clean_benchmark_mode_test.py
           python3 tests/android_adreno_evidence_timestamp_stage_test.py
           python3 tests/android_capability_architecture_test.py
 
