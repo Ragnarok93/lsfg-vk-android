@@ -29,6 +29,23 @@ struct SubgroupQueryResult {
             == requiredOperations;
 }
 
+// B15's earlier fusion is deliberately stricter than B14.  The rewrite
+// addresses the sixteen mip4 producers as one contiguous subgroup tile; a
+// merely large subgroup is not sufficient because subgroup topology is not
+// portable across implementations.  The current SPIR-V pattern is defined
+// for the 128-lane Adreno topology observed by the candidate and must remain
+// disabled everywhere else until an equivalent lane mapping is proven.
+[[nodiscard]] inline bool supportsSinglePassMipmaps(
+        const VkPhysicalDeviceSubgroupProperties& properties) noexcept {
+    constexpr VkSubgroupFeatureFlags requiredOperations =
+        VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT;
+    constexpr VkShaderStageFlags requiredStages = VK_SHADER_STAGE_COMPUTE_BIT;
+    return properties.subgroupSize == 128U
+        && (properties.supportedStages & requiredStages) == requiredStages
+        && (properties.supportedOperations & requiredOperations)
+            == requiredOperations;
+}
+
 [[nodiscard]] inline bool hasCompleteSubgroupMetadata(
         const VkPhysicalDeviceSubgroupProperties& properties) noexcept {
     return properties.subgroupSize != 0U
