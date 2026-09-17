@@ -118,35 +118,42 @@ def patch_hooks_source(path: Path) -> None:
     if CAPABILITY_MARKER in text:
         return
 
+    text = replace_exact(
+        text,
+        '#include "layer.hpp"\n',
+        '#include "layer.hpp"\n'
+        '#include "../scripts/b14_subgroup_properties.hpp"\n',
+        count=1,
+        label=f"{path}: B14 subgroup query helper include",
+    )
+
     old = '''        const auto identity = Utils::getDeviceIdentity(physicalDevice, getProperties2);
 '''
     new = r'''        // b14-mipmaps-subgroup-capability-gate
-        VkPhysicalDeviceSubgroupProperties subgroupProperties{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
-        };
-        VkPhysicalDeviceProperties2 subgroupProperties2{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-            .pNext = &subgroupProperties,
-        };
-        if (getProperties2 != nullptr)
-            getProperties2(physicalDevice, &subgroupProperties2);
-
-        constexpr VkSubgroupFeatureFlags requiredSubgroupOperations =
-            VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT;
-        const bool subgroupComputeSupported =
-            (subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
-        const bool subgroupBroadcastSupported =
-            (subgroupProperties.supportedOperations & requiredSubgroupOperations)
-                == requiredSubgroupOperations;
+        // Some Android compatibility ICDs expose both aliases but rebuild the
+        // core Properties2 pNext chain incompletely. Probe the KHR alias when
+        // the core route cannot prove the exact B14 shader contract. Never
+        // combine fields from separate calls and never infer capabilities from
+        // subgroup size or the GPU identity.
+        auto getProperties2Khr =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2KHR>(
+                Layer::ovkGetInstanceProcAddr(
+                    layerInstance, "vkGetPhysicalDeviceProperties2KHR"));
+        const auto subgroupQuery = b14::querySubgroupProperties(
+            physicalDevice, getProperties2, getProperties2Khr);
+        const auto& subgroupProperties = subgroupQuery.properties;
         const bool mipmapsSubgroupBroadcastSupported =
-            getProperties2 != nullptr
-            && subgroupProperties.subgroupSize >= 4U
-            && subgroupComputeSupported
-            && subgroupBroadcastSupported;
+            b14::supportsCooperativeMipmaps(subgroupProperties);
         std::cerr << "lsfg-vk: init stage=b14-mipmaps-capability"
+                  << " query_route="
+                  << b14::subgroupQueryRouteName(subgroupQuery.route)
                   << " subgroup_size=" << subgroupProperties.subgroupSize
-                  << " compute=" << (subgroupComputeSupported ? 1 : 0)
-                  << " ballot=" << (subgroupBroadcastSupported ? 1 : 0)
+                  << " supported_stages=0x" << std::hex
+                  << subgroupProperties.supportedStages
+                  << " supported_operations=0x"
+                  << subgroupProperties.supportedOperations << std::dec
+                  << " quad_all_stages="
+                  << subgroupProperties.quadOperationsInAllStages
                   << " cooperative_tail="
                   << (mipmapsSubgroupBroadcastSupported ? 1 : 0)
                   << '\n';

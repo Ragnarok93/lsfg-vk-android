@@ -15,6 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "scripts/b14_mipmaps_tail_fusion.hpp"
+SUBGROUP_HEADER = ROOT / "scripts/b14_subgroup_properties.hpp"
+SUBGROUP_TEST = ROOT / "tests/android_b14_subgroup_property_query_test.py"
 PATCHER = ROOT / "scripts/apply-candidate-b14-mipmaps-tail-fusion.py"
 CHECKER = ROOT / "scripts/check-mipmaps-device-agnostic.py"
 FIXTURE = ROOT / "tests/fixtures/p_mipmaps_b13.spv"
@@ -215,7 +217,11 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
 
     def test_candidate_wiring_is_idempotent_and_device_agnostic(self) -> None:
         self.assertTrue(PATCHER.exists(), PATCHER.as_posix())
-        for candidate in (PATCHER, HEADER):
+        subgroup_result = subprocess.run(
+            [sys.executable, str(SUBGROUP_TEST)], capture_output=True, text=True,
+        )
+        self.assertEqual(subgroup_result.returncode, 0, subgroup_result.stderr)
+        for candidate in (PATCHER, HEADER, SUBGROUP_HEADER):
             result = subprocess.run(
                 [sys.executable, str(CHECKER), str(candidate)],
                 capture_output=True, text=True,
@@ -223,7 +229,8 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
         patcher_text = PATCHER.read_text(encoding="utf-8")
-        self.assertIn("VK_SUBGROUP_FEATURE_BALLOT_BIT", patcher_text)
+        subgroup_text = SUBGROUP_HEADER.read_text(encoding="utf-8")
+        self.assertIn("VK_SUBGROUP_FEATURE_BALLOT_BIT", subgroup_text)
         self.assertIn("mipmapsSubgroupBroadcastSupported", patcher_text)
         self.assertIn("enableCooperativeMipmaps", patcher_text)
         self.assertIn("fallback=b13", patcher_text)
