@@ -1,0 +1,155 @@
+name: Repair clean runtime generators
+
+on:
+  push:
+    branches:
+      - feature/adreno-6xx-b14-directional-ahb-adaptive-reload
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Remove stale diagnostic dependencies from production generators
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # Fix the concise production reload log: a previous cleanup emitted an
+          # actual newline inside the C++ character literal instead of '\\n'.
+          p = Path('src/context.cpp')
+          text = p.read_text(encoding='utf-8')
+          bad = "                  << \" target_fps=\" << conf.fpsLimit << '\n';\n"
+          good = "                  << \" target_fps=\" << conf.fpsLimit << '\\n';\n"
+          if text.count(bad) != 1:
+              raise SystemExit('malformed config reload newline not found exactly once')
+          p.write_text(text.replace(bad, good, 1), encoding='utf-8')
+
+          # Slot retirement is required behavior; measuring its host-wait duration
+          # was development profiling. Keep the wait and pending-state transition.
+          p = Path('scripts/adreno_async_zero_history.py')
+          text = p.read_text(encoding='utf-8')
+          old = '''    t=once(t,"    auto& metrics = this->runtimeMetrics;\\n    const auto cycleStart = RuntimeMetrics::Clock::now();\\n",
+                  "    auto& metrics = this->runtimeMetrics;\\n    const auto cycleStart = RuntimeMetrics::Clock::now();\\n    if (pass.handoffFencePending) { const auto w=RuntimeMetrics::Clock::now(); waitForAhbHandoff(info.device,*pass.handoffFence,this->waitHandoffFences); metrics.windowHandoffHostWaitMs += std::chrono::duration<double,std::milli>(RuntimeMetrics::Clock::now()-w).count(); pass.handoffFencePending=false; }\\n",f"{p}: retire slot")
+          '''
+          new = '''    t=once(t,"    auto& metrics = this->runtimeMetrics;\\n    const auto cycleStart = RuntimeMetrics::Clock::now();\\n",
+                  "    auto& metrics = this->runtimeMetrics;\\n    const auto cycleStart = RuntimeMetrics::Clock::now();\\n    if (pass.handoffFencePending) { waitForAhbHandoff(info.device,*pass.handoffFence,this->waitHandoffFences); pass.handoffFencePending=false; }\\n",f"{p}: retire slot")
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('async zero slot-retire timing block not found exactly once')
+          p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # SYNC_FD export fallback still needs the host-fence wait, but not the
+          # removed development timing accumulator.
+          p = Path('scripts/adreno_syncfd_handoff.py')
+          text = p.read_text(encoding='utf-8')
+          old = '''        "            const auto fallbackWaitStart = RuntimeMetrics::Clock::now();\\n"
+                  "            waitForAhbHandoff(\\n"
+                  "                info.device, *this->ahbHandoffFence, this->waitHandoffFences);\\n"
+                  "            metrics.windowHandoffHostWaitMs += std::chrono::duration<double, std::milli>(\\n"
+                  "                RuntimeMetrics::Clock::now() - fallbackWaitStart).count();\\n"
+          '''
+          new = '''        "            waitForAhbHandoff(\\n"
+                  "                info.device, *this->ahbHandoffFence, this->waitHandoffFences);\\n"
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('sync-fd fallback timing block not found exactly once')
+          p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # Candidate A's source-only path is production behavior; the diagnostic
+          # stage assignments were only breadcrumbs and no longer have storage.
+          p = Path('scripts/adreno_deferred_zero_history.py')
+          text = p.read_text(encoding='utf-8')
+          for marker in (
+              '        this->diagnosticStage_ = "deferred-zero-source-copy";\n',
+              '        this->diagnosticStage_ = "deferred-zero-reprime-source-copy";\n',
+          ):
+              if marker not in text:
+                  raise SystemExit(f'deferred-zero diagnostic marker missing: {marker!r}')
+              text = text.replace(marker, '', 1)
+          p.write_text(text, encoding='utf-8')
+
+          # Capability probing is retained, but the generic production present
+          # failure must not depend on the profiling-only diagnostic stage API.
+          p = Path('scripts/adreno_evidence_capabilities.py')
+          text = p.read_text(encoding='utf-8')
+          start = text.find('    text = replace_exact(\n        text,\n        "            Utils::logLimitN(\\"swapPresent\\", 5,\\n"')
+          if start < 0:
+              raise SystemExit('present-failure diagnostic replacement start not found')
+          label = '        label=f"{path}: present failure stage context",\n    )\n'
+          end = text.find(label, start)
+          if end < 0:
+              raise SystemExit('present-failure diagnostic replacement end not found')
+          end += len(label)
+          text = text[:start] + text[end:]
+          p.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+          python3 -m py_compile \
+            scripts/adreno_async_zero_history.py \
+            scripts/adreno_syncfd_handoff.py \
+            scripts/adreno_deferred_zero_history.py \
+            scripts/adreno_evidence_capabilities.py
+
+      - name: Verify composed production runtime is debug-clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tar --exclude=.git -cf - . | tar -xf - -C "$tmp"
+          python3 "$tmp/scripts/apply-adreno-evidence-profile.py" --root "$tmp" --runtime-only
+          for forbidden in windowHandoffHostWaitMs diagnosticStage_ lastDiagnosticStage; do
+            if grep -RFn "$forbidden" "$tmp/src" "$tmp/include"; then
+              echo "ERROR: production runtime transform still emits $forbidden" >&2
+              exit 1
+            fi
+          done
+          python3 - "$tmp" <<'PY'
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          context = (root / 'src/context.cpp').read_text(encoding='utf-8')
+          bad = '<< " target_fps=" << conf.fpsLimit << \'\n\';'
+          good = '<< " target_fps=" << conf.fpsLimit << \'\\n\';'
+          if bad in context:
+              raise SystemExit('malformed config reload newline survived transform')
+          if good not in context:
+              raise SystemExit('clean config reload newline missing')
+          PY
+
+      - name: Run affected contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/android_runtime_stability_test.py
+          python3 tests/android_adaptive_history_test.py
+          python3 tests/android_deferred_zero_history_test.py
+          python3 tests/android_external_semaphore_regression_test.py
+          python3 tests/android_adreno_evidence_bundle_test.py
+          python3 tests/android_capability_architecture_test.py
+          python3 tests/android_ahb_portability_test.py
+          g++ -std=c++20 -Wall -Wextra -Werror -Iinclude src/adaptive_scheduler.cpp tests/adaptive_scheduler_test.cpp -o /tmp/adaptive-test
+          /tmp/adaptive-test
+
+      - name: Commit clean runtime generator repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/context.cpp \
+            scripts/adreno_async_zero_history.py \
+            scripts/adreno_syncfd_handoff.py \
+            scripts/adreno_deferred_zero_history.py \
+            scripts/adreno_evidence_capabilities.py
+          git commit -m 'fix(android): remove profiling dependencies from runtime transforms'
+          git push origin HEAD:${GITHUB_REF_NAME}
