@@ -106,7 +106,7 @@ python3 "${REPO_ROOT}/scripts/adreno_suspend_timeout_guard.py" --root "${REPO_RO
 python3 "${REPO_ROOT}/scripts/adreno_android_runtime_residency.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/adreno_android_config_reload.py" --root "${REPO_ROOT}"
 
-if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" == "1" ]]; then
+if [[ "${ADAPTIVE_RUNTIME}" == "1" ]]; then
     echo "[lsfg-vk] Enabling retained adaptive runtime without GPU/compiler profiling"
     python3 "${REPO_ROOT}/scripts/apply-adreno-evidence-profile.py" \
         --root "${REPO_ROOT}" --runtime-only
@@ -118,7 +118,7 @@ if [[ "${B11_EVIDENCE_PROFILE}" == "1" ]]; then
 fi
 
 if [[ "${PROFILE_REQUESTED}" == "1" ]]; then
-    if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" == "1" ]]; then
+    if [[ "${ADAPTIVE_RUNTIME}" == "1" ]]; then
         echo "[lsfg-vk] Ignoring profiling request because clean adaptive runtime mode is active"
     else
         echo "[lsfg-vk] Enabling temporary zero-stage GPU profiling instrumentation"

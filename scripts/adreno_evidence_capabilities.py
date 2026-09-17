@@ -61,19 +61,19 @@ def patch_device_source(path: Path) -> None:
         label=f"{path}: diagnostics probes",
     )
     text = replace_exact(
-        text,
-        "              << (this->diagnostics.externalSemaphoreOpaqueFd ? 1 : 0)\n"
-        "              << \" sync=\" << synchronizationPathName(decision.synchronizationPath)\n",
-        "              << (this->diagnostics.externalSemaphoreOpaqueFd ? 1 : 0)\n"
-        "              << \" externalSemaphoreSyncFd=\"\n"
-        "              << (this->diagnostics.externalSemaphoreSyncFd ? 1 : 0)\n"
-        "              << \" subgroupSize=\" << subgroup.subgroupSize\n"
-        "              << \" subgroupStages=0x\" << std::hex << subgroup.supportedStages\n"
-        "              << \" subgroupOperations=0x\" << subgroup.supportedOperations << std::dec\n"
-        "              << \" sync=\" << synchronizationPathName(decision.synchronizationPath)\n",
-        count=1,
-        label=f"{path}: capability log",
-    )
+    text,
+    "              << \" sync=\" << synchronizationPathName(decision.synchronizationPath) << '\\n';\n",
+    "              << \" externalSemaphoreOpaqueFd=\"\n"
+    "              << (this->diagnostics.externalSemaphoreOpaqueFd ? 1 : 0)\n"
+    "              << \" externalSemaphoreSyncFd=\"\n"
+    "              << (this->diagnostics.externalSemaphoreSyncFd ? 1 : 0)\n"
+    "              << \" subgroupSize=\" << subgroup.subgroupSize\n"
+    "              << \" subgroupStages=\" << subgroup.supportedStages\n"
+    "              << \" subgroupOperations=\" << subgroup.supportedOperations\n"
+    "              << \" sync=\" << synchronizationPathName(decision.synchronizationPath) << '\\n';\n",
+    count=1,
+    label=f"{path}: capability log",
+)
     path.write_text(text, encoding="utf-8")
 
 def patch_hooks_header(path: Path) -> None:

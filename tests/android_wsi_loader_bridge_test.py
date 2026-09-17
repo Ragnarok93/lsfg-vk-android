@@ -24,23 +24,20 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertNotIn("Diagnostic", functions["vkGetInstanceProcAddr"])
         self.assertNotIn("Diagnostic", functions["vkGetDeviceProcAddr"])
 
-    def test_production_dispatch_path_retains_wsi_resolution_breadcrumbs(self) -> None:
+    def test_production_dispatch_path_retains_wsi_resolution_logic(self) -> None:
         layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
         for token in (
-            'logPresentationHookResolution("gipa", name)',
-            'logPresentationHookResolution("gdpa", name)',
             '"vkCreateSwapchainKHR"',
             '"vkQueuePresentKHR"',
-            '"-hook-resolved name="',
+            'isDeviceWsiHook(name)',
+            'downstream(device, pName)',
+            'return it->second;',
         ):
             self.assertIn(token, layer)
 
-        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        self.assertIn("init stage=swapchain-hook-enter", hooks)
-
-        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn("runtime stage=first-present-enter", context)
-        self.assertIn("runtime stage=first-present-cycle-ready", context)
+        # Development breadcrumbs are intentionally absent from production.
+        self.assertNotIn('logPresentationHookResolution(', layer)
+        self.assertNotIn('runtime stage=gdpa-untracked-wsi-hook-resolved', layer)
 
     def test_android_device_dispatch_is_per_logical_device(self) -> None:
         layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
@@ -58,7 +55,6 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
             "loadDeviceDispatch(device, &dispatch)",
             "dispatch.presentationDevice",
             "downstream(device, pName)",
-            "runtime stage=device-dispatch-ready presentation=1",
         ):
             self.assertIn(token, layer)
 
@@ -92,7 +88,8 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         for token in (
             "isDeviceWsiHook(name)",
             "!tracked && isDeviceWsiHook(name)",
-            "runtime stage=gdpa-untracked-wsi-hook-resolved name=",
+            "if (!downstream || !downstream(device, pName))",
+            "return it->second;",
         ):
             self.assertIn(token, body)
 
