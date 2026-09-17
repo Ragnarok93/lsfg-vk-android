@@ -15,10 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          submodules: recursive
           fetch-depth: 0
 
-      - name: Retarget raw-history capture to command-buffer completion
+      - name: Retarget raw-history capture to main source-copy boundary
         shell: bash
         run: |
           set -euo pipefail
@@ -29,10 +28,14 @@ jobs:
           text = p.read_text(encoding='utf-8')
           old = '''    raw_capture_marker = "    if (profileGameSourceCopyGpu)\\n        this->gameSourceCopyCmdWriteTimestamp(\\n"
           '''
-          new = '''    # Capture retained raw history while the source-copy command buffer is
-              # still recording. The command-buffer completion boundary survives the
-              # composed retained-runtime transforms and does not depend on profiling.
-              raw_capture_marker = "    pass.preCopyBuf.end();\\n\\n"
+          new = '''    # Capture retained raw history while the normal source-copy command
+              # buffer is still recording. Candidate A also creates a re-prime
+              # preCopyBuf, so include the main-path history-slot declaration to
+              # keep this insertion unique after the earlier Candidate A edits.
+              raw_capture_marker = (
+                  "    pass.preCopyBuf.end();\\n\\n"
+                  "    const size_t historySlot = static_cast<size_t>(this->framegenHistoryEpoch_ % 2);\\n"
+              )
           '''
           if text.count(old) != 1:
               raise SystemExit('legacy raw-history profiling anchor not found exactly once')
@@ -57,8 +60,6 @@ jobs:
         run: |
           set -euo pipefail
           tmp="$(mktemp -d)"
-          # Validate the proposed uncommitted repair, not HEAD. git archive HEAD
-          # would silently omit the edit made in the previous step.
           tar --exclude=.git -cf - . | tar -xf - -C "$tmp"
           python3 "$tmp/scripts/apply-adreno-evidence-profile.py" --root "$tmp" --runtime-only
           grep -Fq 'captureRawHistory' "$tmp/src/context.cpp"
