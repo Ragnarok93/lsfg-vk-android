@@ -52,12 +52,14 @@ jobs:
           python3 tests/android_external_semaphore_regression_test.py
           python3 tests/android_ahb_portability_test.py
 
-      - name: Exercise retained runtime transform on clean source
+      - name: Exercise retained runtime transform on repaired worktree
         shell: bash
         run: |
           set -euo pipefail
           tmp="$(mktemp -d)"
-          git archive HEAD | tar -x -C "$tmp"
+          # Validate the proposed uncommitted repair, not HEAD. git archive HEAD
+          # would silently omit the edit made in the previous step.
+          tar --exclude=.git -cf - . | tar -xf - -C "$tmp"
           python3 "$tmp/scripts/apply-adreno-evidence-profile.py" --root "$tmp" --runtime-only
           grep -Fq 'captureRawHistory' "$tmp/src/context.cpp"
           grep -Fq 'copySwapchainToRawHistory' "$tmp/src/context.cpp"
