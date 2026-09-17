@@ -13,7 +13,9 @@ class AndroidCleanBenchmarkModeContractTest(unittest.TestCase):
         )
 
         self.assertIn("LSFGVK_ADAPTIVE_RUNTIME", build_script)
-        runtime_start = build_script.index('if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" == "1" ]]')
+        runtime_marker = ('if [[ "${ADAPTIVE_RUNTIME}" == "1" ]]; then\n'
+            '    echo "[lsfg-vk] Enabling retained adaptive runtime without GPU/compiler profiling"')
+        runtime_start = build_script.index(runtime_marker)
         runtime_end = build_script.index("\nfi", runtime_start)
         runtime_block = build_script[runtime_start:runtime_end]
         self.assertIn("apply-adreno-evidence-profile.py", runtime_block)

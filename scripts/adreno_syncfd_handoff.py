@@ -361,17 +361,12 @@ def patch_outer_source(path: Path) -> None:
         label=f"{path}: pre-submit setup failure log",
     )
 
-    old_async_metrics = (
-        "        metrics.windowHandoffAsyncSubmitCpuMs +=\n"
-        "            std::chrono::duration<double, std::milli>(\n"
-        "                RuntimeMetrics::Clock::now() - asyncSubmitStart).count();\n"
+    \
+    old_async_counts = (
         "        metrics.windowAsyncHandoffs++;\n"
         "        metrics.totalAsyncHandoffs++;\n"
     )
-    new_async_metrics = (
-        "        metrics.windowHandoffAsyncSubmitCpuMs +=\n"
-        "            std::chrono::duration<double, std::milli>(\n"
-        "                RuntimeMetrics::Clock::now() - asyncSubmitStart).count();\n"
+    new_async_counts = (
         "        try {\n"
         "            // SYNC_FD has copy-transference semantics. Export only after\n"
         "            // the queue signal operation is pending so the FD represents\n"
@@ -400,7 +395,7 @@ def patch_outer_source(path: Path) -> None:
         "        }\n"
     )
     text = replace_exact(
-        text, old_async_metrics, new_async_metrics,
+        text, old_async_counts, new_async_counts,
         count=1, label=f"{path}: post-submit sync-fd export and fallback",
     )
 
