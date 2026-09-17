@@ -130,7 +130,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-build-log-${{ matrix.abi }}
-          path: android-build-${ANDROID_ABI}.log
+          path: android-build-${{ matrix.abi }}.log
           if-no-files-found: warn
 
       - name: Inspect clean ${{ matrix.abi }} artifact
@@ -142,27 +142,36 @@ jobs:
           "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h -d "$artifact"
 
           strings "$artifact" > /tmp/lsfg-strings.txt
-          grep -Fq 'deferred-zero reprime-warmup-begin' /tmp/lsfg-strings.txt
-          grep -Fq 'deferred-zero reprime-deferred request_count=' /tmp/lsfg-strings.txt
-          grep -Fq 'candidate-b4-beta4-predicate-opt' /tmp/lsfg-strings.txt
-          grep -Fq 'candidate-b11-beta4-pow2-mask' /tmp/lsfg-strings.txt
-          grep -Fq 'candidate-b13-beta4-fused-mask' /tmp/lsfg-strings.txt
+          for required in \
+            'deferred-zero reprime-warmup-begin' \
+            'deferred-zero reprime-deferred request_count=' \
+            'candidate-b4-beta4-predicate-opt' \
+            'candidate-b11-beta4-pow2-mask' \
+            'candidate-b13-beta4-fused-mask' \
+            'candidate-b14-mipmaps-tail-fusion'; do
+            if ! grep -Fq "$required" /tmp/lsfg-strings.txt; then
+              echo "ERROR: clean production artifact is missing required marker: $required" >&2
+              exit 1
+            fi
+          done
 
           for forbidden in \
             'pipeline-exec-ir-line' \
             'generated-stage-profile backend=' \
             'zero-stage-profile backend=' \
             'final-nonadaptive-sweep' \
-            'candidate-b14-mipmaps-tail-fusion' \
             'b12-stage-profile' \
             'b12-timestamp-fallback' \
             'b12-device-profile' \
             'b12-readback-failure' \
             'b12-query-pool-' \
             'mipmaps_attempts=' \
-            'beta4_attempts='; do
+            'beta4_attempts=' \
+            'candidate-b15-mip4-topology' \
+            'candidate-b15-mip4-register-fusion' \
+            'candidate-fp16-motion-compaction'; do
             if grep -Fq "$forbidden" /tmp/lsfg-strings.txt; then
-              echo "ERROR: clean benchmark artifact still contains profiler marker: $forbidden" >&2
+              echo "ERROR: clean production artifact contains forbidden profiling/experimental marker: $forbidden" >&2
               exit 1
             fi
           done
