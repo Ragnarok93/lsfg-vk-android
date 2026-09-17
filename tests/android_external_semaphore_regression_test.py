@@ -72,7 +72,7 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             "waitPendingHistoryCompletionFd(historySlot, true)",
             "zeroGenerationDirectStorage",
             "activeHistoryInput",
-            "ahbTransportMode==LSFG::AhbTransportMode::DirectStorage",
+            "ahbTransportMode!=LSFG::AhbTransportMode::Unsupported",
         ):
             self.assertIn(marker, transform)
 
@@ -84,14 +84,14 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
 
         for marker in (
-            "zeroGenerationDirectStorage = generationCount == 0 && !this->transportOnly",
+            "zeroGenerationDirectStorage = generationCount == 0 && !this->inputCopyRequired",
             "activeHistoryInput = (this->frameIdx % 2 == 0)",
             "add_external_acquire(acquireBarriers, vk, activeHistoryInput",
             "add_external_release(releaseBarriers, vk, activeHistoryInput",
             "this->asyncZeroHistoryEnabled_=",
             "this->asyncAhbHandoffEnabled_ && ",
             "this->asyncAhbHandoffHandleType_==VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT && ",
-            "ahbTransportMode==LSFG::AhbTransportMode::DirectStorage",
+            "ahbTransportMode!=LSFG::AhbTransportMode::Unsupported",
         ):
             self.assertIn(marker, transform)
 
@@ -100,13 +100,13 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
 
         for marker in (
-            "zeroGenerationTransportOnly = generationCount == 0 && this->transportOnly",
+            "zeroGenerationTransportOnly = generationCount == 0 && this->inputCopyRequired",
             "activeSharedHistoryInput = (this->frameIdx % 2 == 0)",
             "activePrivateHistoryInput = (this->frameIdx % 2 == 0)",
             "copy_same_format(data.cmdBuffer1, activeSharedHistoryInput, activePrivateHistoryInput)",
             "zero-generation transport-only active input acquire",
             "zero-generation transport-only active input release",
-            "ahbTransportMode==LSFG::AhbTransportMode::TransportOnly",
+            "ahbTransportMode!=LSFG::AhbTransportMode::Unsupported",
         ):
             self.assertIn(marker, transform)
 
