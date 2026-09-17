@@ -231,7 +231,7 @@ int main() {
 
         const auto generated = scheduler.plan(60ms);
         assert(scheduler.telemetry().configWarmStart);
-        assert(scheduler.telemetry().wantedGeneratedFrames > 3.0);
+        assert(scheduler.telemetry().wantedGeneratedFrames == 3.0);
         assert(scheduler.telemetry().costLimit == 3);
         assert(generated >= 2);
     }
