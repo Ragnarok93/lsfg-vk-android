@@ -1,0 +1,51 @@
+name: Probe deferred-zero composed anchor
+
+on:
+  push:
+    branches:
+      - feature/adreno-6xx-b14-directional-ahb-adaptive-reload
+
+jobs:
+  probe:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Apply pre-Candidate-A runtime transforms and print source neighborhood
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          root = Path.cwd()
+          sys.path.insert(0, str(root / 'scripts'))
+          from apply_adreno_evidence_profile import (
+              patch_backend_header, patch_device_source, patch_hooks_header, patch_hooks_source,
+              normalize_sync_fd_import_initializer,
+          )
+          from adreno_syncfd_handoff import apply as apply_syncfd_handoff
+          from adreno_async_zero_history import apply as apply_async_zero_history
+          from adreno_async_zero_history_hardening import apply as apply_async_zero_history_hardening
+          from adreno_slot_aware_zero_history import apply as apply_slot_aware_zero_history
+          from adreno_transport_release_overlap import apply as apply_transport_release_overlap
+
+          patch_backend_header(root / 'framegen/public/lsfg_backend.hpp')
+          patch_device_source(root / 'framegen/src/core/device.cpp')
+          patch_hooks_header(root / 'include/hooks.hpp')
+          patch_hooks_source(root / 'src/hooks.cpp')
+          if 'int exportFd(' not in (root / 'include/mini/semaphore.hpp').read_text(encoding='utf-8'):
+              apply_syncfd_handoff(root)
+          normalize_sync_fd_import_initializer(root / 'framegen/src/core/semaphore.cpp')
+          apply_async_zero_history(root)
+          apply_async_zero_history_hardening(root)
+          apply_slot_aware_zero_history(root)
+          apply_transport_release_overlap(root)
+
+          text = (root / 'src/context.cpp').read_text(encoding='utf-8')
+          for needle in ('pass.preCopyBuf.end();', 'gameRenderSemaphores2', 'previousSourceCopySignalValid_', 'if (adaptiveZeroGeneration)'):
+              pos = text.find(needle)
+              print(f'=== {needle} @ {pos} ===')
+              if pos >= 0:
+                  print(text[max(0,pos-1000):pos+1600])
+          PY
