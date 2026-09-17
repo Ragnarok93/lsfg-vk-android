@@ -76,6 +76,10 @@ namespace LSFG_3_1P {
     /// Report requested/applied scale and handoff progress for diagnostics.
     __attribute__((visibility("default")))
     LSFG::AdaptiveFlowContextState getContextFlowScaleState(int32_t id);
+
+    /// Return the most recent completed Adaptive Flow GPU timing sample.
+    __attribute__((visibility("default")))
+    LSFG::AdaptiveFlowGpuTiming getContextGpuTiming(int32_t id);
 #endif
 
     ///

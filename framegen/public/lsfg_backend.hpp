@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstddef>
 #include <string>
 
 namespace LSFG {
@@ -24,6 +25,15 @@ struct AdaptiveFlowContextState {
     float activeScale{0.0f};
     uint32_t warmupRemaining{0};
     bool transitionPending{false};
+};
+
+struct AdaptiveFlowGpuTiming {
+    double mipmapsMs{0.0};
+    double opticalFlowMs{0.0};
+    double totalLsfgMs{0.0};
+    size_t generationCount{0};
+    bool transitionActive{false};
+    bool valid{false};
 };
 
 struct BackendDiagnostics {

@@ -4,6 +4,7 @@
 #include "core/semaphore.hpp"
 #include "core/fence.hpp"
 #include "core/commandbuffer.hpp"
+#include "core/timestampquerypool.hpp"
 #include "shaders/alpha.hpp"
 #include "shaders/beta.hpp"
 #include "shaders/delta.hpp"
@@ -65,6 +66,7 @@ namespace LSFG_3_1 {
 
         void requestFlowScale(float flowScale);
         [[nodiscard]] LSFG::AdaptiveFlowContextState flowScaleState() const;
+        [[nodiscard]] LSFG::AdaptiveFlowGpuTiming gpuTiming() const;
 #endif
 
         ///
@@ -107,6 +109,10 @@ namespace LSFG_3_1 {
             std::vector<Core::Semaphore> outSemaphores; // signaled when each pass is done
             std::vector<Core::Fence> completionFences; // fence for completion of each pass
             Core::Fence preprocessingFence; // reused for zero-generation temporal preprocessing
+#ifdef __ANDROID__
+            Core::TimestampQueryPool adaptiveFlowTimingQueryPool;
+            bool adaptiveFlowTransitionCycle{false};
+#endif
 
             Core::CommandBuffer cmdBuffer1;
             std::vector<Core::CommandBuffer> cmdBuffers2; // command buffers for second step
@@ -144,13 +150,16 @@ namespace LSFG_3_1 {
         std::optional<size_t> pendingFlowGraphIndex_;
         uint32_t pendingFlowWarmupFrames_{0};
         float requestedFlowScale_{0.0f};
+        LSFG::AdaptiveFlowGpuTiming lastAdaptiveFlowGpuTiming_{};
 
         [[nodiscard]] AdaptiveFlowGraph buildAdaptiveFlowGraph(
             Vulkan& vk, float userFlowScale,
             const std::vector<Core::Image>& outImgs);
         [[nodiscard]] FlowGraphRef flowGraph(size_t index);
         void dispatchAdaptiveFlowPreprocess(
-            const Core::CommandBuffer& buffer, FlowGraphRef graph);
+            const Core::CommandBuffer& buffer, FlowGraphRef graph,
+            Core::TimestampQueryPool* timingPool = nullptr);
+        void recordAdaptiveFlowGpuTiming(Vulkan& vk, RenderData& renderData);
         void commitAdaptiveFlowTransition(size_t index);
 #endif
 
