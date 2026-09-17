@@ -39,7 +39,9 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         quality = (ROOT / "framegen/v3.1_src/context.cpp").read_text(encoding="utf-8")
         performance = (ROOT / "framegen/v3.1p_src/context.cpp").read_text(encoding="utf-8")
         for source in (quality, performance):
-            self.assertIn("transportOnly", source)
+            self.assertIn("inputCopyRequired", source)
+            self.assertIn("outputCopyRequired", source)
+            self.assertIn("ahb-directional-transport", source)
             self.assertIn("sharedOutImages", source)
             self.assertIn("vkCmdCopyImage", source)
             self.assertIn("VK_IMAGE_USAGE_TRANSFER_SRC_BIT", source)
