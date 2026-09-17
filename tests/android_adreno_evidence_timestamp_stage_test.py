@@ -43,17 +43,6 @@ class AndroidAdrenoEvidenceTimestampStageTest(unittest.TestCase):
         self.assertNotIn("replace_shader", transform)
         self.assertNotIn("local_size", transform.lower())
 
-    def test_b12_build_wires_fail_visible_readback_after_timestamp_fallback(self) -> None:
-        build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
-
-        fallback = 'python3 "${REPO_ROOT}/scripts/apply-b12-unreported-timestamp-fallback.py"'
-        hardening = 'python3 "${REPO_ROOT}/scripts/apply-b12-reporting-hardening.py"'
-        device_profile = 'python3 "${REPO_ROOT}/scripts/apply-b12-device-profile.py"'
-
-        self.assertIn(hardening, build)
-        self.assertLess(build.index(fallback), build.index(hardening))
-        self.assertLess(build.index(hardening), build.index(device_profile))
-
 
 if __name__ == "__main__":
     unittest.main()

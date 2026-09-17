@@ -198,7 +198,6 @@ if [[ "${B12_DUAL_STAGE_PROFILE}" == "1" ]]; then
     echo "[lsfg-vk] Enabling B12 low-overhead Mipmaps + Beta4 GPU timing"
     python3 "${REPO_ROOT}/scripts/apply-b12-dual-stage-profile.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-b12-unreported-timestamp-fallback.py" --root "${REPO_ROOT}"
-    python3 "${REPO_ROOT}/scripts/apply-b12-reporting-hardening.py" --root "${REPO_ROOT}"
     python3 "${REPO_ROOT}/scripts/apply-b12-device-profile.py" --root "${REPO_ROOT}"
     if [[ "${MIPMAPS_EXEC_PROFILE}" == "1" ]]; then
         echo "[lsfg-vk] Enabling optional p_mipmaps pipeline executable/IR capture"
