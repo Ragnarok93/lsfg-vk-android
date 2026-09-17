@@ -22,6 +22,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
+          from textwrap import dedent, indent
 
           p = Path('tests/android_clean_benchmark_mode_test.py')
           text = p.read_text(encoding='utf-8')
@@ -43,47 +44,49 @@ jobs:
           end = text.find(end_marker, start)
           if start < 0 or end < 0:
               raise SystemExit('sync-fd post-submit transform block not found')
-          replacement = '''    old_async_counts = (
-              "        metrics.windowAsyncHandoffs++;\\n"
-              "        metrics.totalAsyncHandoffs++;\\n"
+          replacement = indent(dedent(r'''\
+          old_async_counts = (
+              "        metrics.windowAsyncHandoffs++;\n"
+              "        metrics.totalAsyncHandoffs++;\n"
           )
           new_async_counts = (
-              "        try {\\n"
-              "            // SYNC_FD has copy-transference semantics. Export only after\\n"
-              "            // the queue signal operation is pending so the FD represents\\n"
-              "            // that exact source-copy completion point without a host wait.\\n"
-              "            framegenInputSemaphoreFd = pass.framegenInputSemaphore.exportFd(\\n"
-              "                info.device, this->asyncAhbHandoffHandleType_);\\n"
-              "        } catch (const std::exception& e) {\\n"
-              "            const auto fallbackWaitStart = RuntimeMetrics::Clock::now();\\n"
-              "            waitForAhbHandoff(\\n"
-              "                info.device, *this->ahbHandoffFence, this->waitHandoffFences);\\n"
-              "            metrics.windowHandoffHostWaitMs += std::chrono::duration<double, std::milli>(\\n"
-              "                RuntimeMetrics::Clock::now() - fallbackWaitStart).count();\\n"
-              "            this->asyncAhbHandoffEnabled_ = false;\\n"
-              "            useAsyncHandoff = false;\\n"
-              "            framegenInputSemaphoreFd = -1;\\n"
-              "            metrics.totalAsyncFallbacks++;\\n"
-              "            std::cerr << \\\"lsfg-vk: Android async AHB handoff disabled after fd export failure: \\\"\\n"
-              "                      << e.what() << \\\"; completed source copy with host fence fallback\\\\n\\\";\\n"
-              "        }\\n"
-              "        if (useAsyncHandoff) {\\n"
-              "            metrics.windowAsyncHandoffs++;\\n"
-              "            metrics.totalAsyncHandoffs++;\\n"
-              "        } else {\\n"
-              "            metrics.windowSyncHandoffs++;\\n"
-              "            metrics.totalSyncHandoffs++;\\n"
-              "        }\\n"
+              "        try {\n"
+              "            // SYNC_FD has copy-transference semantics. Export only after\n"
+              "            // the queue signal operation is pending so the FD represents\n"
+              "            // that exact source-copy completion point without a host wait.\n"
+              "            framegenInputSemaphoreFd = pass.framegenInputSemaphore.exportFd(\n"
+              "                info.device, this->asyncAhbHandoffHandleType_);\n"
+              "        } catch (const std::exception& e) {\n"
+              "            const auto fallbackWaitStart = RuntimeMetrics::Clock::now();\n"
+              "            waitForAhbHandoff(\n"
+              "                info.device, *this->ahbHandoffFence, this->waitHandoffFences);\n"
+              "            metrics.windowHandoffHostWaitMs += std::chrono::duration<double, std::milli>(\n"
+              "                RuntimeMetrics::Clock::now() - fallbackWaitStart).count();\n"
+              "            this->asyncAhbHandoffEnabled_ = false;\n"
+              "            useAsyncHandoff = false;\n"
+              "            framegenInputSemaphoreFd = -1;\n"
+              "            metrics.totalAsyncFallbacks++;\n"
+              "            std::cerr << \"lsfg-vk: Android async AHB handoff disabled after fd export failure: \"\n"
+              "                      << e.what() << \"; completed source copy with host fence fallback\\n\";\n"
+              "        }\n"
+              "        if (useAsyncHandoff) {\n"
+              "            metrics.windowAsyncHandoffs++;\n"
+              "            metrics.totalAsyncHandoffs++;\n"
+              "        } else {\n"
+              "            metrics.windowSyncHandoffs++;\n"
+              "            metrics.totalSyncHandoffs++;\n"
+              "        }\n"
           )
           text = replace_exact(
               text, old_async_counts, new_async_counts,
               count=1, label=f"{path}: post-submit sync-fd export and fallback",
           )
 
-          '''
+          '''), '    ')
           p.write_text(text[:start] + replacement + text[end:], encoding='utf-8')
           PY
           git diff --check
+          python3 -m py_compile scripts/adreno_syncfd_handoff.py
       - name: Run focused contract tests
         shell: bash
         run: |
@@ -91,7 +94,6 @@ jobs:
           python3 tests/android_clean_benchmark_mode_test.py
           python3 tests/android_external_semaphore_regression_test.py
           python3 tests/android_adreno_evidence_bundle_test.py
-          python3 -m py_compile scripts/adreno_syncfd_handoff.py
       - name: Commit repaired anchors
         shell: bash
         run: |
