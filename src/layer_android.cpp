@@ -9,7 +9,6 @@
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan_core.h>
 
-#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -247,26 +246,6 @@ bool isDeviceWsiHook(const std::string& name) {
         || name == "vkDestroySwapchainKHR";
 }
 
-void logPresentationHookResolution(const char* resolver, const std::string& name) {
-    if (name != "vkCreateSwapchainKHR" && name != "vkQueuePresentKHR") return;
-
-    static std::atomic_bool gipaCreateLogged{false};
-    static std::atomic_bool gipaPresentLogged{false};
-    static std::atomic_bool gdpaCreateLogged{false};
-    static std::atomic_bool gdpaPresentLogged{false};
-
-    const bool isGipa = std::strcmp(resolver, "gipa") == 0;
-    std::atomic_bool* logged = nullptr;
-    if (name == "vkCreateSwapchainKHR")
-        logged = isGipa ? &gipaCreateLogged : &gdpaCreateLogged;
-    else
-        logged = isGipa ? &gipaPresentLogged : &gdpaPresentLogged;
-
-    if (!logged->exchange(true, std::memory_order_relaxed)) {
-        std::cerr << "lsfg-vk: runtime stage=" << resolver
-                  << "-hook-resolved name=" << name << "\n";
-    }
-}
 
 void layer_vkDestroyPrivateInstance(
         VkInstance instance,
@@ -276,7 +255,6 @@ void layer_vkDestroyPrivateInstance(
         return;
     erasePrivateInstanceDispatch(instance);
     if (dispatch.DestroyInstance) {
-        std::cerr << "lsfg-vk: runtime stage=private-framegen-instance-destroy-pass-through\n";
         dispatch.DestroyInstance(instance, pAllocator);
     }
 }
@@ -318,7 +296,6 @@ VkResult layer_vkCreateInstance(
         // instance's process-global compatibility dispatch or run the
         // active game-instance hook a second time.
         if (isPrivateFramegenInstance) {
-            std::cerr << "lsfg-vk: runtime stage=private-framegen-instance-pass-through\n";
             const auto res = downstreamCreateInstance(pCreateInfo, pAllocator, pInstance);
             if (res == VK_SUCCESS && pInstance && *pInstance != VK_NULL_HANDLE)
                 storePrivateInstanceDispatch(*pInstance, downstreamGipa);
@@ -352,7 +329,6 @@ VkResult layer_vkCreateInstance(
             throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
                 "Failed to get instance function pointers");
 
-        std::cerr << "lsfg-vk: Vulkan instance layer initialized successfully.\n";
         return VK_SUCCESS;
     } catch (const std::exception& e) {
         std::cerr << "lsfg-vk: An error occurred while initializing the Vulkan instance layer:\n- "
@@ -408,7 +384,6 @@ VkResult layer_vkCreateDevice(
             auto res = next_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
             if (res == VK_SUCCESS) {
                 registerPassthroughDevice(*pDevice);
-                std::cerr << "lsfg-vk: Vulkan device has no VK_KHR_swapchain; passing through without frame generation.\n";
             }
             return res;
         }
@@ -472,8 +447,6 @@ VkResult layer_vkCreateDevice(
             throw LSFG::vulkan_error(res, "Failed to register Vulkan device");
         }
 
-        std::cerr << "lsfg-vk: runtime stage=device-dispatch-ready presentation=1\n";
-        std::cerr << "lsfg-vk: Vulkan device layer initialized successfully.\n";
         return VK_SUCCESS;
     } catch (const std::exception& e) {
         std::cerr << "lsfg-vk: An error occurred while initializing the Vulkan device layer:\n- "
@@ -506,7 +479,6 @@ PFN_vkVoidFunction layer_vkGetInstanceProcAddr(VkInstance instance, const char* 
     if (it != layerFunctions.end()) return it->second;
     it = Hooks::hooks.find(name);
     if (it != Hooks::hooks.end() && Config::activeConf.enable) {
-        logPresentationHookResolution("gipa", name);
         return it->second;
     }
     return next_vkGetInstanceProcAddr(instance, pName);
@@ -533,8 +505,6 @@ PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName)
         if (!tracked && isDeviceWsiHook(name)) {
             if (!downstream || !downstream(device, pName))
                 return nullptr;
-            std::cerr << "lsfg-vk: runtime stage=gdpa-untracked-wsi-hook-resolved name="
-                      << name << "\n";
             return it->second;
         }
 
@@ -545,7 +515,6 @@ PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName)
             return downstream ? downstream(device, pName) : nullptr;
         if (!downstream || !downstream(device, pName))
             return nullptr;
-        logPresentationHookResolution("gdpa", name);
         return it->second;
     }
     return downstream ? downstream(device, pName) : nullptr;

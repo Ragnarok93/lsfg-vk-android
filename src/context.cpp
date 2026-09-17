@@ -309,16 +309,11 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         LSFG_3_1P::finalize();
         LSFG_3_1::finalize();
 
-        // print config
-        std::cerr << "lsfg-vk: Reloaded configuration for " << name.second << ":\n";
-        if (!conf.dll.empty()) std::cerr << "  Using DLL from: " << conf.dll << '\n';
-        std::cerr << "  Multiplier: " << conf.multiplier << '\n';
-        std::cerr << "  Flow Scale: " << conf.flowScale << '\n';
-        std::cerr << "  Performance Mode: " << (conf.performance ? "Enabled" : "Disabled") << '\n';
-        std::cerr << "  HDR Mode: " << (conf.hdr ? "Enabled" : "Disabled") << '\n';
-        std::cerr << "  Adaptive FrameGen: " << (conf.adaptiveFramegen ? "Enabled" : "Disabled") << '\n';
-        if (conf.adaptiveFramegen) std::cerr << "  Output FPS Cap: " << conf.fpsLimit << '\n';
-        if (conf.e_present != 2) std::cerr << "  ! Present Mode: " << conf.e_present << '\n';
+        std::cerr << "lsfg-vk: configuration reloaded target=" << name.second
+                  << " multiplier=" << conf.multiplier
+                  << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
+                  << " target_fps=" << conf.fpsLimit << '
+';
 
         if (conf.multiplier <= 1 && !conf.targeted) return;
     }

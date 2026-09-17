@@ -29,7 +29,7 @@ def patch_backend(path: Path) -> None:
     )
 
     old_delete = """    contexts.erase(it);\n    if (contexts.empty())\n        resetRuntime();\n}\n"""
-    new_delete = """    contexts.erase(it);\n#ifndef __ANDROID__\n    if (contexts.empty())\n        resetRuntime();\n#else\n    // Android swapchain/context churn must not unload the private Vulkan runtime\n    // from deleteContext() while runtimeMutex is held. Reconfiguration and the\n    // explicit finalize() path remain the only runtime destruction boundaries.\n    if (contexts.empty())\n        std::cerr << \"lsfg-vk: framegen runtime retained after last Android context\\n\";\n#endif\n}\n"""
+    new_delete = """    contexts.erase(it);\n#ifndef __ANDROID__\n    if (contexts.empty())\n        resetRuntime();\n#else\n    // Android swapchain/context churn must not unload the private Vulkan runtime\n    // from deleteContext() while runtimeMutex is held. Reconfiguration and the\n    // explicit finalize() path remain the only runtime destruction boundaries.\n#endif\n}\n"""
     text = replace_exact(
         text,
         old_delete,

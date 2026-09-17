@@ -79,8 +79,6 @@ def apply_runtime(root: Path) -> None:
     patch_device_source(root / "framegen/src/core/device.cpp")
     patch_hooks_header(root / "include/hooks.hpp")
     patch_hooks_source(root / "src/hooks.cpp")
-    patch_outer_header(root / "include/context.hpp")
-    patch_outer_source(root / "src/context.cpp")
 
     mini_semaphore_header = root / "include/mini/semaphore.hpp"
     if "int exportFd(" not in mini_semaphore_header.read_text(encoding="utf-8"):
@@ -108,7 +106,9 @@ def apply_runtime(root: Path) -> None:
 
 
 def apply_profiling(root: Path) -> None:
-    """Apply heavy generated-stage timestamp instrumentation for diagnostics."""
+    """Apply opt-in runtime/GPU instrumentation for diagnostics."""
+    patch_outer_header(root / "include/context.hpp")
+    patch_outer_source(root / "src/context.cpp")
     patch_timestamp_query_pool(
         root / "framegen/include/core/timestampquerypool.hpp",
         root / "framegen/src/core/timestampquerypool.cpp",

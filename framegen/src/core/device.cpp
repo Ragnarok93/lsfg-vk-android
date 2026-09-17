@@ -12,11 +12,9 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -54,13 +52,6 @@ LSFG::DeviceIdentity readIdentity(VkPhysicalDevice device) {
     return identity;
 }
 
-std::string uuidString(const std::array<uint8_t, VK_UUID_SIZE>& uuid) {
-    std::ostringstream out;
-    out << std::hex << std::setfill('0');
-    for (const auto byte : uuid)
-        out << std::setw(2) << static_cast<unsigned int>(byte);
-    return out.str();
-}
 
 bool probeAhbImageUsage(VkPhysicalDevice physicalDevice, VkFormat format,
         VkImageUsageFlags usage) {
@@ -327,23 +318,10 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.externalSemaphoreOpaqueFd = true;
 #endif
 
-    std::cerr << "lsfg-vk: backend-init apiVersion="
-              << VK_VERSION_MAJOR(this->diagnostics.apiVersion) << '.'
-              << VK_VERSION_MINOR(this->diagnostics.apiVersion)
-              << " driverName=\"" << this->diagnostics.driverName << "\""
-              << " driverVersion=" << this->diagnostics.driverVersion
-              << " deviceUUID=" << uuidString(this->diagnostics.identity.deviceUUID)
-              << " driverUUID=" << uuidString(this->diagnostics.identity.driverUUID)
-              << " ahbR16fStorage=" << (this->diagnostics.ahbR16fStorage ? 1 : 0)
-              << " ahbSampledInput=" << (this->diagnostics.ahbSampledInput ? 1 : 0)
-              << " ahbStorageOutput=" << (this->diagnostics.ahbStorageOutput ? 1 : 0)
-              << " ahbTransferInput=" << (this->diagnostics.ahbTransferInput ? 1 : 0)
-              << " ahbTransferOutput=" << (this->diagnostics.ahbTransferOutput ? 1 : 0)
-              << " ahbMode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
-              << " externalSemaphoreOpaqueFd="
-              << (this->diagnostics.externalSemaphoreOpaqueFd ? 1 : 0)
-              << " sync=" << synchronizationPathName(decision.synchronizationPath)
-              << " fp=" << shaderPrecisionName(decision.shaderPrecision) << '\n';
+    std::cerr << "lsfg-vk: backend driver=\"" << this->diagnostics.driverName
+              << "\" ahb_mode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
+              << " sync=" << synchronizationPathName(decision.synchronizationPath) << '
+';
 
     uint32_t familyCount{};
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
