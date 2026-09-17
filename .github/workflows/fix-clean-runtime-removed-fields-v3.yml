@@ -68,9 +68,15 @@ jobs:
           end=t.find(label,start); assert end>=0
           t=t[:start]+t[end+len(label):]
           p.write_text(t)
+
+          p=Path('tests/android_adreno_evidence_bundle_test.py'); t=p.read_text()
+          old='''            self.assertIn("lastDiagnosticStage()", outer_header)\n            self.assertIn("present-error stage=", hooks_source)\n'''
+          new='''            self.assertIn("lastDiagnosticStage()", outer_header)\n            self.assertIn("reason=present-error", hooks_source)\n            self.assertNotIn("present-error stage=", hooks_source)\n            self.assertNotIn("lastDiagnosticStage()", hooks_source)\n'''
+          assert t.count(old)==1
+          p.write_text(t.replace(old,new,1))
           PY
           git diff --check
-          python3 -m py_compile scripts/adreno_async_zero_history.py scripts/adreno_syncfd_handoff.py scripts/adreno_deferred_zero_history.py scripts/adreno_evidence_capabilities.py
+          python3 -m py_compile scripts/adreno_async_zero_history.py scripts/adreno_syncfd_handoff.py scripts/adreno_deferred_zero_history.py scripts/adreno_evidence_capabilities.py tests/android_adreno_evidence_bundle_test.py
       - name: Verify production composition
         shell: bash
         run: |
@@ -107,6 +113,6 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/context.cpp scripts/adreno_async_zero_history.py scripts/adreno_syncfd_handoff.py scripts/adreno_deferred_zero_history.py scripts/adreno_evidence_capabilities.py
+          git add src/context.cpp scripts/adreno_async_zero_history.py scripts/adreno_syncfd_handoff.py scripts/adreno_deferred_zero_history.py scripts/adreno_evidence_capabilities.py tests/android_adreno_evidence_bundle_test.py
           git commit -m 'fix(android): remove profiling dependencies from runtime transforms'
           git push origin HEAD:${GITHUB_REF_NAME}
