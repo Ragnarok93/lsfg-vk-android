@@ -6,7 +6,6 @@
 #include "core/commandpool.hpp"
 #include "core/descriptorpool.hpp"
 #include "core/instance.hpp"
-#include "pool/resourcepool.hpp"
 #include "pool/shaderpool.hpp"
 #include "common/exception.hpp"
 #include "common/utils.hpp"
@@ -59,36 +58,6 @@ namespace {
                 std::to_string(device->generationCount) + " actual=" +
                 std::to_string(outputCount));
     }
-
-    void selectConstructionFlowScale(float flowScale) {
-        if (!device.has_value())
-            throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
-        if (!(flowScale >= 1.0F && flowScale <= 4.0F))
-            throw std::runtime_error("LSFG internal flow divisor must be between 1.0 and 4.0");
-        device->flowScale = flowScale;
-        device->resources = Pool::ResourcePool(device->isHdr, flowScale);
-    }
-
-    int32_t createFdContextAtScale(
-            int in0, int in1, const std::vector<int>& outN,
-            VkExtent2D extent, VkFormat format, float flowScale) {
-        selectConstructionFlowScale(flowScale);
-        const int32_t id = std::rand();
-        contexts.emplace(id, Context(*device, in0, in1, outN, extent, format));
-        return id;
-    }
-
-#ifdef __ANDROID__
-    int32_t createAhbContextAtScale(
-            AHardwareBuffer* in0, AHardwareBuffer* in1,
-            const std::vector<AHardwareBuffer*>& outN,
-            VkExtent2D extent, VkFormat format, float flowScale) {
-        selectConstructionFlowScale(flowScale);
-        const int32_t id = std::rand();
-        contexts.emplace(id, Context(*device, in0, in1, outN, extent, format));
-        return id;
-    }
-#endif
 }
 
 void LSFG_3_1P::initialize(const LSFG::DeviceIdentity& identity, VkFormat sharedFormat,
@@ -121,8 +90,10 @@ void LSFG_3_1P::initialize(const LSFG::DeviceIdentity& identity, VkFormat shared
         });
         activeSignature = requestedSignature;
         contexts = std::unordered_map<int32_t, Context>();
+
         device->commandPool = Core::CommandPool(device->device);
         device->descriptorPool = Core::DescriptorPool(device->device);
+
         device->resources = Pool::ResourcePool(device->isHdr, device->flowScale);
         device->shaders = Pool::ShaderPool(loader);
     } catch (...) {
@@ -143,11 +114,13 @@ int32_t LSFG_3_1P::createContext(
         int in0, int in1, const std::vector<int>& outN,
         VkExtent2D extent, VkFormat format) {
     const std::scoped_lock lock(runtimeMutex);
-    if (!instance.has_value() || !device.has_value() || !activeSignature.has_value())
+    if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
     validateOutputCount(outN.size());
-    return createFdContextAtScale(
-        in0, in1, outN, extent, format, activeSignature->flowScale);
+
+    const int32_t id = std::rand();
+    contexts.emplace(id, Context(*device, in0, in1, outN, extent, format));
+    return id;
 }
 
 void LSFG_3_1P::presentContext(int32_t id, int inSem, const std::vector<int>& outSem) {
@@ -167,9 +140,11 @@ void LSFG_3_1P::presentContextWithCount(int32_t id, int inSem,
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
     if (activeGenerationCount > device->generationCount)
         throw std::runtime_error("LSFG active generation count exceeds runtime capacity");
+
     auto it = contexts.find(id);
     if (it == contexts.end())
         throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
+
     it->second.present(*device, inSem, outSem, activeGenerationCount);
 }
 
@@ -177,9 +152,11 @@ void LSFG_3_1P::deleteContext(int32_t id) {
     const std::scoped_lock lock(runtimeMutex);
     if (!instance.has_value() || !device.has_value())
         return;
+
     auto it = contexts.find(id);
     if (it == contexts.end())
         return;
+
     if (!it->second.waitForCompletion(*device)) {
         std::cerr << "lsfg-vk: framegen teardown timed out; retaining context resources for safe bypass\n";
         return;
@@ -212,24 +189,18 @@ int32_t LSFG_3_1P::createContextFromAHB(
         const std::vector<AHardwareBuffer*>& outN,
         VkExtent2D extent, VkFormat format) {
     const std::scoped_lock lock(runtimeMutex);
-    if (!instance.has_value() || !device.has_value() || !activeSignature.has_value())
-        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
-    validateOutputCount(outN.size());
-    return createAhbContextAtScale(
-        in0, in1, outN, extent, format, activeSignature->flowScale);
-}
-
-int32_t LSFG_3_1P::createContextFromAHBAtFlowScale(
-        AHardwareBuffer* in0, AHardwareBuffer* in1,
-        const std::vector<AHardwareBuffer*>& outN,
-        VkExtent2D extent, VkFormat format, float flowScale) {
-    const std::scoped_lock lock(runtimeMutex);
     if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
     validateOutputCount(outN.size());
-    return createAhbContextAtScale(in0, in1, outN, extent, format, flowScale);
+
+    const int32_t id = std::rand();
+    contexts.emplace(id, Context(*device, in0, in1, outN, extent, format));
+    return id;
 }
 
+#endif // __ANDROID__
+
+#ifdef __ANDROID__
 bool LSFG_3_1P::waitContext(int32_t id, uint64_t timeoutNs) {
     const std::scoped_lock lock(runtimeMutex);
     if (!instance.has_value() || !device.has_value())
@@ -239,5 +210,4 @@ bool LSFG_3_1P::waitContext(int32_t id, uint64_t timeoutNs) {
         return false;
     return it->second.waitForLastPresent(*device, timeoutNs);
 }
-
-#endif // __ANDROID__
+#endif
