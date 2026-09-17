@@ -202,7 +202,7 @@ inline RewriteReport fuseTail(std::vector<uint8_t>& code) {
             report.barriersBefore == 4U
             && report.imageWritesBefore == 10U
             && detail::countOp(instructions, spv::OpGroupNonUniformBroadcast) == 4U
-            && candidateAccess == std::pair<size_t, size_t>{13U, 4U}
+            && candidateAccess == std::pair<size_t, size_t>{12U, 4U}
             && detail::hasExactCapabilities(code, instructions, {
                 1U, 50U, 56U, 61U, 64U, 5345U
             })
@@ -211,13 +211,13 @@ inline RewriteReport fuseTail(std::vector<uint8_t>& code) {
             report.alreadyApplied = true;
             report.barriersAfter = 4U;
             report.tailDynamicLoadsBefore = 15U;
-            report.tailDynamicLoadsAfter = 16U;
+            report.tailDynamicLoadsAfter = 12U;
             report.tailCriticalPathLoadsBefore = 6U;
-            report.tailCriticalPathLoadsAfter = 4U;
+            report.tailCriticalPathLoadsAfter = 3U;
             report.tailParallelLanesAfter = 4U;
             report.subgroupBroadcastsAfter = 4U;
             report.staticWorkgroupLoadsBefore = 15U;
-            report.staticWorkgroupLoadsAfter = 13U;
+            report.staticWorkgroupLoadsAfter = 12U;
             report.tailWorkgroupStoresBefore = 4U;
             report.tailWorkgroupStoresAfter = 0U;
             report.imageWritesAfter = 10U;
@@ -429,7 +429,14 @@ inline RewriteReport fuseTail(std::vector<uint8_t>& code) {
         return value;
     };
 
-    const uint32_t sharedSelf = loadShared(40U, false);
+    // The baseline carries the current lane's mip4 value in component 1 of
+    // function state across the fourth barrier. Reuse it instead of issuing
+    // a fourth Workgroup load for every active tail lane.
+    const uint32_t mip4State = id();
+    const uint32_t sharedSelf = id();
+    detail::emit(out, spv::OpLoad, {9U, mip4State, 59U});
+    detail::emit(out, spv::OpCompositeExtract,
+        {8U, sharedSelf, mip4State, 1U});
     const uint32_t sharedRight = loadShared(const256, true);
     const uint32_t sharedLower = loadShared(819U, true);
     const uint32_t sharedDiagonal = loadShared(const264, true);
@@ -563,7 +570,7 @@ inline RewriteReport fuseTail(std::vector<uint8_t>& code) {
         report.reason = "candidate-subgroup-broadcast-count-mismatch";
         return report;
     }
-    if (candidateAccess != std::pair<size_t, size_t>{13U, 4U}) {
+    if (candidateAccess != std::pair<size_t, size_t>{12U, 4U}) {
         report.reason = "candidate-workgroup-access-count-mismatch";
         return report;
     }
@@ -586,13 +593,13 @@ inline RewriteReport fuseTail(std::vector<uint8_t>& code) {
     report.applied = true;
     report.barriersAfter = 4U;
     report.tailDynamicLoadsBefore = 15U;
-    report.tailDynamicLoadsAfter = 16U;
+    report.tailDynamicLoadsAfter = 12U;
     report.tailCriticalPathLoadsBefore = 6U;
-    report.tailCriticalPathLoadsAfter = 4U;
+    report.tailCriticalPathLoadsAfter = 3U;
     report.tailParallelLanesAfter = 4U;
     report.subgroupBroadcastsAfter = 4U;
     report.staticWorkgroupLoadsBefore = 15U;
-    report.staticWorkgroupLoadsAfter = 13U;
+    report.staticWorkgroupLoadsAfter = 12U;
     report.tailWorkgroupStoresBefore = 4U;
     report.tailWorkgroupStoresAfter = 0U;
     report.imageWritesAfter = 10U;
