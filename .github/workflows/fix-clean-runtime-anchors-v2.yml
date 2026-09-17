@@ -1,0 +1,103 @@
+name: Repair clean runtime anchors v2
+
+on:
+  push:
+    branches:
+      - feature/adreno-6xx-b14-directional-ahb-adaptive-reload
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Repair cleanup-sensitive contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('tests/android_clean_benchmark_mode_test.py')
+          text = p.read_text(encoding='utf-8')
+          old = '        runtime_start = build_script.index(\'if [[ "${LSFGVK_ADAPTIVE_RUNTIME:-0}" == "1" ]]\')\n'
+          new = (
+              '        runtime_marker = (\'if [[ "${ADAPTIVE_RUNTIME}" == "1" ]]; then\\n\'\n'
+              '            \'    echo "[lsfg-vk] Enabling retained adaptive runtime without GPU/compiler profiling"\')\n'
+              '        runtime_start = build_script.index(runtime_marker)\n'
+          )
+          if text.count(old) != 1:
+              raise SystemExit('clean benchmark raw adaptive conditional anchor not found')
+          p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          p = Path('scripts/adreno_syncfd_handoff.py')
+          text = p.read_text(encoding='utf-8')
+          start_marker = '    old_async_metrics = (\n'
+          end_marker = '    text = replace_exact(\n        text,\n        "                  << (useAsyncHandoff ? \\\"gpu-semaphore\\\" : \\\"host-fence\\\") << \\\"\\\\n\\\";\\n",\n'
+          start = text.find(start_marker)
+          end = text.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit('sync-fd post-submit transform block not found')
+          replacement = '''    old_async_counts = (
+              "        metrics.windowAsyncHandoffs++;\\n"
+              "        metrics.totalAsyncHandoffs++;\\n"
+          )
+          new_async_counts = (
+              "        try {\\n"
+              "            // SYNC_FD has copy-transference semantics. Export only after\\n"
+              "            // the queue signal operation is pending so the FD represents\\n"
+              "            // that exact source-copy completion point without a host wait.\\n"
+              "            framegenInputSemaphoreFd = pass.framegenInputSemaphore.exportFd(\\n"
+              "                info.device, this->asyncAhbHandoffHandleType_);\\n"
+              "        } catch (const std::exception& e) {\\n"
+              "            const auto fallbackWaitStart = RuntimeMetrics::Clock::now();\\n"
+              "            waitForAhbHandoff(\\n"
+              "                info.device, *this->ahbHandoffFence, this->waitHandoffFences);\\n"
+              "            metrics.windowHandoffHostWaitMs += std::chrono::duration<double, std::milli>(\\n"
+              "                RuntimeMetrics::Clock::now() - fallbackWaitStart).count();\\n"
+              "            this->asyncAhbHandoffEnabled_ = false;\\n"
+              "            useAsyncHandoff = false;\\n"
+              "            framegenInputSemaphoreFd = -1;\\n"
+              "            metrics.totalAsyncFallbacks++;\\n"
+              "            std::cerr << \\\"lsfg-vk: Android async AHB handoff disabled after fd export failure: \\\"\\n"
+              "                      << e.what() << \\\"; completed source copy with host fence fallback\\\\n\\\";\\n"
+              "        }\\n"
+              "        if (useAsyncHandoff) {\\n"
+              "            metrics.windowAsyncHandoffs++;\\n"
+              "            metrics.totalAsyncHandoffs++;\\n"
+              "        } else {\\n"
+              "            metrics.windowSyncHandoffs++;\\n"
+              "            metrics.totalSyncHandoffs++;\\n"
+              "        }\\n"
+          )
+          text = replace_exact(
+              text, old_async_counts, new_async_counts,
+              count=1, label=f"{path}: post-submit sync-fd export and fallback",
+          )
+
+          '''
+          p.write_text(text[:start] + replacement + text[end:], encoding='utf-8')
+          PY
+          git diff --check
+      - name: Run focused contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/android_clean_benchmark_mode_test.py
+          python3 tests/android_external_semaphore_regression_test.py
+          python3 tests/android_adreno_evidence_bundle_test.py
+          python3 -m py_compile scripts/adreno_syncfd_handoff.py
+      - name: Commit repaired anchors
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/adreno_syncfd_handoff.py tests/android_clean_benchmark_mode_test.py
+          git commit -m 'fix(android): decouple clean runtime transforms from diagnostics'
+          git push origin HEAD:${GITHUB_REF_NAME}
