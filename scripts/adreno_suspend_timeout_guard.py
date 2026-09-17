@@ -12,13 +12,8 @@ OLD_WAIT = '''    const auto waitIdleStart = RuntimeMetrics::Clock::now();
     const bool framegenReady = conf.performance
         ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
         : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-    if (!framegenRecoveredAfterTimeout) {
-        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-            RuntimeMetrics::Clock::now() - waitIdleStart).count();
-    } else {
-        // A SIGSTOP/SIGCONT recovery is lifecycle time, not framegen cost.
-        excludeCurrentCycleFromTimingMetrics = true;
-    }
+    metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+        RuntimeMetrics::Clock::now() - waitIdleStart).count();
     if (!framegenReady) {
 '''
 
@@ -53,8 +48,13 @@ NEW_WAIT = '''    const auto waitIdleStart = RuntimeMetrics::Clock::now();
                   << " recheck_ms=" << resumeRecheckMs << "\\n";
     }
 
-    metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-        RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    if (!framegenRecoveredAfterTimeout) {
+        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    } else {
+        // A SIGSTOP/SIGCONT recovery is lifecycle time, not framegen cost.
+        excludeCurrentCycleFromTimingMetrics = true;
+    }
     if (!framegenReady) {
 '''
 
