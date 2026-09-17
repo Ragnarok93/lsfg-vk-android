@@ -260,7 +260,7 @@ void LsContext::waitPendingHistoryCompletionFd(bool throwOnTimeout) {
 '''
     t=insert_before(t,"LsContext::~LsContext() {",wait_helper,f"{p}: deferred history fd wait")
     t=once(t,"    auto& metrics = this->runtimeMetrics;\n    const auto cycleStart = RuntimeMetrics::Clock::now();\n",
-        "    auto& metrics = this->runtimeMetrics;\n    const auto cycleStart = RuntimeMetrics::Clock::now();\n    if (pass.handoffFencePending) { const auto w=RuntimeMetrics::Clock::now(); waitForAhbHandoff(info.device,*pass.handoffFence,this->waitHandoffFences); metrics.windowHandoffHostWaitMs += std::chrono::duration<double,std::milli>(RuntimeMetrics::Clock::now()-w).count(); pass.handoffFencePending=false; }\n",f"{p}: retire slot")
+        "    auto& metrics = this->runtimeMetrics;\n    const auto cycleStart = RuntimeMetrics::Clock::now();\n    if (pass.handoffFencePending) { waitForAhbHandoff(info.device,*pass.handoffFence,this->waitHandoffFences); pass.handoffFencePending=false; }\n",f"{p}: retire slot")
     t=once(t,"    std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;\n    if (this->previousSourceCopySignalValid_)\n",
         "    std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;\n    if (this->pendingHistoryCompletionValid_) this->waitPendingHistoryCompletionFd(true);\n    if (this->previousSourceCopySignalValid_)\n",f"{p}: consume reverse")
     t=once(t,"    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_\n        && generatedFrameCount > 0\n        && !warmupSourceHistory;\n",

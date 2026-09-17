@@ -94,7 +94,7 @@ def patch_hooks_header(path: Path) -> None:
 
 def patch_hooks_source(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-    if "syncFdSemaphore=" in text and "present-error stage=" in text:
+    if "syncFdSemaphore=" in text:
         return
 
     text = replace_exact(
@@ -174,21 +174,4 @@ def patch_hooks_source(path: Path) -> None:
         label=f"{path}: DeviceInfo sync-fd assignment",
     )
 
-    text = replace_exact(
-        text,
-        "            Utils::logLimitN(\"swapPresent\", 5,\n"
-        "                \"An error occurred while presenting the swapchain; degrading to native presentation:\\n\"\n"
-        "                \"- \" + std::string(e.what()));\n"
-        "            swapchains.erase(*pPresentInfo->pSwapchains);\n"
-        "            std::cerr << \"lsfg-vk: runtime stage=context-degraded-bypass reason=present-error\\n\";\n",
-        "            const std::string presentFailureStage = swapchain.lastDiagnosticStage();\n"
-        "            Utils::logLimitN(\"swapPresent\", 5,\n"
-        "                \"An error occurred while presenting the swapchain; degrading to native presentation:\\n\"\n"
-        "                \"- stage=\" + presentFailureStage + \" error=\" + std::string(e.what()));\n"
-        "            swapchains.erase(*pPresentInfo->pSwapchains);\n"
-        "            std::cerr << \"lsfg-vk: runtime stage=context-degraded-bypass reason=present-error stage=\"\n"
-        "                      << presentFailureStage << \"\\n\";\n",
-        count=1,
-        label=f"{path}: present failure stage context",
-    )
     path.write_text(text, encoding="utf-8")

@@ -477,7 +477,6 @@ std::array<size_t, 3> LsContext::orderedRawHistorySlots() const {
     early = r'''    if (this->historyMaintenanceState_ == HistoryMaintenanceState::DeferredZero
             && adaptiveZeroGeneration) {
         // deferred-zero source-only no-framegen
-        this->diagnosticStage_ = "deferred-zero-source-copy";
         pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
         pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
         pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);

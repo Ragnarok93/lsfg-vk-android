@@ -312,8 +312,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         std::cerr << "lsfg-vk: configuration reloaded target=" << name.second
                   << " multiplier=" << conf.multiplier
                   << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
-                  << " target_fps=" << conf.fpsLimit << '
-';
+                  << " target_fps=" << conf.fpsLimit << '\n';
 
         if (conf.multiplier <= 1 && !conf.targeted) return;
     }

@@ -166,7 +166,9 @@ class AndroidAdrenoEvidenceBundleContractTest(unittest.TestCase):
             self.assertIn('"sync-fd"', hooks_source)
             self.assertIn("opaqueFdSemaphoreSupported || syncFdSemaphoreSupported", hooks_source)
             self.assertIn("lastDiagnosticStage()", outer_header)
-            self.assertIn("present-error stage=", hooks_source)
+            self.assertIn("reason=present-error", hooks_source)
+            self.assertNotIn("present-error stage=", hooks_source)
+            self.assertNotIn("lastDiagnosticStage()", hooks_source)
 
             self.assertIn("asyncAhbHandoffHandleType_", outer_header)
             self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", outer_source)
