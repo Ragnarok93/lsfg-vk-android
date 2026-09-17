@@ -16,21 +16,21 @@ def patch_framegen_source(path: Path) -> None:
 
     text = once(
         text,
-        "#ifdef __ANDROID__\n    if (this->transportOnly) {\n",
+        "#ifdef __ANDROID__\n    if (this->inputCopyRequired) {\n",
         "#ifdef __ANDROID__\n"
-        "    const bool zeroGenerationDirectStorage = generationCount == 0 && !this->transportOnly;\n"
-        "    const bool zeroGenerationTransportOnly = generationCount == 0 && this->transportOnly;\n"
+        "    const bool zeroGenerationDirectStorage = generationCount == 0 && !this->inputCopyRequired;\n"
+        "    const bool zeroGenerationTransportOnly = generationCount == 0 && this->inputCopyRequired;\n"
         "    Core::Image& activeHistoryInput = (this->frameIdx % 2 == 0)\n"
         "        ? this->inImg_0 : this->inImg_1;\n"
         "    Core::Image& activeSharedHistoryInput = (this->frameIdx % 2 == 0)\n"
         "        ? this->sharedInImg_0 : this->sharedInImg_1;\n"
         "    Core::Image& activePrivateHistoryInput = (this->frameIdx % 2 == 0)\n"
         "        ? this->inImg_0 : this->inImg_1;\n"
-        "    if (this->transportOnly) {\n",
+        "    if (this->inputCopyRequired) {\n",
         f"{path}: identify active zero-history inputs",
     )
 
-    old_transport = """    if (this->transportOnly) {
+    old_transport = """    if (this->inputCopyRequired) {
         std::vector<VkImageMemoryBarrier2> barriers;
         barriers.reserve(4);
         add_external_transfer_acquire(barriers, vk, this->sharedInImg_0,
@@ -60,7 +60,7 @@ def patch_framegen_source(path: Path) -> None:
         emit_external_barriers(data.cmdBuffer1, barriers);
     } else {
 """
-    new_transport = """    if (this->transportOnly) {
+    new_transport = """    if (this->inputCopyRequired) {
         std::vector<VkImageMemoryBarrier2> barriers;
         barriers.reserve(4);
         if (zeroGenerationTransportOnly) {
@@ -142,7 +142,7 @@ def patch_framegen_source(path: Path) -> None:
 """
     text = once(text, old_acquire, new_acquire, f"{path}: active input acquire")
 
-    old_release = """    if (generationCount == 0 && !this->transportOnly) {
+    old_release = """    if (generationCount == 0 && !this->inputCopyRequired) {
         std::vector<VkImageMemoryBarrier2> releaseBarriers;
         releaseBarriers.reserve(2);
         add_external_release(releaseBarriers, vk, this->inImg_0,
@@ -196,8 +196,7 @@ def patch_outer_source(path: Path) -> None:
         "    this->asyncZeroHistoryEnabled_="
         "this->asyncAhbHandoffEnabled_ && "
         "this->asyncAhbHandoffHandleType_==VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT && "
-        "(ahbTransportMode==LSFG::AhbTransportMode::DirectStorage || "
-        "ahbTransportMode==LSFG::AhbTransportMode::TransportOnly);\n"
+        "ahbTransportMode!=LSFG::AhbTransportMode::Unsupported;\n"
     )
     text = once(text, old_enable, new_enable, f"{path}: supported transport zero-history gate")
 

@@ -67,7 +67,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
             self.assertIn("return", zero_block)
 
             android_release = present[beta:zero_finish]
-            self.assertIn("generationCount == 0 && !this->transportOnly", android_release)
+            self.assertIn("generationCount == 0 && !this->inputCopyRequired", android_release)
             self.assertIn("add_external_release", android_release)
             self.assertIn("this->inImg_0", android_release)
             self.assertIn("this->inImg_1", android_release)

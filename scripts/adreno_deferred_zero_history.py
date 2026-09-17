@@ -328,12 +328,12 @@ void copyRawHistoryToExternalAhb(VkCommandBuffer buf,
 
     allocation_marker = r'''    this->frame_1 = Mini::Image(info.device, info.physicalDevice,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-        ahbTransportMode);
+        ahbTransportMode, LSFG::AhbImageRole::Input);
 
 '''
     allocation = r'''    this->frame_1 = Mini::Image(info.device, info.physicalDevice,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-        ahbTransportMode);
+        ahbTransportMode, LSFG::AhbImageRole::Input);
 
     const uint64_t rawHistoryBytesPerPixel = format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8ULL : 4ULL;
     const uint64_t rawHistoryBytes = static_cast<uint64_t>(extent.width)
