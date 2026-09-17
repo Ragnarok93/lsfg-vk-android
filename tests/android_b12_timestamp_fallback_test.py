@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TRANSFORM = ROOT / "scripts/apply-b12-dual-stage-profile.py"
 FALLBACK = ROOT / "scripts/apply-b12-unreported-timestamp-fallback.py"
 HARDENING = ROOT / "scripts/apply-b12-reporting-hardening.py"
+DEVICE_PROFILE = ROOT / "scripts/apply-b12-device-profile.py"
 
 
 class B12TimestampFallbackContractTest(unittest.TestCase):
@@ -115,7 +116,7 @@ class B12TimestampFallbackContractTest(unittest.TestCase):
                 check=True,
             )
             subprocess.run(
-                [sys.executable, str(HARDENING), "--root", str(temp_root)],
+                [sys.executable, str(DEVICE_PROFILE), "--root", str(temp_root)],
                 check=True,
             )
 
@@ -130,7 +131,7 @@ class B12TimestampFallbackContractTest(unittest.TestCase):
             )
 
             self.assertIn("durationsMsChecked", header)
-            self.assertIn("VK_QUERY_RESULT_WAIT_BIT", source)
+            self.assertNotIn("VK_QUERY_RESULT_WAIT_BIT", source)
             self.assertIn("b12-query-pool-create-failure", source)
             self.assertIn("b12-query-pool-unavailable", source)
             self.assertIn("b12-readback-failure", perf_context)
@@ -140,6 +141,26 @@ class B12TimestampFallbackContractTest(unittest.TestCase):
             self.assertIn("beta4_failures=", perf_context)
             self.assertIn("b12-stage-profile-init", perf_context)
             self.assertIn("b12-stage-profile status=unavailable", perf_context)
+            self.assertIn("result == VK_NOT_READY", perf_context)
+            self.assertIn("b12-readback-pending", perf_context)
+            self.assertIn("!data.b12MipmapsPending", perf_context)
+            self.assertIn("!data.b12Beta4Pending", perf_context)
+            self.assertIn('std::cerr << "lsfg-vk: b12-stage-profile-init', perf_context)
+
+            mipmaps_not_ready = perf_context.index(
+                "if (result == VK_NOT_READY)", perf_context.index("data.b12MipmapsPending")
+            )
+            mipmaps_clear = perf_context.index(
+                "data.b12MipmapsPending = false;", mipmaps_not_ready
+            )
+            mipmaps_terminal = perf_context.index(
+                "b12-readback-failure stage=mipmaps", mipmaps_not_ready
+            )
+            self.assertLess(mipmaps_terminal, mipmaps_clear)
+            self.assertNotIn(
+                "data.b12MipmapsPending = false;",
+                perf_context[mipmaps_not_ready:mipmaps_terminal],
+            )
 
     def test_optional_mipmaps_executable_capture_is_b12_only(self) -> None:
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
