@@ -658,7 +658,14 @@ std::array<size_t, 3> LsContext::orderedRawHistorySlots() const {
         1,
     )
 
-    raw_capture_marker = "    if (profileGameSourceCopyGpu)\n        this->gameSourceCopyCmdWriteTimestamp(\n"
+    # Capture retained raw history while the normal source-copy command
+    # buffer is still recording. Candidate A also creates a re-prime
+    # preCopyBuf, so include the main-path history-slot declaration to
+    # keep this insertion unique after the earlier Candidate A edits.
+    raw_capture_marker = (
+        "    pass.preCopyBuf.end();\n\n"
+        "    const size_t historySlot = static_cast<size_t>(this->framegenHistoryEpoch_ % 2);\n"
+    )
     raw_capture = r'''    const bool captureRawHistory = adaptiveZeroGeneration
         && this->historyMaintenanceState_ == HistoryMaintenanceState::LiveHistory
         && this->deferredZeroRawHistoryAllocated_
