@@ -1,0 +1,89 @@
+name: Repair deferred-zero clean-source anchor
+
+on:
+  push:
+    branches:
+      - feature/adreno-6xx-b14-directional-ahb-adaptive-reload
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Retarget raw-history capture to command-buffer completion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('scripts/adreno_deferred_zero_history.py')
+          text = p.read_text(encoding='utf-8')
+          old = '''    raw_capture_marker = "    if (profileGameSourceCopyGpu)\\n        this->gameSourceCopyCmdWriteTimestamp(\\n"
+          '''
+          new = '''    # Capture retained raw history while the source-copy command buffer is
+              # still recording. This structural anchor survives production cleanup and
+              # does not depend on optional profiling/timestamp instrumentation.
+              raw_capture_marker = (
+                  "    pass.preCopyBuf.end();\\n\\n"
+                  "    std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;\\n"
+              )
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('legacy raw-history profiling anchor not found exactly once')
+          text = text.replace(old, new, 1)
+
+          old_call = '''    text = once(text, raw_capture_marker, raw_capture + raw_capture_marker,
+                          f"{path}: retain short-zero raw history")
+          '''
+          if text.count(old_call) != 1:
+              raise SystemExit('raw-history insertion call not found exactly once')
+          # Same insertion semantics: raw_capture is emitted immediately before
+          # pass.preCopyBuf.end(), so all copy commands remain in one submission.
+          p.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+          python3 -m py_compile scripts/adreno_deferred_zero_history.py
+
+      - name: Run deferred-zero and adaptive contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/android_deferred_zero_history_test.py
+          python3 tests/android_adaptive_history_test.py
+          python3 tests/android_adreno_evidence_bundle_test.py
+          python3 tests/android_external_semaphore_regression_test.py
+          python3 tests/android_ahb_portability_test.py
+
+      - name: Exercise retained runtime transform on clean source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          git archive HEAD | tar -x -C "$tmp"
+          python3 "$tmp/scripts/apply-adreno-evidence-profile.py" --root "$tmp" --runtime-only
+          grep -Fq 'captureRawHistory' "$tmp/src/context.cpp"
+          grep -Fq 'copySwapchainToRawHistory' "$tmp/src/context.cpp"
+          grep -Fq 'framegenHistoryEpoch_' "$tmp/src/context.cpp"
+          if grep -Fq 'profileGameSourceCopyGpu' "$tmp/src/context.cpp"; then
+            echo 'ERROR: production runtime transform reintroduced source-copy profiling' >&2
+            exit 1
+          fi
+
+      - name: Commit repaired transform
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/adreno_deferred_zero_history.py
+          git commit -m 'fix(android): decouple deferred zero history from profiling'
+          git push origin HEAD:${GITHUB_REF_NAME}
