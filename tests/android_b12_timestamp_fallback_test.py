@@ -85,6 +85,8 @@ class B12TimestampFallbackContractTest(unittest.TestCase):
 
     def test_b12_readback_is_fail_visible_and_waits_after_slot_sync(self) -> None:
         required = (
+            Path("scripts/apply-b12-reporting-hardening.py"),
+            Path("scripts/adreno_evidence_common.py"),
             Path("framegen/include/core/timestampquerypool.hpp"),
             Path("framegen/src/core/timestampquerypool.cpp"),
             Path("framegen/v3.1_include/v3_1/context.hpp"),
