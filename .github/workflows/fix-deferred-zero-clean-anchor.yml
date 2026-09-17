@@ -30,24 +30,13 @@ jobs:
           old = '''    raw_capture_marker = "    if (profileGameSourceCopyGpu)\\n        this->gameSourceCopyCmdWriteTimestamp(\\n"
           '''
           new = '''    # Capture retained raw history while the source-copy command buffer is
-              # still recording. This structural anchor survives production cleanup and
-              # does not depend on optional profiling/timestamp instrumentation.
-              raw_capture_marker = (
-                  "    pass.preCopyBuf.end();\\n\\n"
-                  "    std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;\\n"
-              )
+              # still recording. The command-buffer completion boundary survives the
+              # composed retained-runtime transforms and does not depend on profiling.
+              raw_capture_marker = "    pass.preCopyBuf.end();\\n\\n"
           '''
           if text.count(old) != 1:
               raise SystemExit('legacy raw-history profiling anchor not found exactly once')
           text = text.replace(old, new, 1)
-
-          old_call = '''    text = once(text, raw_capture_marker, raw_capture + raw_capture_marker,
-                          f"{path}: retain short-zero raw history")
-          '''
-          if text.count(old_call) != 1:
-              raise SystemExit('raw-history insertion call not found exactly once')
-          # Same insertion semantics: raw_capture is emitted immediately before
-          # pass.preCopyBuf.end(), so all copy commands remain in one submission.
           p.write_text(text, encoding='utf-8')
           PY
           git diff --check
