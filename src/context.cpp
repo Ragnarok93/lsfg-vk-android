@@ -519,6 +519,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 #ifdef __ANDROID__
     auto& metrics = this->runtimeMetrics;
     const auto cycleStart = RuntimeMetrics::Clock::now();
+    bool excludeCurrentCycleFromTimingMetrics = false;
     this->adaptiveScheduler_.configure(
         conf.adaptiveFramegen ? conf.fpsLimit : 0,
         conf.multiplier > 1 ? static_cast<size_t>(conf.multiplier - 1) : 0);
@@ -528,10 +529,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             cycleStart - metrics.lastSourcePresent);
         const double sourceIntervalMs = std::chrono::duration<double, std::milli>(
             sourceInterval).count();
-        metrics.windowSourceIntervalMs += sourceIntervalMs;
-        if (sourceIntervalMs > metrics.windowSourceIntervalMaxMs)
-            metrics.windowSourceIntervalMaxMs = sourceIntervalMs;
-        metrics.windowSourceIntervals++;
+        constexpr double kRuntimeTimingDiscontinuityMs = 250.0;
+        if (sourceIntervalMs < kRuntimeTimingDiscontinuityMs) {
+            metrics.windowSourceIntervalMs += sourceIntervalMs;
+            if (sourceIntervalMs > metrics.windowSourceIntervalMaxMs)
+                metrics.windowSourceIntervalMaxMs = sourceIntervalMs;
+            metrics.windowSourceIntervals++;
+        }
     }
     metrics.lastSourcePresent = cycleStart;
     metrics.hasLastSourcePresent = true;
@@ -606,9 +610,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto cycleEnd = RuntimeMetrics::Clock::now();
         const double cycleMs = std::chrono::duration<double, std::milli>(
             cycleEnd - cycleStart).count();
-        metrics.windowCycleMs += cycleMs;
-        if (cycleMs > metrics.windowCycleMaxMs)
-            metrics.windowCycleMaxMs = cycleMs;
+        if (!excludeCurrentCycleFromTimingMetrics) {
+            metrics.windowCycleMs += cycleMs;
+            if (cycleMs > metrics.windowCycleMaxMs)
+                metrics.windowCycleMaxMs = cycleMs;
+        }
 
         const double elapsedSeconds = std::chrono::duration<double>(
             cycleEnd - metrics.windowStart).count();
