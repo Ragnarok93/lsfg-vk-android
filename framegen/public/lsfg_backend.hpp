@@ -19,6 +19,13 @@ struct DeviceIdentity {
     }
 };
 
+struct AdaptiveFlowContextState {
+    float requestedScale{0.0f};
+    float activeScale{0.0f};
+    uint32_t warmupRemaining{0};
+    bool transitionPending{false};
+};
+
 struct BackendDiagnostics {
     uint32_t apiVersion{VK_API_VERSION_1_0};
     uint32_t driverVersion{0};

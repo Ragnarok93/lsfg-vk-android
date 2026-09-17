@@ -58,6 +58,24 @@ namespace LSFG_3_1P {
         AHardwareBuffer* in0, AHardwareBuffer* in1,
         const std::vector<AHardwareBuffer*>& outN,
         VkExtent2D extent, VkFormat format);
+
+    /// Create an Android context with preset-bounded Flow Scale graphs prepared
+    /// up front. flowScales are user-visible scales ordered target -> minimum.
+    __attribute__((visibility("default")))
+    int32_t createAdaptiveContextFromAHB(
+        AHardwareBuffer* in0, AHardwareBuffer* in1,
+        const std::vector<AHardwareBuffer*>& outN,
+        VkExtent2D extent, VkFormat format,
+        const std::vector<float>& flowScales);
+
+    /// Request a prepared Flow Scale. The context warms three exact source
+    /// history frames before atomically changing the generation graph.
+    __attribute__((visibility("default")))
+    void requestContextFlowScale(int32_t id, float flowScale);
+
+    /// Report requested/applied scale and handoff progress for diagnostics.
+    __attribute__((visibility("default")))
+    LSFG::AdaptiveFlowContextState getContextFlowScaleState(int32_t id);
 #endif
 
     ///

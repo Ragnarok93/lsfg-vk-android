@@ -17,6 +17,8 @@
 #include <vector>
 #include <cstdint>
 #include <array>
+#include <optional>
+#include <cstddef>
 
 #ifdef __ANDROID__
 struct AHardwareBuffer;
@@ -53,6 +55,15 @@ namespace LSFG_3_1 {
             AHardwareBuffer* in0, AHardwareBuffer* in1,
             const std::vector<AHardwareBuffer*>& outN,
             VkExtent2D extent, VkFormat format);
+
+        Context(Vulkan& vk,
+            AHardwareBuffer* in0, AHardwareBuffer* in1,
+            const std::vector<AHardwareBuffer*>& outN,
+            VkExtent2D extent, VkFormat format,
+            const std::vector<float>& adaptiveFlowScales);
+
+        void requestFlowScale(float flowScale);
+        [[nodiscard]] LSFG::AdaptiveFlowContextState flowScaleState() const;
 #endif
 
         ///
@@ -103,6 +114,44 @@ namespace LSFG_3_1 {
             size_t generationCount{0};
         };
         std::array<RenderData, 8> data;
+
+#ifdef __ANDROID__
+        struct AdaptiveFlowGraph {
+            float userFlowScale{0.0f};
+            Shaders::Mipmaps mipmaps;
+            std::array<Shaders::Alpha, 7> alpha;
+            Shaders::Beta beta;
+            std::array<Shaders::Gamma, 7> gamma;
+            std::array<Shaders::Delta, 3> delta;
+            Shaders::Generate generate;
+        };
+
+        struct FlowGraphRef {
+            float userFlowScale{0.0f};
+            Shaders::Mipmaps* mipmaps{nullptr};
+            std::array<Shaders::Alpha, 7>* alpha{nullptr};
+            Shaders::Beta* beta{nullptr};
+            std::array<Shaders::Gamma, 7>* gamma{nullptr};
+            std::array<Shaders::Delta, 3>* delta{nullptr};
+            Shaders::Generate* generate{nullptr};
+        };
+
+        static constexpr uint32_t kAdaptiveFlowHistoryFrames = 3;
+        std::vector<AdaptiveFlowGraph> adaptiveFlowGraphs_;
+        std::vector<float> adaptiveFlowScales_;
+        size_t activeFlowGraphIndex_{0};
+        std::optional<size_t> pendingFlowGraphIndex_;
+        uint32_t pendingFlowWarmupFrames_{0};
+        float requestedFlowScale_{0.0f};
+
+        [[nodiscard]] AdaptiveFlowGraph buildAdaptiveFlowGraph(
+            Vulkan& vk, float userFlowScale,
+            const std::vector<Core::Image>& outImgs);
+        [[nodiscard]] FlowGraphRef flowGraph(size_t index);
+        void dispatchAdaptiveFlowPreprocess(
+            const Core::CommandBuffer& buffer, FlowGraphRef graph);
+        void commitAdaptiveFlowTransition(size_t index);
+#endif
 
         Shaders::Mipmaps mipmaps;
         std::array<Shaders::Alpha, 7> alpha;
