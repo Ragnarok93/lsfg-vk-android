@@ -16,27 +16,31 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import importlib.util
           import sys
           from pathlib import Path
           root = Path.cwd()
-          sys.path.insert(0, str(root / 'scripts'))
-          from apply_adreno_evidence_profile import (
-              patch_backend_header, patch_device_source, patch_hooks_header, patch_hooks_source,
-              normalize_sync_fd_import_initializer,
-          )
+          scripts = root / 'scripts'
+          sys.path.insert(0, str(scripts))
+
+          spec = importlib.util.spec_from_file_location('evidence_bundle', scripts / 'apply-adreno-evidence-profile.py')
+          bundle = importlib.util.module_from_spec(spec)
+          assert spec and spec.loader
+          spec.loader.exec_module(bundle)
+
           from adreno_syncfd_handoff import apply as apply_syncfd_handoff
           from adreno_async_zero_history import apply as apply_async_zero_history
           from adreno_async_zero_history_hardening import apply as apply_async_zero_history_hardening
           from adreno_slot_aware_zero_history import apply as apply_slot_aware_zero_history
           from adreno_transport_release_overlap import apply as apply_transport_release_overlap
 
-          patch_backend_header(root / 'framegen/public/lsfg_backend.hpp')
-          patch_device_source(root / 'framegen/src/core/device.cpp')
-          patch_hooks_header(root / 'include/hooks.hpp')
-          patch_hooks_source(root / 'src/hooks.cpp')
+          bundle.patch_backend_header(root / 'framegen/public/lsfg_backend.hpp')
+          bundle.patch_device_source(root / 'framegen/src/core/device.cpp')
+          bundle.patch_hooks_header(root / 'include/hooks.hpp')
+          bundle.patch_hooks_source(root / 'src/hooks.cpp')
           if 'int exportFd(' not in (root / 'include/mini/semaphore.hpp').read_text(encoding='utf-8'):
               apply_syncfd_handoff(root)
-          normalize_sync_fd_import_initializer(root / 'framegen/src/core/semaphore.cpp')
+          bundle.normalize_sync_fd_import_initializer(root / 'framegen/src/core/semaphore.cpp')
           apply_async_zero_history(root)
           apply_async_zero_history_hardening(root)
           apply_slot_aware_zero_history(root)
@@ -47,5 +51,5 @@ jobs:
               pos = text.find(needle)
               print(f'=== {needle} @ {pos} ===')
               if pos >= 0:
-                  print(text[max(0,pos-1000):pos+1600])
+                  print(text[max(0,pos-1200):pos+1800])
           PY
