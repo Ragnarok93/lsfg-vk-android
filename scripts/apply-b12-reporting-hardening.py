@@ -38,8 +38,7 @@ def patch_header(path: Path) -> None:
         text,
         "        [[nodiscard]] std::vector<double> durationsMs(const Core::Device& device) const;\n",
         "        [[nodiscard]] VkResult durationsMsChecked(\n"
-        "            const Core::Device& device, std::vector<double>& durations,\n"
-        "            bool waitForResults) const;\n"
+        "            const Core::Device& device, std::vector<double>& durations) const;\n"
         "        [[nodiscard]] std::vector<double> durationsMs(const Core::Device& device) const;\n",
         count=1,
         label=f"{path}: checked B12 readback API",
@@ -87,20 +86,16 @@ def patch_source(path: Path) -> None:
 }
 '''
         new = '''VkResult TimestampQueryPool::durationsMsChecked(
-        const Core::Device& device, std::vector<double>& durations,
-        bool waitForResults) const {
+        const Core::Device& device, std::vector<double>& durations) const {
     durations.clear();
     if (!this->supported())
         return VK_ERROR_FEATURE_NOT_PRESENT;
 
     std::vector<uint64_t> timestamps(this->queryCount_);
-    VkQueryResultFlags flags = VK_QUERY_RESULT_64_BIT;
-    if (waitForResults)
-        flags |= VK_QUERY_RESULT_WAIT_BIT;
     const VkResult result = vkGetQueryPoolResults(
         device.handle(), *this->queryPool, 0, this->queryCount_,
         timestamps.size() * sizeof(uint64_t), timestamps.data(),
-        sizeof(uint64_t), flags);
+        sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
     if (result != VK_SUCCESS)
         return result;
 
@@ -122,7 +117,7 @@ def patch_source(path: Path) -> None:
 std::vector<double> TimestampQueryPool::durationsMs(
         const Core::Device& device) const {
     std::vector<double> durations;
-    (void)this->durationsMsChecked(device, durations, false);
+    (void)this->durationsMsChecked(device, durations);
     return durations;
 }
 '''
@@ -179,23 +174,36 @@ def patch_context_header(path: Path) -> None:
         "        uint32_t b12Beta4Attempts{0};\n"
         "        uint32_t b12MipmapsFailures{0};\n"
         "        uint32_t b12Beta4Failures{0};\n"
+        "        uint32_t b12MipmapsNotReady{0};\n"
+        "        uint32_t b12Beta4NotReady{0};\n"
         "        VkResult b12MipmapsLastResult{VK_SUCCESS};\n"
         "        VkResult b12Beta4LastResult{VK_SUCCESS};\n"
         "        bool b12AvailabilityLogged{false};\n"
     )
     text = replace_exact(text, old, new, count=1,
         label=f"{path}: B12 attempt/failure counters")
+    text = replace_exact(
+        text,
+        "            bool b12MipmapsPending{false};\n"
+        "            bool b12Beta4Pending{false};\n",
+        "            bool b12MipmapsPending{false};\n"
+        "            bool b12Beta4Pending{false};\n"
+        "            uint32_t b12MipmapsNotReadyRetries{0};\n"
+        "            uint32_t b12Beta4NotReadyRetries{0};\n",
+        count=1,
+        label=f"{path}: B12 pending retry state",
+    )
     path.write_text(text, encoding="utf-8")
 
 
 HARDENED_COLLECTION = r'''    if (!this->b12AvailabilityLogged) {
         const bool mipmapsSupported = data.b12MipmapsQueryPool.supported();
         const bool beta4Supported = data.b12Beta4QueryPool.supported();
-        std::cout << "lsfg-vk: b12-stage-profile-init mipmaps_supported="
+        std::cerr << "lsfg-vk: b12-stage-profile-init mipmaps_supported="
             << (mipmapsSupported ? 1 : 0)
             << " beta4_supported=" << (beta4Supported ? 1 : 0) << std::endl;
         if (!mipmapsSupported || !beta4Supported) {
-            std::cout << "lsfg-vk: b12-stage-profile status=unavailable"
+            std::cerr << "lsfg-vk: b12-stage-profile status=unavailable"
                 << " reason=query-pool-unsupported"
                 << " mipmaps_supported=" << (mipmapsSupported ? 1 : 0)
                 << " beta4_supported=" << (beta4Supported ? 1 : 0)
@@ -206,49 +214,85 @@ HARDENED_COLLECTION = r'''    if (!this->b12AvailabilityLogged) {
     if (data.b12MipmapsPending) {
         std::vector<double> durations;
         const VkResult result = data.b12MipmapsQueryPool.durationsMsChecked(
-            vk.device, durations, true);
+            vk.device, durations);
         ++this->b12MipmapsAttempts;
         this->b12MipmapsLastResult = result;
-        if (result == VK_SUCCESS && durations.size() == 1) {
+        if (result == VK_NOT_READY) {
+            ++data.b12MipmapsNotReadyRetries;
+            ++this->b12MipmapsNotReady;
+            if (data.b12MipmapsNotReadyRetries == 1) {
+                std::cerr << "lsfg-vk: b12-readback-pending stage=mipmaps result="
+                    << static_cast<int>(result) << std::endl;
+            }
+            if (data.b12MipmapsNotReadyRetries >= 8) {
+                ++this->b12MipmapsFailures;
+                std::cerr << "lsfg-vk: b12-readback-failure stage=mipmaps result="
+                    << static_cast<int>(result)
+                    << " reason=not-ready-retry-limit retries="
+                    << data.b12MipmapsNotReadyRetries << std::endl;
+                data.b12MipmapsPending = false;
+                data.b12MipmapsNotReadyRetries = 0;
+            }
+        } else if (result == VK_SUCCESS && durations.size() == 1) {
             this->b12MipmapsTotalMs += durations.front();
             ++this->b12MipmapsSamples;
+            data.b12MipmapsPending = false;
+            data.b12MipmapsNotReadyRetries = 0;
         } else {
             ++this->b12MipmapsFailures;
-            if (this->b12MipmapsFailures == 1) {
-                std::cout << "lsfg-vk: b12-readback-failure stage=mipmaps result="
-                    << static_cast<int>(result)
-                    << " durations=" << durations.size() << std::endl;
-            }
+            std::cerr << "lsfg-vk: b12-readback-failure stage=mipmaps result="
+                << static_cast<int>(result)
+                << " durations=" << durations.size() << std::endl;
+            data.b12MipmapsPending = false;
+            data.b12MipmapsNotReadyRetries = 0;
         }
-        data.b12MipmapsPending = false;
     }
     if (data.b12Beta4Pending) {
         std::vector<double> durations;
         const VkResult result = data.b12Beta4QueryPool.durationsMsChecked(
-            vk.device, durations, true);
+            vk.device, durations);
         ++this->b12Beta4Attempts;
         this->b12Beta4LastResult = result;
-        if (result == VK_SUCCESS && durations.size() == 1) {
+        if (result == VK_NOT_READY) {
+            ++data.b12Beta4NotReadyRetries;
+            ++this->b12Beta4NotReady;
+            if (data.b12Beta4NotReadyRetries == 1) {
+                std::cerr << "lsfg-vk: b12-readback-pending stage=beta4 result="
+                    << static_cast<int>(result) << std::endl;
+            }
+            if (data.b12Beta4NotReadyRetries >= 8) {
+                ++this->b12Beta4Failures;
+                std::cerr << "lsfg-vk: b12-readback-failure stage=beta4 result="
+                    << static_cast<int>(result)
+                    << " reason=not-ready-retry-limit retries="
+                    << data.b12Beta4NotReadyRetries << std::endl;
+                data.b12Beta4Pending = false;
+                data.b12Beta4NotReadyRetries = 0;
+            }
+        } else if (result == VK_SUCCESS && durations.size() == 1) {
             this->b12Beta4TotalMs += durations.front();
             ++this->b12Beta4Samples;
+            data.b12Beta4Pending = false;
+            data.b12Beta4NotReadyRetries = 0;
         } else {
             ++this->b12Beta4Failures;
-            if (this->b12Beta4Failures == 1) {
-                std::cout << "lsfg-vk: b12-readback-failure stage=beta4 result="
-                    << static_cast<int>(result)
-                    << " durations=" << durations.size() << std::endl;
-            }
+            std::cerr << "lsfg-vk: b12-readback-failure stage=beta4 result="
+                << static_cast<int>(result)
+                << " durations=" << durations.size() << std::endl;
+            data.b12Beta4Pending = false;
+            data.b12Beta4NotReadyRetries = 0;
         }
-        data.b12Beta4Pending = false;
     }
-    if (this->b12MipmapsAttempts >= 120) {
-        const bool clean = this->b12MipmapsFailures == 0
+    if (this->b12MipmapsSamples + this->b12MipmapsFailures >= 120) {
+        const bool clean = this->b12MipmapsSamples > 0
+            && this->b12MipmapsFailures == 0
             && this->b12Beta4Failures == 0;
-        std::cout << "lsfg-vk: b12-stage-profile status="
+        std::cerr << "lsfg-vk: b12-stage-profile status="
             << (clean ? "ok" : "degraded")
             << " mipmaps_attempts=" << this->b12MipmapsAttempts
             << " mipmaps_samples=" << this->b12MipmapsSamples
             << " mipmaps_failures=" << this->b12MipmapsFailures
+            << " mipmaps_not_ready=" << this->b12MipmapsNotReady
             << " mipmaps_last_result=" << static_cast<int>(this->b12MipmapsLastResult)
             << " mipmaps_avg_ms="
             << (this->b12MipmapsSamples > 0
@@ -256,6 +300,7 @@ HARDENED_COLLECTION = r'''    if (!this->b12AvailabilityLogged) {
             << " beta4_attempts=" << this->b12Beta4Attempts
             << " beta4_samples=" << this->b12Beta4Samples
             << " beta4_failures=" << this->b12Beta4Failures
+            << " beta4_not_ready=" << this->b12Beta4NotReady
             << " beta4_last_result=" << static_cast<int>(this->b12Beta4LastResult)
             << " beta4_avg_ms="
             << (this->b12Beta4Samples > 0
@@ -269,6 +314,8 @@ HARDENED_COLLECTION = r'''    if (!this->b12AvailabilityLogged) {
         this->b12Beta4Attempts = 0;
         this->b12MipmapsFailures = 0;
         this->b12Beta4Failures = 0;
+        this->b12MipmapsNotReady = 0;
+        this->b12Beta4NotReady = 0;
         this->b12MipmapsLastResult = VK_SUCCESS;
         this->b12Beta4LastResult = VK_SUCCESS;
     }
@@ -285,6 +332,34 @@ def patch_context_source(path: Path) -> None:
         "    data.shouldWait = generationCount > 0;\n",
         HARDENED_COLLECTION,
         label=f"{path}: B12 checked delayed result collection",
+    )
+    text = replace_exact(
+        text,
+        "    const bool b12ProfileMipmaps = data.b12MipmapsQueryPool.supported();\n"
+        "    const bool b12ProfileBeta4 = generationCount > 0\n"
+        "        && data.b12Beta4QueryPool.supported();\n",
+        "    const bool b12ProfileMipmaps = data.b12MipmapsQueryPool.supported()\n"
+        "        && !data.b12MipmapsPending;\n"
+        "    const bool b12ProfileBeta4 = generationCount > 0\n"
+        "        && data.b12Beta4QueryPool.supported()\n"
+        "        && !data.b12Beta4Pending;\n",
+        count=1,
+        label=f"{path}: do not reuse unresolved query slots",
+    )
+    text = replace_exact(
+        text,
+        "    data.b12MipmapsPending = b12ProfileMipmaps;\n"
+        "    data.b12Beta4Pending = b12ProfileBeta4;\n",
+        "    if (b12ProfileMipmaps) {\n"
+        "        data.b12MipmapsPending = true;\n"
+        "        data.b12MipmapsNotReadyRetries = 0;\n"
+        "    }\n"
+        "    if (b12ProfileBeta4) {\n"
+        "        data.b12Beta4Pending = true;\n"
+        "        data.b12Beta4NotReadyRetries = 0;\n"
+        "    }\n",
+        count=1,
+        label=f"{path}: preserve unresolved pending state",
     )
     path.write_text(text, encoding="utf-8")
 
