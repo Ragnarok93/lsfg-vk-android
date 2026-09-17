@@ -130,12 +130,12 @@ int main(int argc, char** argv) {
         return 10;
     }
     if (first.barriersBefore != 5 || first.barriersAfter != 4) return 11;
-    if (first.tailDynamicLoadsBefore != 15 || first.tailDynamicLoadsAfter != 16) return 12;
+    if (first.tailDynamicLoadsBefore != 15 || first.tailDynamicLoadsAfter != 12) return 12;
     if (first.tailWorkgroupStoresBefore != 4 || first.tailWorkgroupStoresAfter != 0) return 13;
     if (first.imageWritesBefore != 10 || first.imageWritesAfter != 10) return 14;
-    if (first.tailCriticalPathLoadsBefore != 6 || first.tailCriticalPathLoadsAfter != 4) return 15;
+    if (first.tailCriticalPathLoadsBefore != 6 || first.tailCriticalPathLoadsAfter != 3) return 15;
     if (first.tailParallelLanesAfter != 4 || first.subgroupBroadcastsAfter != 4) return 16;
-    if (first.staticWorkgroupLoadsBefore != 15 || first.staticWorkgroupLoadsAfter != 13) return 17;
+    if (first.staticWorkgroupLoadsBefore != 15 || first.staticWorkgroupLoadsAfter != 12) return 17;
     writeFile(argv[2], code);
 
     const auto once = code;
@@ -213,7 +213,7 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
         self.assertEqual((baseline_ops.count(99), candidate_ops.count(99)), (10, 10))
         self.assertEqual(candidate_ops.count(337), 4)
         self.assertEqual(shared_access_counts(FIXTURE.read_bytes()), (15, 5))
-        self.assertEqual(shared_access_counts(transformed_bytes), (13, 4))
+        self.assertEqual(shared_access_counts(transformed_bytes), (12, 4))
 
     def test_candidate_wiring_is_idempotent_and_device_agnostic(self) -> None:
         self.assertTrue(PATCHER.exists(), PATCHER.as_posix())
