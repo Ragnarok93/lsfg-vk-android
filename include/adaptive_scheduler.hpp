@@ -15,6 +15,7 @@ struct AdaptiveSchedulerTelemetry {
     bool costBackedOff{false};
     bool costProbe{false};
     bool discontinuityReset{false};
+    bool configWarmStart{false};
 };
 
 /// Chooses the minimum number of interpolation frames needed to approach an
@@ -27,7 +28,9 @@ public:
 
     /// Apply a hot-reloaded target. A changed target clears fractional,
     /// measurement, and generation-cost state so the previous target cannot
-    /// leak into the new schedule.
+    /// leak into the new schedule. If the scheduler was already observing a
+    /// valid runtime cadence, the next valid sample may warm-start the new
+    /// generation ceiling instead of re-ramping from one generated frame.
     void configure(uint32_t targetFps, std::size_t maxGeneratedFrames);
 
     /// Observe a real/source frame interval and return the number of generated
@@ -53,6 +56,7 @@ private:
     double fractionalGeneratedBudget_{};
     double smoothedSourceIntervalSeconds_{};
     bool hasSmoothedInterval_{false};
+    bool reconfigureWarmStartPending_{false};
 
     // Source-rate decreases need to be recognized quickly so a heavier scene
     // can receive more generation. Apparent source-rate increases are held to

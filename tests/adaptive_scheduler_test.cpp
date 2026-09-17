@@ -33,6 +33,7 @@ int main() {
         // to the maximum interpolation load on the first slow source frame.
         AdaptiveFrameScheduler scheduler(120, 3);
         assert(scheduler.plan(40ms) == 1);
+        assert(!scheduler.telemetry().configWarmStart);
     }
 
     {
@@ -179,9 +180,9 @@ int main() {
     }
 
     {
-        // Discontinuities reset both fractional scheduling and the conservative
-        // generation-cost ceiling; a resumed source must re-establish demand
-        // before probing upward again.
+        // Ordinary discontinuities still reset both fractional scheduling and
+        // the conservative generation-cost ceiling. Only an explicit config
+        // change is allowed to warm-start after a Quick Menu suspension.
         AdaptiveFrameScheduler scheduler(120, 3);
         assert(scheduler.plan(50ms) == 1);
         assert(scheduler.plan(1s) == 0);
@@ -189,15 +190,59 @@ int main() {
         assert(scheduler.telemetry().costLimit == 1);
         assert(scheduler.plan(50ms) == 1);
         assert(!scheduler.telemetry().costRaised);
+        assert(!scheduler.telemetry().configWarmStart);
     }
 
     {
+        // Regression from the S20+ Quick Menu trace: changing an adaptive
+        // target while the guest is suspended used to discard the pause, then
+        // cold-start at cost 1 and spend ~0.6 s per level climbing toward the
+        // newly requested target. Preserve explicit reconfiguration intent
+        // across the pause and seed the first valid cadence sample directly to
+        // the bounded cost required by the new target.
+        AdaptiveFrameScheduler scheduler(45, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(60ms);
+
+        scheduler.configure(60, 3);
+        assert(scheduler.plan(1s) == 0);
+        assert(scheduler.telemetry().discontinuityReset);
+
+        const auto generated = scheduler.plan(60ms);
+        assert(scheduler.telemetry().configWarmStart);
+        assert(scheduler.telemetry().wantedGeneratedFrames > 2.5);
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(generated >= 2);
+    }
+
+    {
+        // The warm start must remain fail-safe: if the newly seeded load causes
+        // a prompt source-rate regression, the existing blame window must back
+        // it off rather than pinning the user-selected target at an unsafe cost.
+        AdaptiveFrameScheduler scheduler(45, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(40ms);
+        scheduler.configure(120, 3);
+        assert(scheduler.plan(1s) == 0);
+        scheduler.plan(40ms);
+        assert(scheduler.telemetry().configWarmStart);
+        assert(scheduler.telemetry().costLimit == 3);
+        scheduler.plan(80ms);
+        assert(scheduler.telemetry().costBackedOff);
+        assert(scheduler.telemetry().costLimit == 2);
+    }
+
+    {
+        // First-time configuration is still a cold start; merely constructing
+        // or enabling Adaptive must not bypass the established safety ramp.
         AdaptiveFrameScheduler scheduler;
         assert(scheduler.plan(33ms) == 0);
         scheduler.configure(60, 3);
-        assert(scheduler.plan(33333333ns) == 1);
+        assert(scheduler.plan(60ms) == 1);
+        assert(!scheduler.telemetry().configWarmStart);
         scheduler.configure(90, 3);
-        assert(scheduler.plan(33333333ns) == 1);
+        assert(scheduler.plan(60ms) >= 1);
+        assert(scheduler.telemetry().configWarmStart);
         assert(scheduler.targetFps() == 90);
     }
 

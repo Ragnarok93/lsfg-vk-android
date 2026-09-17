@@ -34,9 +34,23 @@ void AdaptiveFrameScheduler::configure(
         uint32_t targetFps, std::size_t maxGeneratedFrames) {
     if (targetFps_ == targetFps && maxGeneratedFrames_ == maxGeneratedFrames)
         return;
+
+    const bool hadRuntimeCadence = hasSmoothedInterval_;
+    const bool wasActive = targetFps_ != 0 && maxGeneratedFrames_ != 0;
     targetFps_ = targetFps;
     maxGeneratedFrames_ = maxGeneratedFrames;
     resetRuntimeState();
+
+    // A Quick Menu target/multiplier change is an explicit user request, not a
+    // scene-rate inference. If this scheduler was already running, remember
+    // that intent across the menu's suspend/resume discontinuity. The first
+    // valid cadence sample can then seed the requested generation ceiling
+    // immediately while the existing causal backoff logic watches for a source
+    // FPS regression.
+    reconfigureWarmStartPending_ = hadRuntimeCadence
+        && wasActive
+        && targetFps_ != 0
+        && maxGeneratedFrames_ != 0;
 }
 
 std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval) {
@@ -45,6 +59,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.costBackedOff = false;
     telemetry_.costProbe = false;
     telemetry_.discontinuityReset = false;
+    telemetry_.configWarmStart = false;
     telemetry_.generatedFrames = 0;
     telemetry_.wantedGeneratedFrames = 0.0;
 
@@ -60,8 +75,12 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     // A pause, app switch, shader-compilation stall, or Quick Menu suspension
     // is not a useful source cadence sample. Reset controller state rather than
     // accumulating output debt or blaming frame generation for a discontinuity.
+    // Preserve an explicit hot-reload warm start so the menu pause itself does
+    // not erase the user's newly selected target before the first valid sample.
     if (intervalSeconds >= kDiscontinuitySeconds) {
+        const bool preserveWarmStart = reconfigureWarmStartPending_;
         resetRuntimeState();
+        reconfigureWarmStartPending_ = preserveWarmStart;
         telemetry_.discontinuityReset = true;
         return 0;
     }
@@ -74,6 +93,31 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         0.0,
         static_cast<double>(maxGeneratedFrames_));
     telemetry_.wantedGeneratedFrames = wantedGenerated;
+
+    if (reconfigureWarmStartPending_) {
+        // The first trustworthy post-resume interval is the earliest point at
+        // which the new target can be translated into an actual interpolation
+        // cost. Seed to that bounded requirement instead of spending 0.6 s per
+        // level re-climbing from cost 1. Treat the seed like a normal confirmed
+        // raise so the existing blame window immediately backs off if the extra
+        // work materially reduces source FPS.
+        const auto requiredCost = static_cast<std::size_t>(std::clamp(
+            std::ceil(wantedGenerated - 1e-6),
+            1.0,
+            static_cast<double>(maxGeneratedFrames_)));
+        costLimit_ = std::max(costLimit_, requiredCost);
+        if (costLimit_ > 1) {
+            pendingCostRaise_ = true;
+            pendingRaiseWasProbe_ = false;
+            probeAfterBackoff_ = false;
+            pendingRaiseBaselineFps_ = telemetry_.smoothedSourceFps;
+            pendingRaiseTimeSeconds_ = observedTimeSeconds_;
+            lastCostChangeTimeSeconds_ = observedTimeSeconds_;
+        }
+        resetUnmetDemand();
+        reconfigureWarmStartPending_ = false;
+        telemetry_.configWarmStart = true;
+    }
 
     updateCostLimit(wantedGenerated);
     telemetry_.costLimit = costLimit_;
@@ -306,6 +350,7 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
     fractionalGeneratedBudget_ = 0.0;
     smoothedSourceIntervalSeconds_ = 0.0;
     hasSmoothedInterval_ = false;
+    reconfigureWarmStartPending_ = false;
     resetRateChangeCandidates();
     observedTimeSeconds_ = 0.0;
     costLimit_ = maxGeneratedFrames_ == 0 ? 0 : 1;
