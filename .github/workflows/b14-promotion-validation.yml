@@ -1,0 +1,104 @@
+name: B14 Promotion Validation
+
+on:
+  push:
+    branches:
+      - feature/adreno-6xx-b14-directional-ahb-adaptive-reload
+  workflow_dispatch:
+
+concurrency:
+  group: b14-promotion-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_NDK_VERSION: 27.3.13750724
+  ANDROID_PLATFORM: android-28
+
+jobs:
+  validate:
+    name: Validate promoted B14 runtime
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install host validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libvulkan-dev spirv-tools cmake ninja-build file binutils
+
+      - name: Verify adaptive Quick Menu regression tests
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -Wall -Wextra -Werror \
+            -Iinclude \
+            src/adaptive_scheduler.cpp \
+            tests/adaptive_scheduler_test.cpp \
+            -o /tmp/lsfg-adaptive-scheduler-test
+          /tmp/lsfg-adaptive-scheduler-test
+          python3 tests/android_adaptive_history_test.py
+          python3 tests/android_ahb_portability_test.py
+          python3 tests/android_deferred_zero_history_test.py
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_ROOT=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build promoted B14 arm64 runtime
+        env:
+          ANDROID_ABI: arm64-v8a
+          HOST_TAG: linux-x86_64
+          LSFGVK_ADAPTIVE_RUNTIME: "1"
+          LSFGVK_MIPMAPS_CANDIDATE_SCRIPT: scripts/apply-candidate-b14-mipmaps-tail-fusion.py
+        shell: bash
+        run: |
+          set -o pipefail
+          bash ./scripts/build/android.sh Release 2>&1 | tee b14-promotion-build.log
+
+      - name: Verify promoted runtime markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="build-android-arm64-v8a/dist/liblsfg-vk-arm64-v8a.so"
+          file "$artifact"
+          strings "$artifact" > /tmp/b14-promotion-strings.txt
+          for required in \
+            'candidate-b11-beta4-pow2-mask' \
+            'candidate-b13-beta4-fused-mask' \
+            'candidate-b14-mipmaps-tail-fusion' \
+            'ahb-directional-transport' \
+            'config-reload-soft-toggle'; do
+            grep -Fq "$required" /tmp/b14-promotion-strings.txt || {
+              echo "ERROR: promoted B14 runtime missing marker: $required" >&2
+              exit 1
+            }
+          done
+          for forbidden in \
+            'candidate-b15-mip4-topology' \
+            'candidate-b15-mip4-register-fusion' \
+            'candidate-fp16-motion-compaction'; do
+            if grep -Fq "$forbidden" /tmp/b14-promotion-strings.txt; then
+              echo "ERROR: unpromoted B15/FP16 marker leaked into B14 runtime: $forbidden" >&2
+              exit 1
+            fi
+          done
+          sha256sum "$artifact" | tee b14-promotion-sha256.txt
+
+      - name: Upload promoted B14 runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: liblsfg-vk-b14-promoted-arm64-v8a
+          path: |
+            build-android-arm64-v8a/dist/liblsfg-vk-arm64-v8a.so
+            b14-promotion-build.log
+            b14-promotion-sha256.txt
+          if-no-files-found: error
