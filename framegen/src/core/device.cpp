@@ -320,8 +320,7 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
 
     std::cerr << "lsfg-vk: backend driver=\"" << this->diagnostics.driverName
               << "\" ahb_mode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
-              << " sync=" << synchronizationPathName(decision.synchronizationPath) << '
-';
+              << " sync=" << synchronizationPathName(decision.synchronizationPath) << '\n';
 
     uint32_t familyCount{};
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
