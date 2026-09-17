@@ -17,7 +17,7 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
             '"lsfg-vk-base"',
             "downstreamGipa",
             "downstreamCreateInstance",
-            "runtime stage=private-framegen-instance-pass-through",
+            "storePrivateInstanceDispatch(*pInstance, downstreamGipa)",
         ):
             self.assertIn(token, layer)
 
@@ -33,8 +33,10 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
         private_body_end = create.index("next_vkGetInstanceProcAddr =", private_check)
         private_body = create[private_check:private_body_end]
         self.assertIn("downstreamCreateInstance(pCreateInfo, pAllocator, pInstance)", private_body)
+        self.assertIn("storePrivateInstanceDispatch(*pInstance, downstreamGipa)", private_body)
         self.assertNotIn("next_vkGetInstanceProcAddr =", private_body)
         self.assertNotIn('Hooks::hooks["vkCreateInstance"]', private_body)
+        self.assertNotIn("private-framegen-instance-pass-through", private_body)
 
     def test_private_framegen_instance_stays_bypassed_for_its_entire_lifetime(self) -> None:
         layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
@@ -45,7 +47,6 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
             "loadPrivateInstanceDispatch",
             "erasePrivateInstanceDispatch",
             "layer_vkDestroyPrivateInstance",
-            "runtime stage=private-framegen-instance-destroy-pass-through",
         ):
             self.assertIn(token, layer)
 
@@ -73,6 +74,7 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
             destroy.index("erasePrivateInstanceDispatch(instance)"),
             destroy.index("dispatch.DestroyInstance(instance, pAllocator)"),
         )
+        self.assertNotIn("private-framegen-instance-destroy-pass-through", destroy)
 
     def test_game_instance_path_and_device_dispatch_contract_remain_unchanged(self) -> None:
         layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
@@ -83,9 +85,14 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
             "storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())",
             "loadDeviceDispatch(device, &dispatch)",
             "dispatch.presentationDevice",
-            "runtime stage=device-dispatch-ready presentation=1",
+            ".presentationDevice = true",
         ):
             self.assertIn(token, layer)
+
+        snapshot = layer.index("storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())")
+        post_hook = layer.index('Hooks::hooks["vkCreateDevicePost"]')
+        self.assertLess(snapshot, post_hook)
+        self.assertNotIn("runtime stage=device-dispatch-ready presentation=1", layer)
 
 
 if __name__ == "__main__":
