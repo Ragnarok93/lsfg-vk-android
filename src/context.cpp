@@ -367,16 +367,16 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     // stock Android ICDs as well as wrapper/custom drivers.
     this->frame_0 = Mini::Image(info.device, info.physicalDevice,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-        ahbTransportMode);
+        ahbTransportMode, LSFG::AhbImageRole::Input);
     this->frame_1 = Mini::Image(info.device, info.physicalDevice,
         extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-        ahbTransportMode);
+        ahbTransportMode, LSFG::AhbImageRole::Input);
 
     for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
         this->out_n.emplace_back(info.device, info.physicalDevice,
             extent, format,
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-            ahbTransportMode);
+            ahbTransportMode, LSFG::AhbImageRole::Output);
 
     // Create framegen context using AHB sharing
     std::vector<AHardwareBuffer*> outAhbs;
@@ -448,6 +448,9 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         && gameGetSemaphoreFd != nullptr;
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
+              << ", mode=" << LSFG::ahbTransportModeName(ahbTransportMode)
+              << ", inputCopy=" << (LSFG::ahbInputCopyRequired(ahbTransportMode) ? 1 : 0)
+              << ", outputCopy=" << (LSFG::ahbOutputCopyRequired(ahbTransportMode) ? 1 : 0)
               << ", handoff="
               << (this->asyncAhbHandoffEnabled_ ? "gpu-semaphore" : "host-fence")
               << ")\n";

@@ -78,7 +78,8 @@ namespace LSFG_3_1P {
     private:
         Core::Image inImg_0, inImg_1; // private shader images in transport-only mode
 #ifdef __ANDROID__
-        bool transportOnly{false};
+        bool inputCopyRequired{false};
+        bool outputCopyRequired{false};
         Core::Image sharedInImg_0, sharedInImg_1;
         std::vector<Core::Image> sharedOutImages;
 #endif

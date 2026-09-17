@@ -121,7 +121,7 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
 Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
         VkExtent2D extent, VkFormat format,
         VkImageUsageFlags usage, VkImageAspectFlags aspectFlags,
-        LSFG::AhbTransportMode transportMode)
+        LSFG::AhbTransportMode transportMode, LSFG::AhbImageRole role)
         : extent(extent), format(format), aspectFlags(aspectFlags) {
     // Convert VkFormat to AHardwareBuffer format.
     uint32_t ahbFormat = 0;
@@ -144,7 +144,7 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
         .format = ahbFormat,
         .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
                | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT
-               | (transportMode == LSFG::AhbTransportMode::DirectStorage
+               | (LSFG::ahbStorageUsageRequired(transportMode, role)
                     ? AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER : 0ULL),
         .stride = 0,
         .rfu0 = 0,

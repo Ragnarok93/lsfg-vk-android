@@ -244,7 +244,7 @@ void Context::present(Vulkan& vk,
     data.cmdBuffer1.begin();
 
 #ifdef __ANDROID__
-    if (this->transportOnly) {
+    if (this->inputCopyRequired) {
         std::vector<VkImageMemoryBarrier2> barriers;
         barriers.reserve(4);
         add_external_transfer_acquire(barriers, vk, this->sharedInImg_0,
@@ -288,7 +288,7 @@ void Context::present(Vulkan& vk,
         this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
 
 #ifdef __ANDROID__
-    if (generationCount == 0 && !this->transportOnly) {
+    if (generationCount == 0 && !this->inputCopyRequired) {
         std::vector<VkImageMemoryBarrier2> releaseBarriers;
         releaseBarriers.reserve(2);
         add_external_release(releaseBarriers, vk, this->inImg_0,
@@ -336,7 +336,7 @@ void Context::present(Vulkan& vk,
         buf2.begin();
 
 #ifdef __ANDROID__
-        if (!this->transportOnly) {
+        if (!this->outputCopyRequired) {
             std::vector<VkImageMemoryBarrier2> acquireBarriers;
             acquireBarriers.reserve(1);
             add_external_acquire(acquireBarriers, vk, this->generate.getOutImages().at(pass),
@@ -353,7 +353,7 @@ void Context::present(Vulkan& vk,
         this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);
 
 #ifdef __ANDROID__
-        if (this->transportOnly) {
+        if (this->outputCopyRequired) {
             auto& localOut = this->generate.getOutImages().at(pass);
             auto& sharedOut = this->sharedOutImages.at(pass);
             std::vector<VkImageMemoryBarrier2> barriers;
@@ -443,40 +443,49 @@ Context::Context(Vulkan& vk,
         AHardwareBuffer* in0, AHardwareBuffer* in1,
         const std::vector<AHardwareBuffer*>& outN,
         VkExtent2D extent, VkFormat format) {
-    this->transportOnly = vk.device.getAhbTransportMode() == LSFG::AhbTransportMode::TransportOnly;
+    const auto ahbMode = vk.device.getAhbTransportMode();
+    this->inputCopyRequired = LSFG::ahbInputCopyRequired(ahbMode);
+    this->outputCopyRequired = LSFG::ahbOutputCopyRequired(ahbMode);
     if (vk.device.getAhbTransportMode() == LSFG::AhbTransportMode::Unsupported)
         throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
             "No compatible AHardwareBuffer transport path for framegen format");
+    std::cerr << "lsfg-vk: ahb-directional-transport mode="
+              << LSFG::ahbTransportModeName(ahbMode)
+              << " input_copy=" << (this->inputCopyRequired ? 1 : 0)
+              << " output_copy=" << (this->outputCopyRequired ? 1 : 0)
+              << '\n';
 
     std::vector<Core::Image> outImgs;
     outImgs.reserve(outN.size());
-    if (this->transportOnly) {
+    if (this->inputCopyRequired) {
         this->sharedInImg_0 = Core::Image(vk.device, extent, format,
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, in0);
         this->sharedInImg_1 = Core::Image(vk.device, extent, format,
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, in1);
+        this->inImg_0 = Core::Image(vk.device, extent, format,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        this->inImg_1 = Core::Image(vk.device, extent, format,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    } else {
+        this->inImg_0 = Core::Image(vk.device, extent, format,
+            VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT, in0);
+        this->inImg_1 = Core::Image(vk.device, extent, format,
+            VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT, in1);
+    }
+    if (this->outputCopyRequired) {
         this->sharedOutImages.reserve(outN.size());
         for (auto* ahb : outN)
             this->sharedOutImages.emplace_back(vk.device, extent, format,
                 VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, ahb);
-
-        this->inImg_0 = Core::Image(vk.device, extent, format,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        this->inImg_1 = Core::Image(vk.device, extent, format,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         for (size_t i = 0; i < outN.size(); ++i)
             outImgs.emplace_back(vk.device, extent, format,
                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     } else {
-        this->inImg_0 = Core::Image(vk.device, extent, format,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT, in0);
-        this->inImg_1 = Core::Image(vk.device, extent, format,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT, in1);
         for (auto* ahb : outN)
             outImgs.emplace_back(vk.device, extent, format,
-                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_USAGE_STORAGE_BIT,
                 VK_IMAGE_ASPECT_COLOR_BIT, ahb);
     }
 

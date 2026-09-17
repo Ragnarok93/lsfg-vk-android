@@ -53,7 +53,8 @@ namespace Mini {
         ///
         Image(VkDevice device, VkPhysicalDevice physicalDevice, VkExtent2D extent, VkFormat format,
             VkImageUsageFlags usage, VkImageAspectFlags aspectFlags,
-            LSFG::AhbTransportMode transportMode = LSFG::AhbTransportMode::DirectStorage);
+            LSFG::AhbTransportMode transportMode = LSFG::AhbTransportMode::DirectStorage,
+            LSFG::AhbImageRole role = LSFG::AhbImageRole::Input);
 
         /// Get the AHardwareBuffer handle (Android only).
         [[nodiscard]] AHardwareBuffer* getAhb() const { return this->ahb; }

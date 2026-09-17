@@ -306,17 +306,20 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.ahbR8Storage = probeAhbImageUsage(physicalDevice,
         VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    const bool directStorage = probeAhbImageUsage(physicalDevice, sharedFormat,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    const bool transferSrc = probeAhbImageUsage(physicalDevice, sharedFormat,
+    const bool sampledInput = probeAhbImageUsage(physicalDevice, sharedFormat,
+        VK_IMAGE_USAGE_SAMPLED_BIT);
+    const bool storageOutput = probeAhbImageUsage(physicalDevice, sharedFormat,
+        VK_IMAGE_USAGE_STORAGE_BIT);
+    const bool transferInput = probeAhbImageUsage(physicalDevice, sharedFormat,
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-    const bool transferDst = probeAhbImageUsage(physicalDevice, sharedFormat,
+    const bool transferOutput = probeAhbImageUsage(physicalDevice, sharedFormat,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    this->diagnostics.ahbTransportMode = directStorage
-        ? LSFG::AhbTransportMode::DirectStorage
-        : (transferSrc && transferDst
-            ? LSFG::AhbTransportMode::TransportOnly
-            : LSFG::AhbTransportMode::Unsupported);
+    this->diagnostics.ahbSampledInput = sampledInput;
+    this->diagnostics.ahbStorageOutput = storageOutput;
+    this->diagnostics.ahbTransferInput = transferInput;
+    this->diagnostics.ahbTransferOutput = transferOutput;
+    this->diagnostics.ahbTransportMode = LSFG::selectAhbTransportMode(
+        sampledInput, transferInput, storageOutput, transferOutput);
     this->diagnostics.externalSemaphoreOpaqueFd =
         probeOpaqueFdSemaphoreSupport(physicalDevice, availableExtensions);
 #else
@@ -332,6 +335,10 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
               << " deviceUUID=" << uuidString(this->diagnostics.identity.deviceUUID)
               << " driverUUID=" << uuidString(this->diagnostics.identity.driverUUID)
               << " ahbR16fStorage=" << (this->diagnostics.ahbR16fStorage ? 1 : 0)
+              << " ahbSampledInput=" << (this->diagnostics.ahbSampledInput ? 1 : 0)
+              << " ahbStorageOutput=" << (this->diagnostics.ahbStorageOutput ? 1 : 0)
+              << " ahbTransferInput=" << (this->diagnostics.ahbTransferInput ? 1 : 0)
+              << " ahbTransferOutput=" << (this->diagnostics.ahbTransferOutput ? 1 : 0)
               << " ahbMode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
               << " externalSemaphoreOpaqueFd="
               << (this->diagnostics.externalSemaphoreOpaqueFd ? 1 : 0)
