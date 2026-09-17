@@ -11,6 +11,7 @@
 #include "shaders/generate.hpp"
 #include "shaders/mipmaps.hpp"
 #include "common/utils.hpp"
+#include "lsfg_backend.hpp"
 
 #include <vulkan/vulkan_core.h>
 

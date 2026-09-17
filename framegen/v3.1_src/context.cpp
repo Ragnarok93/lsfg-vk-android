@@ -12,6 +12,10 @@
 #include <optional>
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+#include <utility>
 
 using namespace LSFG_3_1;
 
@@ -173,6 +177,32 @@ void copy_same_format(const Core::CommandBuffer& buf,
         dst.handle(), dst.getLayout(), 1, &region);
 }
 
+class ScopedAdaptiveFlowConstruction {
+public:
+    ScopedAdaptiveFlowConstruction(Vulkan& vk, float userFlowScale)
+        : vk_(vk), savedFlowScale_(vk.flowScale),
+          savedResources_(std::move(vk.resources)) {
+        if (!std::isfinite(userFlowScale) || userFlowScale < 0.25F
+                || userFlowScale > 1.0F)
+            throw std::invalid_argument("Adaptive Flow Scale must be within 0.25..1.0");
+        vk_.flowScale = 1.0F / userFlowScale;
+        vk_.resources = Pool::ResourcePool(vk_.isHdr, vk_.flowScale);
+    }
+
+    ScopedAdaptiveFlowConstruction(const ScopedAdaptiveFlowConstruction&) = delete;
+    ScopedAdaptiveFlowConstruction& operator=(const ScopedAdaptiveFlowConstruction&) = delete;
+
+    ~ScopedAdaptiveFlowConstruction() {
+        vk_.resources = std::move(savedResources_);
+        vk_.flowScale = savedFlowScale_;
+    }
+
+private:
+    Vulkan& vk_;
+    float savedFlowScale_;
+    Pool::ResourcePool savedResources_;
+};
+
 } // namespace
 #endif
 
@@ -281,11 +311,52 @@ void Context::present(Vulkan& vk,
     }
 #endif
 
+#ifdef __ANDROID__
+    size_t generationGraphIndex = 0;
+    bool adaptiveFlowShadowSubmitted = false;
+    bool adaptiveFlowCommitAfterSubmit = false;
+    if (!this->adaptiveFlowScales_.empty()) {
+        generationGraphIndex = this->activeFlowGraphIndex_;
+        const auto activeGraph = this->flowGraph(this->activeFlowGraphIndex_);
+        if (this->pendingFlowGraphIndex_.has_value()) {
+            const size_t pendingIndex = *this->pendingFlowGraphIndex_;
+            const auto pendingGraph = this->flowGraph(pendingIndex);
+            if (this->pendingFlowWarmupFrames_ + 1 < kAdaptiveFlowHistoryFrames) {
+                this->dispatchAdaptiveFlowPreprocess(data.cmdBuffer1, activeGraph);
+                this->dispatchAdaptiveFlowPreprocess(data.cmdBuffer1, pendingGraph);
+                if (generationCount > 0)
+                    activeGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
+                adaptiveFlowShadowSubmitted = true;
+            } else {
+                // The first two shadow cycles already refreshed two distinct
+                // temporal slots. Writing the current source into the pending
+                // graph refreshes the third; generation can switch immediately
+                // after this submission without a native/source-only gap.
+                this->dispatchAdaptiveFlowPreprocess(data.cmdBuffer1, pendingGraph);
+                if (generationCount > 0)
+                    pendingGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
+                generationGraphIndex = pendingIndex;
+                adaptiveFlowCommitAfterSubmit = true;
+            }
+        } else {
+            this->dispatchAdaptiveFlowPreprocess(data.cmdBuffer1, activeGraph);
+            if (generationCount > 0)
+                activeGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
+        }
+    } else {
+        this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);
+        for (size_t i = 0; i < 7; i++)
+            this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
+        if (generationCount > 0)
+            this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
+    }
+#else
     this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);
     for (size_t i = 0; i < 7; i++)
         this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
     if (generationCount > 0)
         this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
+#endif
 
 #ifdef __ANDROID__
     if (generationCount == 0 && !this->inputCopyRequired) {
@@ -310,6 +381,12 @@ void Context::present(Vulkan& vk,
         if (!data.preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))
             throw LSFG::vulkan_error(VK_TIMEOUT,
                 "Temporal preprocessing fence wait timed out");
+#ifdef __ANDROID__
+        if (adaptiveFlowShadowSubmitted)
+            ++this->pendingFlowWarmupFrames_;
+        if (adaptiveFlowCommitAfterSubmit)
+            this->commitAdaptiveFlowTransition(generationGraphIndex);
+#endif
         this->frameIdx++;
         return;
     }
@@ -320,6 +397,18 @@ void Context::present(Vulkan& vk,
     data.cmdBuffer1.submit(vk.device.getComputeQueue(), std::nullopt,
         waits, std::nullopt,
         activeInternalSemaphores, std::nullopt);
+
+#ifdef __ANDROID__
+    if (adaptiveFlowShadowSubmitted)
+        ++this->pendingFlowWarmupFrames_;
+    if (adaptiveFlowCommitAfterSubmit)
+        this->commitAdaptiveFlowTransition(generationGraphIndex);
+    auto* presentGenerate = this->adaptiveFlowScales_.empty()
+        ? &this->generate
+        : this->flowGraph(generationGraphIndex).generate;
+#else
+    auto* presentGenerate = &this->generate;
+#endif
 
     for (size_t pass = 0; pass < generationCount; pass++) {
         auto& internalSemaphore = data.internalSemaphores.at(pass);
@@ -339,22 +428,44 @@ void Context::present(Vulkan& vk,
         if (!this->outputCopyRequired) {
             std::vector<VkImageMemoryBarrier2> acquireBarriers;
             acquireBarriers.reserve(1);
-            add_external_acquire(acquireBarriers, vk, this->generate.getOutImages().at(pass),
+            add_external_acquire(acquireBarriers, vk, presentGenerate->getOutImages().at(pass),
                 VK_ACCESS_2_SHADER_WRITE_BIT);
             emit_external_barriers(buf2, acquireBarriers);
         }
 #endif
 
+#ifdef __ANDROID__
+        if (!this->adaptiveFlowScales_.empty()) {
+            const auto generationGraph = this->flowGraph(generationGraphIndex);
+            for (size_t i = 0; i < 7; i++) {
+                generationGraph.gamma->at(i).Dispatch(
+                    buf2, this->frameIdx, pass, generationCount);
+                if (i >= 4)
+                    generationGraph.delta->at(i - 4).Dispatch(
+                        buf2, this->frameIdx, pass, generationCount);
+            }
+            generationGraph.generate->Dispatch(
+                buf2, this->frameIdx, pass, generationCount);
+        } else {
+            for (size_t i = 0; i < 7; i++) {
+                this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);
+                if (i >= 4)
+                    this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);
+            }
+            this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);
+        }
+#else
         for (size_t i = 0; i < 7; i++) {
             this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);
             if (i >= 4)
                 this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);
         }
         this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);
+#endif
 
 #ifdef __ANDROID__
         if (this->outputCopyRequired) {
-            auto& localOut = this->generate.getOutImages().at(pass);
+            auto& localOut = presentGenerate->getOutImages().at(pass);
             auto& sharedOut = this->sharedOutImages.at(pass);
             std::vector<VkImageMemoryBarrier2> barriers;
             barriers.reserve(2);
@@ -375,7 +486,7 @@ void Context::present(Vulkan& vk,
         } else {
             std::vector<VkImageMemoryBarrier2> releaseBarriers;
             releaseBarriers.reserve(pass + 1 == generationCount ? 3 : 1);
-            add_external_release(releaseBarriers, vk, this->generate.getOutImages().at(pass),
+            add_external_release(releaseBarriers, vk, presentGenerate->getOutImages().at(pass),
                 VK_ACCESS_2_SHADER_WRITE_BIT);
             if (pass + 1 == generationCount) {
                 add_external_release(releaseBarriers, vk, this->inImg_0, VK_ACCESS_2_SHADER_READ_BIT);
@@ -525,6 +636,188 @@ Context::Context(Vulkan& vk,
         this->delta.at(2).getOutImage1(),
         this->delta.at(2).getOutImage2(),
         std::move(outImgs));
+}
+
+Context::Context(Vulkan& vk,
+        AHardwareBuffer* in0, AHardwareBuffer* in1,
+        const std::vector<AHardwareBuffer*>& outN,
+        VkExtent2D extent, VkFormat format,
+        const std::vector<float>& adaptiveFlowScales)
+        : Context(vk, in0, in1, outN, extent, format) {
+    if (adaptiveFlowScales.empty())
+        throw std::invalid_argument("Adaptive Flow Scale requires at least one prepared state");
+
+    const float primaryScale = 1.0F / vk.flowScale;
+    if (std::abs(adaptiveFlowScales.front() - primaryScale) > 0.0005F)
+        throw std::invalid_argument(
+            "Adaptive Flow Scale target must match the initialized runtime scale");
+
+    float previous = 1.01F;
+    for (const float scale : adaptiveFlowScales) {
+        if (!std::isfinite(scale) || scale < 0.25F || scale > 1.0F)
+            throw std::invalid_argument("Adaptive Flow Scale state outside 0.25..1.0");
+        if (scale >= previous)
+            throw std::invalid_argument(
+                "Adaptive Flow Scale states must be strictly target-to-minimum");
+        previous = scale;
+    }
+
+    this->adaptiveFlowScales_ = adaptiveFlowScales;
+    this->activeFlowGraphIndex_ = 0;
+    this->requestedFlowScale_ = adaptiveFlowScales.front();
+    this->adaptiveFlowGraphs_.reserve(adaptiveFlowScales.size() - 1);
+
+    const auto outputImages = this->generate.getOutImages();
+    for (size_t i = 1; i < adaptiveFlowScales.size(); ++i)
+        this->adaptiveFlowGraphs_.emplace_back(
+            this->buildAdaptiveFlowGraph(vk, adaptiveFlowScales.at(i), outputImages));
+
+    double scaleArea = 0.0;
+    for (const float scale : adaptiveFlowScales)
+        scaleArea += static_cast<double>(scale) * static_cast<double>(scale);
+    const double targetArea =
+        static_cast<double>(adaptiveFlowScales.front())
+        * static_cast<double>(adaptiveFlowScales.front());
+    std::cerr << "lsfg-vk: adaptive-flow-resources states="
+              << adaptiveFlowScales.size()
+              << " target=" << adaptiveFlowScales.front()
+              << " min=" << adaptiveFlowScales.back()
+              << " scale_area_ratio=" << (scaleArea / targetArea)
+              << " history_frames=" << kAdaptiveFlowHistoryFrames
+              << '\n';
+}
+
+Context::AdaptiveFlowGraph Context::buildAdaptiveFlowGraph(
+        Vulkan& vk, float userFlowScale,
+        const std::vector<Core::Image>& outImgs) {
+    ScopedAdaptiveFlowConstruction construction(vk, userFlowScale);
+
+    AdaptiveFlowGraph graph;
+    graph.userFlowScale = userFlowScale;
+    graph.mipmaps = Shaders::Mipmaps(vk, this->inImg_0, this->inImg_1);
+    for (size_t i = 0; i < 7; ++i)
+        graph.alpha.at(i) =
+            Shaders::Alpha(vk, graph.mipmaps.getOutImages().at(i));
+    graph.beta = Shaders::Beta(vk, graph.alpha.at(0).getOutImages());
+    for (size_t i = 0; i < 7; ++i) {
+        graph.gamma.at(i) = Shaders::Gamma(vk,
+            graph.alpha.at(6 - i).getOutImages(),
+            graph.beta.getOutImages().at(std::min<size_t>(6 - i, 5)),
+            (i == 0)
+                ? std::nullopt
+                : std::make_optional(graph.gamma.at(i - 1).getOutImage()));
+        if (i < 4)
+            continue;
+        graph.delta.at(i - 4) = Shaders::Delta(vk,
+            graph.alpha.at(6 - i).getOutImages(),
+            graph.beta.getOutImages().at(6 - i),
+            (i == 4)
+                ? std::nullopt
+                : std::make_optional(graph.gamma.at(i - 1).getOutImage()),
+            (i == 4)
+                ? std::nullopt
+                : std::make_optional(graph.delta.at(i - 5).getOutImage1()),
+            (i == 4)
+                ? std::nullopt
+                : std::make_optional(graph.delta.at(i - 5).getOutImage2()));
+    }
+    graph.generate = Shaders::Generate(vk,
+        this->inImg_0, this->inImg_1,
+        graph.gamma.at(6).getOutImage(),
+        graph.delta.at(2).getOutImage1(),
+        graph.delta.at(2).getOutImage2(),
+        outImgs);
+    return graph;
+}
+
+Context::FlowGraphRef Context::flowGraph(size_t index) {
+    if (index == 0) {
+        return FlowGraphRef{
+            .userFlowScale = this->adaptiveFlowScales_.at(0),
+            .mipmaps = &this->mipmaps,
+            .alpha = &this->alpha,
+            .beta = &this->beta,
+            .gamma = &this->gamma,
+            .delta = &this->delta,
+            .generate = &this->generate,
+        };
+    }
+    auto& graph = this->adaptiveFlowGraphs_.at(index - 1);
+    return FlowGraphRef{
+        .userFlowScale = graph.userFlowScale,
+        .mipmaps = &graph.mipmaps,
+        .alpha = &graph.alpha,
+        .beta = &graph.beta,
+        .gamma = &graph.gamma,
+        .delta = &graph.delta,
+        .generate = &graph.generate,
+    };
+}
+
+void Context::dispatchAdaptiveFlowPreprocess(
+        const Core::CommandBuffer& buffer, FlowGraphRef graph) {
+    graph.mipmaps->Dispatch(buffer, this->frameIdx);
+    for (size_t i = 0; i < 7; ++i)
+        graph.alpha->at(6 - i).Dispatch(buffer, this->frameIdx);
+}
+
+void Context::requestFlowScale(float flowScale) {
+    if (this->adaptiveFlowScales_.empty())
+        throw std::logic_error("Context was not created for Adaptive Flow Scale");
+
+    size_t requestedIndex = this->adaptiveFlowScales_.size();
+    for (size_t i = 0; i < this->adaptiveFlowScales_.size(); ++i) {
+        if (std::abs(this->adaptiveFlowScales_.at(i) - flowScale) <= 0.0005F) {
+            requestedIndex = i;
+            break;
+        }
+    }
+    if (requestedIndex == this->adaptiveFlowScales_.size())
+        throw std::invalid_argument("Requested Adaptive Flow Scale was not prebuilt");
+
+    this->requestedFlowScale_ = this->adaptiveFlowScales_.at(requestedIndex);
+    if (requestedIndex == this->activeFlowGraphIndex_) {
+        this->pendingFlowGraphIndex_.reset();
+        this->pendingFlowWarmupFrames_ = 0;
+        return;
+    }
+    if (this->pendingFlowGraphIndex_ == requestedIndex)
+        return;
+
+    this->pendingFlowGraphIndex_ = requestedIndex;
+    this->pendingFlowWarmupFrames_ = 0;
+    std::cerr << "lsfg-vk: adaptive-flow-handoff requested="
+              << this->requestedFlowScale_
+              << " active=" << this->adaptiveFlowScales_.at(this->activeFlowGraphIndex_)
+              << " history_frames=" << kAdaptiveFlowHistoryFrames
+              << '\n';
+}
+
+LSFG::AdaptiveFlowContextState Context::flowScaleState() const {
+    if (this->adaptiveFlowScales_.empty())
+        return {};
+    const uint32_t remaining = this->pendingFlowGraphIndex_.has_value()
+        ? kAdaptiveFlowHistoryFrames
+            - std::min(this->pendingFlowWarmupFrames_, kAdaptiveFlowHistoryFrames)
+        : 0;
+    return LSFG::AdaptiveFlowContextState{
+        .requestedScale = this->requestedFlowScale_,
+        .activeScale = this->adaptiveFlowScales_.at(this->activeFlowGraphIndex_),
+        .warmupRemaining = remaining,
+        .transitionPending = this->pendingFlowGraphIndex_.has_value(),
+    };
+}
+
+void Context::commitAdaptiveFlowTransition(size_t index) {
+    const float previous = this->adaptiveFlowScales_.at(this->activeFlowGraphIndex_);
+    this->activeFlowGraphIndex_ = index;
+    this->pendingFlowGraphIndex_.reset();
+    this->pendingFlowWarmupFrames_ = 0;
+    std::cerr << "lsfg-vk: adaptive-flow-handoff applied="
+              << this->adaptiveFlowScales_.at(index)
+              << " previous=" << previous
+              << " history_frames=" << kAdaptiveFlowHistoryFrames
+              << '\n';
 }
 
 #endif // __ANDROID__

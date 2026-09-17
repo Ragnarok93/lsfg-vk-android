@@ -198,6 +198,42 @@ int32_t LSFG_3_1::createContextFromAHB(
     return id;
 }
 
+int32_t LSFG_3_1::createAdaptiveContextFromAHB(
+        AHardwareBuffer* in0, AHardwareBuffer* in1,
+        const std::vector<AHardwareBuffer*>& outN,
+        VkExtent2D extent, VkFormat format,
+        const std::vector<float>& flowScales) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    validateOutputCount(outN.size());
+
+    const int32_t id = std::rand();
+    contexts.emplace(id, Context(
+        *device, in0, in1, outN, extent, format, flowScales));
+    return id;
+}
+
+void LSFG_3_1::requestContextFlowScale(int32_t id, float flowScale) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
+    it->second.requestFlowScale(flowScale);
+}
+
+LSFG::AdaptiveFlowContextState LSFG_3_1::getContextFlowScaleState(int32_t id) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        return {};
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        return {};
+    return it->second.flowScaleState();
+}
+
 #endif // __ANDROID__
 
 #ifdef __ANDROID__
