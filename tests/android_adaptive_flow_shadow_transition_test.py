@@ -65,6 +65,16 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
                           context_source.as_posix())
             self.assertIn("commitAdaptiveFlowTransition", source, context_source.as_posix())
             self.assertIn("adaptiveFlowTimingQueryPool", header, context_header.as_posix())
+            self.assertIn("Core::DescriptorPool descriptorPool", header,
+                          context_header.as_posix())
+            self.assertIn("savedDescriptorPool_(vk.descriptorPool)", source,
+                          context_source.as_posix())
+            self.assertIn("vk_.descriptorPool = descriptorPool", source,
+                          context_source.as_posix())
+            self.assertIn("graph.descriptorPool = Core::DescriptorPool(vk.device)", source,
+                          context_source.as_posix())
+            self.assertIn("descriptor_pool_mode=per-state", source,
+                          context_source.as_posix())
             self.assertIn("recordAdaptiveFlowGpuTiming", source, context_source.as_posix())
             self.assertIn("transitionActive = renderData.adaptiveFlowTransitionCycle", source,
                           context_source.as_posix())

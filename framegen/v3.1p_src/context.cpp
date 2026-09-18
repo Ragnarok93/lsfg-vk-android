@@ -180,11 +180,15 @@ void copy_same_format(const Core::CommandBuffer& buf,
 
 class ScopedAdaptiveFlowConstruction {
 public:
-    ScopedAdaptiveFlowConstruction(Vulkan& vk, float userFlowScale)
+    ScopedAdaptiveFlowConstruction(
+            Vulkan& vk, float userFlowScale,
+            const Core::DescriptorPool& descriptorPool)
         : vk_(vk), savedFlowScale_(vk.flowScale),
           userFlowScale_(validateUserFlowScale(userFlowScale)),
+          savedDescriptorPool_(vk.descriptorPool),
           savedResources_(std::move(vk.resources)) {
         vk_.flowScale = 1.0F / userFlowScale_;
+        vk_.descriptorPool = descriptorPool;
         vk_.resources = Pool::ResourcePool(vk_.isHdr, vk_.flowScale);
     }
 
@@ -193,6 +197,7 @@ public:
 
     ~ScopedAdaptiveFlowConstruction() {
         vk_.resources = std::move(savedResources_);
+        vk_.descriptorPool = savedDescriptorPool_;
         vk_.flowScale = savedFlowScale_;
     }
 
@@ -208,6 +213,7 @@ private:
     Vulkan& vk_;
     float savedFlowScale_;
     float userFlowScale_;
+    Core::DescriptorPool savedDescriptorPool_;
     Pool::ResourcePool savedResources_;
 };
 
@@ -720,6 +726,7 @@ Context::Context(Vulkan& vk,
         * static_cast<double>(adaptiveFlowScales.front());
     std::cerr << "lsfg-vk: adaptive-flow-resources states="
               << adaptiveFlowScales.size()
+              << " descriptor_pool_mode=per-state"
               << " target=" << adaptiveFlowScales.front()
               << " min=" << adaptiveFlowScales.back()
               << " scale_area_ratio=" << (scaleArea / targetArea)
@@ -730,10 +737,11 @@ Context::Context(Vulkan& vk,
 Context::AdaptiveFlowGraph Context::buildAdaptiveFlowGraph(
         Vulkan& vk, float userFlowScale,
         const std::vector<Core::Image>& outImgs) {
-    ScopedAdaptiveFlowConstruction construction(vk, userFlowScale);
-
     AdaptiveFlowGraph graph;
     graph.userFlowScale = userFlowScale;
+    graph.descriptorPool = Core::DescriptorPool(vk.device);
+    ScopedAdaptiveFlowConstruction construction(
+        vk, userFlowScale, graph.descriptorPool);
     graph.mipmaps = Shaders::Mipmaps(vk, this->inImg_0, this->inImg_1);
     for (size_t i = 0; i < 7; ++i)
         graph.alpha.at(i) =

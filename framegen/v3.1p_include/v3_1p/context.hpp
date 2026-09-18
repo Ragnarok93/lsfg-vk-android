@@ -5,6 +5,7 @@
 #include "core/fence.hpp"
 #include "core/commandbuffer.hpp"
 #include "core/timestampquerypool.hpp"
+#include "core/descriptorpool.hpp"
 #include "shaders/alpha.hpp"
 #include "shaders/beta.hpp"
 #include "shaders/delta.hpp"
@@ -121,6 +122,11 @@ namespace LSFG_3_1P {
 #ifdef __ANDROID__
         struct AdaptiveFlowGraph {
             float userFlowScale{0.0f};
+            // Keep each prepared Flow Scale's descriptors in its own pool.
+            // A complete LSFG graph can consume enough sampled/storage-image
+            // descriptors that four preset states overflow the legacy shared
+            // 4096-descriptor pool even though every state is valid alone.
+            Core::DescriptorPool descriptorPool;
             Shaders::Mipmaps mipmaps;
             std::array<Shaders::Alpha, 7> alpha;
             Shaders::Beta beta;
