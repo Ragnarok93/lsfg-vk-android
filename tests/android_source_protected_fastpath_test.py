@@ -38,6 +38,7 @@ for variant in ("v3.1", "v3.1p"):
     compact = " ".join(text.split())
     assert "if (data.shouldWait)" in text, variant
     assert "recordAdaptiveFlowGpuTiming(vk, data);" in text, variant
-    assert compact.index("recordAdaptiveFlowGpuTiming(vk, data);") < compact.index("data.shouldWait = generationCount > 0;"), variant
+    assert "data.shouldWait = true;" in text, variant
+    assert compact.index("recordAdaptiveFlowGpuTiming(vk, data);") < compact.index("data.shouldWait = true;"), variant
 
 print("Source-protected Adaptive completion fast-path contract satisfied")
