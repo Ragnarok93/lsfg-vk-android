@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
-    def test_zero_generation_advances_history_without_source_pacing(self) -> None:
+    def test_zero_generation_is_source_only_without_source_pacing(self) -> None:
         header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
@@ -21,10 +21,10 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         zero_block = source[adaptive_zero:zero_end]
 
         self.assertGreater(adaptive_zero, handoff)
-        self.assertIn("presentContextWithCount", zero_block)
-        self.assertIn("stage=adaptive-history-advance", zero_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", zero_block)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", zero_block)
+        self.assertNotIn("presentContextWithCount(", zero_block)
+        self.assertNotIn("presentContextWithCountAndHistoryFd", zero_block)
+        self.assertIn("stage=adaptive-zero-source-only", zero_block)
+        self.assertIn("requiresSourceHistoryWarmup_ = true", zero_block)
         self.assertNotIn("enterSourceOnlyBypass", zero_block)
 
     def test_framegen_zero_generation_refreshes_temporal_preprocessing(self) -> None:
