@@ -1219,10 +1219,62 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(warmupResult, "pre-copy-warmup");
     }
 
-    // 2. Tell framegen to generate intermediary frames. It acquires the input
-    //    and output AHBs from EXTERNAL and releases them back to EXTERNAL. The
-    //    optional input FD makes the framegen GPU wait directly for the game
-    //    source-copy submission instead of stalling this presentation thread.
+    // 2. Shadow deadline admission. This computes the exact decision that a
+    // future drop-enabled path would make, but it does not change generation
+    // policy yet. Runtime timing evidence must validate the predictor first.
+    std::vector<double> deadlinePhases;
+    deadlinePhases.reserve(interpolationPhases.size());
+    for (const float phase : interpolationPhases)
+        deadlinePhases.emplace_back(static_cast<double>(phase));
+
+    double predictedSharedCostMs = 0.0;
+    double predictedPerSyntheticCostMs = 0.0;
+    const bool detailedPrediction =
+        this->adaptiveFlowTimingValid_
+        && this->adaptiveFlowGenerationCount_ > 0
+        && this->adaptiveFlowTotalLsfgMs_ > 0.0
+        && this->adaptiveFlowWorkMs_ > 0.0
+        && this->adaptiveFlowTotalLsfgMs_ >= this->adaptiveFlowWorkMs_;
+    if (detailedPrediction) {
+        predictedSharedCostMs = this->adaptiveFlowWorkMs_;
+        predictedPerSyntheticCostMs =
+            (this->adaptiveFlowTotalLsfgMs_ - this->adaptiveFlowWorkMs_)
+            / static_cast<double>(this->adaptiveFlowGenerationCount_);
+    } else if (this->deadlineHostCostValid_) {
+        const double previousCount = static_cast<double>(
+            std::max<size_t>(1, this->deadlineHostCostGenerationCount_));
+        const double requestedCount = static_cast<double>(
+            std::max<size_t>(1, generatedFrameCount));
+        // With no stage breakdown, retain the whole measured completion cost as
+        // shared work and only scale upward when requesting more output passes.
+        predictedSharedCostMs = this->deadlineHostCostEwmaMs_
+            * std::max(1.0, requestedCount / previousCount);
+    }
+
+    const SyntheticDeadlineAdmissionPlan deadlineShadowPlan =
+        SyntheticDeadlineAdmission::evaluate(
+            monotonicNowNs(),
+            sourceCycle,
+            deadlinePhases,
+            predictedSharedCostMs,
+            predictedPerSyntheticCostMs,
+            this->deadlinePositivePredictionErrorEwmaMs_);
+    metrics.windowDeadlineShadowRejects += deadlineShadowPlan.rejectedCount;
+    metrics.totalDeadlineShadowRejects += deadlineShadowPlan.rejectedCount;
+
+    double deadlinePredictedTotalMs = 0.0;
+    if (deadlineShadowPlan.predictionValid && !deadlineShadowPlan.slots.empty()) {
+        deadlinePredictedTotalMs =
+            deadlineShadowPlan.slots.back().predictedCompletionMs;
+        metrics.windowPredictedLsfgMs += deadlinePredictedTotalMs;
+        metrics.windowDeadlinePredictionSamples++;
+        metrics.totalDeadlinePredictionSamples++;
+    }
+
+    // Tell framegen to generate intermediary frames. It acquires the input
+    // and output AHBs from EXTERNAL and releases them back to EXTERNAL. The
+    // optional input FD makes the framegen GPU wait directly for the game
+    // source-copy submission instead of stalling this presentation thread.
     std::vector<int> noOutSems;
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
@@ -1290,6 +1342,50 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
+
+    const auto completionObservedAt = RuntimeMetrics::Clock::now();
+    const double actualCompletionMs =
+        std::chrono::duration<double, std::milli>(
+            completionObservedAt - dispatchStart).count();
+    constexpr double kCostEwmaAlpha = 0.20;
+    if (!this->deadlineHostCostValid_) {
+        this->deadlineHostCostEwmaMs_ = actualCompletionMs;
+        this->deadlineHostCostValid_ = true;
+    } else {
+        this->deadlineHostCostEwmaMs_ += kCostEwmaAlpha
+            * (actualCompletionMs - this->deadlineHostCostEwmaMs_);
+    }
+    this->deadlineHostCostGenerationCount_ = generatedFrameCount;
+
+    if (deadlineShadowPlan.predictionValid) {
+        metrics.windowActualLsfgMs += actualCompletionMs;
+        const double positiveErrorMs =
+            std::max(0.0, actualCompletionMs - deadlinePredictedTotalMs);
+        this->deadlinePositivePredictionErrorEwmaMs_ += kCostEwmaAlpha
+            * (positiveErrorMs - this->deadlinePositivePredictionErrorEwmaMs_);
+    }
+
+    const uint64_t completionObservedNs = monotonicNowNs();
+    if (completionObservedNs > 0) {
+        uint64_t lateSlots = 0;
+        for (const auto& slot : deadlineShadowPlan.slots) {
+            if (slot.deadlineNs > 0 && completionObservedNs > slot.deadlineNs)
+                ++lateSlots;
+        }
+        metrics.windowDeadlineShadowLate += lateSlots;
+        metrics.totalDeadlineShadowLate += lateSlots;
+    }
+
+    if (firstPresentDiagnostic && deadlineShadowPlan.predictionValid) {
+        std::cerr << "lsfg-vk: runtime stage=deadline-shadow"
+                  << " predicted_total_ms=" << deadlinePredictedTotalMs
+                  << " actual_total_ms=" << actualCompletionMs
+                  << " would_reject=" << deadlineShadowPlan.rejectedCount
+                  << " prediction_error_margin_ms="
+                  << this->deadlinePositivePredictionErrorEwmaMs_
+                  << "\n";
+    }
+
     updateAdaptiveFlowGovernor();
 
     // 4. Copy generated frames to swapchain images and present them. Each
