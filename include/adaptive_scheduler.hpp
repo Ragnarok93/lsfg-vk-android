@@ -3,11 +3,24 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
+
+struct AdaptiveGenerationPlan {
+    // Normalized synthetic opportunities inside the next protected source
+    // interval. 0.0 is the source-arrival anchor and 1.0 is the source
+    // deadline. Creating a slot consumes it; callers must never feed rejected
+    // or late slots back into the distributor as catch-up debt.
+    std::vector<double> slotPhases;
+    double desiredDensity{};
+    double governedDensity{};
+};
 
 struct AdaptiveSchedulerTelemetry {
     double sourceFps{};
     double smoothedSourceFps{};
     double wantedGeneratedFrames{};
+    double governedGeneratedDensity{};
+    double fractionalPhase{};
     std::size_t costLimit{};
     std::size_t generatedFrames{};
     bool sourceRateSnapped{false};
@@ -33,9 +46,13 @@ public:
     /// generation ceiling instead of re-ramping from one generated frame.
     void configure(uint32_t targetFps, std::size_t maxGeneratedFrames);
 
-    /// Observe a real/source frame interval and return the number of generated
-    /// frames for this source cycle. This is an output planner only: it never
-    /// sleeps and never modifies source pacing.
+    /// Observe a real/source frame interval and construct deterministic
+    /// synthetic opportunities for the following protected source interval.
+    /// Slot creation advances fractional phase immediately, so a caller that
+    /// rejects a slot cannot create catch-up debt.
+    AdaptiveGenerationPlan planSlots(std::chrono::nanoseconds sourceInterval);
+
+    /// Compatibility wrapper for existing count-only callers.
     std::size_t plan(std::chrono::nanoseconds sourceInterval);
 
     void reset();
