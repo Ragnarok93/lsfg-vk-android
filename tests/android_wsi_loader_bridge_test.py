@@ -184,7 +184,16 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
             android,
         )
         self.assertIn(
-            "if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());",
+            "if (lastGeneratedSourceChainSemaphore != VK_NULL_HANDLE)",
+            android,
+        )
+        self.assertIn(
+            "waitSemaphores.emplace_back(lastGeneratedSourceChainSemaphore);",
+            android,
+        )
+        self.assertIn(
+            "lastGeneratedSourceChainSemaphore =\n"
+            "            pass.prevPostCopySemaphores.at(i).handle();",
             android,
         )
         self.assertIn("VkSemaphore lastPrevPostCopySemaphore =", android)
