@@ -54,6 +54,7 @@ jobs:
           python3 tests/android_b14_subgroup_property_query_test.py
           python3 tests/android_b15_subgroup_gate_test.py
           python3 tests/android_final_cpu_overhead_test.py
+          python3 tests/android_fractional_phase_lifetime_test.py
           python3 tests/android_capability_architecture_test.py
 
       - name: Build and run capability policy tests
