@@ -43,6 +43,10 @@ namespace LSFG::Pool {
             const Core::Device& device,
             float timestamp = 0.0F, bool firstIter = false, bool firstIterS = false);
 
+        /// Update only the interpolation timestamp in an existing constant
+        /// buffer. Safe only after prior GPU consumers of that buffer retire.
+        static void writeTimestamp(Core::Buffer& buffer, float timestamp);
+
         ///
         /// Retrieve a sampler by type or create it.
         ///
