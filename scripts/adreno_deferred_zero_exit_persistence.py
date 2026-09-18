@@ -79,12 +79,12 @@ def patch_source(path: Path) -> None:
     # Fresh DeferredZero entries always begin with an empty wake-evidence window.
     text = once(
         text,
-        "                this->historyMaintenanceState_ = HistoryMaintenanceState::DeferredZero;\n"
-        "                metrics.windowDeferredZeroEntries++;\n",
-        "                this->historyMaintenanceState_ = HistoryMaintenanceState::DeferredZero;\n"
-        "                this->deferredZeroWakeRequestCount_ = 0;\n"
-        "                this->deferredZeroWakeWindowStart_ = {};\n"
-        "                metrics.windowDeferredZeroEntries++;\n",
+        "            this->historyMaintenanceState_ = HistoryMaintenanceState::DeferredZero;\n"
+        "            metrics.windowDeferredZeroEntries++;\n",
+        "            this->historyMaintenanceState_ = HistoryMaintenanceState::DeferredZero;\n"
+        "            this->deferredZeroWakeRequestCount_ = 0;\n"
+        "            this->deferredZeroWakeWindowStart_ = {};\n"
+        "            metrics.windowDeferredZeroEntries++;\n",
         f"{path}: reset wake-density state on DeferredZero entry",
     )
 
