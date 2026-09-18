@@ -12,16 +12,6 @@ from adreno_evidence_capabilities import (
 )
 from adreno_evidence_common import replace_exact
 from adreno_syncfd_handoff import apply as apply_syncfd_handoff
-from adreno_async_zero_history import apply as apply_async_zero_history
-from adreno_async_zero_history_hardening import apply as apply_async_zero_history_hardening
-from adreno_slot_aware_zero_history import apply as apply_slot_aware_zero_history
-from adreno_transport_release_overlap import apply as apply_transport_release_overlap
-from adreno_deferred_zero_history_build import apply as apply_deferred_zero_history
-from adreno_deferred_zero_reprime_sync import apply as apply_deferred_zero_reprime_sync
-from adreno_deferred_zero_reprime_guard import apply as apply_deferred_zero_reprime_guard
-from adreno_deferred_zero_history_finalize import apply as apply_deferred_zero_history_finalize
-from adreno_deferred_zero_safe_reprime import apply as apply_deferred_zero_safe_reprime
-from adreno_deferred_zero_exit_persistence import apply as apply_deferred_zero_exit_persistence
 
 def normalize_sync_fd_import_initializer(path: Path) -> None:
     """Keep the validation transform valid under Android NDK C++20 rules."""
@@ -68,25 +58,12 @@ def apply_runtime(root: Path) -> None:
     if "int exportFd(" not in mini_semaphore_header.read_text(encoding="utf-8"):
         apply_syncfd_handoff(root)
     normalize_sync_fd_import_initializer(root / "framegen/src/core/semaphore.cpp")
-    apply_async_zero_history(root)
-    apply_async_zero_history_hardening(root)
-    apply_slot_aware_zero_history(root)
-    apply_transport_release_overlap(root)
 
-    # Synthetic evidence-bundle fixtures intentionally contain only the files
-    # touched by that test. Full Android builds always contain Mini::Image and
-    # therefore always apply Candidate A here.
-    if (root / "include/mini/image.hpp").exists():
-        apply_deferred_zero_history(root)
-        apply_deferred_zero_reprime_sync(root)
-        apply_deferred_zero_reprime_guard(root)
-        apply_deferred_zero_history_finalize(root)
-        # Final Candidate A lifecycle transform: remove the crash-prone retained
-        # raw-history replay and rebuild framegen history across live presents.
-        apply_deferred_zero_safe_reprime(root)
-        # Preserve the validated live re-prime, but only wake it when scheduler
-        # generation requests are dense enough to amortize the three-frame cost.
-        apply_deferred_zero_exit_persistence(root)
+    # Source-protected fractional FG deliberately stays on the restored
+    # presentContextWithCount(..., 0) history-maintenance path. Do not compose
+    # the discarded asynchronous/DeferredZero transform stacks here: they add
+    # a second history controller and rewrite the framegen API/lifetime model
+    # underneath the source-protected scheduler.
 
 
 def main() -> None:
