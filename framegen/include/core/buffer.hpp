@@ -53,6 +53,11 @@ namespace LSFG::Core {
         /// Get the size of the buffer.
         [[nodiscard]] size_t getSize() const { return this->size; }
 
+        /// Update a range of the persistently mapped host-coherent buffer.
+        /// Callers are responsible for GPU lifetime: the range must not still
+        /// be consumed by an in-flight submission.
+        void write(const void* data, size_t bytes, size_t offset = 0) const;
+
         /// Trivially copyable, moveable and destructible
         Buffer(const Buffer&) noexcept = default;
         Buffer& operator=(const Buffer&) noexcept = default;
@@ -64,6 +69,7 @@ namespace LSFG::Core {
 
         std::shared_ptr<VkBuffer> buffer;
         std::shared_ptr<VkDeviceMemory> memory;
+        std::shared_ptr<uint8_t> mapped;
 
         size_t size{};
     };
