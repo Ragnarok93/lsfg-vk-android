@@ -96,13 +96,8 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         self.assertIn("if (adaptiveZeroGeneration) {", text)
 
         bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
-        self.assertIn("apply_deferred_zero_exit_persistence", bundle)
-        self.assertIn("apply_deferred_zero_exit_persistence(root)", bundle)
-        self.assertLess(
-            bundle.index("apply_deferred_zero_safe_reprime(root)"),
-            bundle.index("apply_deferred_zero_exit_persistence(root)"),
-            "exit-persistence gate must compose after the validated safe live re-prime transform",
-        )
+        self.assertNotIn("apply_deferred_zero_exit_persistence(root)", bundle)
+        self.assertNotIn("apply_deferred_zero_safe_reprime(root)", bundle)
 
     def test_safe_reprime_lifecycle_reset_is_method_bounded(self) -> None:
         safe = (ROOT / "scripts/adreno_deferred_zero_safe_reprime.py").read_text(encoding="utf-8")
@@ -122,15 +117,10 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         self.assertIn("new_counters = r'''", safe)
         self.assertIn("<< '\\n';", safe)
 
-    def test_safe_reprime_supersedes_legacy_replay_after_checkpoint_transforms(self) -> None:
+    def test_safe_reprime_is_retired_from_production_profile(self) -> None:
         bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
-        self.assertIn("apply_deferred_zero_safe_reprime", bundle)
-        self.assertIn("apply_deferred_zero_safe_reprime(root)", bundle)
-        self.assertLess(
-            bundle.index("apply_deferred_zero_history_finalize(root)"),
-            bundle.index("apply_deferred_zero_safe_reprime(root)"),
-            "safe re-prime must be the final Candidate A lifecycle transform",
-        )
+        self.assertNotIn("apply_deferred_zero_history_finalize(root)", bundle)
+        self.assertNotIn("apply_deferred_zero_safe_reprime(root)", bundle)
 
     def test_failure_and_lifecycle_paths_fall_back_without_changing_scheduler(self) -> None:
         transform = (ROOT / "scripts/adreno_deferred_zero_history.py").read_text(encoding="utf-8")
@@ -153,14 +143,18 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         self.assertNotIn("AdaptiveFrameScheduler::plan", transform)
         self.assertNotIn("src/adaptive_scheduler.cpp", transform)
 
-    def test_candidate_a_is_applied_after_existing_slot_release_overlap(self) -> None:
+    def test_candidate_a_is_retired_from_production_profile(self) -> None:
         bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
-        self.assertIn("apply_deferred_zero_history(root)", bundle)
-        self.assertLess(
-            bundle.index("apply_transport_release_overlap(root)"),
-            bundle.index("apply_deferred_zero_history(root)"),
-            "Candidate A must patch the already slot-aware/release-overlapped Android source",
-        )
+        for retired in (
+            "apply_transport_release_overlap(root)",
+            "apply_deferred_zero_history(root)",
+            "apply_deferred_zero_reprime_sync(root)",
+            "apply_deferred_zero_reprime_guard(root)",
+            "apply_deferred_zero_history_finalize(root)",
+            "apply_deferred_zero_safe_reprime(root)",
+            "apply_deferred_zero_exit_persistence(root)",
+        ):
+            self.assertNotIn(retired, bundle)
 
     def test_candidate_a_checkpoint_reports_reprime_time_and_preserves_present_result(self) -> None:
         finalize = ROOT / "scripts/adreno_deferred_zero_history_finalize.py"
@@ -172,11 +166,8 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         self.assertIn("VK_ERROR_OUT_OF_DATE_KHR", text)
 
         bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
-        self.assertIn("apply_deferred_zero_history_finalize(root)", bundle)
-        self.assertLess(
-            bundle.index("apply_deferred_zero_history(root)"),
-            bundle.index("apply_deferred_zero_history_finalize(root)"),
-        )
+        self.assertNotIn("apply_deferred_zero_history(root)", bundle)
+        self.assertNotIn("apply_deferred_zero_history_finalize(root)", bundle)
 
 
     def test_deferred_zero_entry_preserves_fractional_anti_oscillation_without_host_drain(self) -> None:
