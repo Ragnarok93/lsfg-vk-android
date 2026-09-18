@@ -8,10 +8,10 @@ ROOT = Path(__file__).resolve().parents[1]
 class AndroidBarrierScopeRegressionTest(unittest.TestCase):
     def test_read_to_write_uses_execution_dependency_only(self) -> None:
         source = (ROOT / "framegen/src/common/utils.cpp").read_text(encoding="utf-8")
-        r2w = source.substring(
-            source.index("BarrierBuilder& BarrierBuilder::addR2W"),
-            source.index("BarrierBuilder& BarrierBuilder::addW2R"),
-        )
+        r2w = source[
+            source.index("BarrierBuilder& BarrierBuilder::addR2W"):
+            source.index("BarrierBuilder& BarrierBuilder::addW2R")
+        ]
         self.assertIn("VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT", r2w)
         self.assertIn("VK_ACCESS_2_NONE", r2w)
         self.assertIn("VK_ACCESS_2_SHADER_WRITE_BIT", r2w)
@@ -19,10 +19,10 @@ class AndroidBarrierScopeRegressionTest(unittest.TestCase):
 
     def test_write_to_read_visibility_remains_intact(self) -> None:
         source = (ROOT / "framegen/src/common/utils.cpp").read_text(encoding="utf-8")
-        w2r = source.substring(
-            source.index("BarrierBuilder& BarrierBuilder::addW2R"),
-            source.index("void BarrierBuilder::build"),
-        )
+        w2r = source[
+            source.index("BarrierBuilder& BarrierBuilder::addW2R"):
+            source.index("void BarrierBuilder::build")
+        ]
         self.assertIn("VK_ACCESS_2_SHADER_WRITE_BIT", w2r)
         self.assertIn("VK_ACCESS_2_SHADER_READ_BIT", w2r)
         self.assertIn("VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT", w2r)
