@@ -118,15 +118,35 @@ def patch_source(path: Path) -> None:
     # Live re-prime uses the same async game->framegen SYNC_FD handoff as the
     # established adaptive-zero path, even when the scheduler currently asks
     # for generated frames.
-    text = once(
-        text,
-        "    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_ && !warmupSourceHistory && ((generatedFrameCount>0 && this->generatedAsyncAhbHandoffEnabled_) || (adaptiveZeroGeneration && this->asyncZeroHistoryEnabled_));\n",
+    split_handoff = (
+        "    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_ && !warmupSourceHistory && "
+        "((generatedFrameCount>0 && this->generatedAsyncAhbHandoffEnabled_) || "
+        "(adaptiveZeroGeneration && this->asyncZeroHistoryEnabled_));\n"
+    )
+    legacy_handoff = (
+        "    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_ && !warmupSourceHistory && "
+        "(generatedFrameCount>0 || (adaptiveZeroGeneration && this->asyncZeroHistoryEnabled_));\n"
+    )
+    replacement_handoff = (
         "    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_ && !warmupSourceHistory && "
         "((generatedFrameCount>0 && this->generatedAsyncAhbHandoffEnabled_) || "
         "((adaptiveZeroGeneration || deferredReprimeWarmup) "
-        "&& this->asyncZeroHistoryEnabled_));\n",
-        f"{path}: allow async handoff during safe DeferredZero warmup",
+        "&& this->asyncZeroHistoryEnabled_));\n"
     )
+    if split_handoff in text:
+        text = once(
+            text, split_handoff, replacement_handoff,
+            f"{path}: allow async handoff during safe DeferredZero warmup",
+        )
+    elif legacy_handoff in text:
+        text = once(
+            text, legacy_handoff, replacement_handoff,
+            f"{path}: allow async handoff during safe DeferredZero warmup (legacy)",
+        )
+    elif replacement_handoff not in text:
+        raise RuntimeError(
+            f"{path}: no recognized async handoff expression for safe DeferredZero warmup"
+        )
 
     zero_branch_marker = '''    if (adaptiveZeroGeneration) {
         // The framegen zero-count path advances its temporal frame index without
