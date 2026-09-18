@@ -55,9 +55,11 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             self.assertIn("dispatchAdaptiveFlowPreprocess", source, context_source.as_posix())
             self.assertIn("pendingFlowWarmupFrames_ + 1 < kAdaptiveFlowHistoryFrames", source,
                           context_source.as_posix())
-            self.assertIn("dispatchAdaptiveFlowPreprocess(activeGraph", source,
+            self.assertIn("data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool", source,
                           context_source.as_posix())
-            self.assertIn("dispatchAdaptiveFlowPreprocess(pendingGraph", source,
+            self.assertIn("data.cmdBuffer1, pendingGraph, adaptiveFlowTimingPool", source,
+                          context_source.as_posix())
+            self.assertIn("data.cmdBuffer1, pendingGraph);", source,
                           context_source.as_posix())
             self.assertIn("generationGraphIndex = pendingIndex", source,
                           context_source.as_posix())

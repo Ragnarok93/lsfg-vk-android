@@ -191,20 +191,15 @@ def patch_source(path: Path, backend: str) -> None:
         label=f"{path}: query-pool initialization",
     )
 
-    old_dispatch = (
-        "    this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
-        "    for (size_t i = 0; i < 7; i++)\n"
-        "        this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);\n"
-        "    if (generationCount > 0)\n"
-        "        this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
-    )
-    new_dispatch = (
+    profile_setup = (
         "    const bool profileZeroStage = generationCount == 0\n"
         "        && this->zeroStageQueryPool.supported();\n"
         "    if (profileZeroStage) {\n"
         "        this->zeroStageQueryPool.reset(data.cmdBuffer1.handle());\n"
         "        this->zeroStageQueryPool.write(data.cmdBuffer1.handle(), 0);\n"
         "    }\n\n"
+    )
+    profiled_dispatch = (
         "    this->mipmaps.Dispatch(\n"
         "        data.cmdBuffer1, this->frameIdx,\n"
         "        profileZeroStage ? &this->zeroStageQueryPool : nullptr, 1);\n"
@@ -219,22 +214,65 @@ def patch_source(path: Path, backend: str) -> None:
         "    if (generationCount > 0)\n"
         "        this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
     )
-    text = replace_exact(
-        text, old_dispatch, new_dispatch, count=1,
-        label=f"{path}: stage timestamp recording",
-    )
+
+    if "adaptiveFlowScales_" in text:
+        # Adaptive Flow owns a distinct Android graph selector. Zero-stage/B14
+        # profiling is intentionally restricted to the fixed graph so the
+        # temporary profiling build neither double-instruments Adaptive Flow nor
+        # changes its production timestamp contract.
+        adaptive_anchor = "    size_t generationGraphIndex = 0;\n"
+        text = replace_exact(
+            text,
+            adaptive_anchor,
+            profile_setup + adaptive_anchor,
+            count=1,
+            label=f"{path}: adaptive fixed-profile setup",
+        )
+        fixed_dispatch = (
+            "    } else {\n"
+            "        this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+            "        for (size_t i = 0; i < 7; i++)\n"
+            "            this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+            "        if (generationCount > 0)\n"
+            "            this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+            "    }\n"
+        )
+        fixed_profiled = (
+            "    } else {\n"
+            + "".join(
+                ("        " + line if line.strip() else line)
+                for line in profiled_dispatch.splitlines(keepends=True)
+            )
+            + "    }\n"
+        )
+        text = replace_exact(
+            text,
+            fixed_dispatch,
+            fixed_profiled,
+            count=1,
+            label=f"{path}: adaptive fixed stage timestamp recording",
+        )
+    else:
+        old_dispatch = (
+            "    this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+            "    for (size_t i = 0; i < 7; i++)\n"
+            "        this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+            "    if (generationCount > 0)\n"
+            "        this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+        )
+        text = replace_exact(
+            text,
+            old_dispatch,
+            profile_setup + profiled_dispatch,
+            count=1,
+            label=f"{path}: stage timestamp recording",
+        )
 
     old_zero_tail = (
-        "        if (!data.preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))\n"
-        "            throw LSFG::vulkan_error(VK_TIMEOUT,\n"
-        "                \"Temporal preprocessing fence wait timed out\");\n"
         "        this->frameIdx++;\n"
         "        return;\n"
     )
     new_zero_tail = (
-        "        if (!data.preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))\n"
-        "            throw LSFG::vulkan_error(VK_TIMEOUT,\n"
-        "                \"Temporal preprocessing fence wait timed out\");\n"
         "        if (profileZeroStage) {\n"
         "            const auto durations = this->zeroStageQueryPool.durationsMs(vk.device);\n"
         "            if (durations.size() == this->zeroStageProfileTotalsMs.size()) {\n"
