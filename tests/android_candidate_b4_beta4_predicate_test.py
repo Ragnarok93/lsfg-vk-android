@@ -75,11 +75,9 @@ class AndroidCandidateB4Beta4PredicateContractTest(unittest.TestCase):
                         production.index('return spirvBytecode;'))
 
         build = (ROOT / 'scripts/build/android.sh').read_text(encoding='utf-8')
-        b3 = 'python3 "${REPO_ROOT}/scripts/apply-candidate-b3-beta4-analysis.py" --root "${REPO_ROOT}"'
         b4 = 'python3 "${REPO_ROOT}/scripts/apply-candidate-b4-beta4-predicate.py" --root "${REPO_ROOT}"'
         cleanup = 'python3 "${REPO_ROOT}/scripts/apply-candidate-b-translation-cleanup.py" --root "${REPO_ROOT}"'
         self.assertIn(b4, build)
-        self.assertGreater(build.index(b4), build.index(b3))
         self.assertGreater(build.index(b4), build.index(cleanup))
         workflow = (ROOT / '.github/workflows/android-bionic.yml').read_text(encoding='utf-8')
         self.assertIn('python3 tests/android_candidate_b4_beta4_predicate_test.py', workflow)

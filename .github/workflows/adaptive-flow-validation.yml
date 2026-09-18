@@ -27,8 +27,9 @@ jobs:
             tests/adaptive_flow_controller_test.cpp \
             -o /tmp/lsfg-adaptive-flow-controller-test
           /tmp/lsfg-adaptive-flow-controller-test
-      - name: Validate Android shadow handoff contract
+      - name: Validate Android runtime and shadow handoff contracts
         shell: bash
         run: |
           set -euo pipefail
+          python3 tests/android_adaptive_flow_runtime_integration_test.py
           python3 tests/android_adaptive_flow_shadow_transition_test.py

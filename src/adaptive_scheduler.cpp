@@ -35,7 +35,12 @@ void AdaptiveFrameScheduler::configure(
     if (targetFps_ == targetFps && maxGeneratedFrames_ == maxGeneratedFrames)
         return;
 
-    const bool hadRuntimeCadence = hasSmoothedInterval_;
+    // A suspend-spanning interval may already have cleared the current EMA
+    // before the render thread gets a chance to observe the Quick Menu's atomic
+    // conf.toml update. Keep a separate lifecycle-level cadence bit so the
+    // user's target change is still treated as an established-runtime
+    // reconfiguration rather than a first-start cold configuration.
+    const bool hadRuntimeCadence = runtimeCadenceEstablished_;
     const bool wasActive = targetFps_ != 0 && maxGeneratedFrames_ != 0;
     targetFps_ = targetFps;
     maxGeneratedFrames_ = maxGeneratedFrames;
@@ -85,6 +90,10 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         return 0;
     }
 
+    // This bit intentionally survives later timing discontinuities. It is only
+    // cleared by an explicit lifecycle reset(), so config writes observed just
+    // after resume can still distinguish a running game from first startup.
+    runtimeCadenceEstablished_ = true;
     observedTimeSeconds_ += intervalSeconds;
     updateSourceRate(intervalSeconds);
 
@@ -369,5 +378,6 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
 }
 
 void AdaptiveFrameScheduler::reset() {
+    runtimeCadenceEstablished_ = false;
     resetRuntimeState();
 }

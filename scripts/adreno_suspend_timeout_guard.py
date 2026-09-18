@@ -25,6 +25,7 @@ NEW_WAIT = '''    const auto waitIdleStart = RuntimeMetrics::Clock::now();
             : LSFG_3_1::waitContext(*this->lsfgCtxId, timeoutNs);
     };
     bool framegenReady = waitFramegenCompletion(framegenCompletionTimeoutNs);
+    bool framegenRecoveredAfterTimeout = false;
     const uint64_t framegenCompletionWaitElapsedNs =
         static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             RuntimeMetrics::Clock::now() - waitIdleStart).count());
@@ -37,6 +38,7 @@ NEW_WAIT = '''    const auto waitIdleStart = RuntimeMetrics::Clock::now();
     if (!framegenReady) {
         const auto resumeRecheckStart = RuntimeMetrics::Clock::now();
         framegenReady = waitFramegenCompletion(resumeCompletionRecheckNs);
+        framegenRecoveredAfterTimeout = framegenReady;
         const double resumeRecheckMs = std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - resumeRecheckStart).count();
         std::cerr << "lsfg-vk: runtime stage=framegen-completion-resume-recheck"
@@ -46,8 +48,13 @@ NEW_WAIT = '''    const auto waitIdleStart = RuntimeMetrics::Clock::now();
                   << " recheck_ms=" << resumeRecheckMs << "\\n";
     }
 
-    metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-        RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    if (!framegenRecoveredAfterTimeout) {
+        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    } else {
+        // A SIGSTOP/SIGCONT recovery is lifecycle time, not framegen cost.
+        excludeCurrentCycleFromTimingMetrics = true;
+    }
     if (!framegenReady) {
 '''
 

@@ -283,7 +283,8 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
         self.assertNotIn("\x00", transformed_process)
 
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
-        self.assertIn("LSFGVK_MIPMAPS_CANDIDATE_SCRIPT", build)
+        self.assertNotIn("LSFGVK_MIPMAPS_CANDIDATE_SCRIPT", build)
+        self.assertIn('B14_SCRIPT="${REPO_ROOT}/scripts/apply-candidate-b14-mipmaps-tail-fusion.py"', build)
         self.assertIn("check-mipmaps-device-agnostic.py", build)
 
 

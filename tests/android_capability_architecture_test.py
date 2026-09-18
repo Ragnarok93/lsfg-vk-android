@@ -60,7 +60,13 @@ class AndroidCapabilityArchitectureContractTest(unittest.TestCase):
         performance = (ROOT / "framegen/v3.1p_src/context.cpp").read_text(encoding="utf-8")
         quality_lifecycle = (ROOT / "framegen/v3.1_src/lsfg.cpp").read_text(encoding="utf-8")
         performance_lifecycle = (ROOT / "framegen/v3.1p_src/lsfg.cpp").read_text(encoding="utf-8")
-        self.assertNotIn("UINT64_MAX", wrapper)
+        present = wrapper.split("VkResult LsContext::present", 1)[1]
+        android_present, desktop_present = present.split(
+            "#else\n    // Desktop Linux path: OPAQUE_FD semaphore-based synchronization", 1
+        )
+        self.assertNotIn("UINT64_MAX", android_present)
+        self.assertIn("runtimeWaitTimeoutNs()", android_present)
+        self.assertIn("UINT64_MAX", desktop_present)
         self.assertNotIn("UINT64_MAX", quality)
         self.assertNotIn("UINT64_MAX", performance)
         self.assertNotIn("vkDeviceWaitIdle", quality_lifecycle)

@@ -216,6 +216,27 @@ int main() {
     }
 
     {
+        // Actual S20+ ordering from the 2026-09-17 trace is the inverse: the
+        // first old-config present after resume consumes the suspend-spanning
+        // discontinuity, and only then does the layer notice conf.toml changed.
+        // A target change after that discontinuity must still remember that
+        // this is an established runtime and warm-start the next valid sample.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(60ms);
+
+        assert(scheduler.plan(1s) == 0);
+        assert(scheduler.telemetry().discontinuityReset);
+        scheduler.configure(90, 3);
+
+        const auto generated = scheduler.plan(60ms);
+        assert(scheduler.telemetry().configWarmStart);
+        assert(scheduler.telemetry().wantedGeneratedFrames == 3.0);
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(generated >= 2);
+    }
+
+    {
         // The warm start must remain fail-safe: if the newly seeded load causes
         // a prompt source-rate regression, the existing blame window must back
         // it off rather than pinning the user-selected target at an unsafe cost.
@@ -244,6 +265,19 @@ int main() {
         assert(scheduler.plan(60ms) >= 1);
         assert(scheduler.telemetry().configWarmStart);
         assert(scheduler.targetFps() == 90);
+    }
+
+    {
+        // An explicit lifecycle reset is different from a suspend cadence
+        // discontinuity. It must erase established-runtime history so a later
+        // configuration behaves like a true cold start.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 8; ++frame)
+            scheduler.plan(40ms);
+        scheduler.reset();
+        scheduler.configure(90, 3);
+        assert(scheduler.plan(60ms) == 1);
+        assert(!scheduler.telemetry().configWarmStart);
     }
 
     return 0;

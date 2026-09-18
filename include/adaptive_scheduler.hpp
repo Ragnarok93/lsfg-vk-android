@@ -56,6 +56,10 @@ private:
     double fractionalGeneratedBudget_{};
     double smoothedSourceIntervalSeconds_{};
     bool hasSmoothedInterval_{false};
+    // Unlike the current smoothing window, this survives timing discontinuities.
+    // It distinguishes an established runtime that resumed before observing a
+    // config write from a true first-start/lifecycle reset.
+    bool runtimeCadenceEstablished_{false};
     bool reconfigureWarmStartPending_{false};
 
     // Source-rate decreases need to be recognized quickly so a heavier scene

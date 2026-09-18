@@ -2,7 +2,7 @@ name: Build lsfg-vk
 
 on:
   push:
-    branches: ["release"]
+    branches: ["release", "fix/**"]
 
 env:
   CARGO_TERM_COLOR: always

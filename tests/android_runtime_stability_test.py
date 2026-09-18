@@ -115,6 +115,13 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn('"adaptive="', hooks)
         self.assertIn('"target_fps="', hooks)
 
+    def test_suspend_boundaries_are_excluded_from_runtime_timing_metrics(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("kRuntimeTimingDiscontinuityMs = 250.0", source)
+        self.assertIn("if (sourceIntervalMs < kRuntimeTimingDiscontinuityMs)", source)
+        self.assertIn("bool excludeCurrentCycleFromTimingMetrics = false", source)
+        self.assertIn("if (!excludeCurrentCycleFromTimingMetrics)", source)
+
     def test_framegen_runtime_reconfigures_instead_of_reusing_incompatible_outputs(self) -> None:
         """Regression: adaptive 4x left generationCount=3 active for fixed 2x's one AHB."""
         for backend in ("v3.1_src", "v3.1p_src"):
