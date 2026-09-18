@@ -12,6 +12,17 @@ if "runtimeWaitTimeoutNs()" in desktop:
 if "ovkAcquireNextImageKHR(info.device, this->swapchain, UINT64_MAX" not in desktop:
     raise SystemExit("desktop swapchain acquire must retain the upstream indefinite timeout")
 
+cmake = (root / "CMakeLists.txt").read_text()
+for android_only in (
+    "src/android_diagnostics.cpp",
+    "src/android_wsi_loader_bridge.cpp",
+    "src/layer_android.cpp",
+):
+    if android_only not in cmake:
+        raise SystemExit(f"desktop source exclusion missing for {android_only}")
+if "else()\n    # Android loader/provenance entrypoints" not in cmake:
+    raise SystemExit("Android-only source exclusions are not scoped to the desktop branch")
+
 workflow = (root / ".github/workflows/android-bionic.yml").read_text()
 for stale in ("b12-evidence-build:", "b12-mipmaps-refinement-build:"):
     if stale in workflow:
