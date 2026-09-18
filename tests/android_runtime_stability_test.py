@@ -90,7 +90,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
                 "Framegen completion and teardown must use bounded context fences rather than an uninterruptible device-wide idle wait",
             )
 
-    def test_adaptive_path_uses_variable_count_without_owning_source_pacing(self) -> None:
+    def test_adaptive_path_uses_integer_tiers_without_owning_source_pacing(self) -> None:
         scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -106,7 +106,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "adaptiveScheduler_.telemetry()",
             "presentContextWithCount",
             "adaptiveZeroGeneration",
-            "stage=adaptive-history-advance",
+            "stage=adaptive-zero-source-only",
         ):
             self.assertIn(token, source)
 
@@ -154,8 +154,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             self.assertIn("if (contexts.empty())", delete_body)
             self.assertIn("resetRuntime", delete_body)
 
-    def test_adaptive_zero_generation_crosses_handoff_and_advances_history(self) -> None:
-        """Fractional zero-generation cadence must update temporal history, not enter Off."""
+    def test_adaptive_zero_generation_is_source_only_and_invalidates_history(self) -> None:
+        """Zero-generation Adaptive cycles must not touch private framegen history."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present_start = source.index("VkResult LsContext::present")
         handoff_start = source.index("submitAndWaitForAhbHandoff", present_start)
@@ -164,10 +164,11 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         zero_block = source[zero_start:warmup_start]
 
         self.assertGreater(zero_start, handoff_start)
-        self.assertIn("presentContextWithCount", zero_block)
-        self.assertIn("adaptive-history-advance", zero_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", zero_block)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", zero_block)
+        self.assertNotIn("presentContextWithCount(", zero_block)
+        self.assertNotIn("presentContextWithCountAndHistoryFd", zero_block)
+        self.assertIn("adaptive-zero-source-only", zero_block)
+        self.assertIn("requiresSourceHistoryWarmup_ = true", zero_block)
+        self.assertNotIn("requiresSourceHistoryWarmup_ = false", zero_block)
         self.assertNotIn("source-direct-present", source[present_start:handoff_start])
 
     def test_generation_resumes_only_after_source_only_history_warmup(self) -> None:
