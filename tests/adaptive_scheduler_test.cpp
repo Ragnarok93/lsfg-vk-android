@@ -341,5 +341,34 @@ int main() {
         assert(scheduler.telemetry().costLimit >= 2);
     }
 
+    {
+        // AFG follows LSFG's low-FPS safety policy: interpolation is completely
+        // disabled below 10 real FPS instead of extrapolating across enormous
+        // temporal gaps. The target remains configured so generation resumes
+        // automatically when source cadence recovers.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            assert(scheduler.plan(125ms) == 0); // 8 FPS
+        assert(scheduler.telemetry().lowFpsCutoff);
+        assert(scheduler.telemetry().generatedFrames == 0);
+
+        bool resumed = false;
+        for (int frame = 0; frame < 20; ++frame)
+            resumed = resumed || scheduler.plan(40ms) > 0; // 25 FPS
+        assert(resumed);
+        assert(!scheduler.telemetry().lowFpsCutoff);
+    }
+
+    {
+        // The cutoff is strictly below 10 FPS: an exact 100 ms source interval
+        // remains eligible for fractional AFG planning.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        bool generated = false;
+        for (int frame = 0; frame < 12; ++frame)
+            generated = generated || scheduler.plan(100ms) > 0;
+        assert(generated);
+        assert(!scheduler.telemetry().lowFpsCutoff);
+    }
+
     return 0;
 }
