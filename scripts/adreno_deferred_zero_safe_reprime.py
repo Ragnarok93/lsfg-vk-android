@@ -120,9 +120,10 @@ def patch_source(path: Path) -> None:
     # for generated frames.
     text = once(
         text,
-        "    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_ && !warmupSourceHistory && (generatedFrameCount>0 || (adaptiveZeroGeneration && this->asyncZeroHistoryEnabled_));\n",
+        "    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_ && !warmupSourceHistory && ((generatedFrameCount>0 && this->generatedAsyncAhbHandoffEnabled_) || (adaptiveZeroGeneration && this->asyncZeroHistoryEnabled_));\n",
         "    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_ && !warmupSourceHistory && "
-        "(generatedFrameCount>0 || ((adaptiveZeroGeneration || deferredReprimeWarmup) "
+        "((generatedFrameCount>0 && this->generatedAsyncAhbHandoffEnabled_) || "
+        "((adaptiveZeroGeneration || deferredReprimeWarmup) "
         "&& this->asyncZeroHistoryEnabled_));\n",
         f"{path}: allow async handoff during safe DeferredZero warmup",
     )
