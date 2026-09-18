@@ -312,6 +312,7 @@ def patch_outer_header(path: Path) -> None:
         text,
         "    bool asyncAhbHandoffEnabled_{false};\n",
         "    bool asyncAhbHandoffEnabled_{false};\n"
+        "    bool generatedAsyncAhbHandoffEnabled_{false};\n"
         "    VkExternalSemaphoreHandleTypeFlagBits asyncAhbHandoffHandleType_{\n"
         "        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT};\n",
         count=1,
