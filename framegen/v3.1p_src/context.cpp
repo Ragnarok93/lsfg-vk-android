@@ -490,7 +490,7 @@ void Context::present(Vulkan& vk,
                         buf2, this->frameIdx, pass, generationCount, interpolationPhase);
             }
             generationGraph.generate->Dispatch(
-                buf2, this->frameIdx, pass, generationCount);
+                buf2, this->frameIdx, pass, generationCount, interpolationPhase);
         } else {
             for (size_t i = 0; i < 7; i++) {
                 this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount, interpolationPhase);
