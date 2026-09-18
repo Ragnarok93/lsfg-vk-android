@@ -152,11 +152,15 @@ private:
     // OPAQUE_FD semaphore, or an export fails at runtime, this is disabled for
     // the life of the context and the established synchronous fence path wins.
     bool asyncAhbHandoffEnabled_{false};
+    // Adaptive-only output completion fast path. It is independently disabled
+    // if completion-semaphore export fails; the input handoff can remain async.
+    bool asyncFramegenCompletionEnabled_{false};
 
-    // Deadline admission remains shadow-only until device timing validates the
-    // predictor. The host completion EWMA is the fail-open coarse fallback when
-    // detailed Adaptive Flow GPU timing is unavailable.
+    // Deadline admission protects the source timeline once a bounded
+    // synchronous calibration has established a usable completion-cost model.
+    // Unknown cost fails open and remains on the bounded host-wait path.
     bool deadlineHostCostValid_{false};
+    uint32_t deadlineHostCostSamples_{0};
     double deadlineHostCostEwmaMs_{0.0};
     size_t deadlineHostCostGenerationCount_{0};
     double deadlinePositivePredictionErrorEwmaMs_{0.0};
