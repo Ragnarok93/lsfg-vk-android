@@ -21,6 +21,10 @@ namespace Hooks {
         // Optional Android optimization. False preserves the established
         // synchronous AHB fence handoff with no change in presentation behavior.
         bool androidOpaqueFdSemaphoreSupported{false};
+        // Optional adaptive presentation pacing. When available, generated and
+        // source presents carry explicit target times instead of relying on
+        // MAILBOX queue submission cadence to approximate display cadence.
+        bool androidDisplayTimingSupported{false};
     };
 
     /// Map of hooked Vulkan functions.
