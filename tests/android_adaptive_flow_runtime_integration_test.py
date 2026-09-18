@@ -115,17 +115,18 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         # Adaptive FIFO scheduling is valid only when the driver can honor
         # explicit desiredPresentTime metadata. Otherwise preserve the existing
         # game/configured present mode and the upstream pacing owner.
+        compact_hooks = "".join(hooks.split())
         self.assertIn(
-            "adaptivePresentationPacing(activeConf, deviceInfo.androidDisplayTimingSupported)",
-            hooks,
+            "adaptivePresentationPacing(activeConf,deviceInfo.androidDisplayTimingSupported)",
+            compact_hooks,
         )
         self.assertIn(
-            "adaptivePresentationPacing(conf, deviceInfo.androidDisplayTimingSupported)",
-            hooks,
+            "adaptivePresentationPacing(conf,deviceInfo.androidDisplayTimingSupported)",
+            compact_hooks,
         )
         self.assertNotIn(
-            "adaptivePresentationPacing(previous) != adaptivePresentationPacing(next)",
-            hooks,
+            "adaptivePresentationPacing(previous)!=adaptivePresentationPacing(next)",
+            compact_hooks,
         )
 
 
