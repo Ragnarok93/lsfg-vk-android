@@ -27,6 +27,12 @@ jobs:
             tests/adaptive_flow_controller_test.cpp \
             -o /tmp/lsfg-adaptive-flow-controller-test
           /tmp/lsfg-adaptive-flow-controller-test
+          g++ -std=c++20 -Wall -Wextra -Werror \
+            -Iinclude \
+            src/adaptive_scheduler.cpp \
+            tests/adaptive_scheduler_test.cpp \
+            -o /tmp/lsfg-adaptive-scheduler-test
+          /tmp/lsfg-adaptive-scheduler-test
       - name: Validate Android runtime and shadow handoff contracts
         shell: bash
         run: |
