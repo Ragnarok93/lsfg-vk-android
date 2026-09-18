@@ -52,5 +52,31 @@ class AndroidNonblockingGeneratedPipelineTest(unittest.TestCase):
             self.assertNotIn(forbidden, transform)
 
 
+    def test_soft_toggle_never_waits_for_framegen(self) -> None:
+        transform = (ROOT / "scripts/adreno_nonblocking_generated_pipeline.py").read_text(
+            encoding="utf-8"
+        )
+
+        for marker in (
+            "enterSourceOnlyBypass(VkQueue queue)",
+            "soft-bypass-buffered-source",
+            "pendingSourceReady_.handle()",
+            "framegenOutputEligible_ = false",
+            "soft resident bypass never drains framegen synchronously",
+        ):
+            self.assertIn(marker, transform)
+
+        # Destruction/recreation still owns the bounded lifecycle drain. The
+        # resident Off/On seam must only enqueue/release the buffered real image.
+        soft_start = transform.index("soft resident bypass never drains framegen synchronously")
+        soft_end = transform.index("soft-bypass-buffered-source", soft_start) + len(
+            "soft-bypass-buffered-source"
+        )
+        soft = transform[soft_start:soft_end]
+        self.assertNotIn("waitContext(", soft)
+        self.assertNotIn("flushPendingAndroidWork(true)", soft)
+        self.assertNotIn("sleep_for", soft)
+
+
 if __name__ == "__main__":
     unittest.main()
