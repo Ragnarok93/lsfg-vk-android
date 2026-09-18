@@ -30,6 +30,16 @@ assert "deadline-shadow" not in source
 assert "waitContext" in source
 assert "if (!useAsyncFramegenCompletion)" in source
 
+# Synthetic swapchain acquisition is opportunistic in Adaptive mode. A missing
+# image drops only that synthetic presentation; it must never block the source
+# present thread. Fixed mode retains its existing bounded acquire behavior.
+assert "generatedAcquireTimeoutNs" in source
+assert "conf.adaptiveFramegen ? 0 : runtimeWaitTimeoutNs()" in compact_source
+assert "res == VK_NOT_READY || res == VK_TIMEOUT" in source
+assert "windowSyntheticAcquireDrops" in header
+assert "lastGeneratedSourceChainSemaphore" in source
+assert "presentedGeneratedFrameCount" in source
+
 # Ring retirement is the ownership proof for framegen-side imported semaphores
 # and timing resources. Reuse waits the old slot and records its completed GPU
 # timing before replacing it.
