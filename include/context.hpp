@@ -222,11 +222,11 @@ private:
         uint64_t windowSyntheticDeadlineSamples{0};
     } runtimeMetrics;
 
-    // Reused for the game-device -> framegen AHB handoff. Async generated
-    // cycles still attach this fence to the source-copy submit; by the time the
-    // framegen completion wait returns, that submit has necessarily completed,
-    // so the fence is safe to reset on the next cycle. Warm-up/fallback cycles
-    // continue to wait it synchronously exactly as before.
+    // Reused for the game-device -> framegen AHB handoff. Generated and
+    // HistoryOnly cycles can use the dedicated GPU semaphore when available;
+    // source-history warm-up and capability/export fallbacks host-wait this
+    // fence with a finite timeout. The fence remains attached to every source
+    // copy submit so its reuse is bounded by the later completion gate.
     std::shared_ptr<VkFence> ahbHandoffFence;
     PFN_vkResetFences resetHandoffFences{nullptr};
     PFN_vkWaitForFences waitHandoffFences{nullptr};
