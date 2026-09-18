@@ -5,6 +5,7 @@
 #include <vulkan/vulkan_core.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 
 namespace LSFG::Core {
