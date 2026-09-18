@@ -23,7 +23,7 @@ Generate::Generate(Vulkan& vk,
           inImg5(std::move(inImg5)) {
     // create resources
     this->shaderModule = vk.shaders.getShader(vk.device, "generate",
-        { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },
+        { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC },
           { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
           { 5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
           { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } });
@@ -44,13 +44,14 @@ Generate::Generate(Vulkan& vk,
     for (size_t count = 1; count <= vk.generationCount; count++) {
       for (size_t i = 0; i < count; i++) {
         auto& pass = this->passesByGenerationCount.at(count).emplace_back();
-        pass.buffer = vk.resources.getBuffer(vk.device,
+        pass.buffer = vk.resources.createTimestampRing(vk.device,
             static_cast<float>(i + 1) / static_cast<float>(count + 1));
         for (size_t j = 0; j < 2; j++) {
             pass.descriptorSet.at(j) = Core::DescriptorSet(vk.device, vk.descriptorPool,
                 this->shaderModule);
             pass.descriptorSet.at(j).update(vk.device)
-                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, pass.buffer)
+                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, pass.buffer,
+                LSFG::Pool::ResourcePool::timestampRecordSize())
                 .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers)
                 .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, j == 0 ? this->inImg2 : this->inImg1)
                 .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, j == 0 ? this->inImg1 : this->inImg2)
@@ -68,8 +69,11 @@ void Generate::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         uint64_t pass_idx, size_t activeGenerationCount,
         float interpolationPhase) {
     auto& pass = this->passesByGenerationCount.at(activeGenerationCount).at(pass_idx);
+    const uint32_t timestampOffset =
+        LSFG::Pool::ResourcePool::timestampRingOffset(pass.buffer, frameCount);
     if (interpolationPhase > 0.0F)
-        LSFG::Pool::ResourcePool::writeTimestamp(pass.buffer, interpolationPhase);
+        LSFG::Pool::ResourcePool::writeTimestamp(
+            pass.buffer, interpolationPhase, timestampOffset);
 
     // first pass
     const auto extent = this->inImg1.getExtent();
@@ -86,7 +90,7 @@ void Generate::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         .build();
 
     this->pipeline.bind(buf);
-    pass.descriptorSet.at(frameCount % 2).bind(buf, this->pipeline);
+    pass.descriptorSet.at(frameCount % 2).bind(buf, this->pipeline, timestampOffset);
     buf.dispatch(threadsX, threadsY, 1);
 }
 
@@ -100,7 +104,7 @@ Generate::Generate(Vulkan& vk,
           outImgs(std::move(outImgs)) {
     // create resources (same as the FD-based ctor)
     this->shaderModule = vk.shaders.getShader(vk.device, "generate",
-        { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },
+        { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC },
           { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
           { 5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
           { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } });
@@ -114,13 +118,14 @@ Generate::Generate(Vulkan& vk,
     for (size_t count = 1; count <= vk.generationCount; count++) {
       for (size_t i = 0; i < count; i++) {
         auto& pass = this->passesByGenerationCount.at(count).emplace_back();
-        pass.buffer = vk.resources.getBuffer(vk.device,
+        pass.buffer = vk.resources.createTimestampRing(vk.device,
             static_cast<float>(i + 1) / static_cast<float>(count + 1));
         for (size_t j = 0; j < 2; j++) {
             pass.descriptorSet.at(j) = Core::DescriptorSet(vk.device, vk.descriptorPool,
                 this->shaderModule);
             pass.descriptorSet.at(j).update(vk.device)
-                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, pass.buffer)
+                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, pass.buffer,
+                LSFG::Pool::ResourcePool::timestampRecordSize())
                 .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers)
                 .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, j == 0 ? this->inImg2 : this->inImg1)
                 .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, j == 0 ? this->inImg1 : this->inImg2)

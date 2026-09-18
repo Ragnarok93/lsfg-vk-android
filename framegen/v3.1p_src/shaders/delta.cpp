@@ -26,7 +26,7 @@ Delta::Delta(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
     // create resources
     this->shaderModules = {{
         vk.shaders.getShader(vk.device, "p_delta[0]",
-            { { 1 , VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },
+            { { 1 , VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC },
               { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
               { 5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
               { 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } }),
@@ -43,12 +43,12 @@ Delta::Delta(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
               { 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
               { 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } }),
         vk.shaders.getShader(vk.device, "p_delta[4]",
-            { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },
+            { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC },
               { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
               { 4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
               { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } }),
         vk.shaders.getShader(vk.device, "p_delta[5]",
-            { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },
+            { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC },
               { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
               { 6, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
               { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } }),
@@ -65,7 +65,7 @@ Delta::Delta(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
               { 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
               { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } }),
         vk.shaders.getShader(vk.device, "p_delta[9]",
-            { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },
+            { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC },
               { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
               { 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
               { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } })
@@ -107,14 +107,15 @@ Delta::Delta(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
     for (size_t count = 1; count <= vk.generationCount; count++) {
       for (size_t pass_idx = 0; pass_idx < count; pass_idx++) {
         auto& pass = this->passesByGenerationCount.at(count).emplace_back();
-        pass.buffer = vk.resources.getBuffer(vk.device,
+        pass.buffer = vk.resources.createTimestampRing(vk.device,
             static_cast<float>(pass_idx + 1) / static_cast<float>(count + 1),
             false, !this->optImg1.has_value());
         for (size_t i = 0; i < 3; i++) {
             pass.firstDescriptorSet.at(i) = Core::DescriptorSet(vk.device, vk.descriptorPool,
                 this->shaderModules.at(0));
             pass.firstDescriptorSet.at(i).update(vk.device)
-                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, pass.buffer)
+                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, pass.buffer,
+                LSFG::Pool::ResourcePool::timestampRecordSize())
                 .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(1))
                 .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(2))
                 .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, this->inImgs1.at((i + 2) % 3))
@@ -149,7 +150,8 @@ Delta::Delta(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
         pass.descriptorSets.at(3) = Core::DescriptorSet(vk.device, vk.descriptorPool,
             this->shaderModules.at(4));
         pass.descriptorSets.at(3).update(vk.device)
-            .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, pass.buffer)
+            .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, pass.buffer,
+                LSFG::Pool::ResourcePool::timestampRecordSize())
             .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(0))
             .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(2))
             .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, this->tempImgs2)
@@ -161,7 +163,8 @@ Delta::Delta(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
             pass.sixthDescriptorSet.at(i) = Core::DescriptorSet(vk.device, vk.descriptorPool,
                 this->shaderModules.at(5));
             pass.sixthDescriptorSet.at(i).update(vk.device)
-                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, pass.buffer)
+                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, pass.buffer,
+                LSFG::Pool::ResourcePool::timestampRecordSize())
                 .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(1))
                 .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(2))
                 .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, this->inImgs1.at((i + 2) % 3))
@@ -195,7 +198,8 @@ Delta::Delta(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
         pass.descriptorSets.at(7) = Core::DescriptorSet(vk.device, vk.descriptorPool,
             this->shaderModules.at(9));
         pass.descriptorSets.at(7).update(vk.device)
-            .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, pass.buffer)
+            .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, pass.buffer,
+                LSFG::Pool::ResourcePool::timestampRecordSize())
             .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(0))
             .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(2))
             .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, this->tempImgs1.at(0))
@@ -210,8 +214,11 @@ void Delta::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         uint64_t pass_idx, size_t activeGenerationCount,
         float interpolationPhase) {
     auto& pass = this->passesByGenerationCount.at(activeGenerationCount).at(pass_idx);
+    const uint32_t timestampOffset =
+        LSFG::Pool::ResourcePool::timestampRingOffset(pass.buffer, frameCount);
     if (interpolationPhase > 0.0F)
-        LSFG::Pool::ResourcePool::writeTimestamp(pass.buffer, interpolationPhase);
+        LSFG::Pool::ResourcePool::writeTimestamp(
+            pass.buffer, interpolationPhase, timestampOffset);
 
     // first shader
     const auto extent = this->tempImgs1.at(0).getExtent();
@@ -226,7 +233,8 @@ void Delta::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         .build();
 
     this->pipelines.at(0).bind(buf);
-    pass.firstDescriptorSet.at(frameCount % 3).bind(buf, this->pipelines.at(0));
+    pass.firstDescriptorSet.at(frameCount % 3).bind(
+        buf, this->pipelines.at(0), timestampOffset);
     buf.dispatch(threadsX, threadsY, 1);
 
     // second shader
@@ -268,7 +276,7 @@ void Delta::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         .build();
 
     this->pipelines.at(4).bind(buf);
-    pass.descriptorSets.at(3).bind(buf, this->pipelines.at(4));
+    pass.descriptorSets.at(3).bind(buf, this->pipelines.at(4), timestampOffset);
     buf.dispatch(threadsX, threadsY, 1);
 
     // sixth shader
@@ -281,7 +289,8 @@ void Delta::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         .build();
 
     this->pipelines.at(5).bind(buf);
-    pass.sixthDescriptorSet.at(frameCount % 3).bind(buf, this->pipelines.at(5));
+    pass.sixthDescriptorSet.at(frameCount % 3).bind(
+        buf, this->pipelines.at(5), timestampOffset);
     buf.dispatch(threadsX, threadsY, 1);
 
     // seventh shader
@@ -325,6 +334,6 @@ void Delta::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         .build();
 
     this->pipelines.at(9).bind(buf);
-    pass.descriptorSets.at(7).bind(buf, this->pipelines.at(9));
+    pass.descriptorSets.at(7).bind(buf, this->pipelines.at(9), timestampOffset);
     buf.dispatch(threadsX, threadsY, 1);
 }
