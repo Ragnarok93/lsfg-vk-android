@@ -885,8 +885,9 @@ namespace {
 
         auto it3 = swapchains.find(*pPresentInfo->pSwapchains);
         if (it3 == swapchains.end()) {
-            Utils::logLimitN("swapMap", 5,
-                "Swapchain context not found in map");
+            // A missing LSFG wrapper is expected for disabled/degraded
+            // pass-through swapchains. Creation already logs the reason, so do
+            // not add repeated work or noise on every present.
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
         }
         auto& swapchain = it3->second;
