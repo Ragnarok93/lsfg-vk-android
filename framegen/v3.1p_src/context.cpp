@@ -556,17 +556,24 @@ bool Context::waitForLastPresent(Vulkan& vk, uint64_t timeoutNs) {
     if (!renderData.shouldWait)
         return true;
 
-    const auto deadline = std::chrono::steady_clock::now()
-        + std::chrono::nanoseconds(timeoutNs);
-    for (size_t i = 0; i < renderData.generationCount; ++i) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline)
-            return false;
-        const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            deadline - now).count();
-        if (!renderData.completionFences.at(i).wait(
-                vk.device, static_cast<uint64_t>(remaining)))
-            return false;
+    if (timeoutNs == 0) {
+        for (size_t i = 0; i < renderData.generationCount; ++i) {
+            if (!renderData.completionFences.at(i).wait(vk.device, 0))
+                return false;
+        }
+    } else {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::nanoseconds(timeoutNs);
+        for (size_t i = 0; i < renderData.generationCount; ++i) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+                return false;
+            const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                deadline - now).count();
+            if (!renderData.completionFences.at(i).wait(
+                    vk.device, static_cast<uint64_t>(remaining)))
+                return false;
+        }
     }
 #ifdef __ANDROID__
     this->recordAdaptiveFlowGpuTiming(vk, renderData);
