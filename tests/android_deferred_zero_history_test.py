@@ -16,8 +16,8 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
             "LiveHistory",
             "DeferredZero",
             "ReprimeHistory",
-            "kDeferredZeroDecisionThreshold = 1",
-            "kDeferredZeroMinimumDurationMs = 0",
+            "kDeferredZeroDecisionThreshold = 6",
+            "kDeferredZeroMinimumDurationMs = 250",
             "kRawHistoryBudgetBytes = 64ULL * 1024ULL * 1024ULL",
             "std::array<Mini::Image, 3> rawSourceHistory_",
             "framegenHistoryEpoch_",
@@ -179,15 +179,16 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         )
 
 
-    def test_zero_generation_enters_local_history_without_host_wait(self) -> None:
+    def test_deferred_zero_entry_preserves_fractional_anti_oscillation_without_host_drain(self) -> None:
         transform = (ROOT / "scripts/adreno_deferred_zero_history.py").read_text(encoding="utf-8")
 
-        self.assertIn("kDeferredZeroDecisionThreshold = 1", transform)
-        self.assertIn("kDeferredZeroMinimumDurationMs = 0", transform)
+        self.assertIn("kDeferredZeroDecisionThreshold = 6", transform)
+        self.assertIn("kDeferredZeroMinimumDurationMs = 250", transform)
 
         decision_start = transform.index("if (adaptiveZeroGeneration)")
         decision_end = transform.index("metrics_marker =", decision_start)
         decision = transform[decision_start:decision_end]
+        self.assertIn("rawSourceHistoryCount_ >= 3", decision)
         self.assertNotIn("flushPendingAndroidWork(true)", decision)
 
         deferred_start = transform.index("deferred-zero source-only no-framegen")
@@ -195,6 +196,23 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         deferred = transform[deferred_start:deferred_end]
         self.assertNotIn("waitPendingHistoryCompletionFd", deferred)
         self.assertNotIn("presentContextWithCount", deferred)
+
+    def test_zero_history_slot_reuse_waits_on_gpu_not_present_thread(self) -> None:
+        transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
+
+        self.assertIn("historyCompletionWaitSemaphore", transform)
+        self.assertIn("Mini::Semaphore::importFd", transform)
+        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", transform)
+        self.assertIn("gameRenderSemaphores2.emplace_back", transform)
+        self.assertIn("zero-history-sync-fd gpu-retire slot=", transform)
+
+        consume_start = transform.index('new_consume = """')
+        consume_end = transform.index('"""', consume_start + len('new_consume = """'))
+        consume = transform[consume_start:consume_end]
+        self.assertNotIn(
+            "waitPendingHistoryCompletionFd(historySlot, true)",
+            consume,
+        )
 
 
 if __name__ == "__main__":
