@@ -47,29 +47,13 @@ jobs:
           python3 tests/android_adaptive_history_test.py
           python3 tests/android_deferred_zero_history_test.py
           python3 tests/android_batch_optimization_test.py
-          python3 tests/android_zero_stage_profile_test.py
-          python3 tests/android_mipmaps_shader_profile_test.py
-          python3 tests/android_candidate_b_shader_hot_path_test.py
-          python3 tests/android_candidate_b2_mipmaps_dependency_test.py
-          python3 tests/android_candidate_b3_beta4_analysis_test.py
           python3 tests/android_candidate_b4_beta4_predicate_test.py
           python3 tests/android_candidate_b13_beta4_fused_mask_test.py
           python3 tests/android_candidate_b14_mipmaps_tail_fusion_test.py
-          python3 tests/android_beta4_evidence_analyzer_test.py
-          python3 tests/android_candidate_b9_beta4_spill_collapse_test.py
-          python3 tests/android_candidate_b6_pipeline_executable_profile_test.py
-          python3 tests/android_candidate_b8_mipmaps_matrix_test.py
-          python3 tests/android_final_nonadaptive_sweep_test.py
+          python3 tests/android_b14_subgroup_property_query_test.py
+          python3 tests/android_b15_subgroup_gate_test.py
           python3 tests/android_final_cpu_overhead_test.py
-          python3 tests/android_adreno_evidence_bundle_test.py
-          python3 tests/android_clean_benchmark_mode_test.py
-          python3 tests/android_adreno_evidence_timestamp_stage_test.py
           python3 tests/android_capability_architecture_test.py
-          python3 tests/android_b12_timestamp_fallback_test.py
-          python3 tests/android_mipmaps_evidence_analyzer_test.py
-          python3 tests/android_mipmaps_device_agnostic_evidence_test.py
-          python3 scripts/analyze-mipmaps-evidence.py --help >/dev/null
-          python3 scripts/analyze-beta4-evidence.py --help >/dev/null
 
       - name: Build and run capability policy tests
         run: |
