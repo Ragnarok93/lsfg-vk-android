@@ -507,7 +507,7 @@ void Context::present(Vulkan& vk,
             auto& localOut = presentGenerate->getOutImages().at(pass);
             auto& sharedOut = this->sharedOutImages.at(pass);
             std::vector<VkImageMemoryBarrier2> barriers;
-            barriers.reserve(2);
+            barriers.reserve(pass + 1 == generationCount ? 4 : 2);
             add_local_transition(barriers, localOut, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                 VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -521,6 +521,16 @@ void Context::present(Vulkan& vk,
                 VK_ACCESS_2_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL);
             add_external_transfer_release(barriers, vk, sharedOut,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            // Direct-input/copy-output keeps both AHB inputs owned by framegen
+            // across the generated passes. Return ownership only after the last
+            // pass has finished reading them so the game device can safely
+            // write the next source pair without a host-side synchronization.
+            if (pass + 1 == generationCount) {
+                add_external_release(barriers, vk, this->inImg_0,
+                    VK_ACCESS_2_SHADER_READ_BIT);
+                add_external_release(barriers, vk, this->inImg_1,
+                    VK_ACCESS_2_SHADER_READ_BIT);
+            }
             emit_external_barriers(buf2, barriers);
         } else {
             std::vector<VkImageMemoryBarrier2> releaseBarriers;
