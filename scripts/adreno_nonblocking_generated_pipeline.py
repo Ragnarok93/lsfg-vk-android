@@ -413,6 +413,14 @@ def patch_context_source(path: Path) -> None:
     this->previousSourceCopySignalValid_ = false;
 }
 """
+    deferred_hardened_bypass = """void LsContext::enterSourceOnlyBypass() {
+    this->flushPendingAndroidWork(true);
+    this->invalidateDeferredZeroHistory();
+    this->lastGeneratedFrameCount_ = 0;
+    this->requiresSourceHistoryWarmup_ = true;
+    this->previousSourceCopySignalValid_ = false;
+}
+"""
     base_bypass = """void LsContext::enterSourceOnlyBypass() {
     this->lastGeneratedFrameCount_ = 0;
     this->requiresSourceHistoryWarmup_ = true;
@@ -437,6 +445,7 @@ def patch_context_source(path: Path) -> None:
         this->pendingSourceValid_ = false;
     }
 
+    this->invalidateDeferredZeroHistory();
     this->framegenOutputEligible_ = false;
     this->pendingGeneratedCount_ = 0;
     this->lastGeneratedFrameCount_ = 0;
@@ -444,7 +453,9 @@ def patch_context_source(path: Path) -> None:
     this->previousSourceCopySignalValid_ = false;
 }
 """
-    if hardened_bypass in text:
+    if deferred_hardened_bypass in text:
+        text = text.replace(deferred_hardened_bypass, nonblocking_bypass, 1)
+    elif hardened_bypass in text:
         text = text.replace(hardened_bypass, nonblocking_bypass, 1)
     elif base_bypass in text:
         text = text.replace(base_bypass, nonblocking_bypass, 1)
