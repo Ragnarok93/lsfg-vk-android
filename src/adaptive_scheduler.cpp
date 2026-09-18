@@ -22,6 +22,13 @@ constexpr double kSourceDropRatio = 0.90;
 constexpr double kRecoveryRatio = 0.97;
 constexpr double kSuccessfulProbeHoldSeconds = 5.0;
 
+// LSFG fixed multipliers assume roughly a 30 FPS source-quality floor.
+// Adaptive mode remains usable below that floor, but must reduce synthetic
+// pressure as temporal distance grows. At/below 10 FPS interpolation is
+// disabled entirely until real cadence recovers.
+constexpr double kInterpolationCutoffFps = 10.0;
+constexpr double kFullInterpolationFps = 30.0;
+
 // If an already-established interpolation cost can no longer keep aggregate
 // output near the requested target, test one cheaper level before adding work.
 // The probe is retained only when it materially recovers source cadence without
@@ -107,10 +114,26 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     observedTimeSeconds_ += intervalSeconds;
     updateSourceRate(intervalSeconds);
 
-    const double wantedGenerated = std::clamp(
+    const double rawWantedGenerated = std::clamp(
         static_cast<double>(targetFps_) * smoothedSourceIntervalSeconds_ - 1.0,
         0.0,
         static_cast<double>(maxGeneratedFrames_));
+
+    const double sourceFps = telemetry_.smoothedSourceFps;
+    double wantedGenerated = rawWantedGenerated;
+    if (sourceFps <= kInterpolationCutoffFps) {
+        wantedGenerated = 0.0;
+        // Never carry fractional interpolation debt through a severe hitch,
+        // loading screen, or sub-cutoff source collapse.
+        fractionalGeneratedBudget_ = 0.0;
+        resetUnmetDemand();
+    } else if (sourceFps < kFullInterpolationFps) {
+        const double lowFpsWeight = std::clamp(
+            (sourceFps - kInterpolationCutoffFps)
+                / (kFullInterpolationFps - kInterpolationCutoffFps),
+            0.0, 1.0);
+        wantedGenerated *= lowFpsWeight;
+    }
     telemetry_.wantedGeneratedFrames = wantedGenerated;
 
     if (reconfigureWarmStartPending_) {
