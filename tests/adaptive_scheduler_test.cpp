@@ -384,5 +384,38 @@ int main() {
     }
 
 
+    {
+        // Source timing is indexed only by real-frame arrivals. Synthetic slot
+        // queries cannot advance or re-phase the next real-frame deadline.
+        SourceFrameTimeline timeline;
+        const auto first = timeline.observe(1'000'000'000ULL, 20ms);
+        assert(first.valid);
+        assert(first.sourceIndex == 0);
+        assert(first.anchorNs == 1'000'000'000ULL);
+        assert(first.sourceDeadlineNs == 1'020'000'000ULL);
+        const auto midpoint = first.syntheticDeadlineNs(0.5);
+        assert(midpoint == 1'010'000'000ULL);
+        assert(first.sourceDeadlineNs == 1'020'000'000ULL);
+
+        const auto second = timeline.observe(1'020'000'000ULL, 20ms);
+        assert(second.valid);
+        assert(second.sourceIndex == 1);
+        assert(second.anchorNs == 1'020'000'000ULL);
+        assert(second.sourceDeadlineNs == 1'040'000'000ULL);
+    }
+
+    {
+        // A source discontinuity invalidates only the presentation epoch. It
+        // must not manufacture historical synthetic timestamps or catch-up.
+        SourceFrameTimeline timeline;
+        assert(timeline.observe(2'000'000'000ULL, 16ms).valid);
+        assert(!timeline.observe(3'000'000'000ULL, 300ms).valid);
+        const auto resumed = timeline.observe(3'020'000'000ULL, 20ms);
+        assert(resumed.valid);
+        assert(resumed.sourceIndex == 0);
+        assert(resumed.sourceDeadlineNs > resumed.anchorNs);
+    }
+
+
     return 0;
 }
