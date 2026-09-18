@@ -46,6 +46,7 @@ jobs:
           python3 tests/android_runtime_stability_test.py
           python3 tests/android_suspend_timeout_guard_test.py
           python3 tests/android_nonblocking_generated_pipeline_test.py
+          python3 tests/android_barrier_scope_regression_test.py
           python3 tests/android_adaptive_history_test.py
           python3 tests/android_deferred_zero_history_test.py
           python3 tests/android_batch_optimization_test.py
