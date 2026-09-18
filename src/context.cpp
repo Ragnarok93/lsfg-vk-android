@@ -1154,9 +1154,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.preCopySemaphores.at(1).handle(),
     };
 
-    // Warm-up and zero-generation cycles deliberately retain the proven host
-    // fence path. Only ordinary generated cycles can use the optional dedicated
-    // cross-device semaphore, keeping source-only/history transitions unchanged.
+    // HistoryOnly uses the same dedicated cross-device input semaphore as
+    // generated work when supported, avoiding an unnecessary source-copy host
+    // wait. Source-history warm-up and unsupported/export-failure cases retain
+    // the proven bounded host-fence fallback.
     bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
         && !warmupSourceHistory;
     int framegenInputSemaphoreFd = -1;
@@ -1365,9 +1366,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-returned\n";
 
     // 3. Ensure framegen's separate VkDevice has completed its release barriers
-    //    before the game device acquires generated AHBs for readback/blit. Keep
-    //    this existing bounded completion wait for correctness; the optimization
-    //    only removes the earlier source-copy host wait.
+    //    before the game device acquires generated AHBs for readback/blit.
+    //    The existing output-semaphore contract can order this GPU copy, but it
+    //    cannot by itself prevent a late generated present queued ahead of the
+    //    source present from becoming WSI head-of-line work. Retain this bounded
+    //    host completion gate until presentation ordering can be proven
+    //    source-safe; do not disguise that blocker as a nonblocking fast path.
     const auto waitIdleStart = RuntimeMetrics::Clock::now();
     const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
     const bool framegenReady = conf.performance
@@ -1677,5 +1681,9 @@ void LsContext::enterSourceOnlyBypass() {
     this->previousSourceCopySignalValid_ = false;
     this->sourceTimeline_.reset();
     this->adaptiveScheduler_.reset();
+    this->deadlineHostCostValid_ = false;
+    this->deadlineHostCostEwmaMs_ = 0.0;
+    this->deadlineHostCostGenerationCount_ = 0;
+    this->deadlinePositivePredictionErrorEwmaMs_ = 0.0;
 }
 #endif
