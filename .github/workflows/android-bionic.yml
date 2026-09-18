@@ -46,6 +46,7 @@ jobs:
           python3 tests/android_runtime_stability_test.py
           python3 tests/android_suspend_timeout_guard_test.py
           python3 tests/android_adaptive_history_test.py
+          python3 tests/android_generated_handoff_policy_test.py
           python3 tests/android_deferred_zero_history_test.py
           python3 tests/android_batch_optimization_test.py
           python3 tests/android_candidate_b4_beta4_predicate_test.py
