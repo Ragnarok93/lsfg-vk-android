@@ -73,13 +73,12 @@ class AndroidBatchOptimizationTest(unittest.TestCase):
         self.assertIn("{data.transportReadySemaphore}", text)
         self.assertIn("transportReleaseFence.wait", text)
 
+        # Keep this older transform available as reference evidence, but the
+        # source-protected production composer must not revive the discarded
+        # slot-aware/TransportOnly stack.
         bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
-        self.assertIn("apply_transport_release_overlap(root)", bundle)
-        self.assertLess(
-            bundle.index("apply_slot_aware_zero_history(root)"),
-            bundle.index("apply_transport_release_overlap(root)"),
-            "release overlap must patch the already slot-aware TransportOnly path",
-        )
+        self.assertNotIn("apply_slot_aware_zero_history(root)", bundle)
+        self.assertNotIn("apply_transport_release_overlap(root)", bundle)
 
 
 if __name__ == "__main__":
