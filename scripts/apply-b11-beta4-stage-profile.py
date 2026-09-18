@@ -134,17 +134,18 @@ def patch_context_source(path: Path) -> None:
         label=f"{path}: Beta4 accumulator reset",
     )
 
+    dispatch_indent = "                " if "adaptiveFlowScales_" in text else "        "
     dispatch_old = (
-        "        this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
-        "        if (profileGenerated)\n"
-        "            data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 4);\n"
+        f"{dispatch_indent}this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+        f"{dispatch_indent}if (profileGenerated)\n"
+        f"{dispatch_indent}    data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 4);\n"
     )
     dispatch_new = (
-        "        this->beta.Dispatch(\n"
-        "            data.cmdBuffer1, this->frameIdx,\n"
-        "            profileGenerated ? &data.generatedBeta4QueryPool : nullptr);\n"
-        "        if (profileGenerated)\n"
-        "            data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 4);\n"
+        f"{dispatch_indent}this->beta.Dispatch(\n"
+        f"{dispatch_indent}    data.cmdBuffer1, this->frameIdx,\n"
+        f"{dispatch_indent}    profileGenerated ? &data.generatedBeta4QueryPool : nullptr);\n"
+        f"{dispatch_indent}if (profileGenerated)\n"
+        f"{dispatch_indent}    data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 4);\n"
     )
     text = replace_exact(
         text,
