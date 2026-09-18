@@ -230,8 +230,9 @@ namespace {
         );
         std::cerr << "lsfg-vk: init stage=android-sync-capability opaqueFdSemaphore="
                   << (opaqueFdSemaphoreSupported ? 1 : 0)
-                  << " displayTiming=" << (displayTimingSupported ? 1 : 0)
                   << " fallback=host-fence\n";
+        std::cerr << "lsfg-vk: init stage=android-display-timing capability="
+                  << (displayTimingSupported ? 1 : 0) << "\n";
 #else
         auto extensions = Utils::addExtensions(
             pCreateInfo->ppEnabledExtensionNames,
@@ -707,15 +708,19 @@ namespace {
             ? VK_PRESENT_MODE_FIFO_KHR
             : Config::activeConf.e_present;
         const bool recreatingExistingSwapchain = pCreateInfo->oldSwapchain != VK_NULL_HANDLE;
-        createInfo.presentMode = adaptivePacing
-            ? choosePresentMode(
+        // Preserve the established hot-recreate contract first, then
+        // apply the adaptive-only FIFO override. Fixed/Fixed therefore retains
+        // the application's recreation behavior byte-for-byte at this seam.
+        createInfo.presentMode = recreatingExistingSwapchain
+            ? pCreateInfo->presentMode
+            : choosePresentMode(
                 deviceInfo.physicalDevice, pCreateInfo->surface,
-                pCreateInfo->presentMode, VK_PRESENT_MODE_FIFO_KHR)
-            : (recreatingExistingSwapchain
-                ? pCreateInfo->presentMode
-                : choosePresentMode(
-                    deviceInfo.physicalDevice, pCreateInfo->surface,
-                    pCreateInfo->presentMode, configuredPresentMode));
+                pCreateInfo->presentMode, configuredPresentMode);
+        if (adaptivePacing) {
+            createInfo.presentMode = choosePresentMode(
+                deviceInfo.physicalDevice, pCreateInfo->surface,
+                pCreateInfo->presentMode, VK_PRESENT_MODE_FIFO_KHR);
+        }
         if (recreatingExistingSwapchain) {
             std::cerr << "lsfg-vk: init stage=swapchain-hot-recreate-present-mode"
                       << " adaptivePacing=" << (adaptivePacing ? 1 : 0)
