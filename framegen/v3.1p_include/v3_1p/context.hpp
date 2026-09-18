@@ -76,7 +76,8 @@ namespace LSFG_3_1P {
         ///
         void present(Vulkan& vk,
             int inSem, const std::vector<int>& outSem,
-            size_t activeGenerationCount);
+            size_t activeGenerationCount,
+            const std::vector<float>* interpolationPhases = nullptr);
 
         [[nodiscard]] bool waitForLastPresent(Vulkan& vk, uint64_t timeoutNs);
 
