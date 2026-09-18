@@ -54,27 +54,23 @@ def patch_framegen_header(path: Path) -> None:
         return
     text = replace_exact(
         text,
-        "            Core::Fence preprocessingFence; // reused for zero-generation temporal preprocessing\n\n"
-        "            Core::CommandBuffer cmdBuffer1;\n",
+        "            Core::Fence preprocessingFence; // reused for zero-generation temporal preprocessing\n",
         "            Core::Fence preprocessingFence; // reused for zero-generation temporal preprocessing\n"
         "            Core::TimestampQueryPool generatedPreQueryPool;\n"
         "            std::vector<Core::TimestampQueryPool> generatedPassQueryPools;\n"
         "            bool generatedProfilePending{false};\n"
-        "            size_t generatedProfileGenerationCount{0};\n\n"
-        "            Core::CommandBuffer cmdBuffer1;\n",
+        "            size_t generatedProfileGenerationCount{0};\n",
         count=1,
         label=f"{path}: generated profile slot state",
     )
     text = replace_exact(
         text,
-        "        uint32_t zeroStageProfileSamples{0};\n\n"
-        "        Shaders::Mipmaps mipmaps;\n",
+        "        uint32_t zeroStageProfileSamples{0};\n",
         "        uint32_t zeroStageProfileSamples{0};\n"
         "        std::array<double, 4> generatedPreProfileTotalsMs{};\n"
         "        std::array<double, 12> generatedPassProfileTotalsMs{};\n"
         "        uint32_t generatedProfileSourceSamples{0};\n"
-        "        uint32_t generatedProfilePassSamples{0};\n\n"
-        "        Shaders::Mipmaps mipmaps;\n",
+        "        uint32_t generatedProfilePassSamples{0};\n",
         count=1,
         label=f"{path}: generated profile accumulators",
     )
@@ -180,6 +176,9 @@ def patch_framegen_source(path: Path, backend: str) -> None:
         "    data.cmdBuffer1 = Core::CommandBuffer(vk.device, vk.commandPool);\n"
         "    data.cmdBuffer1.begin();\n"
         "    bool profileGenerated = generationCount > 0 && data.generatedPreQueryPool.supported();\n"
+        "#ifdef __ANDROID__\n"
+        "    profileGenerated = profileGenerated && this->adaptiveFlowScales_.empty();\n"
+        "#endif\n"
         "    for (size_t pass = 0; profileGenerated && pass < generationCount; ++pass)\n"
         "        profileGenerated = data.generatedPassQueryPools.at(pass).supported();\n"
         "    if (profileGenerated) {\n"
@@ -191,29 +190,49 @@ def patch_framegen_source(path: Path, backend: str) -> None:
         label=f"{path}: generated first-stage profiling start",
     )
 
-    text = replace_exact(
-        text,
-        "#endif\n\n    const bool profileZeroStage = generationCount == 0\n",
+    input_transport_anchor = (
+        "#endif\n\n"
+        "#ifdef __ANDROID__\n"
+        "    Core::TimestampQueryPool* adaptiveFlowTimingPool = nullptr;\n"
+    )
+    input_transport_profiled = (
         "#endif\n\n"
         "    if (profileGenerated)\n"
         "        data.generatedPreQueryPool.writeAtStage(\n"
         "            data.cmdBuffer1.handle(), 1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);\n\n"
-        "    const bool profileZeroStage = generationCount == 0\n",
-        count=1,
-        label=f"{path}: input transport timestamp",
+        "#ifdef __ANDROID__\n"
+        "    Core::TimestampQueryPool* adaptiveFlowTimingPool = nullptr;\n"
     )
+    if "adaptiveFlowScales_" in text:
+        text = replace_exact(
+            text, input_transport_anchor, input_transport_profiled, count=1,
+            label=f"{path}: input transport timestamp",
+        )
+    else:
+        text = replace_exact(
+            text,
+            "#endif\n\n    const bool profileZeroStage = generationCount == 0\n",
+            "#endif\n\n"
+            "    if (profileGenerated)\n"
+            "        data.generatedPreQueryPool.writeAtStage(\n"
+            "            data.cmdBuffer1.handle(), 1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);\n\n"
+            "    const bool profileZeroStage = generationCount == 0\n",
+            count=1,
+            label=f"{path}: input transport timestamp",
+        )
 
+    fixed_indent = "        " if "adaptiveFlowScales_" in text else "    "
     mipmap_tail = (
-        "    this->mipmaps.Dispatch(\n"
-        "        data.cmdBuffer1, this->frameIdx,\n"
-        "        profileZeroStage ? &this->zeroStageQueryPool : nullptr, 1);\n"
-        "    if (profileZeroStage)\n"
-        "        this->zeroStageQueryPool.write(data.cmdBuffer1.handle(), 2);\n"
+        f"{fixed_indent}this->mipmaps.Dispatch(\n"
+        f"{fixed_indent}    data.cmdBuffer1, this->frameIdx,\n"
+        f"{fixed_indent}    profileZeroStage ? &this->zeroStageQueryPool : nullptr, 1);\n"
+        f"{fixed_indent}if (profileZeroStage)\n"
+        f"{fixed_indent}    this->zeroStageQueryPool.write(data.cmdBuffer1.handle(), 2);\n"
     )
     mipmap_tail_new = (
         mipmap_tail
-        + "    if (profileGenerated)\n"
-        "        data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 2);\n"
+        + f"{fixed_indent}if (profileGenerated)\n"
+        f"{fixed_indent}    data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 2);\n"
     )
     text = replace_exact(
         text, mipmap_tail, mipmap_tail_new, count=1,
@@ -221,29 +240,29 @@ def patch_framegen_source(path: Path, backend: str) -> None:
     )
 
     alpha_beta_old = (
-        "    for (size_t i = 0; i < 7; i++) {\n"
-        "        this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);\n"
-        "        if (profileZeroStage)\n"
-        "            this->zeroStageQueryPool.write(\n"
-        "                data.cmdBuffer1.handle(), static_cast<uint32_t>(i + 3));\n"
-        "    }\n"
-        "    if (generationCount > 0)\n"
-        "        this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+        f"{fixed_indent}for (size_t i = 0; i < 7; i++) {{\n"
+        f"{fixed_indent}    this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+        f"{fixed_indent}    if (profileZeroStage)\n"
+        f"{fixed_indent}        this->zeroStageQueryPool.write(\n"
+        f"{fixed_indent}            data.cmdBuffer1.handle(), static_cast<uint32_t>(i + 3));\n"
+        f"{fixed_indent}}}\n"
+        f"{fixed_indent}if (generationCount > 0)\n"
+        f"{fixed_indent}    this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
     )
     alpha_beta_new = (
-        "    for (size_t i = 0; i < 7; i++) {\n"
-        "        this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);\n"
-        "        if (profileZeroStage)\n"
-        "            this->zeroStageQueryPool.write(\n"
-        "                data.cmdBuffer1.handle(), static_cast<uint32_t>(i + 3));\n"
-        "    }\n"
-        "    if (profileGenerated)\n"
-        "        data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 3);\n"
-        "    if (generationCount > 0) {\n"
-        "        this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
-        "        if (profileGenerated)\n"
-        "            data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 4);\n"
-        "    }\n"
+        f"{fixed_indent}for (size_t i = 0; i < 7; i++) {{\n"
+        f"{fixed_indent}    this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+        f"{fixed_indent}    if (profileZeroStage)\n"
+        f"{fixed_indent}        this->zeroStageQueryPool.write(\n"
+        f"{fixed_indent}            data.cmdBuffer1.handle(), static_cast<uint32_t>(i + 3));\n"
+        f"{fixed_indent}}}\n"
+        f"{fixed_indent}if (profileGenerated)\n"
+        f"{fixed_indent}    data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 3);\n"
+        f"{fixed_indent}if (generationCount > 0) {{\n"
+        f"{fixed_indent}    this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);\n"
+        f"{fixed_indent}    if (profileGenerated)\n"
+        f"{fixed_indent}        data.generatedPreQueryPool.write(data.cmdBuffer1.handle(), 4);\n"
+        f"{fixed_indent}}}\n"
     )
     text = replace_exact(
         text, alpha_beta_old, alpha_beta_new, count=1,
@@ -269,29 +288,58 @@ def patch_framegen_source(path: Path, backend: str) -> None:
         label=f"{path}: generated pass profiling start",
     )
 
-    pass_old = (
-        "        for (size_t i = 0; i < 7; i++) {\n"
-        "            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
-        "            if (i >= 4)\n"
-        "                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
-        "        }\n"
-        "        this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
-    )
-    pass_new = (
-        "        for (size_t i = 0; i < 7; i++) {\n"
-        "            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
-        "            if (generatedPassProfile != nullptr)\n"
-        "                generatedPassProfile->write(buf2.handle(), generatedPassQueryIndex++);\n"
-        "            if (i >= 4) {\n"
-        "                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
-        "                if (generatedPassProfile != nullptr)\n"
-        "                    generatedPassProfile->write(buf2.handle(), generatedPassQueryIndex++);\n"
-        "            }\n"
-        "        }\n"
-        "        this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
-        "        if (generatedPassProfile != nullptr)\n"
-        "            generatedPassProfile->write(buf2.handle(), generatedPassQueryIndex++);\n"
-    )
+    if "adaptiveFlowScales_" in text:
+        pass_old = (
+            "        } else {\n"
+            "            for (size_t i = 0; i < 7; i++) {\n"
+            "                this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "                if (i >= 4)\n"
+            "                    this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "            }\n"
+            "            this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "        }\n"
+        )
+        pass_new = (
+            "        } else {\n"
+            "            for (size_t i = 0; i < 7; i++) {\n"
+            "                this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "                if (generatedPassProfile != nullptr)\n"
+            "                    generatedPassProfile->write(buf2.handle(), generatedPassQueryIndex++);\n"
+            "                if (i >= 4) {\n"
+            "                    this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "                    if (generatedPassProfile != nullptr)\n"
+            "                        generatedPassProfile->write(buf2.handle(), generatedPassQueryIndex++);\n"
+            "                }\n"
+            "            }\n"
+            "            this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "            if (generatedPassProfile != nullptr)\n"
+            "                generatedPassProfile->write(buf2.handle(), generatedPassQueryIndex++);\n"
+            "        }\n"
+        )
+    else:
+        pass_old = (
+            "        for (size_t i = 0; i < 7; i++) {\n"
+            "            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "            if (i >= 4)\n"
+            "                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "        }\n"
+            "        this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+        )
+        pass_new = (
+            "        for (size_t i = 0; i < 7; i++) {\n"
+            "            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "            if (generatedPassProfile != nullptr)\n"
+            "                generatedPassProfile->write(buf2.handle(), generatedPassQueryIndex++);\n"
+            "            if (i >= 4) {\n"
+            "                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "                if (generatedPassProfile != nullptr)\n"
+            "                    generatedPassProfile->write(buf2.handle(), generatedPassQueryIndex++);\n"
+            "            }\n"
+            "        }\n"
+            "        this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);\n"
+            "        if (generatedPassProfile != nullptr)\n"
+            "            generatedPassProfile->write(buf2.handle(), generatedPassQueryIndex++);\n"
+        )
     text = replace_exact(
         text, pass_old, pass_new, count=1,
         label=f"{path}: generated shader stage timestamps",
