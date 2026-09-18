@@ -92,5 +92,18 @@ private:
     double unmetSourceFpsSum_{};
     std::size_t unmetSourceFpsSamples_{};
 
+    // Once an established generation level stops preserving useful source
+    // cadence, temporarily try one cheaper level. The lower level is retained
+    // only when source FPS recovers enough to preserve aggregate throughput.
+    double sourcePreservationSinceSeconds_{-1.0};
+    double sourcePreservationFpsSum_{};
+    std::size_t sourcePreservationSamples_{};
+    bool sourcePreservationProbeActive_{false};
+    std::size_t sourcePreservationOriginalCost_{};
+    double sourcePreservationBaselineFps_{};
+    double sourcePreservationProbeStartedSeconds_{};
+    double sourcePreservationProbeFpsSum_{};
+    std::size_t sourcePreservationProbeSamples_{};
+
     AdaptiveSchedulerTelemetry telemetry_{};
 };
