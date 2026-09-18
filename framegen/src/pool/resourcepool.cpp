@@ -7,6 +7,9 @@
 
 #include <array>
 #include <cstdint>
+#include <cstddef>
+#include <cmath>
+#include <stdexcept>
 
 using namespace LSFG;
 using namespace LSFG::Pool;
@@ -52,6 +55,16 @@ Core::Buffer ResourcePool::getBuffer(
     buffers[hash] = buffer;
     return buffer;
 }
+
+void ResourcePool::writeTimestamp(Core::Buffer& buffer, float timestamp) {
+    if (!std::isfinite(timestamp) || timestamp <= 0.0F || timestamp >= 1.0F)
+        throw std::invalid_argument("Interpolation timestamp must be within (0, 1)");
+    buffer.write(
+        &timestamp,
+        sizeof(timestamp),
+        offsetof(ConstantBuffer, timestamp));
+}
+
 
 Core::Sampler ResourcePool::getSampler(
             const Core::Device& device,
