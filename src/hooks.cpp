@@ -57,12 +57,20 @@ namespace {
         return conf.multiplier;
     }
 
-    bool adaptivePresentationPacing(const Config::Configuration& conf) {
+    bool adaptivePresentationPacing(
+            const Config::Configuration& conf,
+            bool displayTimingSupported) {
 #ifdef __ANDROID__
-        return conf.targeted && conf.enable && conf.multiplier > 1
+        // FIFO alone only orders a burst; it does not pace it. Enable the
+        // adaptive presentation contract only when the device can honor
+        // explicit desiredPresentTime metadata. Otherwise preserve the game's
+        // configured WSI mode and the established GameNative pacing owner.
+        return displayTimingSupported
+            && conf.targeted && conf.enable && conf.multiplier > 1
             && (conf.adaptiveFramegen || conf.adaptiveFlowScale);
 #else
         (void)conf;
+        (void)displayTimingSupported;
         return false;
 #endif
     }
@@ -81,10 +89,7 @@ namespace {
             const bool fixedFlowScaleChanged =
                 !previous.adaptiveFlowScale && !next.adaptiveFlowScale
                 && previous.flowScale != next.flowScale;
-            const bool adaptivePresentationModeChanged =
-                adaptivePresentationPacing(previous) != adaptivePresentationPacing(next);
             return previous.dll != next.dll
-                || adaptivePresentationModeChanged
                 || adaptiveFlowModeChanged
                 || adaptiveFlowPresetChanged
                 || fixedFlowScaleChanged
@@ -703,7 +708,8 @@ namespace {
 
         createInfo.imageUsage |= requiredTransferUsage;
 
-        const bool adaptivePacing = adaptivePresentationPacing(activeConf);
+        const bool adaptivePacing = adaptivePresentationPacing(
+            activeConf, deviceInfo.androidDisplayTimingSupported);
         const auto configuredPresentMode = adaptivePacing
             ? VK_PRESENT_MODE_FIFO_KHR
             : Config::activeConf.e_present;
@@ -954,7 +960,8 @@ namespace {
         #pragma clang diagnostic pop
 
         const VkPresentModeKHR desiredPresentMode =
-            adaptivePresentationPacing(conf)
+            adaptivePresentationPacing(
+                conf, deviceInfo.androidDisplayTimingSupported)
                 ? VK_PRESENT_MODE_FIFO_KHR
                 : conf.e_present;
         if (configuredPresent != desiredPresentMode) {
