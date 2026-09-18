@@ -178,6 +178,15 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
         self.assertIn("previousSourceCopySignalValid_ = false", bypass)
 
+    def test_zero_generation_is_source_only_and_rewarms_history(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("if (adaptiveZeroGeneration)")
+        end = source.index("if (warmupSourceHistory)", start)
+        block = source[start:end]
+        self.assertNotIn("presentContextWithCount(", block)
+        self.assertNotIn("presentContextWithCountAndHistoryFd", block)
+        self.assertIn("requiresSourceHistoryWarmup_ = true", block)
+        self.assertIn("pre-copy-adaptive-zero-source-only", block)
 
 if __name__ == "__main__":
     unittest.main()
