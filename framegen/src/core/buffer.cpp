@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <cstring>
+#include <stdexcept>
 #include <optional>
 
 using namespace LSFG::Core;
@@ -68,19 +70,38 @@ void Buffer::construct(const Core::Device& device, const void* data, VkBufferUsa
     if (res != VK_SUCCESS || buf == nullptr)
         throw LSFG::vulkan_error(res, "Failed to map memory for Vulkan buffer");
     std::copy_n(reinterpret_cast<const uint8_t*>(data), this->size, buf);
-    vkUnmapMemory(device.handle(), memoryHandle);
+
+    // Keep host-coherent uniform storage persistently mapped. This makes
+    // source-protected fractional timestamp updates a bounded memcpy rather
+    // than adding vkMapMemory/vkUnmapMemory calls to the frame hot path.
+    // The memory type above explicitly requires HOST_COHERENT.
+    this->mapped = {};
 
     // store buffer and memory in shared ptr
     this->buffer = std::shared_ptr<VkBuffer>(
         new VkBuffer(bufferHandle),
         [dev = device.handle()](VkBuffer* img) {
             vkDestroyBuffer(dev, *img, nullptr);
+            delete img;
         }
     );
     this->memory = std::shared_ptr<VkDeviceMemory>(
         new VkDeviceMemory(memoryHandle),
         [dev = device.handle()](VkDeviceMemory* mem) {
+            vkUnmapMemory(dev, *mem);
             vkFreeMemory(dev, *mem, nullptr);
+            delete mem;
         }
     );
+    this->mapped = std::shared_ptr<uint8_t>(this->memory, buf);
+}
+
+void Buffer::write(const void* data, size_t bytes, size_t offset) const {
+    if (data == nullptr)
+        throw std::invalid_argument("Buffer write data is null");
+    if (!this->mapped)
+        throw std::logic_error("Buffer is not persistently mapped");
+    if (offset > this->size || bytes > this->size - offset)
+        throw std::out_of_range("Buffer write exceeds allocation");
+    std::memcpy(this->mapped.get() + offset, data, bytes);
 }
