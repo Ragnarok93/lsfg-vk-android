@@ -29,8 +29,8 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
                 f"{relative}: negative output fd sentinels must never reach Core::Semaphore(fd)",
             )
 
-    def test_adaptive_zero_generation_defers_completion_fd_without_reverse_vulkan_import(self) -> None:
-        """Zero-generation completion must not import a framegen sync fd into the game VkDevice."""
+    def test_adaptive_zero_generation_defers_completion_fd_to_gpu_dependency(self) -> None:
+        """Normal zero-history retirement imports SYNC_FD as a game-device GPU wait."""
         transform = "\n".join(
             (ROOT / relative).read_text(encoding="utf-8")
             for relative in (
@@ -52,11 +52,9 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         ):
             self.assertIn(marker, transform)
 
-        self.assertNotIn("pendingHistoryCompletionSemaphore_", transform)
-        self.assertNotIn(
-            "pendingHistoryCompletionSemaphore_=Mini::Semaphore::importFd",
-            transform,
-        )
+        self.assertIn("historyCompletionWaitSemaphore", transform)
+        self.assertIn("Mini::Semaphore::importFd", transform)
+        self.assertIn("gameRenderSemaphores2.emplace_back", transform)
 
     def test_zero_history_retirement_is_slot_aware_without_pacing_delay(self) -> None:
         """A zero pass may overlap the next frame but must retire before its input slot is reused."""
@@ -69,13 +67,20 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             "waitPendingHistoryCompletionFd(size_t historySlot",
             "pendingHistoryCompletionFds_.at(historySlot)",
             "pendingHistoryCompletionValid_.at(historySlot)",
-            "waitPendingHistoryCompletionFd(historySlot, true)",
+            "historyCompletionWaitSemaphore",
+            "Mini::Semaphore::importFd",
+            "gameRenderSemaphores2.emplace_back",
+            "zero-history-sync-fd gpu-retire slot=",
             "zeroGenerationDirectStorage",
             "activeHistoryInput",
             "ahbTransportMode!=LSFG::AhbTransportMode::Unsupported",
         ):
             self.assertIn(marker, transform)
 
+        normal_consume_start = transform.index('new_consume = """')
+        normal_consume_end = transform.index('"""', normal_consume_start + len('new_consume = """'))
+        normal_consume = transform[normal_consume_start:normal_consume_end]
+        self.assertNotIn("waitPendingHistoryCompletionFd(historySlot, true)", normal_consume)
         self.assertNotIn("delayUntilNextSourceOutput", transform)
         self.assertNotIn("sleep_for", transform)
 
