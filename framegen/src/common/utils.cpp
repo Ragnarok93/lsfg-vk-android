@@ -127,8 +127,11 @@ BarrierBuilder& BarrierBuilder::addR2W(Core::Image& image) {
         throw std::logic_error("BarrierBuilder capacity exceeded");
     this->barriers[this->barrierCount++] = VkImageMemoryBarrier2{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        // Read-after-use -> overwrite is a WAR hazard: preserve compute
+        // execution ordering, but do not request source memory availability or
+        // cache visibility for data that will not be consumed again.
         .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+        .srcAccessMask = VK_ACCESS_2_NONE,
         .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
         .oldLayout = image.getLayout(),
