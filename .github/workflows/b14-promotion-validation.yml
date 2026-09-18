@@ -3,7 +3,8 @@ name: B14 Promotion Validation
 on:
   push:
     branches:
-      - feature/adreno-6xx-b14-directional-ahb-adaptive-reload
+      - release
+      - 'fix/**'
   workflow_dispatch:
 
 concurrency:
