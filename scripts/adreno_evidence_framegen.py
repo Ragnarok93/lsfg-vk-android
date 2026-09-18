@@ -221,7 +221,7 @@ def patch_framegen_source(path: Path, backend: str) -> None:
             label=f"{path}: input transport timestamp",
         )
 
-    fixed_indent = "        " if "adaptiveFlowScales_" in text else "    "
+    fixed_indent = "            " if "adaptiveFlowScales_" in text else "    "
     mipmap_tail = (
         f"{fixed_indent}this->mipmaps.Dispatch(\n"
         f"{fixed_indent}    data.cmdBuffer1, this->frameIdx,\n"
