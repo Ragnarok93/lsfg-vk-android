@@ -91,6 +91,60 @@ void SourceFrameTimeline::reset() {
     intervalNs_ = 0;
 }
 
+SyntheticDeadlineAdmissionPlan SyntheticDeadlineAdmission::evaluate(
+        uint64_t nowNs,
+        const SourceTimelineCycle& cycle,
+        const std::vector<double>& phases,
+        double sharedCostMs,
+        double perSyntheticCostMs,
+        double positivePredictionErrorMarginMs) {
+    SyntheticDeadlineAdmissionPlan plan{};
+    plan.slots.reserve(phases.size());
+
+    const bool finiteCosts =
+        std::isfinite(sharedCostMs) && std::isfinite(perSyntheticCostMs)
+        && sharedCostMs >= 0.0 && perSyntheticCostMs >= 0.0;
+    plan.predictionValid = cycle.valid && nowNs > 0 && finiteCosts
+        && (sharedCostMs > 0.0 || perSyntheticCostMs > 0.0);
+    const double learnedMarginMs =
+        std::isfinite(positivePredictionErrorMarginMs)
+        ? std::max(0.0, positivePredictionErrorMarginMs)
+        : 0.0;
+
+    for (std::size_t i = 0; i < phases.size(); ++i) {
+        const double phase = phases.at(i);
+        const uint64_t deadlineNs = cycle.syntheticDeadlineNs(phase);
+        const double usableBudgetMs =
+            deadlineNs > nowNs
+            ? static_cast<double>(deadlineNs - nowNs) / 1'000'000.0
+            : 0.0;
+        const double predictedCompletionMs = plan.predictionValid
+            ? sharedCostMs + perSyntheticCostMs * static_cast<double>(i + 1)
+            : 0.0;
+        // Start with a rate-independent relative uncertainty reserve, then let
+        // measured positive prediction error dominate once evidence exists.
+        const double safetyMarginMs = plan.predictionValid
+            ? std::max(predictedCompletionMs * 0.10, learnedMarginMs)
+            : 0.0;
+        const bool deadlineStillUsable = deadlineNs > nowNs;
+        const bool admitted = deadlineStillUsable
+            && (!plan.predictionValid
+                || predictedCompletionMs + safetyMarginMs <= usableBudgetMs);
+
+        if (!admitted)
+            ++plan.rejectedCount;
+        plan.slots.push_back(SyntheticDeadlineSlotDecision{
+            .phase = phase,
+            .deadlineNs = deadlineNs,
+            .usableBudgetMs = usableBudgetMs,
+            .predictedCompletionMs = predictedCompletionMs,
+            .safetyMarginMs = safetyMarginMs,
+            .admitted = admitted,
+        });
+    }
+    return plan;
+}
+
 AdaptiveFrameScheduler::AdaptiveFrameScheduler(
         uint32_t targetFps, std::size_t maxGeneratedFrames)
         : targetFps_(targetFps),

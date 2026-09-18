@@ -31,6 +31,34 @@ private:
     uint64_t intervalNs_{0};
 };
 
+struct SyntheticDeadlineSlotDecision {
+    double phase{};
+    uint64_t deadlineNs{};
+    double usableBudgetMs{};
+    double predictedCompletionMs{};
+    double safetyMarginMs{};
+    bool admitted{true};
+};
+
+struct SyntheticDeadlineAdmissionPlan {
+    bool predictionValid{false};
+    std::size_t rejectedCount{};
+    std::vector<SyntheticDeadlineSlotDecision> slots;
+};
+
+/// Stateless fast-path deadline check. It owns no long-term policy and never
+/// changes source cadence, generation density, or Flow Scale.
+class SyntheticDeadlineAdmission {
+public:
+    [[nodiscard]] static SyntheticDeadlineAdmissionPlan evaluate(
+        uint64_t nowNs,
+        const SourceTimelineCycle& cycle,
+        const std::vector<double>& phases,
+        double sharedCostMs,
+        double perSyntheticCostMs,
+        double positivePredictionErrorMarginMs);
+};
+
 struct AdaptiveGenerationPlan {
     // Normalized synthetic opportunities inside the next protected source
     // interval. 0.0 is the source-arrival anchor and 1.0 is the source
