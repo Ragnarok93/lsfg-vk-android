@@ -57,6 +57,16 @@ namespace {
         return conf.multiplier;
     }
 
+    bool adaptivePresentationPacing(const Config::Configuration& conf) {
+#ifdef __ANDROID__
+        return conf.targeted && conf.enable && conf.multiplier > 1
+            && (conf.adaptiveFramegen || conf.adaptiveFlowScale);
+#else
+        (void)conf;
+        return false;
+#endif
+    }
+
     bool requiresSwapchainRecreation(
             const Config::Configuration& previous,
             const Config::Configuration& next) {
@@ -71,7 +81,10 @@ namespace {
             const bool fixedFlowScaleChanged =
                 !previous.adaptiveFlowScale && !next.adaptiveFlowScale
                 && previous.flowScale != next.flowScale;
+            const bool adaptivePresentationModeChanged =
+                adaptivePresentationPacing(previous) != adaptivePresentationPacing(next);
             return previous.dll != next.dll
+                || adaptivePresentationModeChanged
                 || adaptiveFlowModeChanged
                 || adaptiveFlowPresetChanged
                 || fixedFlowScaleChanged
@@ -205,6 +218,10 @@ namespace {
         const bool opaqueFdSemaphoreSupported = supportsOpaqueFdSemaphore(physicalDevice);
         if (opaqueFdSemaphoreSupported)
             requestedExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+        const bool displayTimingSupported = supportsDeviceExtension(
+            physicalDevice, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+        if (displayTimingSupported)
+            requestedExtensions.push_back(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
 
         auto extensions = Utils::addExtensions(
             pCreateInfo->ppEnabledExtensionNames,
@@ -213,6 +230,7 @@ namespace {
         );
         std::cerr << "lsfg-vk: init stage=android-sync-capability opaqueFdSemaphore="
                   << (opaqueFdSemaphoreSupported ? 1 : 0)
+                  << " displayTiming=" << (displayTimingSupported ? 1 : 0)
                   << " fallback=host-fence\n";
 #else
         auto extensions = Utils::addExtensions(
@@ -246,9 +264,12 @@ namespace {
         const bool androidAhbSupported = supportsDeviceExtension(physicalDevice,
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
         const bool androidOpaqueFdSemaphoreSupported = supportsOpaqueFdSemaphore(physicalDevice);
+        const bool androidDisplayTimingSupported = supportsDeviceExtension(
+            physicalDevice, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
 #else
         const bool androidAhbSupported = true;
         const bool androidOpaqueFdSemaphoreSupported = false;
+        const bool androidDisplayTimingSupported = false;
 #endif
         auto getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
             Layer::ovkGetInstanceProcAddr(layerInstance, "vkGetPhysicalDeviceProperties2"));
@@ -269,6 +290,7 @@ namespace {
             .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
             .androidAhbSupported = androidAhbSupported,
             .androidOpaqueFdSemaphoreSupported = androidOpaqueFdSemaphoreSupported,
+            .androidDisplayTimingSupported = androidDisplayTimingSupported,
         });
         return VK_SUCCESS;
     }
@@ -680,17 +702,26 @@ namespace {
 
         createInfo.imageUsage |= requiredTransferUsage;
 
-        const auto configuredPresentMode = Config::activeConf.e_present;
+        const bool adaptivePacing = adaptivePresentationPacing(activeConf);
+        const auto configuredPresentMode = adaptivePacing
+            ? VK_PRESENT_MODE_FIFO_KHR
+            : Config::activeConf.e_present;
         const bool recreatingExistingSwapchain = pCreateInfo->oldSwapchain != VK_NULL_HANDLE;
-        createInfo.presentMode = recreatingExistingSwapchain
-            ? pCreateInfo->presentMode
-            : choosePresentMode(
+        createInfo.presentMode = adaptivePacing
+            ? choosePresentMode(
                 deviceInfo.physicalDevice, pCreateInfo->surface,
-                pCreateInfo->presentMode, configuredPresentMode);
+                pCreateInfo->presentMode, VK_PRESENT_MODE_FIFO_KHR)
+            : (recreatingExistingSwapchain
+                ? pCreateInfo->presentMode
+                : choosePresentMode(
+                    deviceInfo.physicalDevice, pCreateInfo->surface,
+                    pCreateInfo->presentMode, configuredPresentMode));
         if (recreatingExistingSwapchain) {
             std::cerr << "lsfg-vk: init stage=swapchain-hot-recreate-present-mode"
-                         " preservingGameMode=" << pCreateInfo->presentMode
-                      << " configuredMode=" << configuredPresentMode << "\n";
+                      << " adaptivePacing=" << (adaptivePacing ? 1 : 0)
+                      << " gameMode=" << pCreateInfo->presentMode
+                      << " configuredMode=" << configuredPresentMode
+                      << " effectiveMode=" << createInfo.presentMode << "\n";
         }
 
         std::cerr << "lsfg-vk: init stage=swapchain-downstream-create-begin images="
@@ -917,7 +948,11 @@ namespace {
         }
         #pragma clang diagnostic pop
 
-        if (configuredPresent != conf.e_present) {
+        const VkPresentModeKHR desiredPresentMode =
+            adaptivePresentationPacing(conf)
+                ? VK_PRESENT_MODE_FIFO_KHR
+                : conf.e_present;
+        if (configuredPresent != desiredPresentMode) {
             Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
