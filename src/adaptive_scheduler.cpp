@@ -126,7 +126,9 @@ SyntheticDeadlineAdmissionPlan SyntheticDeadlineAdmission::evaluate(
         const double safetyMarginMs = plan.predictionValid
             ? std::max(predictedCompletionMs * 0.10, learnedMarginMs)
             : 0.0;
-        const bool deadlineStillUsable = deadlineNs > nowNs;
+        const bool hasUsableEpoch = cycle.valid && nowNs > 0;
+        const bool deadlineStillUsable =
+            !hasUsableEpoch || deadlineNs > nowNs;
         const bool admitted = deadlineStillUsable
             && (!plan.predictionValid
                 || predictedCompletionMs + safetyMarginMs <= usableBudgetMs);
