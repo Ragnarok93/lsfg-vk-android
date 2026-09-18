@@ -124,6 +124,7 @@ private:
 
 #ifdef __ANDROID__
     AdaptiveFrameScheduler adaptiveScheduler_;
+    SourceFrameTimeline sourceTimeline_;
     AdaptiveFlowController adaptiveFlowController_;
     AdaptiveFlowPreset adaptiveFlowPreset_{AdaptiveFlowPreset::Quality};
     bool adaptiveFlowRuntimeAvailable_{false};
@@ -143,7 +144,6 @@ private:
     // swapchain still uses FIFO ordering when this capability is unavailable.
     bool adaptiveDisplayTimingEnabled_{false};
     uint64_t adaptivePresentPeriodNs_{0};
-    uint64_t adaptiveNextPresentTimeNs_{0};
     uint32_t adaptivePresentId_{1};
 
     bool requiresSourceHistoryWarmup_{false};
@@ -185,6 +185,14 @@ private:
         uint64_t windowSyncHandoffs{0};
         uint64_t totalSyncHandoffs{0};
         uint64_t totalAsyncFallbacks{0};
+        uint64_t windowSyntheticOpportunities{0};
+        uint64_t totalSyntheticOpportunities{0};
+        uint64_t windowDeadlineShadowRejects{0};
+        uint64_t totalDeadlineShadowRejects{0};
+        uint64_t windowDeadlineShadowLate{0};
+        uint64_t totalDeadlineShadowLate{0};
+        uint64_t windowDeadlinePredictionSamples{0};
+        uint64_t totalDeadlinePredictionSamples{0};
 
         double windowCycleMs{0.0};
         double windowCycleMaxMs{0.0};
@@ -194,7 +202,15 @@ private:
         double windowGeneratedPresentMs{0.0};
         double windowSourceIntervalMs{0.0};
         double windowSourceIntervalMaxMs{0.0};
+        double windowSourceDeadlineErrorMs{0.0};
+        double windowSourceDeadlineErrorAbsMs{0.0};
+        double windowSyntheticDeadlineErrorMs{0.0};
+        double windowPredictedLsfgMs{0.0};
+        double windowActualLsfgMs{0.0};
+        double windowInterceptPresentMs{0.0};
         uint64_t windowSourceIntervals{0};
+        uint64_t windowSourceDeadlineSamples{0};
+        uint64_t windowSyntheticDeadlineSamples{0};
     } runtimeMetrics;
 
     // Reused for the game-device -> framegen AHB handoff. Async generated
