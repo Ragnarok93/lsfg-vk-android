@@ -3,6 +3,8 @@
 #include <cassert>
 #include <chrono>
 #include <cstddef>
+#include <cmath>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -340,6 +342,47 @@ int main() {
         assert(restored);
         assert(scheduler.telemetry().costLimit >= 2);
     }
+
+    {
+        // Fractional density is represented as explicit opportunities on one
+        // continuous phase lattice, not by switching integer multiplier modes.
+        // A 0.5 synthetic/source density should therefore produce one
+        // opportunity every two protected source intervals at a stable phase.
+        AdaptiveFrameScheduler scheduler(75, 3);
+        std::vector<double> absoluteSlots;
+        for (int frame = 0; frame < 12; ++frame) {
+            const auto plan = scheduler.planSlots(20ms);
+            assert(std::abs(plan.desiredDensity - 0.5) < 0.0001);
+            assert(std::abs(plan.governedDensity - 0.5) < 0.0001);
+            for (const double phase : plan.slotPhases) {
+                assert(phase > 0.0 && phase <= 1.0);
+                absoluteSlots.push_back(static_cast<double>(frame) + phase);
+            }
+        }
+        assert(absoluteSlots.size() == 6);
+        for (std::size_t i = 1; i < absoluteSlots.size(); ++i)
+            assert(std::abs((absoluteSlots[i] - absoluteSlots[i - 1]) - 2.0) < 0.0001);
+    }
+
+    {
+        // Consuming/rejecting an opportunity is deliberately external to the
+        // scheduler. Merely ignoring a created slot must not cause a later
+        // catch-up burst or alter the phase lattice.
+        AdaptiveFrameScheduler scheduler(75, 3);
+        std::vector<std::size_t> counts;
+        for (int frame = 0; frame < 8; ++frame)
+            counts.push_back(scheduler.planSlots(20ms).slotPhases.size());
+
+        for (const auto count : counts)
+            assert(count <= 1);
+        std::size_t total = 0;
+        for (const auto count : counts)
+            total += count;
+        assert(total == 4);
+        assert(scheduler.telemetry().fractionalPhase >= 0.0);
+        assert(scheduler.telemetry().fractionalPhase < 1.0);
+    }
+
 
     return 0;
 }
