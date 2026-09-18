@@ -3,6 +3,7 @@
 
 #include "v3_1p/shaders/generate.hpp"
 #include "common/utils.hpp"
+#include "pool/resourcepool.hpp"
 #include "core/commandbuffer.hpp"
 #include "core/image.hpp"
 
@@ -64,8 +65,11 @@ Generate::Generate(Vulkan& vk,
 }
 
 void Generate::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
-        uint64_t pass_idx, size_t activeGenerationCount) {
+        uint64_t pass_idx, size_t activeGenerationCount,
+        float interpolationPhase) {
     auto& pass = this->passesByGenerationCount.at(activeGenerationCount).at(pass_idx);
+    if (interpolationPhase > 0.0F)
+        LSFG::Pool::ResourcePool::writeTimestamp(pass.buffer, interpolationPhase);
 
     // first pass
     const auto extent = this->inImg1.getExtent();
