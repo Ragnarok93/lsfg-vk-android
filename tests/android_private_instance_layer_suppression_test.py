@@ -24,6 +24,8 @@ class AndroidPrivateInstanceLayerSuppressionTest(unittest.TestCase):
             "ScopedPrivateInstanceLayerSuppression",
             '"DISABLE_LSFG"',
             '"VK_INSTANCE_LAYERS"',
+            '"VK_LOADER_LAYERS_ENABLE"',
+            '"VK_LOADER_LAYERS_DISABLE"',
             '"VK_LAYER_LS_frame_generation"',
             "setenv",
             "unsetenv",
@@ -35,6 +37,15 @@ class AndroidPrivateInstanceLayerSuppressionTest(unittest.TestCase):
         create = source.index("vkCreateInstance(&createInfo", ctor)
         suppression = source.index("ScopedPrivateInstanceLayerSuppression", ctor)
         self.assertLess(suppression, create)
+
+    def test_private_instance_suppresses_forced_loader_enable(self) -> None:
+        source = (ROOT / "framegen/src/core/instance.cpp").read_text(encoding="utf-8")
+        self.assertIn('readEnvironment("VK_LOADER_LAYERS_ENABLE")', source)
+        self.assertIn('readEnvironment("VK_LOADER_LAYERS_DISABLE")', source)
+        self.assertIn('unsetenv("VK_LOADER_LAYERS_ENABLE")', source)
+        self.assertIn('setenv("VK_LOADER_LAYERS_DISABLE", "*", 1)', source)
+        self.assertIn('restoreEnvironment("VK_LOADER_LAYERS_ENABLE"', source)
+        self.assertIn('restoreEnvironment("VK_LOADER_LAYERS_DISABLE"', source)
 
     def test_android_layer_keeps_private_instance_passthrough_as_fallback(self) -> None:
         layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
