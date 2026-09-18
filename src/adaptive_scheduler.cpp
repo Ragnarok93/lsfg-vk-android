@@ -21,6 +21,16 @@ constexpr double kBlameWindowSeconds = 1.250;
 constexpr double kSourceDropRatio = 0.90;
 constexpr double kRecoveryRatio = 0.97;
 constexpr double kSuccessfulProbeHoldSeconds = 5.0;
+
+// If an already-established interpolation cost can no longer keep aggregate
+// output near the requested target, test one cheaper level before adding work.
+// The probe is retained only when it materially recovers source cadence without
+// materially reducing aggregate source+generated throughput.
+constexpr double kSourcePreservationOutputRatio = 0.95;
+constexpr double kSourcePreservationConfirmSeconds = 0.60;
+constexpr double kSourcePreservationProbeSeconds = 0.60;
+constexpr double kSourcePreservationGainRatio = 1.08;
+constexpr double kSourcePreservationKeepOutputRatio = 0.95;
 } // namespace
 
 AdaptiveFrameScheduler::AdaptiveFrameScheduler(
@@ -285,6 +295,107 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
                 successfulProbeHoldUntilSeconds_ =
                     observedTimeSeconds_ + kSuccessfulProbeHoldSeconds;
         }
+    }
+
+    if (sourcePreservationProbeActive_) {
+        sourcePreservationProbeFpsSum_ += sourceFps;
+        sourcePreservationProbeSamples_++;
+
+        if (observedTimeSeconds_ - sourcePreservationProbeStartedSeconds_
+                >= kSourcePreservationProbeSeconds) {
+            const double recoveredSourceFps = sourcePreservationProbeSamples_ > 0
+                ? sourcePreservationProbeFpsSum_
+                    / static_cast<double>(sourcePreservationProbeSamples_)
+                : sourceFps;
+            const double originalOutputFps = sourcePreservationBaselineFps_
+                * static_cast<double>(sourcePreservationOriginalCost_ + 1);
+            const double probedOutputFps = recoveredSourceFps
+                * static_cast<double>(costLimit_ + 1);
+            const bool sourceRecovered = sourcePreservationBaselineFps_ > 0.0
+                && recoveredSourceFps
+                    >= sourcePreservationBaselineFps_ * kSourcePreservationGainRatio;
+            const bool throughputPreserved = originalOutputFps <= 0.0
+                || probedOutputFps
+                    >= originalOutputFps * kSourcePreservationKeepOutputRatio;
+            const bool targetNearlyMet = targetFps_ > 0
+                && probedOutputFps
+                    >= static_cast<double>(targetFps_) * kSourcePreservationOutputRatio;
+
+            sourcePreservationProbeActive_ = false;
+            sourcePreservationProbeFpsSum_ = 0.0;
+            sourcePreservationProbeSamples_ = 0;
+
+            if (sourceRecovered && (throughputPreserved || targetNearlyMet)) {
+                // Require the cheaper level to recover almost enough source FPS
+                // to satisfy the target before a later upward probe is allowed.
+                pendingRaiseBaselineFps_ = targetFps_ > 0
+                    ? static_cast<double>(targetFps_)
+                        / static_cast<double>(costLimit_ + 1)
+                    : recoveredSourceFps;
+                probeAfterBackoff_ = true;
+                lastBackoffTimeSeconds_ = observedTimeSeconds_;
+                successfulProbeHoldUntilSeconds_ =
+                    observedTimeSeconds_ + kSuccessfulProbeHoldSeconds;
+                telemetry_.costProbe = true;
+            } else {
+                costLimit_ = std::min(
+                    sourcePreservationOriginalCost_, maxGeneratedFrames_);
+                probeAfterBackoff_ = false;
+                lastCostChangeTimeSeconds_ = observedTimeSeconds_;
+                raiseHoldUntilSeconds_ =
+                    observedTimeSeconds_ + kSuccessfulProbeHoldSeconds;
+                telemetry_.costRaised = true;
+                telemetry_.costProbe = true;
+            }
+
+            resetUnmetDemand();
+        }
+        return;
+    }
+
+    const double projectedOutputFps =
+        sourceFps * static_cast<double>(costLimit_ + 1);
+    const bool sourceStarvedAtCurrentCost =
+        costLimit_ > 1
+        && targetFps_ > 0
+        && projectedOutputFps
+            < static_cast<double>(targetFps_) * kSourcePreservationOutputRatio;
+
+    if (sourceStarvedAtCurrentCost) {
+        if (sourcePreservationSinceSeconds_ < 0.0) {
+            sourcePreservationSinceSeconds_ = observedTimeSeconds_;
+            sourcePreservationFpsSum_ = sourceFps;
+            sourcePreservationSamples_ = 1;
+        } else {
+            sourcePreservationFpsSum_ += sourceFps;
+            sourcePreservationSamples_++;
+        }
+
+        if (observedTimeSeconds_ - sourcePreservationSinceSeconds_
+                >= kSourcePreservationConfirmSeconds) {
+            sourcePreservationOriginalCost_ = costLimit_;
+            sourcePreservationBaselineFps_ = sourcePreservationSamples_ > 0
+                ? sourcePreservationFpsSum_
+                    / static_cast<double>(sourcePreservationSamples_)
+                : sourceFps;
+            costLimit_--;
+            sourcePreservationProbeActive_ = true;
+            sourcePreservationProbeStartedSeconds_ = observedTimeSeconds_;
+            sourcePreservationProbeFpsSum_ = 0.0;
+            sourcePreservationProbeSamples_ = 0;
+            sourcePreservationSinceSeconds_ = -1.0;
+            sourcePreservationFpsSum_ = 0.0;
+            sourcePreservationSamples_ = 0;
+            lastCostChangeTimeSeconds_ = observedTimeSeconds_;
+            resetUnmetDemand();
+            telemetry_.costBackedOff = true;
+            telemetry_.costProbe = true;
+            return;
+        }
+    } else {
+        sourcePreservationSinceSeconds_ = -1.0;
+        sourcePreservationFpsSum_ = 0.0;
+        sourcePreservationSamples_ = 0;
     }
 
     if (costLimit_ >= maxGeneratedFrames_) {
