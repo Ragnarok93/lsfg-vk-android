@@ -1417,11 +1417,45 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (!useAsyncFramegenCompletion) {
         const auto waitIdleStart = RuntimeMetrics::Clock::now();
         const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
-        const bool framegenReady = conf.performance
-            ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
-            : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        const auto waitFramegenCompletion = [&](uint64_t timeoutNs) {
+            return conf.performance
+                ? LSFG_3_1P::waitContext(*this->lsfgCtxId, timeoutNs)
+                : LSFG_3_1::waitContext(*this->lsfgCtxId, timeoutNs);
+        };
+        bool framegenReady =
+            waitFramegenCompletion(framegenCompletionTimeoutNs);
+        bool framegenRecoveredAfterTimeout = false;
+        const uint64_t framegenCompletionWaitElapsedNs =
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                RuntimeMetrics::Clock::now() - waitIdleStart).count());
+
+        // Suspend/resume can stale the first bounded fence wait. Recheck once
+        // only on timeout; this never executes in steady-state pacing.
+        constexpr uint64_t resumeCompletionRecheckNs = 32'000'000ULL;
+        if (!framegenReady) {
+            const auto resumeRecheckStart = RuntimeMetrics::Clock::now();
+            framegenReady =
+                waitFramegenCompletion(resumeCompletionRecheckNs);
+            framegenRecoveredAfterTimeout = framegenReady;
+            const double resumeRecheckMs =
+                std::chrono::duration<double, std::milli>(
+                    RuntimeMetrics::Clock::now() - resumeRecheckStart).count();
+            std::cerr
+                << "lsfg-vk: runtime stage=framegen-completion-resume-recheck"
+                << " recovered=" << (framegenReady ? 1 : 0)
+                << " initial_wait_ms="
+                << (static_cast<double>(framegenCompletionWaitElapsedNs)
+                    / 1'000'000.0)
+                << " recheck_ms=" << resumeRecheckMs << "\n";
+        }
+
+        if (!framegenRecoveredAfterTimeout) {
+            metrics.windowWaitIdleMs +=
+                std::chrono::duration<double, std::milli>(
+                    RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        } else {
+            excludeCurrentCycleFromTimingMetrics = true;
+        }
         if (!framegenReady) {
             this->lastGeneratedFrameCount_ = 0;
             std::cerr << "lsfg-vk: runtime stage=framegen-completion-timeout timeout_ms="
