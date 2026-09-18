@@ -150,12 +150,10 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         ):
             self.assertIn(marker, slot_aware)
 
-        self.assertIn("apply_async_zero_history_hardening(root)", apply_bundle)
-        self.assertIn("apply_slot_aware_zero_history(root)", apply_bundle)
-        self.assertLess(
-            apply_bundle.index("apply_async_zero_history_hardening(root)"),
-            apply_bundle.index("apply_slot_aware_zero_history(root)"),
-        )
+        # Retain the historical transforms as regression/reference material,
+        # but source-protected production builds must not compose them.
+        self.assertNotIn("apply_async_zero_history_hardening(root)", apply_bundle)
+        self.assertNotIn("apply_slot_aware_zero_history(root)", apply_bundle)
 
 
 if __name__ == "__main__":
