@@ -234,6 +234,16 @@ LSFG::AdaptiveFlowContextState LSFG_3_1::getContextFlowScaleState(int32_t id) {
     return it->second.flowScaleState();
 }
 
+LSFG::AdaptiveFlowGpuTiming LSFG_3_1::getContextGpuTiming(int32_t id) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        return {};
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        return {};
+    return it->second.gpuTiming();
+}
+
 #endif // __ANDROID__
 
 #ifdef __ANDROID__

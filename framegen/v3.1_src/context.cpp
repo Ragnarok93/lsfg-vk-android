@@ -267,6 +267,10 @@ void Context::present(Vulkan& vk,
                 throw LSFG::vulkan_error(VK_TIMEOUT, "Fence wait timed out");
     data.shouldWait = generationCount > 0;
     data.generationCount = generationCount;
+#ifdef __ANDROID__
+    data.adaptiveFlowTransitionCycle =
+        !this->adaptiveFlowScales_.empty() && this->pendingFlowGraphIndex_.has_value();
+#endif
 
     if (inSem >= 0) data.inSemaphore = Core::Semaphore(vk.device, inSem);
 
@@ -312,6 +316,14 @@ void Context::present(Vulkan& vk,
 #endif
 
 #ifdef __ANDROID__
+    Core::TimestampQueryPool* adaptiveFlowTimingPool = nullptr;
+    if (!this->adaptiveFlowScales_.empty()
+            && data.adaptiveFlowTimingQueryPool.supported()) {
+        adaptiveFlowTimingPool = &data.adaptiveFlowTimingQueryPool;
+        adaptiveFlowTimingPool->reset(data.cmdBuffer1.handle());
+        adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 0);
+    }
+
     size_t generationGraphIndex = 0;
     bool adaptiveFlowShadowSubmitted = false;
     bool adaptiveFlowCommitAfterSubmit = false;
@@ -322,8 +334,10 @@ void Context::present(Vulkan& vk,
             const size_t pendingIndex = *this->pendingFlowGraphIndex_;
             const auto pendingGraph = this->flowGraph(pendingIndex);
             if (this->pendingFlowWarmupFrames_ + 1 < kAdaptiveFlowHistoryFrames) {
-                this->dispatchAdaptiveFlowPreprocess(data.cmdBuffer1, activeGraph);
-                this->dispatchAdaptiveFlowPreprocess(data.cmdBuffer1, pendingGraph);
+                this->dispatchAdaptiveFlowPreprocess(
+                    data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
+                this->dispatchAdaptiveFlowPreprocess(
+                    data.cmdBuffer1, pendingGraph);
                 if (generationCount > 0)
                     activeGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
                 adaptiveFlowShadowSubmitted = true;
@@ -332,14 +346,16 @@ void Context::present(Vulkan& vk,
                 // temporal slots. Writing the current source into the pending
                 // graph refreshes the third; generation can switch immediately
                 // after this submission without a native/source-only gap.
-                this->dispatchAdaptiveFlowPreprocess(data.cmdBuffer1, pendingGraph);
+                this->dispatchAdaptiveFlowPreprocess(
+                    data.cmdBuffer1, pendingGraph, adaptiveFlowTimingPool);
                 if (generationCount > 0)
                     pendingGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
                 generationGraphIndex = pendingIndex;
                 adaptiveFlowCommitAfterSubmit = true;
             }
         } else {
-            this->dispatchAdaptiveFlowPreprocess(data.cmdBuffer1, activeGraph);
+            this->dispatchAdaptiveFlowPreprocess(
+                data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
             if (generationCount > 0)
                 activeGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
         }
@@ -350,6 +366,8 @@ void Context::present(Vulkan& vk,
         if (generationCount > 0)
             this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
     }
+    if (adaptiveFlowTimingPool != nullptr)
+        adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 2);
 #else
     this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);
     for (size_t i = 0; i < 7; i++)
@@ -370,6 +388,10 @@ void Context::present(Vulkan& vk,
     }
 #endif
 
+#ifdef __ANDROID__
+    if (adaptiveFlowTimingPool != nullptr && generationCount == 0)
+        adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 3);
+#endif
     data.cmdBuffer1.end();
     std::vector<Core::Semaphore> waits = { data.inSemaphore };
     if (inSem < 0) waits.clear();
@@ -382,6 +404,7 @@ void Context::present(Vulkan& vk,
             throw LSFG::vulkan_error(VK_TIMEOUT,
                 "Temporal preprocessing fence wait timed out");
 #ifdef __ANDROID__
+        this->recordAdaptiveFlowGpuTiming(vk, data);
         if (adaptiveFlowShadowSubmitted)
             ++this->pendingFlowWarmupFrames_;
         if (adaptiveFlowCommitAfterSubmit)
@@ -464,6 +487,9 @@ void Context::present(Vulkan& vk,
 #endif
 
 #ifdef __ANDROID__
+        if (adaptiveFlowTimingPool != nullptr && pass + 1 == generationCount)
+            adaptiveFlowTimingPool->write(buf2.handle(), 3);
+
         if (this->outputCopyRequired) {
             auto& localOut = presentGenerate->getOutImages().at(pass);
             auto& sharedOut = this->sharedOutImages.at(pass);
@@ -528,6 +554,9 @@ bool Context::waitForLastPresent(Vulkan& vk, uint64_t timeoutNs) {
                 vk.device, static_cast<uint64_t>(remaining)))
             return false;
     }
+#ifdef __ANDROID__
+    this->recordAdaptiveFlowGpuTiming(vk, renderData);
+#endif
     renderData.shouldWait = false;
     return true;
 }
@@ -663,6 +692,9 @@ Context::Context(Vulkan& vk,
     }
 
     this->adaptiveFlowScales_ = adaptiveFlowScales;
+    for (auto& renderData : this->data)
+        renderData.adaptiveFlowTimingQueryPool =
+            Core::TimestampQueryPool(vk.device, 4);
     this->activeFlowGraphIndex_ = 0;
     this->requestedFlowScale_ = adaptiveFlowScales.front();
     this->adaptiveFlowGraphs_.reserve(adaptiveFlowScales.size() - 1);
@@ -755,10 +787,46 @@ Context::FlowGraphRef Context::flowGraph(size_t index) {
 }
 
 void Context::dispatchAdaptiveFlowPreprocess(
-        const Core::CommandBuffer& buffer, FlowGraphRef graph) {
+        const Core::CommandBuffer& buffer, FlowGraphRef graph,
+        Core::TimestampQueryPool* timingPool) {
     graph.mipmaps->Dispatch(buffer, this->frameIdx);
+    if (timingPool != nullptr)
+        timingPool->write(buffer.handle(), 1);
     for (size_t i = 0; i < 7; ++i)
         graph.alpha->at(6 - i).Dispatch(buffer, this->frameIdx);
+}
+
+void Context::recordAdaptiveFlowGpuTiming(
+        Vulkan& vk, RenderData& renderData) {
+    if (this->adaptiveFlowScales_.empty()
+            || !renderData.adaptiveFlowTimingQueryPool.supported())
+        return;
+
+    const auto durations =
+        renderData.adaptiveFlowTimingQueryPool.durationsMs(vk.device);
+    if (durations.size() != 3)
+        return;
+
+    const double mipmapsMs = durations.at(0);
+    const double opticalFlowMs = durations.at(0) + durations.at(1);
+    const double totalLsfgMs =
+        durations.at(0) + durations.at(1) + durations.at(2);
+    if (!std::isfinite(mipmapsMs) || !std::isfinite(opticalFlowMs)
+            || !std::isfinite(totalLsfgMs))
+        return;
+
+    this->lastAdaptiveFlowGpuTiming_ = LSFG::AdaptiveFlowGpuTiming{
+        .mipmapsMs = mipmapsMs,
+        .opticalFlowMs = opticalFlowMs,
+        .totalLsfgMs = totalLsfgMs,
+        .generationCount = renderData.generationCount,
+        .transitionActive = renderData.adaptiveFlowTransitionCycle,
+        .valid = true,
+    };
+}
+
+LSFG::AdaptiveFlowGpuTiming Context::gpuTiming() const {
+    return this->lastAdaptiveFlowGpuTiming_;
 }
 
 void Context::requestFlowScale(float flowScale) {

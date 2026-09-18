@@ -29,11 +29,14 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             self.assertIn("createAdaptiveContextFromAHB", header, public_header.as_posix())
             self.assertIn("requestContextFlowScale", header, public_header.as_posix())
             self.assertIn("getContextFlowScaleState", header, public_header.as_posix())
+            self.assertIn("getContextGpuTiming", header, public_header.as_posix())
             self.assertIn("AdaptiveFlowContextState", header, public_header.as_posix())
+            self.assertIn("AdaptiveFlowGpuTiming", header, public_header.as_posix())
 
             self.assertIn("createAdaptiveContextFromAHB", source, backend_source.as_posix())
             self.assertIn("requestContextFlowScale", source, backend_source.as_posix())
             self.assertIn("getContextFlowScaleState", source, backend_source.as_posix())
+            self.assertIn("getContextGpuTiming", source, backend_source.as_posix())
 
             # Fixed construction remains a separate, unchanged public path.
             self.assertIn("createContextFromAHB(", header, public_header.as_posix())
@@ -59,6 +62,12 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             self.assertIn("generationGraphIndex = pendingIndex", source,
                           context_source.as_posix())
             self.assertIn("commitAdaptiveFlowTransition", source, context_source.as_posix())
+            self.assertIn("adaptiveFlowTimingQueryPool", header, context_header.as_posix())
+            self.assertIn("recordAdaptiveFlowGpuTiming", source, context_source.as_posix())
+            self.assertIn("transitionActive = renderData.adaptiveFlowTransitionCycle", source,
+                          context_source.as_posix())
+            self.assertIn("timingPool->write(buffer.handle(), 1)", source,
+                          context_source.as_posix())
 
             # The transition is recorded in the existing command/submission path.
             self.assertNotIn("vkDeviceWaitIdle", source, context_source.as_posix())
