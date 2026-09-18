@@ -11,7 +11,6 @@
 #include <mutex>
 #include <optional>
 #include <string>
-#include <vector>
 
 using namespace LSFG::Core;
 
@@ -31,31 +30,6 @@ void restoreEnvironment(const char* name, const std::optional<std::string>& valu
         setenv(name, value->c_str(), 1);
     else
         unsetenv(name);
-}
-
-std::string stripLayerName(const std::string& value, const std::string& layerName) {
-    std::vector<std::string> layers;
-    size_t start = 0;
-    for (size_t i = 0; i <= value.size(); ++i) {
-        const bool atEnd = i == value.size();
-        const bool separator = !atEnd && (value[i] == ':' || value[i] == ';');
-        if (!atEnd && !separator)
-            continue;
-        if (i > start) {
-            const std::string token = value.substr(start, i - start);
-            if (token != layerName)
-                layers.push_back(token);
-        }
-        start = i + 1;
-    }
-
-    std::string result;
-    for (const auto& layer : layers) {
-        if (!result.empty())
-            result += ':';
-        result += layer;
-    }
-    return result;
 }
 
 class ScopedPrivateInstanceLayerSuppression {
