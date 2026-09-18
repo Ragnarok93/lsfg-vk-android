@@ -341,5 +341,46 @@ int main() {
         assert(scheduler.telemetry().costLimit >= 2);
     }
 
+    {
+        // AFG must not respond to a sub-30 FPS source collapse by increasing
+        // interpolation load. At 20 FPS toward 60, attenuated demand is 1.0
+        // generated frame per real frame instead of the raw 2.0.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        std::size_t generated = 0;
+        for (int frame = 0; frame < 30; ++frame)
+            generated += scheduler.plan(50ms);
+        assert(scheduler.telemetry().smoothedSourceFps > 19.0);
+        assert(scheduler.telemetry().smoothedSourceFps < 21.0);
+        assert(scheduler.telemetry().wantedGeneratedFrames <= 1.01);
+        assert(generated <= 31);
+    }
+
+    {
+        // Below 30 FPS, interpolation pressure scales down continuously. A
+        // 15 FPS source toward 60 should average roughly 0.75 generated frames
+        // per real frame rather than requesting the maximum 3x synthetic load.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        std::size_t generated = 0;
+        for (int frame = 0; frame < 40; ++frame)
+            generated += scheduler.plan(66666667ns);
+        assert(scheduler.telemetry().smoothedSourceFps > 14.0);
+        assert(scheduler.telemetry().smoothedSourceFps < 16.0);
+        assert(scheduler.telemetry().wantedGeneratedFrames < 0.80);
+        assert(generated >= 27 && generated <= 32);
+    }
+
+    {
+        // Hard safety cutoff: at or below 10 FPS AFG must generate nothing,
+        // and suppressed fractional debt must not burst when source cadence
+        // recovers.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            assert(scheduler.plan(100ms) == 0);
+        assert(scheduler.telemetry().wantedGeneratedFrames == 0.0);
+
+        const auto firstRecovered = scheduler.plan(33333333ns);
+        assert(firstRecovered <= 1);
+    }
+
     return 0;
 }
