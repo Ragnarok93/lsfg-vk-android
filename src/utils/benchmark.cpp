@@ -82,6 +82,7 @@ void Benchmark::run(uint32_t width, uint32_t height) {
     lsfgInitialize(
         identity, format,
         conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
+        false,
         [](const std::string& name) -> std::vector<uint8_t> {
             auto dxbc = Extract::getShader(name);
             auto spirv = Extract::translateShader(dxbc);
