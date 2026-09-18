@@ -11,6 +11,32 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+def patch_context_header(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    if "enterSourceOnlyBypass(VkQueue queue)" in text:
+        return
+    text = replace_once(
+        text,
+        "    void enterSourceOnlyBypass();\n",
+        "    void enterSourceOnlyBypass(VkQueue queue);\n",
+        f"{path}: nonblocking resident bypass signature",
+    )
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_hooks_source(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    if "swapchain.enterSourceOnlyBypass(queue)" in text:
+        return
+    text = replace_once(
+        text,
+        "            swapchain.enterSourceOnlyBypass();\n",
+        "            swapchain.enterSourceOnlyBypass(queue);\n",
+        f"{path}: pass present queue into resident bypass",
+    )
+    path.write_text(text, encoding="utf-8")
+
+
 def patch_context_source(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     if "nonblocking-generated-pipeline active=1" in text:
@@ -374,6 +400,57 @@ def patch_context_source(path: Path) -> None:
         1,
     )
 
+    # A resident Off/On toggle is not destruction. The previous lifecycle
+    # hardening deliberately drained outstanding Android work here, but that is a
+    # host wait and can recreate the user-visible hitch this pipeline removes.
+    # soft resident bypass never drains framegen synchronously: enqueue the one
+    # buffered real image first, invalidate synthetic output, and leave any
+    # framegen/zero-history work resident for later nonblocking retirement.
+    hardened_bypass = """void LsContext::enterSourceOnlyBypass() {
+    this->flushPendingAndroidWork(true);
+    this->lastGeneratedFrameCount_ = 0;
+    this->requiresSourceHistoryWarmup_ = true;
+    this->previousSourceCopySignalValid_ = false;
+}
+"""
+    base_bypass = """void LsContext::enterSourceOnlyBypass() {
+    this->lastGeneratedFrameCount_ = 0;
+    this->requiresSourceHistoryWarmup_ = true;
+    this->previousSourceCopySignalValid_ = false;
+}
+"""
+    nonblocking_bypass = """void LsContext::enterSourceOnlyBypass(VkQueue queue) {
+    if (this->pendingSourceValid_) {
+        const VkSemaphore sourceReady = this->pendingSourceReady_.handle();
+        const VkPresentInfoKHR pendingSourceInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = nullptr,
+            .waitSemaphoreCount = sourceReady != VK_NULL_HANDLE ? 1U : 0U,
+            .pWaitSemaphores = sourceReady != VK_NULL_HANDLE ? &sourceReady : nullptr,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &this->pendingSourceImage_,
+        };
+        const auto result = Layer::ovkQueuePresentKHR(queue, &pendingSourceInfo);
+        std::cerr << "lsfg-vk: soft-bypass-buffered-source result="
+                  << result << "\\n";
+        this->pendingSourceValid_ = false;
+    }
+
+    this->framegenOutputEligible_ = false;
+    this->pendingGeneratedCount_ = 0;
+    this->lastGeneratedFrameCount_ = 0;
+    this->requiresSourceHistoryWarmup_ = true;
+    this->previousSourceCopySignalValid_ = false;
+}
+"""
+    if hardened_bypass in text:
+        text = text.replace(hardened_bypass, nonblocking_bypass, 1)
+    elif base_bypass in text:
+        text = text.replace(base_bypass, nonblocking_bypass, 1)
+    elif "soft-bypass-buffered-source" not in text:
+        raise RuntimeError(f"{path}: source-only bypass anchor missing")
+
     path.write_text(text, encoding="utf-8")
 
 
@@ -390,7 +467,9 @@ def patch_build(path: Path) -> None:
 
 
 def apply(root: Path) -> None:
+    patch_context_header(root / "include/context.hpp")
     patch_context_source(root / "src/context.cpp")
+    patch_hooks_source(root / "src/hooks.cpp")
     patch_build(root / "scripts/build/android.sh")
 
 
@@ -399,7 +478,9 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     root = args.root.resolve()
+    patch_context_header(root / "include/context.hpp")
     patch_context_source(root / "src/context.cpp")
+    patch_hooks_source(root / "src/hooks.cpp")
 
 
 if __name__ == "__main__":
