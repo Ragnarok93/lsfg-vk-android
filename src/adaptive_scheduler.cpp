@@ -10,6 +10,9 @@ constexpr double kFastIntervalLow = 0.70;
 constexpr unsigned kSlowSamplesRequired = 3;
 constexpr unsigned kFastSamplesRequired = 6;
 constexpr double kDiscontinuitySeconds = 0.250;
+// Seed fractional phase away from common rational boundaries so fractional
+// densities do not repeatedly place opportunities exactly on a source deadline.
+constexpr double kInitialFractionalPhase = 0.3819660112501051;
 
 // Governor timing intentionally favors stability over quickly chasing an
 // unreachable output target. The source-rate estimator is allowed to settle
@@ -68,7 +71,8 @@ void AdaptiveFrameScheduler::configure(
         && maxGeneratedFrames_ != 0;
 }
 
-std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval) {
+AdaptiveGenerationPlan AdaptiveFrameScheduler::planSlots(std::chrono::nanoseconds sourceInterval) {
+    AdaptiveGenerationPlan plan{};
     telemetry_.sourceRateSnapped = false;
     telemetry_.costRaised = false;
     telemetry_.costBackedOff = false;
@@ -77,15 +81,17 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.configWarmStart = false;
     telemetry_.generatedFrames = 0;
     telemetry_.wantedGeneratedFrames = 0.0;
+    telemetry_.governedGeneratedDensity = 0.0;
+    telemetry_.fractionalPhase = fractionalGeneratedBudget_;
 
     if (targetFps_ == 0 || maxGeneratedFrames_ == 0) {
         telemetry_.costLimit = 0;
-        return 0;
+        return plan;
     }
 
     const double intervalSeconds = std::chrono::duration<double>(sourceInterval).count();
     if (!(intervalSeconds > 0.0) || !std::isfinite(intervalSeconds))
-        return 0;
+        return plan;
 
     // A pause, app switch, shader-compilation stall, or Quick Menu suspension
     // is not a useful source cadence sample. Reset controller state rather than
@@ -97,7 +103,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         resetRuntimeState();
         reconfigureWarmStartPending_ = preserveWarmStart;
         telemetry_.discontinuityReset = true;
-        return 0;
+        return plan;
     }
 
     // This bit intentionally survives later timing discontinuities. It is only
@@ -112,6 +118,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         0.0,
         static_cast<double>(maxGeneratedFrames_));
     telemetry_.wantedGeneratedFrames = wantedGenerated;
+    plan.desiredDensity = wantedGenerated;
 
     if (reconfigureWarmStartPending_) {
         // The first trustworthy post-resume interval is the earliest point at
@@ -141,23 +148,46 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     updateCostLimit(wantedGenerated);
     telemetry_.costLimit = costLimit_;
 
-    // Apply the cost ceiling before fractional accumulation. This prevents an
-    // intentionally suppressed high-cost request from building a backlog that
-    // would burst as soon as the governor probes a higher level.
+    // Apply the slow-governor ceiling before distributing slots. This preserves
+    // the existing long-term source-preservation controller while making the
+    // fractional layer purely a deterministic opportunity distributor.
     const double governedWanted = std::min(
         wantedGenerated, static_cast<double>(costLimit_));
-    fractionalGeneratedBudget_ += governedWanted;
+    plan.governedDensity = governedWanted;
+    telemetry_.governedGeneratedDensity = governedWanted;
 
+    const double phaseAtStart = fractionalGeneratedBudget_;
+    const double phaseAtEnd = phaseAtStart + governedWanted;
     const auto generated = static_cast<std::size_t>(
-        std::floor(fractionalGeneratedBudget_ + 1e-6));
+        std::floor(phaseAtEnd + 1e-9));
     const auto clamped = std::min(generated, costLimit_);
-    fractionalGeneratedBudget_ -= static_cast<double>(clamped);
 
+    plan.slotPhases.reserve(clamped);
+    if (governedWanted > 0.0) {
+        for (std::size_t slot = 0; slot < clamped; ++slot) {
+            const double threshold = static_cast<double>(slot + 1);
+            const double phase = (threshold - phaseAtStart) / governedWanted;
+            if (phase > 0.0 && phase <= 1.0 + 1e-9)
+                plan.slotPhases.emplace_back(std::clamp(phase, 0.0, 1.0));
+        }
+    }
+
+    // Consume every created opportunity now. Admission happens later and must
+    // never refund this phase when a synthetic frame is skipped or misses.
+    fractionalGeneratedBudget_ = phaseAtEnd - static_cast<double>(clamped);
     if (clamped == costLimit_ && costLimit_ > 0)
         fractionalGeneratedBudget_ = std::min(fractionalGeneratedBudget_, 0.999999);
+    fractionalGeneratedBudget_ = std::clamp(
+        fractionalGeneratedBudget_, 0.0, 0.999999);
 
-    telemetry_.generatedFrames = clamped;
-    return clamped;
+    telemetry_.generatedFrames = plan.slotPhases.size();
+    telemetry_.fractionalPhase = fractionalGeneratedBudget_;
+    return plan;
+}
+
+std::size_t AdaptiveFrameScheduler::plan(
+        std::chrono::nanoseconds sourceInterval) {
+    return planSlots(sourceInterval).slotPhases.size();
 }
 
 void AdaptiveFrameScheduler::resetRateChangeCandidates() {
@@ -473,7 +503,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
 }
 
 void AdaptiveFrameScheduler::resetRuntimeState() {
-    fractionalGeneratedBudget_ = 0.0;
+    fractionalGeneratedBudget_ = kInitialFractionalPhase;
     smoothedSourceIntervalSeconds_ = 0.0;
     hasSmoothedInterval_ = false;
     reconfigureWarmStartPending_ = false;
