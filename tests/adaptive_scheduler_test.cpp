@@ -280,5 +280,66 @@ int main() {
         assert(!scheduler.telemetry().configWarmStart);
     }
 
+    {
+        // A generation ceiling that was once affordable must not remain pinned
+        // after later GPU contention collapses the real/source cadence. Probe a
+        // lower interpolation cost before adding yet more generated work.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 48; ++frame)
+            scheduler.plan(40ms);
+        assert(scheduler.telemetry().costLimit >= 2);
+
+        bool sawProtectiveProbe = false;
+        for (int frame = 0; frame < 30; ++frame) {
+            scheduler.plan(55ms);
+            sawProtectiveProbe = sawProtectiveProbe
+                || (scheduler.telemetry().costBackedOff
+                    && scheduler.telemetry().costProbe);
+            if (sawProtectiveProbe)
+                break;
+        }
+        assert(sawProtectiveProbe);
+        assert(scheduler.telemetry().costLimit == 1);
+
+        // If source cadence recovers enough that the lower-cost operating point
+        // preserves almost the same output throughput, keep the cheaper level.
+        for (int frame = 0; frame < 40; ++frame)
+            scheduler.plan(35ms);
+        assert(scheduler.telemetry().costLimit == 1);
+    }
+
+    {
+        // A source-preservation probe is causal, not a blind downgrade. If
+        // lowering generation cost does not recover source FPS, restore the
+        // previous interpolation level instead of sacrificing output for no gain.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 48; ++frame)
+            scheduler.plan(40ms);
+        assert(scheduler.telemetry().costLimit >= 2);
+
+        bool sawProtectiveProbe = false;
+        for (int frame = 0; frame < 30; ++frame) {
+            scheduler.plan(55ms);
+            sawProtectiveProbe = sawProtectiveProbe
+                || (scheduler.telemetry().costBackedOff
+                    && scheduler.telemetry().costProbe);
+            if (sawProtectiveProbe)
+                break;
+        }
+        assert(sawProtectiveProbe);
+
+        bool restored = false;
+        for (int frame = 0; frame < 40; ++frame) {
+            scheduler.plan(55ms);
+            restored = restored
+                || (scheduler.telemetry().costRaised
+                    && scheduler.telemetry().costProbe);
+            if (restored)
+                break;
+        }
+        assert(restored);
+        assert(scheduler.telemetry().costLimit >= 2);
+    }
+
     return 0;
 }
