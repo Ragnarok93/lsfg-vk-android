@@ -16,10 +16,11 @@ int main() {
 
     {
         AdaptiveFrameScheduler scheduler(60, 3);
-        std::size_t generated = 0;
+        // Fractional 0/1 debt scheduling is intentionally disabled for the
+        // stability recovery. A small 50->60 deficit stays source-only until
+        // it crosses the next integer generation tier.
         for (int frame = 0; frame < 50; ++frame)
-            generated += scheduler.plan(20ms);
-        assert(generated >= 9 && generated <= 11);
+            assert(scheduler.plan(20ms) == 0);
     }
 
     {
@@ -180,8 +181,8 @@ int main() {
     }
 
     {
-        // Ordinary discontinuities still reset both fractional scheduling and
-        // the conservative generation-cost ceiling. Only an explicit config
+        // Ordinary discontinuities still reset the conservative generation-cost
+        // ceiling. Only an explicit config
         // change is allowed to warm-start after a Quick Menu suspension.
         AdaptiveFrameScheduler scheduler(120, 3);
         assert(scheduler.plan(50ms) == 1);
@@ -360,23 +361,19 @@ int main() {
     }
 
     {
-        // Below 30 FPS, interpolation pressure scales down continuously. A
-        // 15 FPS source toward 60 should average roughly 0.75 generated frames
-        // per real frame rather than requesting the maximum 3x synthetic load.
+        // Below 30 FPS the desired load is still attenuated, but the recovery
+        // scheduler selects a stable integer tier instead of alternating 0/1.
         AdaptiveFrameScheduler scheduler(60, 3);
-        std::size_t generated = 0;
         for (int frame = 0; frame < 40; ++frame)
-            generated += scheduler.plan(66666667ns);
+            assert(scheduler.plan(66666667ns) == 1);
         assert(scheduler.telemetry().smoothedSourceFps > 14.0);
         assert(scheduler.telemetry().smoothedSourceFps < 16.0);
         assert(scheduler.telemetry().wantedGeneratedFrames < 0.80);
-        assert(generated >= 27 && generated <= 32);
     }
 
     {
         // Hard safety cutoff: at or below 10 FPS AFG must generate nothing,
-        // and suppressed fractional debt must not burst when source cadence
-        // recovers.
+        // and recovery must not burst when source cadence returns.
         AdaptiveFrameScheduler scheduler(60, 3);
         for (int frame = 0; frame < 12; ++frame)
             assert(scheduler.plan(100ms) == 0);
@@ -384,6 +381,15 @@ int main() {
 
         const auto firstRecovered = scheduler.plan(33333333ns);
         assert(firstRecovered <= 1);
+    }
+
+    {
+        // Stable cadence must not alternate generation counts. This locks out
+        // the fractional debt path that drove repeated zero-history transitions.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        const auto first = scheduler.plan(25ms);
+        for (int frame = 0; frame < 24; ++frame)
+            assert(scheduler.plan(25ms) == first);
     }
 
     return 0;
