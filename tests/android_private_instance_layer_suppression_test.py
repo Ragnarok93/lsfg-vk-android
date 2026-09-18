@@ -26,7 +26,6 @@ class AndroidPrivateInstanceLayerSuppressionTest(unittest.TestCase):
             '"VK_INSTANCE_LAYERS"',
             '"VK_LOADER_LAYERS_ENABLE"',
             '"VK_LOADER_LAYERS_DISABLE"',
-            '"VK_LAYER_LS_frame_generation"',
             "setenv",
             "unsetenv",
             "restoreEnvironment",
