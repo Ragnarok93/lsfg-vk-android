@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace {
 constexpr double kIntervalSmoothing = 0.15;
@@ -35,6 +36,60 @@ constexpr double kSourcePreservationProbeSeconds = 0.60;
 constexpr double kSourcePreservationGainRatio = 1.08;
 constexpr double kSourcePreservationKeepOutputRatio = 0.95;
 } // namespace
+
+uint64_t SourceTimelineCycle::syntheticDeadlineNs(double phase) const {
+    if (!valid || intervalNs == 0 || !std::isfinite(phase))
+        return 0;
+    const double clampedPhase = std::clamp(phase, 0.0, 1.0);
+    const auto offsetNs = static_cast<uint64_t>(
+        std::llround(static_cast<double>(intervalNs) * clampedPhase));
+    if (anchorNs > std::numeric_limits<uint64_t>::max() - offsetNs)
+        return std::numeric_limits<uint64_t>::max();
+    return anchorNs + offsetNs;
+}
+
+SourceTimelineCycle SourceFrameTimeline::observe(
+        uint64_t sourceArrivalNs,
+        std::chrono::nanoseconds observedSourceInterval) {
+    const int64_t rawIntervalNs = observedSourceInterval.count();
+    if (sourceArrivalNs == 0 || rawIntervalNs <= 0) {
+        return {};
+    }
+
+    const uint64_t observedNs = static_cast<uint64_t>(rawIntervalNs);
+    constexpr uint64_t kDiscontinuityNs = 250'000'000ULL;
+    if (observedNs >= kDiscontinuityNs) {
+        reset();
+        return {};
+    }
+
+    if (intervalNs_ == 0) {
+        intervalNs_ = observedNs;
+    } else {
+        // Presentation timing follows the source itself; this EMA only removes
+        // single-frame arrival jitter and never feeds generation/load policy.
+        intervalNs_ = (intervalNs_ * 7ULL + observedNs) / 8ULL;
+    }
+
+    const uint64_t sourceIndex = sourceIndex_++;
+    const uint64_t deadline = sourceArrivalNs
+            > std::numeric_limits<uint64_t>::max() - intervalNs_
+        ? std::numeric_limits<uint64_t>::max()
+        : sourceArrivalNs + intervalNs_;
+
+    return SourceTimelineCycle{
+        .valid = true,
+        .sourceIndex = sourceIndex,
+        .anchorNs = sourceArrivalNs,
+        .intervalNs = intervalNs_,
+        .sourceDeadlineNs = deadline,
+    };
+}
+
+void SourceFrameTimeline::reset() {
+    sourceIndex_ = 0;
+    intervalNs_ = 0;
+}
 
 AdaptiveFrameScheduler::AdaptiveFrameScheduler(
         uint32_t targetFps, std::size_t maxGeneratedFrames)
