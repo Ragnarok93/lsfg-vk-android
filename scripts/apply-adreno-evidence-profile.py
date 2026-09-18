@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compose retained Android runtime transforms and optional Adreno profiling."""
+"""Compose retained Android runtime transforms for production builds."""
 from __future__ import annotations
 
 import argparse
@@ -9,12 +9,6 @@ from adreno_evidence_capabilities import (
     patch_device_source,
     patch_hooks_header,
     patch_hooks_source,
-)
-from adreno_evidence_outer import patch_outer_header, patch_outer_source
-from adreno_evidence_framegen import (
-    patch_framegen_header,
-    patch_framegen_source,
-    patch_timestamp_query_pool,
 )
 from adreno_evidence_common import replace_exact
 from adreno_syncfd_handoff import apply as apply_syncfd_handoff
@@ -28,16 +22,6 @@ from adreno_deferred_zero_reprime_guard import apply as apply_deferred_zero_repr
 from adreno_deferred_zero_history_finalize import apply as apply_deferred_zero_history_finalize
 from adreno_deferred_zero_safe_reprime import apply as apply_deferred_zero_safe_reprime
 from adreno_deferred_zero_exit_persistence import apply as apply_deferred_zero_exit_persistence
-
-FRAMEGEN_HEADERS = (
-    Path("framegen/v3.1_include/v3_1/context.hpp"),
-    Path("framegen/v3.1p_include/v3_1p/context.hpp"),
-)
-FRAMEGEN_SOURCES = (
-    (Path("framegen/v3.1_src/context.cpp"), "quality"),
-    (Path("framegen/v3.1p_src/context.cpp"), "performance"),
-)
-
 
 def normalize_sync_fd_import_initializer(path: Path) -> None:
     """Keep the validation transform valid under Android NDK C++20 rules."""
@@ -105,38 +89,11 @@ def apply_runtime(root: Path) -> None:
         apply_deferred_zero_exit_persistence(root)
 
 
-def apply_profiling(root: Path) -> None:
-    """Apply opt-in runtime/GPU instrumentation for diagnostics."""
-    patch_outer_header(root / "include/context.hpp")
-    patch_outer_source(root / "src/context.cpp")
-    patch_timestamp_query_pool(
-        root / "framegen/include/core/timestampquerypool.hpp",
-        root / "framegen/src/core/timestampquerypool.cpp",
-    )
-    for rel in FRAMEGEN_HEADERS:
-        patch_framegen_header(root / rel)
-    for rel, backend in FRAMEGEN_SOURCES:
-        patch_framegen_source(root / rel, backend)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument(
-        "--runtime-only",
-        action="store_true",
-        help="apply retained Android adaptive/runtime transforms without stage profiling",
-    )
     args = parser.parse_args()
-    root = args.root.resolve()
-
-    # In full diagnostic mode, preserve the important historical ordering:
-    # framegen timestamp hooks are installed before the async zero-history
-    # transform optionally adjusts their zero-generation condition. Runtime-only
-    # mode skips these heavy framegen timestamp/query-pool transforms entirely.
-    if not args.runtime_only:
-        apply_profiling(root)
-    apply_runtime(root)
+    apply_runtime(args.root.resolve())
 
 
 if __name__ == "__main__":
