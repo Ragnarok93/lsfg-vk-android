@@ -341,7 +341,14 @@ def patch_outer_source(path: Path) -> None:
         "        && gameGetSemaphoreFd != nullptr;\n"
         "    this->asyncAhbHandoffHandleType_ = syncFdHandoffSupported\n"
         "        ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT\n"
-        "        : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;\n",
+        "        : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;\n"
+        "    this->generatedAsyncAhbHandoffEnabled_ =\n"
+        "        this->asyncAhbHandoffEnabled_\n"
+        "        && backendDiagnostics.driverName.find(\"Turnip\") == std::string::npos;\n"
+        "    std::cerr << \"lsfg-vk: generated-handoff-policy driver=\\\"\"\n"
+        "              << backendDiagnostics.driverName << \"\\\" mode=\"\n"
+        "              << (this->generatedAsyncAhbHandoffEnabled_\n"
+        "                  ? \"gpu-semaphore\" : \"host-fence\") << \"\\n\";\n",
         count=1,
         label=f"{path}: prefer sync-fd async handoff",
     )
