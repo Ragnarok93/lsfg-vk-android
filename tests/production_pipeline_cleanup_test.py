@@ -41,6 +41,16 @@ for stale in (
     "--runtime-only",
     "FRAMEGEN_HEADERS",
     "FRAMEGEN_SOURCES",
+    "apply_async_zero_history(root)",
+    "apply_async_zero_history_hardening(root)",
+    "apply_slot_aware_zero_history(root)",
+    "apply_transport_release_overlap(root)",
+    "apply_deferred_zero_history(root)",
+    "apply_deferred_zero_reprime_sync(root)",
+    "apply_deferred_zero_reprime_guard(root)",
+    "apply_deferred_zero_history_finalize(root)",
+    "apply_deferred_zero_safe_reprime(root)",
+    "apply_deferred_zero_exit_persistence(root)",
 ):
     if stale in composer:
         raise SystemExit(f"retained runtime composer still contains profiler code: {stale}")
