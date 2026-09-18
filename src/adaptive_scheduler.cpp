@@ -303,10 +303,10 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
 
         if (observedTimeSeconds_ - sourcePreservationProbeStartedSeconds_
                 >= kSourcePreservationProbeSeconds) {
-            const double recoveredSourceFps = sourcePreservationProbeSamples_ > 0
-                ? sourcePreservationProbeFpsSum_
-                    / static_cast<double>(sourcePreservationProbeSamples_)
-                : sourceFps;
+            // sourceFps is already the scheduler's smoothed, burst-filtered
+            // cadence estimate. Averaging the whole probe again would include
+            // the intentional recovery ramp and understate the lower level.
+            const double recoveredSourceFps = sourceFps;
             const double originalOutputFps = sourcePreservationBaselineFps_
                 * static_cast<double>(sourcePreservationOriginalCost_ + 1);
             const double probedOutputFps = recoveredSourceFps
