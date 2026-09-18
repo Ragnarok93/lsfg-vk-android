@@ -280,9 +280,16 @@ void Context::present(Vulkan& vk,
     auto& data = this->data.at(this->frameIdx % 8);
 
     if (data.shouldWait) {
-        for (size_t i = 0; i < data.generationCount; ++i)
-            if (!data.completionFences.at(i).wait(vk.device, framegenWaitTimeoutNs()))
-                throw LSFG::vulkan_error(VK_TIMEOUT, "Fence wait timed out");
+        if (data.generationCount == 0) {
+            if (!data.preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))
+                throw LSFG::vulkan_error(
+                    VK_TIMEOUT, "Temporal preprocessing fence wait timed out");
+        } else {
+            for (size_t i = 0; i < data.generationCount; ++i)
+                if (!data.completionFences.at(i).wait(
+                        vk.device, framegenWaitTimeoutNs()))
+                    throw LSFG::vulkan_error(VK_TIMEOUT, "Fence wait timed out");
+        }
 #ifdef __ANDROID__
         // Ring retirement is also the no-stall timing harvest point for the
         // async Android completion path. The slot is known complete before any
@@ -290,7 +297,10 @@ void Context::present(Vulkan& vk,
         this->recordAdaptiveFlowGpuTiming(vk, data);
 #endif
     }
-    data.shouldWait = generationCount > 0;
+    // Every present submits GPU work. Zero-generation HistoryOnly cycles submit
+    // temporal preprocessing and retire through preprocessingFence instead of
+    // synchronously waiting on the present thread.
+    data.shouldWait = true;
     data.generationCount = generationCount;
 #ifdef __ANDROID__
     data.adaptiveFlowTransitionCycle =
@@ -425,11 +435,7 @@ void Context::present(Vulkan& vk,
         data.preprocessingFence.reset(vk.device);
         data.cmdBuffer1.submit(vk.device.getComputeQueue(), data.preprocessingFence,
             waits, std::nullopt, {}, std::nullopt);
-        if (!data.preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))
-            throw LSFG::vulkan_error(VK_TIMEOUT,
-                "Temporal preprocessing fence wait timed out");
 #ifdef __ANDROID__
-        this->recordAdaptiveFlowGpuTiming(vk, data);
         if (adaptiveFlowShadowSubmitted)
             ++this->pendingFlowWarmupFrames_;
         if (adaptiveFlowCommitAfterSubmit)
@@ -572,15 +578,26 @@ bool Context::waitForLastPresent(Vulkan& vk, uint64_t timeoutNs) {
 
     const auto deadline = std::chrono::steady_clock::now()
         + std::chrono::nanoseconds(timeoutNs);
-    for (size_t i = 0; i < renderData.generationCount; ++i) {
+    if (renderData.generationCount == 0) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline)
             return false;
         const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
             deadline - now).count();
-        if (!renderData.completionFences.at(i).wait(
+        if (!renderData.preprocessingFence.wait(
                 vk.device, static_cast<uint64_t>(remaining)))
             return false;
+    } else {
+        for (size_t i = 0; i < renderData.generationCount; ++i) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+                return false;
+            const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                deadline - now).count();
+            if (!renderData.completionFences.at(i).wait(
+                    vk.device, static_cast<uint64_t>(remaining)))
+                return false;
+        }
     }
 #ifdef __ANDROID__
     this->recordAdaptiveFlowGpuTiming(vk, renderData);
@@ -593,10 +610,16 @@ bool Context::waitForCompletion(Vulkan& vk) {
     for (auto& renderData : this->data) {
         if (!renderData.shouldWait)
             continue;
-        for (size_t i = 0; i < renderData.generationCount; ++i) {
-            if (!renderData.completionFences.at(i).wait(
+        if (renderData.generationCount == 0) {
+            if (!renderData.preprocessingFence.wait(
                     vk.device, framegenWaitTimeoutNs()))
                 return false;
+        } else {
+            for (size_t i = 0; i < renderData.generationCount; ++i) {
+                if (!renderData.completionFences.at(i).wait(
+                        vk.device, framegenWaitTimeoutNs()))
+                    return false;
+            }
         }
         renderData.shouldWait = false;
     }
