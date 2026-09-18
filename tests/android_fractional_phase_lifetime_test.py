@@ -34,7 +34,8 @@ for variant in ("v3.1", "v3.1p"):
         assert "createTimestampRing" in text, (variant, name)
         assert "VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC" in text, (variant, name)
         assert "timestampRingOffset(pass.buffer, frameCount)" in text, (variant, name)
-        assert "writeTimestamp(pass.buffer, interpolationPhase, timestampOffset)" in text, (variant, name)
+        compact = " ".join(text.split())
+        assert "writeTimestamp( pass.buffer, interpolationPhase, timestampOffset);" in compact, (variant, name)
         assert "writeTimestamp(pass.buffer, interpolationPhase);" not in text, (variant, name)
         assert "timestampRecordSize()" in text, (variant, name)
 
