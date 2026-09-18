@@ -55,6 +55,14 @@ if(ANDROID)
         PROPERTIES COMPILE_DEFINITIONS
         "layer_vkGetInstanceProcAddr=lsfg_layer_vkGetInstanceProcAddr_impl;layer_vkGetDeviceProcAddr=lsfg_layer_vkGetDeviceProcAddr_impl"
     )
+else()
+    # Android loader/provenance entrypoints intentionally shadow the production
+    # layer entrypoints on Android and must never be linked into the desktop layer.
+    list(REMOVE_ITEM SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/android_diagnostics.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/android_wsi_loader_bridge.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/layer_android.cpp"
+    )
 endif()
 
 add_library(lsfg-vk SHARED ${SOURCES})
