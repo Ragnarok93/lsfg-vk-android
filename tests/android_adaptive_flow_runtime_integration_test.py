@@ -17,6 +17,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("AdaptiveFlowController::statesForPreset", source)
         self.assertIn("createAdaptiveContextFromAHB", source)
         self.assertIn("createContextFromAHB", source)
+        self.assertIn("adaptive-flow-fallback mode=fixed-target", source)
+        self.assertIn("adaptiveFlowRuntimeAvailable_", source)
+        self.assertIn("!this->adaptiveFlowRuntimeAvailable_", source)
         self.assertIn("1.0F / initialFlowScale", source)
         self.assertIn("float initialFlowScale = conf.flowScale", source)
 

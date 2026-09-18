@@ -126,6 +126,7 @@ private:
     AdaptiveFrameScheduler adaptiveScheduler_;
     AdaptiveFlowController adaptiveFlowController_;
     AdaptiveFlowPreset adaptiveFlowPreset_{AdaptiveFlowPreset::Quality};
+    bool adaptiveFlowRuntimeAvailable_{false};
     float adaptiveFlowRequestedScale_{1.0F};
     float adaptiveFlowActiveScale_{1.0F};
     uint32_t adaptiveFlowWarmupRemaining_{0};

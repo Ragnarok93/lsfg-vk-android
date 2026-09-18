@@ -435,14 +435,31 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     int32_t ctxId;
     if (conf.adaptiveFlowScale) {
-        if (conf.performance)
-            ctxId = LSFG_3_1P::createAdaptiveContextFromAHB(
-                this->frame_0.getAhb(), this->frame_1.getAhb(),
-                outAhbs, extent, format, adaptiveFlowScales);
-        else
-            ctxId = LSFG_3_1::createAdaptiveContextFromAHB(
-                this->frame_0.getAhb(), this->frame_1.getAhb(),
-                outAhbs, extent, format, adaptiveFlowScales);
+        try {
+            if (conf.performance)
+                ctxId = LSFG_3_1P::createAdaptiveContextFromAHB(
+                    this->frame_0.getAhb(), this->frame_1.getAhb(),
+                    outAhbs, extent, format, adaptiveFlowScales);
+            else
+                ctxId = LSFG_3_1::createAdaptiveContextFromAHB(
+                    this->frame_0.getAhb(), this->frame_1.getAhb(),
+                    outAhbs, extent, format, adaptiveFlowScales);
+            this->adaptiveFlowRuntimeAvailable_ = true;
+        } catch (const std::exception& e) {
+            std::cerr << "lsfg-vk: adaptive-flow-fallback mode=fixed-target"
+                      << " target=" << initialFlowScale
+                      << " reason=" << e.what() << '\n';
+            this->adaptiveFlowController_.configure(
+                false, this->adaptiveFlowPreset_);
+            if (conf.performance)
+                ctxId = LSFG_3_1P::createContextFromAHB(
+                    this->frame_0.getAhb(), this->frame_1.getAhb(),
+                    outAhbs, extent, format);
+            else
+                ctxId = LSFG_3_1::createContextFromAHB(
+                    this->frame_0.getAhb(), this->frame_1.getAhb(),
+                    outAhbs, extent, format);
+        }
     } else if (conf.performance) {
         ctxId = LSFG_3_1P::createContextFromAHB(
             this->frame_0.getAhb(), this->frame_1.getAhb(),
@@ -614,7 +631,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     this->lastGeneratedFrameCount_ = generatedFrameCount;
 
     const auto updateAdaptiveFlowGovernor = [&]() {
-        if (!conf.adaptiveFlowScale)
+        if (!conf.adaptiveFlowScale || !this->adaptiveFlowRuntimeAvailable_)
             return;
 
         const LSFG::AdaptiveFlowGpuTiming timing = conf.performance
@@ -821,7 +838,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_discontinuities=" << metrics.windowAdaptiveDiscontinuities
                       << " adaptive_discontinuities_total=" << metrics.totalAdaptiveDiscontinuities
                       << " source_history_valid=" << (this->requiresSourceHistoryWarmup_ ? 0 : 1)
-                      << " adaptive_flow_enabled=" << (conf.adaptiveFlowScale ? 1 : 0)
+                      << " adaptive_flow_enabled=" << (this->adaptiveFlowRuntimeAvailable_ ? 1 : 0)
+                       << " adaptive_flow_mode_requested=" << (conf.adaptiveFlowScale ? 1 : 0)
                       << " adaptive_flow_preset="
                       << AdaptiveFlowController::presetName(this->adaptiveFlowPreset_)
                       << " adaptive_flow_target="
