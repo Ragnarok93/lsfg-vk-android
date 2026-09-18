@@ -10,7 +10,6 @@ constexpr std::array<float, 4> kBalancedStates{0.80F, 0.70F, 0.625F, 0.55F};
 constexpr std::array<float, 4> kLowStates{0.55F, 0.45F, 0.35F, 0.25F};
 
 constexpr double kPressureRatio = 0.90;
-constexpr double kRecoveryRatio = 0.72;
 constexpr double kRecoveryPredictedRatio = 0.82;
 constexpr double kMinimumFlowBudgetRatio = 0.10;
 constexpr double kMinimumPredictedReliefRatio = 0.03;
@@ -163,7 +162,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
 
     pressureSeconds_ = 0.0;
 
-    if (canRaise && telemetry_.pressureRatio <= kRecoveryRatio && !observation.deadlineMissed) {
+    if (canRaise && !observation.deadlineMissed) {
         const double currentScale = static_cast<double>(presetStates[index]);
         const double higherScale = static_cast<double>(presetStates[index - 1]);
         const double addedFlowMs = observation.flowMs

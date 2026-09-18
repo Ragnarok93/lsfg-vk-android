@@ -117,6 +117,20 @@ int main() {
     }
 
     {
+        // Recovery should be quality-seeking: once the higher state is
+        // predicted to fit comfortably, the lower state's raw utilization
+        // ratio must not strand quality indefinitely.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 12; ++i)
+            controller.observe(sample(16.2, 5.0));
+        assert(near(controller.currentScale(), 0.90F));
+
+        for (int i = 0; i < 70; ++i)
+            controller.observe(sample(12.5, 1.0));
+        assert(near(controller.currentScale(), 1.00F));
+    }
+
+    {
         // If a higher state is predicted to consume too much of the budget,
         // hold the lower state despite otherwise healthy current timings.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
