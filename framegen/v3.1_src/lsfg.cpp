@@ -11,6 +11,7 @@
 #include "common/utils.hpp"
 
 #include <cstdint>
+#include <cmath>
 #include <optional>
 #include <cstdlib>
 #include <ctime>
@@ -146,6 +147,31 @@ void LSFG_3_1::presentContextWithCount(int32_t id, int inSem,
         throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
 
     it->second.present(*device, inSem, outSem, activeGenerationCount);
+}
+
+void LSFG_3_1::presentContextWithPhases(int32_t id, int inSem,
+        const std::vector<int>& outSem,
+        const std::vector<float>& interpolationPhases) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    if (interpolationPhases.size() > device->generationCount)
+        throw std::runtime_error("LSFG interpolation phase count exceeds runtime capacity");
+
+    float previous = 0.0F;
+    for (const float phase : interpolationPhases) {
+        if (!std::isfinite(phase) || phase <= 0.0F || phase >= 1.0F
+                || phase <= previous)
+            throw std::invalid_argument(
+                "LSFG interpolation phases must be finite, increasing, and within (0, 1)");
+        previous = phase;
+    }
+
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
+    it->second.present(
+        *device, inSem, outSem, interpolationPhases.size(), &interpolationPhases);
 }
 
 void LSFG_3_1::deleteContext(int32_t id) {
