@@ -138,6 +138,14 @@ private:
     double adaptiveFlowBudgetMs_{0.0};
     size_t adaptiveFlowGenerationCount_{0};
     AdaptiveFlowDecisionReason adaptiveFlowReason_{AdaptiveFlowDecisionReason::None};
+
+    // Adaptive presentation pacing. VK_GOOGLE_display_timing is optional; the
+    // swapchain still uses FIFO ordering when this capability is unavailable.
+    bool adaptiveDisplayTimingEnabled_{false};
+    uint64_t adaptivePresentPeriodNs_{0};
+    uint64_t adaptiveNextPresentTimeNs_{0};
+    uint32_t adaptivePresentId_{1};
+
     bool requiresSourceHistoryWarmup_{false};
     bool previousSourceCopySignalValid_{false};
     // Optional fast path only. If either logical device cannot share an
