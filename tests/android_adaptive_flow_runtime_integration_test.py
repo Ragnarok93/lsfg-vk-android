@@ -43,6 +43,8 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         ):
             self.assertIn(field, source)
         self.assertIn(".schedulerTransition = schedulerTransition", source)
+        self.assertIn("kAdaptiveFlowCadenceDiscontinuityMs = 250.0", source)
+        self.assertIn("!cadenceDiscontinuity", source)
 
     def test_budget_tracks_adaptive_target_or_fixed_output_period(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")

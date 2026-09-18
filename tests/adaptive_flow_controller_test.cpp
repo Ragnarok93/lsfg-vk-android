@@ -129,6 +129,23 @@ int main() {
     }
 
     {
+        // A suspend-sized observation must not satisfy several seconds of
+        // recovery evidence in one call. This matters for Adaptive Flow paired
+        // with Fixed LSFG, where no Adaptive-LSFG discontinuity event exists.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 12; ++i)
+            controller.observe(sample(16.2, 5.0));
+        assert(near(controller.currentScale(), 0.90F));
+
+        for (int i = 0; i < 20; ++i)
+            controller.observe(sample(8.0, 2.0));
+        auto resumed = sample(8.0, 2.0);
+        resumed.elapsed = 10s;
+        controller.observe(resumed);
+        assert(near(controller.currentScale(), 0.90F));
+    }
+
+    {
         // Reconfiguring presets returns to the newly selected target rather than
         // leaking the previous preset's runtime state.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Low);

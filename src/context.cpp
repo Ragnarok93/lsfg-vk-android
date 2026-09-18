@@ -626,6 +626,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             conf.adaptiveFramegen && adaptiveLsfgTransition(adaptiveTelemetry);
         const bool timingUsable = timing.valid && !timing.transitionActive;
         const bool budgetValid = budgetMs > 0.0 && std::isfinite(budgetMs);
+        constexpr double kAdaptiveFlowCadenceDiscontinuityMs = 250.0;
+        const double sourceIntervalMs =
+            std::chrono::duration<double, std::milli>(sourceInterval).count();
+        const bool cadenceDiscontinuity =
+            sourceIntervalMs >= kAdaptiveFlowCadenceDiscontinuityMs;
 
         AdaptiveFlowObservation observation{
             .elapsed = sourceInterval,
@@ -639,7 +644,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 && timing.totalLsfgMs > budgetMs,
             .schedulerTransition = schedulerTransition,
             .valid = budgetValid && (schedulerTransition
-                || (timingUsable && sourceInterval.count() > 0)),
+                || (!cadenceDiscontinuity
+                    && timingUsable && sourceInterval.count() > 0)),
         };
 
         const float previousScale = this->adaptiveFlowController_.currentScale();

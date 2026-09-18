@@ -83,8 +83,11 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     }
 
     const double elapsedSeconds = std::chrono::duration<double>(observation.elapsed).count();
-    if (elapsedSeconds > 0.0 && std::isfinite(elapsedSeconds))
-        observedSeconds_ += std::min(elapsedSeconds, 0.250);
+    const double evidenceSeconds =
+        elapsedSeconds > 0.0 && std::isfinite(elapsedSeconds)
+            ? std::min(elapsedSeconds, 0.250)
+            : 0.0;
+    observedSeconds_ += evidenceSeconds;
 
     if (!observation.valid
             || !(observation.frameBudgetMs > 0.0)
@@ -143,7 +146,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             return telemetry_.currentScale;
         }
 
-        pressureSeconds_ += elapsedSeconds;
+        pressureSeconds_ += evidenceSeconds;
         headroomSeconds_ = 0.0;
         if (pressureSeconds_ >= kDownConfirmSeconds) {
             telemetry_.stateIndex++;
@@ -174,7 +177,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             return telemetry_.currentScale;
         }
 
-        headroomSeconds_ += elapsedSeconds;
+        headroomSeconds_ += evidenceSeconds;
         if (headroomSeconds_ >= kUpConfirmSeconds) {
             telemetry_.stateIndex--;
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
