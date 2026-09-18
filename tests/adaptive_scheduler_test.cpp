@@ -417,5 +417,58 @@ int main() {
     }
 
 
+    {
+        // Deadline admission is a stateless fast decision, not another slow
+        // governor. The same source cycle and cost model must yield per-slot
+        // decisions solely from remaining presentation budget.
+        SourceTimelineCycle cycle{
+            .valid = true,
+            .sourceIndex = 4,
+            .anchorNs = 1'000'000'000ULL,
+            .intervalNs = 20'000'000ULL,
+            .sourceDeadlineNs = 1'020'000'000ULL,
+        };
+        const std::vector<double> phases{0.25, 0.75};
+        const auto roomy = SyntheticDeadlineAdmission::evaluate(
+            1'000'000'000ULL, cycle, phases, 2.0, 1.0, 0.0);
+        assert(roomy.predictionValid);
+        assert(roomy.rejectedCount == 0);
+        assert(roomy.slots.size() == 2);
+        assert(roomy.slots[0].admitted);
+        assert(roomy.slots[1].admitted);
+
+        const auto pressured = SyntheticDeadlineAdmission::evaluate(
+            1'004'500'000ULL, cycle, phases, 2.0, 1.0, 0.0);
+        assert(pressured.predictionValid);
+        assert(pressured.rejectedCount == 1);
+        assert(!pressured.slots[0].admitted);
+        assert(pressured.slots[1].admitted);
+    }
+
+    {
+        // With no cost history, future slots fail open; a slot whose deadline
+        // already passed is still consumed as missed rather than carried as debt.
+        SourceTimelineCycle cycle{
+            .valid = true,
+            .sourceIndex = 8,
+            .anchorNs = 2'000'000'000ULL,
+            .intervalNs = 40'000'000ULL,
+            .sourceDeadlineNs = 2'040'000'000ULL,
+        };
+        const std::vector<double> phases{0.25, 0.75};
+        const auto unknown = SyntheticDeadlineAdmission::evaluate(
+            2'000'000'000ULL, cycle, phases, 0.0, 0.0, 0.0);
+        assert(!unknown.predictionValid);
+        assert(unknown.rejectedCount == 0);
+
+        const auto missed = SyntheticDeadlineAdmission::evaluate(
+            2'020'000'000ULL, cycle, phases, 0.0, 0.0, 0.0);
+        assert(!missed.predictionValid);
+        assert(missed.rejectedCount == 1);
+        assert(!missed.slots[0].admitted);
+        assert(missed.slots[1].admitted);
+    }
+
+
     return 0;
 }
