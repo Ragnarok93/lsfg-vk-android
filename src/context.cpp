@@ -1108,24 +1108,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     if (adaptiveZeroGeneration) {
-        // The framegen zero-count path advances its temporal frame index without
-        // dispatching interpolation shaders. The source AHB was already updated
-        // above, keeping the alternating real-frame history coherent for the next
-        // nonzero Adaptive cycle.
-        std::vector<int> noOutSems;
-        const auto historyAdvanceStart = RuntimeMetrics::Clock::now();
-        if (conf.performance)
-            LSFG_3_1P::presentContextWithCount(
-                *this->lsfgCtxId, -1, noOutSems, 0);
-        else
-            LSFG_3_1::presentContextWithCount(
-                *this->lsfgCtxId, -1, noOutSems, 0);
-        metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
-            RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
+        // Stability recovery: a zero-generation Adaptive cycle is a pure source
+        // present. Do not submit a zero-count framegen job or maintain private
+        // temporal history through SYNC_FD handoffs. If generation becomes
+        // necessary again, consume one real frame as a clean history warmup.
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
-        this->requiresSourceHistoryWarmup_ = false;
+        this->requiresSourceHistoryWarmup_ = true;
         this->lastGeneratedFrameCount_ = 0;
 
         const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
@@ -1151,12 +1141,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "Failed to present Adaptive zero-generation source frame");
         }
         if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset) {
-            std::cerr << "lsfg-vk: runtime stage=adaptive-history-advance"
-                      << " generated=0 history_valid=1"
+            std::cerr << "lsfg-vk: runtime stage=adaptive-zero-source-only"
+                      << " generated=0 history_valid=0"
                       << " discontinuity=" << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
                       << "\n";
         }
-        return finishSourcePresent(adaptiveSourceResult, "pre-copy-adaptive-zero");
+        return finishSourcePresent(
+            adaptiveSourceResult, "pre-copy-adaptive-zero-source-only");
     }
 
     if (warmupSourceHistory) {
