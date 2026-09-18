@@ -37,10 +37,12 @@ void Buffer::construct(const Core::Device& device, const void* data, VkBufferUsa
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
     std::optional<uint32_t> memType{};
+    constexpr VkMemoryPropertyFlags requiredHostFlags =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
         if ((memReqs.memoryTypeBits & (1 << i)) && // NOLINTBEGIN
-            (memProps.memoryTypes[i].propertyFlags &
-                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
+            (memProps.memoryTypes[i].propertyFlags & requiredHostFlags)
+                == requiredHostFlags) {
             memType.emplace(i);
             break;
         } // NOLINTEND

@@ -52,6 +52,15 @@ void DescriptorSet::bind(const CommandBuffer& commandBuffer, const Pipeline& pip
         0, 1, &descriptorSetHandle, 0, nullptr);
 }
 
+void DescriptorSet::bind(
+        const CommandBuffer& commandBuffer, const Pipeline& pipeline,
+        uint32_t dynamicOffset) const {
+    VkDescriptorSet descriptorSetHandle = this->handle();
+    vkCmdBindDescriptorSets(commandBuffer.handle(),
+        VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.getLayout(),
+        0, 1, &descriptorSetHandle, 1, &dynamicOffset);
+}
+
 // updater class
 
 DescriptorSetUpdateBuilder& DescriptorSetUpdateBuilder::add(VkDescriptorType type, const Image& image) {
@@ -85,7 +94,15 @@ DescriptorSetUpdateBuilder& DescriptorSetUpdateBuilder::add(VkDescriptorType typ
     return *this;
 }
 
-DescriptorSetUpdateBuilder& DescriptorSetUpdateBuilder::add(VkDescriptorType type, const Buffer& buffer) {
+DescriptorSetUpdateBuilder& DescriptorSetUpdateBuilder::add(
+        VkDescriptorType type, const Buffer& buffer) {
+    return this->add(
+        type, buffer, static_cast<VkDeviceSize>(buffer.getSize()), 0);
+}
+
+DescriptorSetUpdateBuilder& DescriptorSetUpdateBuilder::add(
+        VkDescriptorType type, const Buffer& buffer,
+        VkDeviceSize range, VkDeviceSize offset) {
     this->entries.push_back({
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet = this->descriptorSet->handle(),
@@ -95,7 +112,8 @@ DescriptorSetUpdateBuilder& DescriptorSetUpdateBuilder::add(VkDescriptorType typ
         .pImageInfo = nullptr,
         .pBufferInfo = new VkDescriptorBufferInfo {
             .buffer = buffer.handle(),
-            .range = buffer.getSize()
+            .offset = offset,
+            .range = range,
         }
     });
     return *this;

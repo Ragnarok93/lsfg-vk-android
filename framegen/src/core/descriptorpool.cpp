@@ -13,11 +13,12 @@ using namespace LSFG::Core;
 
 DescriptorPool::DescriptorPool(const Core::Device& device) {
     // create descriptor pool
-    const std::array<VkDescriptorPoolSize, 4> pools{{ // arbitrary limits
+    const std::array<VkDescriptorPoolSize, 5> pools{{ // arbitrary limits
         { .type = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = 4096 },
         { .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 4096 },
         { .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 4096 },
-        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 4096 }
+        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 4096 },
+        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .descriptorCount = 4096 }
     }};
     const VkDescriptorPoolCreateInfo desc{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,

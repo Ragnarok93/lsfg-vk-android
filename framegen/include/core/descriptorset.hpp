@@ -56,6 +56,8 @@ namespace LSFG::Core {
         /// @param pipeline Pipeline to bind the descriptor set to.
         ///
         void bind(const CommandBuffer& commandBuffer, const Pipeline& pipeline) const;
+        void bind(const CommandBuffer& commandBuffer, const Pipeline& pipeline,
+            uint32_t dynamicOffset) const;
 
         /// Get the Vulkan handle.
         [[nodiscard]] auto handle() const { return *this->descriptorSet; }
@@ -80,6 +82,9 @@ namespace LSFG::Core {
         DescriptorSetUpdateBuilder& add(VkDescriptorType type, const Image& image);
         DescriptorSetUpdateBuilder& add(VkDescriptorType type, const Sampler& sampler);
         DescriptorSetUpdateBuilder& add(VkDescriptorType type, const Buffer& buffer);
+        DescriptorSetUpdateBuilder& add(
+            VkDescriptorType type, const Buffer& buffer,
+            VkDeviceSize range, VkDeviceSize offset = 0);
         DescriptorSetUpdateBuilder& add(VkDescriptorType type); // empty entry
 
         /// Add a list of resources to the descriptor set update.

@@ -7,6 +7,7 @@
 #include "vulkan/vulkan_core.h"
 
 #include <cstdint>
+#include <cstddef>
 #include <unordered_map>
 
 namespace LSFG::Pool {
@@ -43,9 +44,22 @@ namespace LSFG::Pool {
             const Core::Device& device,
             float timestamp = 0.0F, bool firstIter = false, bool firstIterS = false);
 
-        /// Update only the interpolation timestamp in an existing constant
-        /// buffer. Safe only after prior GPU consumers of that buffer retire.
-        static void writeTimestamp(Core::Buffer& buffer, float timestamp);
+        /// Eight slots match Context's render-data retirement ring. Dynamic
+        /// uniform offsets select a slot without updating descriptor sets that
+        /// may still be referenced by in-flight submissions.
+        static constexpr size_t kTimestampRingSlots = 8;
+
+        Core::Buffer createTimestampRing(
+            const Core::Device& device,
+            float timestamp = 0.0F, bool firstIter = false, bool firstIterS = false);
+
+        [[nodiscard]] static VkDeviceSize timestampRecordSize() noexcept;
+        [[nodiscard]] static uint32_t timestampRingOffset(
+            const Core::Buffer& buffer, uint64_t frameIndex);
+
+        /// Update only the interpolation timestamp in a retired ring record.
+        static void writeTimestamp(
+            Core::Buffer& buffer, float timestamp, size_t baseOffset = 0);
 
         ///
         /// Retrieve a sampler by type or create it.
