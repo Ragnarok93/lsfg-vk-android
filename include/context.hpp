@@ -148,6 +148,20 @@ private:
 
     bool requiresSourceHistoryWarmup_{false};
     bool previousSourceCopySignalValid_{false};
+
+    // Queue-target 1 delivery for Android: the application's real frame is
+    // acknowledged this call, but displayed on the next source boundary so the
+    // preceding interpolation batch can be inserted in temporal order. Synthetic
+    // work that is not complete by that next boundary is dropped rather than
+    // delaying the real frame.
+    bool pendingSourceValid_{false};
+    uint32_t pendingSourceImage_{0};
+    Mini::Semaphore pendingSourceReady_;
+    size_t pendingPassIndex_{0};
+    size_t pendingGeneratedCount_{0};
+    bool framegenInFlight_{false};
+    bool framegenOutputEligible_{false};
+
     // Optional fast path only. If either logical device cannot share an
     // OPAQUE_FD semaphore, or an export fails at runtime, this is disabled for
     // the life of the context and the established synchronous fence path wins.
@@ -185,6 +199,8 @@ private:
         uint64_t windowSyncHandoffs{0};
         uint64_t totalSyncHandoffs{0};
         uint64_t totalAsyncFallbacks{0};
+        uint64_t windowGeneratedLateDrops{0};
+        uint64_t totalGeneratedLateDrops{0};
 
         double windowCycleMs{0.0};
         double windowCycleMaxMs{0.0};
