@@ -191,6 +191,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("const bool warmupSourceHistory", source)
         self.assertIn("if (this->previousSourceCopySignalValid_)", source)
         self.assertIn("stage=source-history-warmup", source)
+        self.assertIn(
+            'advanceAdaptiveHistoryAndPresentSource("source-history-warmup")',
+            source,
+        )
         self.assertIn("return finishSourcePresent", source)
 
     def test_context_creation_failure_recreates_original_swapchain(self) -> None:

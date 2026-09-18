@@ -52,3 +52,32 @@ for variant in ("v3.1", "v3.1p"):
     assert compact.index("recordAdaptiveFlowGpuTiming(vk, data);") < compact.index("data.shouldWait = true;"), variant
 
 print("Source-protected Adaptive completion fast-path contract satisfied")
+
+
+# Before touching either shared input AHB, Adaptive must nonblockingly prove
+# that the previous framegen submission released them. Busy framegen drops only
+# synthetic work and presents the real source directly; no source-time wait is
+# allowed and the skipped source invalidates temporal history for a real refresh.
+present_start = source.index("VkResult LsContext::present")
+precopy = source.index("copySwapchainToExternalAhb", present_start)
+busy_poll = source.index("previousFramegenComplete", present_start)
+assert busy_poll < precopy
+assert "waitContext(*this->lsfgCtxId, 0)" in compact_source
+busy_block = source[busy_poll:precopy]
+assert "requiresSourceHistoryWarmup_ = true" in busy_block
+assert "previousSourceCopySignalValid_ = false" in busy_block
+assert "gameRenderSemaphores.data()" in busy_block
+assert "game-render-framegen-busy" in busy_block
+assert "windowFramegenBusyBypasses" in header
+
+# Intercepted source-only bypasses advance wrapper frameIdx but not framegen's
+# temporal index, so shared-input selection must use the framegen capture index.
+assert "framegenSourceFrameIdx_" in header
+assert "framegenSourceFrameIdx_ % 2" in source
+assert "framegenSourceFrameIdx_ < 2" in source
+
+
+# Busy source-only presents do not consume an LSFG render-pass slot. Holding the
+# wrapper ring index avoids reusing per-pass semaphores/command buffers merely
+# because several protected source frames bypassed framegen.
+assert "advanceRenderPassRingOnFinish = false" in busy_block

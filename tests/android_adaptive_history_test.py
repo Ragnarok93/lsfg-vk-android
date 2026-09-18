@@ -130,6 +130,30 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
                 source_path.as_posix(),
             )
 
+    def test_zero_timeout_completion_check_is_a_true_nonblocking_poll(self) -> None:
+        for source_path in (
+            ROOT / "framegen/v3.1_src/context.cpp",
+            ROOT / "framegen/v3.1p_src/context.cpp",
+        ):
+            source = source_path.read_text(encoding="utf-8")
+            start = source.index("bool Context::waitForLastPresent")
+            end = source.index("bool Context::waitForCompletion", start)
+            wait_body = source[start:end]
+            self.assertIn("timeoutNs == 0", wait_body, source_path.as_posix())
+            self.assertIn("fence.wait(vk.device, 0)", wait_body, source_path.as_posix())
+            self.assertIn("renderData.shouldWait = false", wait_body, source_path.as_posix())
+
+    def test_source_history_warmup_submits_history_only_preprocess(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        warmup_start = source.index("if (warmupSourceHistory)")
+        deadline_start = source.index("// 2. Deadline admission", warmup_start)
+        warmup = source[warmup_start:deadline_start]
+        self.assertIn(
+            'advanceAdaptiveHistoryAndPresentSource("source-history-warmup")',
+            warmup,
+        )
+        self.assertNotIn("warmupPresentInfo", warmup)
+
     def test_generated_passes_reuse_completion_fences(self) -> None:
         backend_sources = (
             ROOT / "framegen/v3.1_src/context.cpp",

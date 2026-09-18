@@ -88,7 +88,12 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         present = source.split("VkResult LsContext::present", 1)[1]
         android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
         self.assertIn("this->asyncAhbHandoffEnabled_", android_present)
-        self.assertIn("&& !warmupSourceHistory", android_present)
+        self.assertIn(
+            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;",
+            android_present,
+            "HistoryOnly and source-history warm-up should use the supported GPU semaphore handoff",
+        )
+        self.assertNotIn("&& !warmupSourceHistory", android_present)
         self.assertNotIn(
             "&& generatedFrameCount > 0",
             android_present,
@@ -102,7 +107,7 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         self.assertIn(
             "submitAndWaitForAhbHandoff",
             android_present,
-            "Unsupported synchronization and source-history warm-up must retain the proven bounded host-fence fallback",
+            "Unsupported synchronization/export failure must retain the proven bounded host-fence fallback",
         )
 
     def test_generated_ahb_uses_external_ownership_copy_path(self) -> None:

@@ -577,28 +577,29 @@ bool Context::waitForLastPresent(Vulkan& vk, uint64_t timeoutNs) {
     if (!renderData.shouldWait)
         return true;
 
+    const bool pollOnly = timeoutNs == 0;
     const auto deadline = std::chrono::steady_clock::now()
         + std::chrono::nanoseconds(timeoutNs);
-    if (renderData.generationCount == 0) {
+    const auto waitFence = [&](const Core::Fence& fence) {
+        if (pollOnly)
+            return fence.wait(vk.device, 0);
+
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline)
-            return false;
+            return fence.wait(vk.device, 0);
+
         const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
             deadline - now).count();
-        if (!renderData.preprocessingFence.wait(
-                vk.device, static_cast<uint64_t>(remaining)))
+        return fence.wait(vk.device, static_cast<uint64_t>(remaining));
+    };
+
+    if (renderData.generationCount == 0) {
+        if (!waitFence(renderData.preprocessingFence))
             return false;
     } else {
-        for (size_t i = 0; i < renderData.generationCount; ++i) {
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= deadline)
+        for (size_t i = 0; i < renderData.generationCount; ++i)
+            if (!waitFence(renderData.completionFences.at(i)))
                 return false;
-            const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                deadline - now).count();
-            if (!renderData.completionFences.at(i).wait(
-                    vk.device, static_cast<uint64_t>(remaining)))
-                return false;
-        }
     }
 #ifdef __ANDROID__
     this->recordAdaptiveFlowGpuTiming(vk, renderData);

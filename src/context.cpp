@@ -851,6 +851,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << "\n";
     }
 
+    bool advanceRenderPassRingOnFinish = true;
     const auto finishSourcePresent = [&](VkResult result, const char* sourceWait) -> VkResult {
         metrics.windowSourceFrames++;
         metrics.totalSourceFrames++;
@@ -905,6 +906,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSyntheticDeadlineSamples = 0;
             metrics.windowSyntheticOpportunities = 0;
             metrics.windowSyntheticAcquireDrops = 0;
+            metrics.windowFramegenBusyBypasses = 0;
             metrics.windowDeadlineShadowRejects = 0;
             metrics.windowDeadlineShadowLate = 0;
             metrics.windowDeadlinePredictionSamples = 0;
@@ -1015,6 +1017,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << metrics.windowSyntheticAcquireDrops
                       << " synthetic_acquire_drops_total="
                       << metrics.totalSyntheticAcquireDrops
+                      << " framegen_busy_source_bypasses="
+                      << metrics.windowFramegenBusyBypasses
+                      << " framegen_busy_source_bypasses_total="
+                      << metrics.totalFramegenBusyBypasses
                       << " deadline_rejects="
                       << metrics.windowDeadlineShadowRejects
                       << " deadline_rejects_total="
@@ -1120,6 +1126,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceDeadlineSamples = 0;
             metrics.windowSyntheticDeadlineSamples = 0;
             metrics.windowSyntheticOpportunities = 0;
+            metrics.windowSyntheticAcquireDrops = 0;
+            metrics.windowFramegenBusyBypasses = 0;
             metrics.windowDeadlineShadowRejects = 0;
             metrics.windowDeadlineShadowLate = 0;
             metrics.windowDeadlinePredictionSamples = 0;
@@ -1127,9 +1135,62 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowActualLsfgMs = 0.0;
         }
 
-        this->frameIdx++;
+        if (advanceRenderPassRingOnFinish)
+            this->frameIdx++;
         return result;
     };
+
+    // Framegen owns both shared input AHBs until its most recent submission
+    // completes. Adaptive generation is opportunistic: never wait for that
+    // ownership on the intercepted source-present thread and never overwrite an
+    // AHB that framegen may still be reading. A busy framegen therefore drops
+    // only this cycle's synthetic work and presents the real source directly.
+    if (conf.adaptiveFramegen) {
+        const bool previousFramegenComplete = conf.performance
+            ? LSFG_3_1P::waitContext(*this->lsfgCtxId, 0)
+            : LSFG_3_1::waitContext(*this->lsfgCtxId, 0);
+        if (!previousFramegenComplete) {
+            this->requiresSourceHistoryWarmup_ = true;
+            this->previousSourceCopySignalValid_ = false;
+            this->lastGeneratedFrameCount_ = 0;
+            generatedFrameCount = 0;
+            interpolationPhases.clear();
+            metrics.windowFramegenBusyBypasses++;
+            metrics.totalFramegenBusyBypasses++;
+            // No wrapper render-pass resources were consumed on this bypass.
+            // Keep frameIdx on the next unused pass slot instead of walking the
+            // 8-slot ring while older GPU-side waits may still be retiring.
+            advanceRenderPassRingOnFinish = false;
+
+            VkPresentTimeGOOGLE busySourcePresentTime{};
+            VkPresentTimesInfoGOOGLE busySourcePresentTimes{};
+            const VkPresentInfoKHR busySourcePresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = adaptivePresentPNext(
+                    pNext, sourceCycle.sourceDeadlineNs,
+                    busySourcePresentTime, busySourcePresentTimes),
+                .waitSemaphoreCount =
+                    static_cast<uint32_t>(gameRenderSemaphores.size()),
+                .pWaitSemaphores = gameRenderSemaphores.empty()
+                    ? nullptr : gameRenderSemaphores.data(),
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto busySourceResult =
+                Layer::ovkQueuePresentKHR(queue, &busySourcePresentInfo);
+            if (busySourceResult != VK_SUCCESS
+                    && busySourceResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(
+                    busySourceResult,
+                    "Failed to present source while framegen remained busy");
+            }
+            return finishSourcePresent(
+                busySourceResult, "game-render-framegen-busy");
+        }
+    }
 
     // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
     // validated presentation sequence and EXTERNAL ownership barriers intact.
@@ -1144,9 +1205,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     copySwapchainToExternalAhb(pass.preCopyBuf.handle(),
         this->swapchainImages.at(presentIdx),
-        this->frameIdx % 2 == 0 ? this->frame_0.handle() : this->frame_1.handle(),
+        this->framegenSourceFrameIdx_ % 2 == 0
+            ? this->frame_0.handle() : this->frame_1.handle(),
         this->extent.width, this->extent.height,
-        info.queue.first, this->frameIdx < 2);
+        info.queue.first, this->framegenSourceFrameIdx_ < 2);
 
     pass.preCopyBuf.end();
 
@@ -1161,12 +1223,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.preCopySemaphores.at(1).handle(),
     };
 
-    // HistoryOnly uses the same dedicated cross-device input semaphore as
-    // generated work when supported, avoiding an unnecessary source-copy host
-    // wait. Source-history warm-up and unsupported/export-failure cases retain
-    // the proven bounded host-fence fallback.
-    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
-        && !warmupSourceHistory;
+    // HistoryOnly and source-history warm-up use the same dedicated
+    // cross-device input semaphore as generated work when supported, avoiding
+    // an unnecessary source-copy host wait. Unsupported/export-failure cases
+    // retain the proven bounded host-fence fallback.
+    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;
     int framegenInputSemaphoreFd = -1;
     if (useAsyncHandoff) {
         try {
@@ -1215,6 +1276,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             else
                 LSFG_3_1::presentContextWithCount(
                     *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, 0);
+            this->framegenSourceFrameIdx_++;
             metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
             updateAdaptiveFlowGovernor();
@@ -1262,31 +1324,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return advanceAdaptiveHistoryAndPresentSource("scheduler-zero");
 
     if (warmupSourceHistory) {
-        this->requiresSourceHistoryWarmup_ = false;
-        this->lastGeneratedFrameCount_ = 0;
-        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
-        VkPresentTimeGOOGLE warmupPresentTime{};
-        VkPresentTimesInfoGOOGLE warmupPresentTimes{};
-        const VkPresentInfoKHR warmupPresentInfo{
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = adaptivePresentPNext(
-                pNext, sourceCycle.sourceDeadlineNs,
-                warmupPresentTime, warmupPresentTimes),
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &sourceReady,
-            .swapchainCount = 1,
-            .pSwapchains = &this->swapchain,
-            .pImageIndices = &presentIdx,
-        };
-        const auto warmupResult = Layer::ovkQueuePresentKHR(queue, &warmupPresentInfo);
-        if (warmupResult != VK_SUCCESS && warmupResult != VK_SUBOPTIMAL_KHR) {
-            metrics.windowSourcePresentFailures++;
-            metrics.totalSourcePresentFailures++;
-            throw LSFG::vulkan_error(warmupResult,
-                "Failed to present source-history warmup frame");
-        }
         std::cerr << "lsfg-vk: runtime stage=source-history-warmup\n";
-        return finishSourcePresent(warmupResult, "pre-copy-warmup");
+        return advanceAdaptiveHistoryAndPresentSource("source-history-warmup");
     }
 
     // 2. Deadline admission is Adaptive-only. The scheduler has already
@@ -1410,6 +1449,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         LSFG_3_1::presentContextWithCount(
             *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, generatedFrameCount);
     }
+    this->framegenSourceFrameIdx_++;
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)

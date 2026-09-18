@@ -123,6 +123,9 @@ private:
     size_t lastGeneratedFrameCount_{0};
 
 #ifdef __ANDROID__
+    // Advances only when a source frame is actually submitted to framegen.
+    // Intercepted source-only bypasses must not perturb framegen's input parity.
+    uint64_t framegenSourceFrameIdx_{0};
     AdaptiveFrameScheduler adaptiveScheduler_;
     SourceFrameTimeline sourceTimeline_;
     AdaptiveFlowController adaptiveFlowController_;
@@ -202,6 +205,8 @@ private:
         uint64_t totalSyntheticOpportunities{0};
         uint64_t windowSyntheticAcquireDrops{0};
         uint64_t totalSyntheticAcquireDrops{0};
+        uint64_t windowFramegenBusyBypasses{0};
+        uint64_t totalFramegenBusyBypasses{0};
         uint64_t windowDeadlineShadowRejects{0};
         uint64_t totalDeadlineShadowRejects{0};
         uint64_t windowDeadlineShadowLate{0};
