@@ -28,6 +28,28 @@ def patch_context_source(path: Path) -> None:
         f"{path}: defer Android pass selection",
     )
 
+    # The retained deferred-zero transform retires the current ring-slot handoff
+    # fence at function entry. Keep that exact synchronization point, but scope
+    # its binding separately so the incoming source can select a new slot after
+    # the previously buffered source advances frameIdx.
+    early_retire = (
+        "    if (pass.handoffFencePending) { waitForAhbHandoff(info.device,*pass.handoffFence,"
+        "this->waitHandoffFences); pass.handoffFencePending=false; }\n"
+    )
+    if early_retire in text:
+        text = text.replace(
+            early_retire,
+            "    {\n"
+            "        auto& retiringPass = this->passInfos.at(this->frameIdx % 8);\n"
+            "        if (retiringPass.handoffFencePending) {\n"
+            "            waitForAhbHandoff(info.device, *retiringPass.handoffFence, "
+            "this->waitHandoffFences);\n"
+            "            retiringPass.handoffFencePending = false;\n"
+            "        }\n"
+            "    }\n",
+            1,
+        )
+
     text = replace_once(
         text,
         "    const bool warmupSourceHistory =\n"
