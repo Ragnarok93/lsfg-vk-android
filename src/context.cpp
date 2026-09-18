@@ -541,6 +541,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         info.androidOpaqueFdSemaphoreSupported
         && backendDiagnostics.externalSemaphoreOpaqueFd
         && gameGetSemaphoreFd != nullptr;
+    this->asyncFramegenCompletionEnabled_ = this->asyncAhbHandoffEnabled_;
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
               << ", mode=" << LSFG::ahbTransportModeName(ahbTransportMode)
@@ -1198,58 +1199,62 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << (useAsyncHandoff ? "gpu-semaphore" : "host-fence") << "\n";
     }
 
-    if (adaptiveZeroGeneration) {
-        // The framegen zero-count path advances its temporal frame index without
-        // dispatching interpolation shaders. The source AHB was already updated
-        // above, keeping the alternating real-frame history coherent for the next
-        // nonzero Adaptive cycle.
-        std::vector<int> noOutSems;
-        const auto historyAdvanceStart = RuntimeMetrics::Clock::now();
-        if (conf.performance)
-            LSFG_3_1P::presentContextWithCount(
-                *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, 0);
-        else
-            LSFG_3_1::presentContextWithCount(
-                *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, 0);
-        metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
-            RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
-        updateAdaptiveFlowGovernor();
-        metrics.windowAdaptiveZeroGenerationCycles++;
-        metrics.totalAdaptiveZeroGenerationCycles++;
-        this->requiresSourceHistoryWarmup_ = false;
-        this->lastGeneratedFrameCount_ = 0;
+    const auto advanceAdaptiveHistoryAndPresentSource =
+        [&](const char* reason) -> VkResult {
+            std::vector<int> noOutSems;
+            const auto historyAdvanceStart = RuntimeMetrics::Clock::now();
+            if (conf.performance)
+                LSFG_3_1P::presentContextWithCount(
+                    *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, 0);
+            else
+                LSFG_3_1::presentContextWithCount(
+                    *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, 0);
+            metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
+                RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
+            updateAdaptiveFlowGovernor();
+            metrics.windowAdaptiveZeroGenerationCycles++;
+            metrics.totalAdaptiveZeroGenerationCycles++;
+            this->requiresSourceHistoryWarmup_ = false;
+            this->lastGeneratedFrameCount_ = 0;
 
-        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
-        VkPresentTimeGOOGLE adaptiveSourcePresentTime{};
-        VkPresentTimesInfoGOOGLE adaptiveSourcePresentTimes{};
-        const VkPresentInfoKHR adaptiveSourcePresentInfo{
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = adaptivePresentPNext(
-                pNext, sourceCycle.sourceDeadlineNs,
-                adaptiveSourcePresentTime, adaptiveSourcePresentTimes),
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &sourceReady,
-            .swapchainCount = 1,
-            .pSwapchains = &this->swapchain,
-            .pImageIndices = &presentIdx,
+            const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+            VkPresentTimeGOOGLE adaptiveSourcePresentTime{};
+            VkPresentTimesInfoGOOGLE adaptiveSourcePresentTimes{};
+            const VkPresentInfoKHR adaptiveSourcePresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = adaptivePresentPNext(
+                    pNext, sourceCycle.sourceDeadlineNs,
+                    adaptiveSourcePresentTime, adaptiveSourcePresentTimes),
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &sourceReady,
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto adaptiveSourceResult = Layer::ovkQueuePresentKHR(
+                queue, &adaptiveSourcePresentInfo);
+            if (adaptiveSourceResult != VK_SUCCESS
+                    && adaptiveSourceResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(adaptiveSourceResult,
+                    "Failed to present Adaptive history-only source frame");
+            }
+            if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset
+                    || reason != nullptr) {
+                std::cerr << "lsfg-vk: runtime stage=adaptive-history-advance"
+                          << " generated=0 history_valid=1"
+                          << " reason=" << (reason != nullptr ? reason : "cadence")
+                          << " discontinuity="
+                          << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
+                          << "\n";
+            }
+            return finishSourcePresent(
+                adaptiveSourceResult, "pre-copy-adaptive-history");
         };
-        const auto adaptiveSourceResult = Layer::ovkQueuePresentKHR(
-            queue, &adaptiveSourcePresentInfo);
-        if (adaptiveSourceResult != VK_SUCCESS
-                && adaptiveSourceResult != VK_SUBOPTIMAL_KHR) {
-            metrics.windowSourcePresentFailures++;
-            metrics.totalSourcePresentFailures++;
-            throw LSFG::vulkan_error(adaptiveSourceResult,
-                "Failed to present Adaptive zero-generation source frame");
-        }
-        if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset) {
-            std::cerr << "lsfg-vk: runtime stage=adaptive-history-advance"
-                      << " generated=0 history_valid=1"
-                      << " discontinuity=" << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
-                      << "\n";
-        }
-        return finishSourcePresent(adaptiveSourceResult, "pre-copy-adaptive-zero");
-    }
+
+    if (adaptiveZeroGeneration)
+        return advanceAdaptiveHistoryAndPresentSource("scheduler-zero");
 
     if (warmupSourceHistory) {
         this->requiresSourceHistoryWarmup_ = false;
@@ -1279,9 +1284,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(warmupResult, "pre-copy-warmup");
     }
 
-    // 2. Shadow deadline admission. This computes the exact decision that a
-    // future drop-enabled path would make, but it does not change generation
-    // policy yet. Runtime timing evidence must validate the predictor first.
+    // 2. Deadline admission is the fast source-protection gate. The scheduler
+    // has already consumed these fractional opportunities, so rejected/late
+    // slots are dropped permanently and never become catch-up debt.
     std::vector<double> deadlinePhases;
     deadlinePhases.reserve(interpolationPhases.size());
     for (const float phase : interpolationPhases)
@@ -1305,13 +1310,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::max<size_t>(1, this->deadlineHostCostGenerationCount_));
         const double requestedCount = static_cast<double>(
             std::max<size_t>(1, generatedFrameCount));
-        // With no stage breakdown, retain the whole measured completion cost as
-        // shared work and only scale upward when requesting more output passes.
         predictedSharedCostMs = this->deadlineHostCostEwmaMs_
             * std::max(1.0, requestedCount / previousCount);
     }
 
-    const SyntheticDeadlineAdmissionPlan deadlineShadowPlan =
+    const SyntheticDeadlineAdmissionPlan deadlineAdmissionPlan =
         SyntheticDeadlineAdmission::evaluate(
             monotonicNowNs(),
             sourceCycle,
@@ -1319,23 +1322,61 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             predictedSharedCostMs,
             predictedPerSyntheticCostMs,
             this->deadlinePositivePredictionErrorEwmaMs_);
-    metrics.windowDeadlineShadowRejects += deadlineShadowPlan.rejectedCount;
-    metrics.totalDeadlineShadowRejects += deadlineShadowPlan.rejectedCount;
+    metrics.windowDeadlineShadowRejects += deadlineAdmissionPlan.rejectedCount;
+    metrics.totalDeadlineShadowRejects += deadlineAdmissionPlan.rejectedCount;
 
     double deadlinePredictedTotalMs = 0.0;
-    if (deadlineShadowPlan.predictionValid && !deadlineShadowPlan.slots.empty()) {
+    if (deadlineAdmissionPlan.predictionValid
+            && !deadlineAdmissionPlan.slots.empty()) {
         deadlinePredictedTotalMs =
-            deadlineShadowPlan.slots.back().predictedCompletionMs;
+            deadlineAdmissionPlan.slots.back().predictedCompletionMs;
         metrics.windowPredictedLsfgMs += deadlinePredictedTotalMs;
         metrics.windowDeadlinePredictionSamples++;
         metrics.totalDeadlinePredictionSamples++;
     }
 
-    // Tell framegen to generate intermediary frames. It acquires the input
-    // and output AHBs from EXTERNAL and releases them back to EXTERNAL. The
-    // optional input FD makes the framegen GPU wait directly for the game
-    // source-copy submission instead of stalling this presentation thread.
+    if (conf.adaptiveFramegen && !deadlineAdmissionPlan.slots.empty()) {
+        std::vector<float> admittedPhases;
+        admittedPhases.reserve(interpolationPhases.size());
+        for (size_t i = 0; i < deadlineAdmissionPlan.slots.size(); ++i) {
+            const auto& slot = deadlineAdmissionPlan.slots.at(i);
+            if (slot.admitted)
+                admittedPhases.emplace_back(interpolationPhases.at(i));
+        }
+        interpolationPhases = std::move(admittedPhases);
+        generatedFrameCount = interpolationPhases.size();
+        this->lastGeneratedFrameCount_ = generatedFrameCount;
+
+        if (generatedFrameCount == 0)
+            return advanceAdaptiveHistoryAndPresentSource("deadline-reject");
+    }
+
+    // Tell framegen to generate intermediary frames. The Adaptive fast path
+    // exports one game-device binary semaphore per output and imports it into
+    // framegen, so post-copy can wait on GPU completion without a host stall.
     std::vector<int> noOutSems;
+    std::vector<int> renderSemaphoreFds;
+    bool useAsyncFramegenCompletion =
+        conf.adaptiveFramegen
+        && this->asyncFramegenCompletionEnabled_
+        && deadlineAdmissionPlan.predictionValid
+        && this->deadlineHostCostSamples_ >= 2;
+    if (useAsyncFramegenCompletion) {
+        renderSemaphoreFds.resize(generatedFrameCount, -1);
+        try {
+            for (size_t i = 0; i < generatedFrameCount; ++i) {
+                pass.renderSemaphores.at(i) =
+                    Mini::Semaphore(info.device, &renderSemaphoreFds.at(i));
+            }
+        } catch (const std::exception& e) {
+            this->asyncFramegenCompletionEnabled_ = false;
+            useAsyncFramegenCompletion = false;
+            renderSemaphoreFds.clear();
+            metrics.totalAsyncFallbacks++;
+            std::cerr << "lsfg-vk: Adaptive framegen completion semaphore disabled: "
+                      << e.what() << "; using bounded host completion wait\n";
+        }
+    }
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
                   << (conf.performance ? "performance" : "quality")
@@ -1348,11 +1389,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (conf.performance)
             LSFG_3_1P::presentContextWithPhases(
                 *this->lsfgCtxId, framegenInputSemaphoreFd,
-                noOutSems, interpolationPhases);
+                useAsyncFramegenCompletion ? renderSemaphoreFds : noOutSems,
+                interpolationPhases);
         else
             LSFG_3_1::presentContextWithPhases(
                 *this->lsfgCtxId, framegenInputSemaphoreFd,
-                noOutSems, interpolationPhases);
+                useAsyncFramegenCompletion ? renderSemaphoreFds : noOutSems,
+                interpolationPhases);
     } else if (conf.performance) {
         LSFG_3_1P::presentContextWithCount(
             *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, generatedFrameCount);
@@ -1365,87 +1408,95 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-returned\n";
 
-    // 3. Ensure framegen's separate VkDevice has completed its release barriers
-    //    before the game device acquires generated AHBs for readback/blit.
-    //    The existing output-semaphore contract can order this GPU copy, but it
-    //    cannot by itself prevent a late generated present queued ahead of the
-    //    source present from becoming WSI head-of-line work. Retain this bounded
-    //    host completion gate until presentation ordering can be proven
-    //    source-safe; do not disguise that blocker as a nonblocking fast path.
-    const auto waitIdleStart = RuntimeMetrics::Clock::now();
-    const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
-    const bool framegenReady = conf.performance
-        ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
-        : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-    metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-        RuntimeMetrics::Clock::now() - waitIdleStart).count();
-    if (!framegenReady) {
-        this->lastGeneratedFrameCount_ = 0;
-        std::cerr << "lsfg-vk: runtime stage=framegen-completion-timeout timeout_ms="
-                  << (framegenCompletionTimeoutNs / 1'000'000ULL)
-                  << "; presenting source and requesting swapchain recreation\n";
-        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
-        const VkPresentInfoKHR timeoutPresentInfo{
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = pNext,
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &sourceReady,
-            .swapchainCount = 1,
-            .pSwapchains = &this->swapchain,
-            .pImageIndices = &presentIdx,
-        };
-        const auto timeoutPresentResult = Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
-        if (timeoutPresentResult != VK_SUCCESS && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
-            metrics.windowSourcePresentFailures++;
-            metrics.totalSourcePresentFailures++;
-            throw LSFG::vulkan_error(timeoutPresentResult,
-                "Failed to present source frame after framegen timeout");
-        }
-        return finishSourcePresent(VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-timeout");
-    }
-    if (firstPresentDiagnostic)
-        std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
-
-    const auto completionObservedAt = RuntimeMetrics::Clock::now();
-    const double actualCompletionMs =
-        std::chrono::duration<double, std::milli>(
-            completionObservedAt - dispatchStart).count();
+    // 3. Source-protected Adaptive completion. Once calibration is valid,
+    // generated-output release is ordered entirely by cross-device binary
+    // semaphores and this present thread does not wait for framegen. Fixed mode,
+    // calibration cycles, and capability failures keep the proven bounded wait.
     constexpr double kCostEwmaAlpha = 0.20;
-    if (!this->deadlineHostCostValid_) {
-        this->deadlineHostCostEwmaMs_ = actualCompletionMs;
-        this->deadlineHostCostValid_ = true;
-    } else {
-        this->deadlineHostCostEwmaMs_ += kCostEwmaAlpha
-            * (actualCompletionMs - this->deadlineHostCostEwmaMs_);
-    }
-    this->deadlineHostCostGenerationCount_ = generatedFrameCount;
-
-    if (deadlineShadowPlan.predictionValid) {
-        metrics.windowActualLsfgMs += actualCompletionMs;
-        const double positiveErrorMs =
-            std::max(0.0, actualCompletionMs - deadlinePredictedTotalMs);
-        this->deadlinePositivePredictionErrorEwmaMs_ += kCostEwmaAlpha
-            * (positiveErrorMs - this->deadlinePositivePredictionErrorEwmaMs_);
-    }
-
-    const uint64_t completionObservedNs = monotonicNowNs();
-    if (completionObservedNs > 0) {
-        uint64_t lateSlots = 0;
-        for (const auto& slot : deadlineShadowPlan.slots) {
-            if (slot.deadlineNs > 0 && completionObservedNs > slot.deadlineNs)
-                ++lateSlots;
+    if (!useAsyncFramegenCompletion) {
+        const auto waitIdleStart = RuntimeMetrics::Clock::now();
+        const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
+        const bool framegenReady = conf.performance
+            ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
+            : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
+        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        if (!framegenReady) {
+            this->lastGeneratedFrameCount_ = 0;
+            std::cerr << "lsfg-vk: runtime stage=framegen-completion-timeout timeout_ms="
+                      << (framegenCompletionTimeoutNs / 1'000'000ULL)
+                      << "; presenting source and requesting swapchain recreation\n";
+            const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+            const VkPresentInfoKHR timeoutPresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = pNext,
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &sourceReady,
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto timeoutPresentResult =
+                Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
+            if (timeoutPresentResult != VK_SUCCESS
+                    && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(timeoutPresentResult,
+                    "Failed to present source frame after framegen timeout");
+            }
+            return finishSourcePresent(
+                VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-timeout");
         }
-        metrics.windowDeadlineShadowLate += lateSlots;
-        metrics.totalDeadlineShadowLate += lateSlots;
-    }
+        if (firstPresentDiagnostic)
+            std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
 
-    if (firstPresentDiagnostic && deadlineShadowPlan.predictionValid) {
-        std::cerr << "lsfg-vk: runtime stage=deadline-shadow"
-                  << " predicted_total_ms=" << deadlinePredictedTotalMs
-                  << " actual_total_ms=" << actualCompletionMs
-                  << " would_reject=" << deadlineShadowPlan.rejectedCount
-                  << " prediction_error_margin_ms="
-                  << this->deadlinePositivePredictionErrorEwmaMs_
+        const auto completionObservedAt = RuntimeMetrics::Clock::now();
+        const double actualCompletionMs =
+            std::chrono::duration<double, std::milli>(
+                completionObservedAt - dispatchStart).count();
+        if (!this->deadlineHostCostValid_) {
+            this->deadlineHostCostEwmaMs_ = actualCompletionMs;
+            this->deadlineHostCostValid_ = true;
+        } else {
+            this->deadlineHostCostEwmaMs_ += kCostEwmaAlpha
+                * (actualCompletionMs - this->deadlineHostCostEwmaMs_);
+        }
+        this->deadlineHostCostGenerationCount_ = generatedFrameCount;
+        this->deadlineHostCostSamples_++;
+
+        if (deadlineAdmissionPlan.predictionValid) {
+            metrics.windowActualLsfgMs += actualCompletionMs;
+            const double positiveErrorMs =
+                std::max(0.0, actualCompletionMs - deadlinePredictedTotalMs);
+            this->deadlinePositivePredictionErrorEwmaMs_ += kCostEwmaAlpha
+                * (positiveErrorMs - this->deadlinePositivePredictionErrorEwmaMs_);
+        }
+
+        const uint64_t completionObservedNs = monotonicNowNs();
+        if (completionObservedNs > 0) {
+            uint64_t lateSlots = 0;
+            for (const auto& slot : deadlineAdmissionPlan.slots) {
+                if (slot.deadlineNs > 0 && completionObservedNs > slot.deadlineNs)
+                    ++lateSlots;
+            }
+            metrics.windowDeadlineShadowLate += lateSlots;
+            metrics.totalDeadlineShadowLate += lateSlots;
+        }
+
+        if (firstPresentDiagnostic && deadlineAdmissionPlan.predictionValid) {
+            std::cerr << "lsfg-vk: runtime stage=deadline-calibration"
+                      << " predicted_total_ms=" << deadlinePredictedTotalMs
+                      << " actual_total_ms=" << actualCompletionMs
+                      << " rejected=" << deadlineAdmissionPlan.rejectedCount
+                      << " prediction_error_margin_ms="
+                      << this->deadlinePositivePredictionErrorEwmaMs_
+                      << "\n";
+        }
+    } else if (firstPresentDiagnostic) {
+        std::cerr << "lsfg-vk: runtime stage=framegen-completion-async"
+                  << " generated=" << generatedFrameCount
+                  << " rejected=" << deadlineAdmissionPlan.rejectedCount
                   << "\n";
     }
 
@@ -1479,8 +1530,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             info.queue.first);
 
         pass.postCopyBufs.at(i).end();
+        std::vector<VkSemaphore> postCopyWaitSemaphores{
+            pass.acquireSemaphores.at(i).handle()
+        };
+        if (useAsyncFramegenCompletion)
+            postCopyWaitSemaphores.emplace_back(
+                pass.renderSemaphores.at(i).handle());
         pass.postCopyBufs.at(i).submit(info.queue.second,
-            { pass.acquireSemaphores.at(i).handle() },
+            postCopyWaitSemaphores,
             { pass.postCopySemaphores.at(i).handle(),
               pass.prevPostCopySemaphores.at(i).handle() });
 
