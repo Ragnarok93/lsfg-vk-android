@@ -5,11 +5,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def profiling_gate_offset(build: str) -> int:
-    """Return the start of profiling selection, including B11 evidence builds."""
-    return build.index('PROFILE_REQUESTED="${LSFGVK_ZERO_STAGE_PROFILE:-0}"')
-
-
 class AndroidBatchOptimizationTest(unittest.TestCase):
     def test_android_last_context_keeps_private_runtime_resident(self) -> None:
         """Android swapchain churn must not destroy the private Vulkan runtime from deleteContext()."""
@@ -27,9 +22,9 @@ class AndroidBatchOptimizationTest(unittest.TestCase):
 
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
         self.assertIn("adreno_android_runtime_residency.py", build)
-        profile_gate = profiling_gate_offset(build)
         runtime_patch = build.index("adreno_android_runtime_residency.py")
-        self.assertLess(runtime_patch, profile_gate, "runtime residency must apply to every Android build")
+        runtime_bundle = build.index("apply-adreno-evidence-profile.py")
+        self.assertLess(runtime_patch, runtime_bundle, "runtime residency must precede retained runtime composition")
 
         for backend in ("v3.1_src", "v3.1p_src"):
             source = (ROOT / "framegen" / backend / "lsfg.cpp").read_text(encoding="utf-8")
@@ -49,9 +44,9 @@ class AndroidBatchOptimizationTest(unittest.TestCase):
 
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
         self.assertIn("adreno_android_config_reload.py", build)
-        profile_gate = profiling_gate_offset(build)
         config_patch = build.index("adreno_android_config_reload.py")
-        self.assertLess(config_patch, profile_gate, "config hardening must apply to every Android build")
+        runtime_bundle = build.index("apply-adreno-evidence-profile.py")
+        self.assertLess(config_patch, runtime_bundle, "config hardening must precede retained runtime composition")
 
     def test_transport_only_zero_history_signals_shared_ahb_release_early(self) -> None:
         """TransportOnly completion FD should cover AHB copy/release, not private mipmap/alpha work."""
