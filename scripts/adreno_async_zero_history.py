@@ -264,7 +264,7 @@ void LsContext::waitPendingHistoryCompletionFd(bool throwOnTimeout) {
     t=once(t,"    std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;\n    if (this->previousSourceCopySignalValid_)\n",
         "    std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;\n    if (this->pendingHistoryCompletionValid_) this->waitPendingHistoryCompletionFd(true);\n    if (this->previousSourceCopySignalValid_)\n",f"{p}: consume reverse")
     t=once(t,"    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_\n        && generatedFrameCount > 0\n        && !warmupSourceHistory;\n",
-        "    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_ && !warmupSourceHistory && (generatedFrameCount>0 || (adaptiveZeroGeneration && this->asyncZeroHistoryEnabled_));\n",f"{p}: async zero")
+        "    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_ && !warmupSourceHistory && ((generatedFrameCount>0 && this->generatedAsyncAhbHandoffEnabled_) || (adaptiveZeroGeneration && this->asyncZeroHistoryEnabled_));\n",f"{p}: async zero")
     t=t.replace("*this->ahbHandoffFence","*pass.handoffFence")
     t=once(t,"    this->previousSourceCopySignalValid_ = true;\n","    pass.handoffFencePending=useAsyncHandoff;\n    this->previousSourceCopySignalValid_ = true;\n",f"{p}: fence pending")
     zs=t.find("    if (adaptiveZeroGeneration) {\n"); ze=t.find("\n    if (warmupSourceHistory) {\n",zs)
