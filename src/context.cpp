@@ -382,8 +382,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->adaptiveFlowController_.configure(
         conf.adaptiveFlowScale, this->adaptiveFlowPreset_);
     this->adaptiveDisplayTimingEnabled_ =
-        info.androidDisplayTimingSupported
-        && (conf.adaptiveFramegen || conf.adaptiveFlowScale);
+        info.androidDisplayTimingSupported && conf.adaptiveFramegen;
     std::cerr << "lsfg-vk: adaptive-present-pacing"
               << " fifo=1"
               << " display_timing="
@@ -1284,71 +1283,73 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(warmupResult, "pre-copy-warmup");
     }
 
-    // 2. Deadline admission is the fast source-protection gate. The scheduler
-    // has already consumed these fractional opportunities, so rejected/late
-    // slots are dropped permanently and never become catch-up debt.
-    std::vector<double> deadlinePhases;
-    deadlinePhases.reserve(interpolationPhases.size());
-    for (const float phase : interpolationPhases)
-        deadlinePhases.emplace_back(static_cast<double>(phase));
+    // 2. Deadline admission is Adaptive-only. The scheduler has already
+    // consumed these fractional opportunities, so rejected/late slots are
+    // dropped permanently and never become catch-up debt.
+    SyntheticDeadlineAdmissionPlan deadlineAdmissionPlan{};
+    double deadlinePredictedTotalMs = 0.0;
+    if (conf.adaptiveFramegen) {
+        std::vector<double> deadlinePhases;
+        deadlinePhases.reserve(interpolationPhases.size());
+        for (const float phase : interpolationPhases)
+            deadlinePhases.emplace_back(static_cast<double>(phase));
 
-    double predictedSharedCostMs = 0.0;
-    double predictedPerSyntheticCostMs = 0.0;
-    const bool detailedPrediction =
-        this->adaptiveFlowTimingValid_
-        && this->adaptiveFlowGenerationCount_ > 0
-        && this->adaptiveFlowTotalLsfgMs_ > 0.0
-        && this->adaptiveFlowWorkMs_ > 0.0
-        && this->adaptiveFlowTotalLsfgMs_ >= this->adaptiveFlowWorkMs_;
-    if (detailedPrediction) {
-        predictedSharedCostMs = this->adaptiveFlowWorkMs_;
-        predictedPerSyntheticCostMs =
-            (this->adaptiveFlowTotalLsfgMs_ - this->adaptiveFlowWorkMs_)
-            / static_cast<double>(this->adaptiveFlowGenerationCount_);
-    } else if (this->deadlineHostCostValid_) {
-        const double previousCount = static_cast<double>(
-            std::max<size_t>(1, this->deadlineHostCostGenerationCount_));
-        const double requestedCount = static_cast<double>(
-            std::max<size_t>(1, generatedFrameCount));
-        predictedSharedCostMs = this->deadlineHostCostEwmaMs_
-            * std::max(1.0, requestedCount / previousCount);
-    }
+        double predictedSharedCostMs = 0.0;
+        double predictedPerSyntheticCostMs = 0.0;
+        const bool detailedPrediction =
+            this->adaptiveFlowTimingValid_
+            && this->adaptiveFlowGenerationCount_ > 0
+            && this->adaptiveFlowTotalLsfgMs_ > 0.0
+            && this->adaptiveFlowWorkMs_ > 0.0
+            && this->adaptiveFlowTotalLsfgMs_ >= this->adaptiveFlowWorkMs_;
+        if (detailedPrediction) {
+            predictedSharedCostMs = this->adaptiveFlowWorkMs_;
+            predictedPerSyntheticCostMs =
+                (this->adaptiveFlowTotalLsfgMs_ - this->adaptiveFlowWorkMs_)
+                / static_cast<double>(this->adaptiveFlowGenerationCount_);
+        } else if (this->deadlineHostCostValid_) {
+            const double previousCount = static_cast<double>(
+                std::max<size_t>(1, this->deadlineHostCostGenerationCount_));
+            const double requestedCount = static_cast<double>(
+                std::max<size_t>(1, generatedFrameCount));
+            predictedSharedCostMs = this->deadlineHostCostEwmaMs_
+                * std::max(1.0, requestedCount / previousCount);
+        }
 
-    const SyntheticDeadlineAdmissionPlan deadlineAdmissionPlan =
-        SyntheticDeadlineAdmission::evaluate(
+        deadlineAdmissionPlan = SyntheticDeadlineAdmission::evaluate(
             monotonicNowNs(),
             sourceCycle,
             deadlinePhases,
             predictedSharedCostMs,
             predictedPerSyntheticCostMs,
             this->deadlinePositivePredictionErrorEwmaMs_);
-    metrics.windowDeadlineShadowRejects += deadlineAdmissionPlan.rejectedCount;
-    metrics.totalDeadlineShadowRejects += deadlineAdmissionPlan.rejectedCount;
+        metrics.windowDeadlineShadowRejects += deadlineAdmissionPlan.rejectedCount;
+        metrics.totalDeadlineShadowRejects += deadlineAdmissionPlan.rejectedCount;
 
-    double deadlinePredictedTotalMs = 0.0;
-    if (deadlineAdmissionPlan.predictionValid
-            && !deadlineAdmissionPlan.slots.empty()) {
-        deadlinePredictedTotalMs =
-            deadlineAdmissionPlan.slots.back().predictedCompletionMs;
-        metrics.windowPredictedLsfgMs += deadlinePredictedTotalMs;
-        metrics.windowDeadlinePredictionSamples++;
-        metrics.totalDeadlinePredictionSamples++;
-    }
-
-    if (conf.adaptiveFramegen && !deadlineAdmissionPlan.slots.empty()) {
-        std::vector<float> admittedPhases;
-        admittedPhases.reserve(interpolationPhases.size());
-        for (size_t i = 0; i < deadlineAdmissionPlan.slots.size(); ++i) {
-            const auto& slot = deadlineAdmissionPlan.slots.at(i);
-            if (slot.admitted)
-                admittedPhases.emplace_back(interpolationPhases.at(i));
+        if (deadlineAdmissionPlan.predictionValid
+                && !deadlineAdmissionPlan.slots.empty()) {
+            deadlinePredictedTotalMs =
+                deadlineAdmissionPlan.slots.back().predictedCompletionMs;
+            metrics.windowPredictedLsfgMs += deadlinePredictedTotalMs;
+            metrics.windowDeadlinePredictionSamples++;
+            metrics.totalDeadlinePredictionSamples++;
         }
-        interpolationPhases = std::move(admittedPhases);
-        generatedFrameCount = interpolationPhases.size();
-        this->lastGeneratedFrameCount_ = generatedFrameCount;
 
-        if (generatedFrameCount == 0)
-            return advanceAdaptiveHistoryAndPresentSource("deadline-reject");
+        if (!deadlineAdmissionPlan.slots.empty()) {
+            std::vector<float> admittedPhases;
+            admittedPhases.reserve(interpolationPhases.size());
+            for (size_t i = 0; i < deadlineAdmissionPlan.slots.size(); ++i) {
+                const auto& slot = deadlineAdmissionPlan.slots.at(i);
+                if (slot.admitted)
+                    admittedPhases.emplace_back(interpolationPhases.at(i));
+            }
+            interpolationPhases = std::move(admittedPhases);
+            generatedFrameCount = interpolationPhases.size();
+            this->lastGeneratedFrameCount_ = generatedFrameCount;
+
+            if (generatedFrameCount == 0)
+                return advanceAdaptiveHistoryAndPresentSource("deadline-reject");
+        }
     }
 
     // Tell framegen to generate intermediary frames. The Adaptive fast path
@@ -1451,47 +1452,49 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (firstPresentDiagnostic)
             std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
 
-        const auto completionObservedAt = RuntimeMetrics::Clock::now();
-        const double actualCompletionMs =
-            std::chrono::duration<double, std::milli>(
-                completionObservedAt - dispatchStart).count();
-        if (!this->deadlineHostCostValid_) {
-            this->deadlineHostCostEwmaMs_ = actualCompletionMs;
-            this->deadlineHostCostValid_ = true;
-        } else {
-            this->deadlineHostCostEwmaMs_ += kCostEwmaAlpha
-                * (actualCompletionMs - this->deadlineHostCostEwmaMs_);
-        }
-        this->deadlineHostCostGenerationCount_ = generatedFrameCount;
-        this->deadlineHostCostSamples_++;
-
-        if (deadlineAdmissionPlan.predictionValid) {
-            metrics.windowActualLsfgMs += actualCompletionMs;
-            const double positiveErrorMs =
-                std::max(0.0, actualCompletionMs - deadlinePredictedTotalMs);
-            this->deadlinePositivePredictionErrorEwmaMs_ += kCostEwmaAlpha
-                * (positiveErrorMs - this->deadlinePositivePredictionErrorEwmaMs_);
-        }
-
-        const uint64_t completionObservedNs = monotonicNowNs();
-        if (completionObservedNs > 0) {
-            uint64_t lateSlots = 0;
-            for (const auto& slot : deadlineAdmissionPlan.slots) {
-                if (slot.deadlineNs > 0 && completionObservedNs > slot.deadlineNs)
-                    ++lateSlots;
+        if (conf.adaptiveFramegen) {
+            const auto completionObservedAt = RuntimeMetrics::Clock::now();
+            const double actualCompletionMs =
+                std::chrono::duration<double, std::milli>(
+                    completionObservedAt - dispatchStart).count();
+            if (!this->deadlineHostCostValid_) {
+                this->deadlineHostCostEwmaMs_ = actualCompletionMs;
+                this->deadlineHostCostValid_ = true;
+            } else {
+                this->deadlineHostCostEwmaMs_ += kCostEwmaAlpha
+                    * (actualCompletionMs - this->deadlineHostCostEwmaMs_);
             }
-            metrics.windowDeadlineShadowLate += lateSlots;
-            metrics.totalDeadlineShadowLate += lateSlots;
-        }
+            this->deadlineHostCostGenerationCount_ = generatedFrameCount;
+            this->deadlineHostCostSamples_++;
 
-        if (firstPresentDiagnostic && deadlineAdmissionPlan.predictionValid) {
-            std::cerr << "lsfg-vk: runtime stage=deadline-calibration"
-                      << " predicted_total_ms=" << deadlinePredictedTotalMs
-                      << " actual_total_ms=" << actualCompletionMs
-                      << " rejected=" << deadlineAdmissionPlan.rejectedCount
-                      << " prediction_error_margin_ms="
-                      << this->deadlinePositivePredictionErrorEwmaMs_
-                      << "\n";
+            if (deadlineAdmissionPlan.predictionValid) {
+                metrics.windowActualLsfgMs += actualCompletionMs;
+                const double positiveErrorMs =
+                    std::max(0.0, actualCompletionMs - deadlinePredictedTotalMs);
+                this->deadlinePositivePredictionErrorEwmaMs_ += kCostEwmaAlpha
+                    * (positiveErrorMs - this->deadlinePositivePredictionErrorEwmaMs_);
+            }
+
+            const uint64_t completionObservedNs = monotonicNowNs();
+            if (completionObservedNs > 0) {
+                uint64_t lateSlots = 0;
+                for (const auto& slot : deadlineAdmissionPlan.slots) {
+                    if (slot.deadlineNs > 0 && completionObservedNs > slot.deadlineNs)
+                        ++lateSlots;
+                }
+                metrics.windowDeadlineShadowLate += lateSlots;
+                metrics.totalDeadlineShadowLate += lateSlots;
+            }
+
+            if (firstPresentDiagnostic && deadlineAdmissionPlan.predictionValid) {
+                std::cerr << "lsfg-vk: runtime stage=deadline-calibration"
+                          << " predicted_total_ms=" << deadlinePredictedTotalMs
+                          << " actual_total_ms=" << actualCompletionMs
+                          << " rejected=" << deadlineAdmissionPlan.rejectedCount
+                          << " prediction_error_margin_ms="
+                          << this->deadlinePositivePredictionErrorEwmaMs_
+                          << "\n";
+            }
         }
     } else if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-completion-async"
@@ -1741,6 +1744,7 @@ void LsContext::enterSourceOnlyBypass() {
     this->deadlineHostCostValid_ = false;
     this->deadlineHostCostEwmaMs_ = 0.0;
     this->deadlineHostCostGenerationCount_ = 0;
+    this->deadlineHostCostSamples_ = 0;
     this->deadlinePositivePredictionErrorEwmaMs_ = 0.0;
 }
 #endif
