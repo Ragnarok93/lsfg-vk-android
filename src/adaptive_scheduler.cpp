@@ -392,6 +392,12 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             telemetry_.costProbe = true;
             return;
         }
+
+        // Do not let the ordinary unmet-demand path race the protective
+        // measurement by raising generation cost while starvation evidence is
+        // still being confirmed.
+        resetUnmetDemand();
+        return;
     } else {
         sourcePreservationSinceSeconds_ = -1.0;
         sourcePreservationFpsSum_ = 0.0;
