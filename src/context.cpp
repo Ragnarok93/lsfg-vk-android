@@ -10,6 +10,7 @@
 #ifdef __ANDROID__
 #include <android/hardware_buffer.h>
 #include <android/log.h>
+#include <time.h>
 #endif
 
 #include <vulkan/vulkan_core.h>
@@ -54,6 +55,14 @@ uint64_t runtimeWaitTimeoutNs() {
         return defaultMs * 1000000ULL;
     const uint64_t boundedMs = parsed > maxMs ? maxMs : static_cast<uint64_t>(parsed);
     return boundedMs * 1000000ULL;
+}
+
+uint64_t monotonicNowNs() {
+    timespec now{};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return static_cast<uint64_t>(now.tv_sec) * 1'000'000'000ULL
+        + static_cast<uint64_t>(now.tv_nsec);
 }
 
 AdaptiveFlowPreset adaptiveFlowPresetFromConfig(const std::string& preset) {
@@ -372,6 +381,16 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->adaptiveFlowPreset_ = adaptiveFlowPresetFromConfig(conf.adaptiveFlowPreset);
     this->adaptiveFlowController_.configure(
         conf.adaptiveFlowScale, this->adaptiveFlowPreset_);
+    this->adaptiveDisplayTimingEnabled_ =
+        info.androidDisplayTimingSupported
+        && (conf.adaptiveFramegen || conf.adaptiveFlowScale);
+    std::cerr << "lsfg-vk: adaptive-present-pacing"
+              << " fifo=1"
+              << " display_timing="
+              << (this->adaptiveDisplayTimingEnabled_ ? 1 : 0)
+              << " adaptive_fg=" << (conf.adaptiveFramegen ? 1 : 0)
+              << " adaptive_flow=" << (conf.adaptiveFlowScale ? 1 : 0)
+              << '\n';
 
     std::vector<float> adaptiveFlowScales;
     float initialFlowScale = conf.flowScale;
@@ -625,6 +644,33 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         ? this->adaptiveScheduler_.plan(sourceInterval)
         : static_cast<size_t>(conf.multiplier - 1);
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
+
+    if (this->adaptiveDisplayTimingEnabled_) {
+        uint64_t candidatePeriodNs = 0;
+        if (conf.adaptiveFramegen && conf.fpsLimit > 0) {
+            candidatePeriodNs =
+                1'000'000'000ULL / static_cast<uint64_t>(conf.fpsLimit);
+        } else if (sourceInterval.count() > 0) {
+            candidatePeriodNs = static_cast<uint64_t>(
+                sourceInterval.count() / static_cast<int64_t>(generatedFrameCount + 1));
+        }
+
+        if (candidatePeriodNs > 0) {
+            if (this->adaptivePresentPeriodNs_ == 0 || conf.adaptiveFramegen) {
+                this->adaptivePresentPeriodNs_ = candidatePeriodNs;
+            } else {
+                // Fixed-FG + Adaptive Flow has no explicit output target. Follow
+                // the observed source cadence without resetting the presentation
+                // anchor on every small source-interval fluctuation.
+                this->adaptivePresentPeriodNs_ =
+                    (this->adaptivePresentPeriodNs_ * 7ULL + candidatePeriodNs) / 8ULL;
+            }
+        }
+    } else {
+        this->adaptivePresentPeriodNs_ = 0;
+        this->adaptiveNextPresentTimeNs_ = 0;
+    }
+
     const bool adaptiveZeroGeneration = conf.adaptiveFramegen && generatedFrameCount == 0;
     const bool warmupSourceHistory =
         generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
@@ -749,13 +795,66 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    const auto adaptivePresentPNext = [&](
+            const void* downstream,
+            VkPresentTimeGOOGLE& presentTime,
+            VkPresentTimesInfoGOOGLE& presentTimes) -> const void* {
+        if (!this->adaptiveDisplayTimingEnabled_
+                || this->adaptivePresentPeriodNs_ == 0)
+            return downstream;
+
+        const uint64_t nowNs = monotonicNowNs();
+        if (nowNs == 0)
+            return downstream;
+
+        // Keep the first ready frame close to the next compositor opportunity,
+        // then meter every following generated/source image by the requested
+        // output period. Rebase after stalls/suspend so stale slots never cause
+        // a catch-up burst.
+        const uint64_t leadNs = std::max<uint64_t>(
+            250'000ULL,
+            std::min<uint64_t>(2'000'000ULL, this->adaptivePresentPeriodNs_ / 8ULL));
+        const uint64_t earliestNs = nowNs + leadNs;
+        if (this->adaptiveNextPresentTimeNs_ == 0
+                || this->adaptiveNextPresentTimeNs_
+                    + this->adaptivePresentPeriodNs_ < earliestNs) {
+            this->adaptiveNextPresentTimeNs_ = earliestNs;
+        }
+
+        const uint64_t desiredPresentTime = std::max(
+            this->adaptiveNextPresentTimeNs_, earliestNs);
+        this->adaptiveNextPresentTimeNs_ =
+            desiredPresentTime + this->adaptivePresentPeriodNs_;
+
+        uint32_t presentId = this->adaptivePresentId_++;
+        if (presentId == 0) {
+            presentId = 1;
+            this->adaptivePresentId_ = 2;
+        }
+        presentTime = VkPresentTimeGOOGLE{
+            .presentID = presentId,
+            .desiredPresentTime = desiredPresentTime,
+        };
+        presentTimes = VkPresentTimesInfoGOOGLE{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+            .pNext = downstream,
+            .swapchainCount = 1,
+            .pTimes = &presentTime,
+        };
+        return &presentTimes;
+    };
+
     const bool firstPresentDiagnostic = this->frameIdx == 0;
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=first-present-enter image=" << presentIdx
                   << " multiplier=" << conf.multiplier
                   << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                   << " target_fps=" << conf.fpsLimit
-                  << " performance=" << (conf.performance ? 1 : 0) << "\n";
+                  << " performance=" << (conf.performance ? 1 : 0)
+                  << " display_timing="
+                  << (this->adaptiveDisplayTimingEnabled_ ? 1 : 0)
+                  << " present_period_ns=" << this->adaptivePresentPeriodNs_
+                  << "\n";
     }
 
     const auto finishSourcePresent = [&](VkResult result, const char* sourceWait) -> VkResult {
@@ -896,6 +995,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->adaptiveFlowGenerationCount_
                       << " adaptive_flow_reason="
                       << AdaptiveFlowController::reasonName(this->adaptiveFlowReason_)
+                      << " adaptive_present_timing="
+                      << (this->adaptiveDisplayTimingEnabled_ ? 1 : 0)
+                      << " adaptive_present_period_ns="
+                      << this->adaptivePresentPeriodNs_
                       << " multiplier=" << conf.multiplier
                       << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                       << " target_fps=" << conf.fpsLimit
@@ -1026,9 +1129,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->lastGeneratedFrameCount_ = 0;
 
         const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+        VkPresentTimeGOOGLE adaptiveSourcePresentTime{};
+        VkPresentTimesInfoGOOGLE adaptiveSourcePresentTimes{};
         const VkPresentInfoKHR adaptiveSourcePresentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = pNext,
+            .pNext = adaptivePresentPNext(
+                pNext, adaptiveSourcePresentTime, adaptiveSourcePresentTimes),
             .waitSemaphoreCount = 1,
             .pWaitSemaphores = &sourceReady,
             .swapchainCount = 1,
@@ -1057,9 +1163,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->requiresSourceHistoryWarmup_ = false;
         this->lastGeneratedFrameCount_ = 0;
         const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+        VkPresentTimeGOOGLE warmupPresentTime{};
+        VkPresentTimesInfoGOOGLE warmupPresentTimes{};
         const VkPresentInfoKHR warmupPresentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = pNext,
+            .pNext = adaptivePresentPNext(
+                pNext, warmupPresentTime, warmupPresentTimes),
             .waitSemaphoreCount = 1,
             .pWaitSemaphores = &sourceReady,
             .swapchainCount = 1,
@@ -1176,9 +1285,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
         if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());
 
+        VkPresentTimeGOOGLE generatedPresentTime{};
+        VkPresentTimesInfoGOOGLE generatedPresentTimes{};
+        const void* generatedDownstreamPNext = i == 0 ? pNext : nullptr;
         const VkPresentInfoKHR presentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = i == 0 ? pNext : nullptr,
+            .pNext = adaptivePresentPNext(
+                generatedDownstreamPNext,
+                generatedPresentTime,
+                generatedPresentTimes),
             .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
             .pWaitSemaphores = waitSemaphores.data(),
             .swapchainCount = 1,
@@ -1207,9 +1322,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     VkSemaphore lastPrevPostCopySemaphore = generatedFrameCount > 0
         ? pass.prevPostCopySemaphores.at(generatedFrameCount - 1).handle()
         : pass.preCopySemaphores.at(0).handle();
+    VkPresentTimeGOOGLE finalSourcePresentTime{};
+    VkPresentTimesInfoGOOGLE finalSourcePresentTimes{};
+    const void* finalSourceDownstreamPNext =
+        generatedFrameCount == 0 ? pNext : nullptr;
     const VkPresentInfoKHR finalPresentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = generatedFrameCount == 0 ? pNext : nullptr,
+        .pNext = adaptivePresentPNext(
+            finalSourceDownstreamPNext,
+            finalSourcePresentTime,
+            finalSourcePresentTimes),
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &lastPrevPostCopySemaphore,
         .swapchainCount = 1,
