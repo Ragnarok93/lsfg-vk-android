@@ -71,20 +71,28 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
 
     def test_runtime_telemetry_reports_requested_applied_and_reason(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        for field in (
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        fields = (
             "adaptive_flow_preset=",
             "adaptive_flow_target=",
             "adaptive_flow_minimum=",
             "adaptive_flow_requested=",
             "adaptive_flow_active=",
             "adaptive_flow_transition=",
+            "adaptive_flow_warmup_remaining=",
+            "adaptive_flow_timing_valid=",
             "adaptive_flow_mipmaps_ms=",
             "adaptive_flow_work_ms=",
             "adaptive_flow_lsfg_ms=",
             "adaptive_flow_budget_ms=",
+            "adaptive_flow_generation_count=",
             "adaptive_flow_reason=",
-        ):
+        )
+        for field in fields:
             self.assertIn(field, source)
+            self.assertIn(field, hooks)
+
+        self.assertIn("adaptiveFlowRuntimeSnapshot()", hooks)
 
 
 if __name__ == "__main__":

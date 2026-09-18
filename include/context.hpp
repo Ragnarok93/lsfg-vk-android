@@ -21,6 +21,26 @@
 #include <memory>
 #include <vector>
 
+#ifdef __ANDROID__
+struct AdaptiveFlowRuntimeSnapshot {
+    bool enabled{false};
+    const char* preset{"quality"};
+    float targetScale{0.0F};
+    float minimumScale{0.0F};
+    float requestedScale{0.0F};
+    float activeScale{0.0F};
+    bool transitionPending{false};
+    uint32_t warmupRemaining{0};
+    bool timingValid{false};
+    double mipmapsMs{0.0};
+    double flowMs{0.0};
+    double totalLsfgMs{0.0};
+    double budgetMs{0.0};
+    size_t generationCount{0};
+    const char* reason{"none"};
+};
+#endif
+
 ///
 /// This class is the frame generation context. There should be one instance per swapchain.
 ///
@@ -60,6 +80,27 @@ public:
 
 #ifdef __ANDROID__
     void enterSourceOnlyBypass();
+
+    [[nodiscard]] AdaptiveFlowRuntimeSnapshot adaptiveFlowRuntimeSnapshot() const {
+        const auto& telemetry = adaptiveFlowController_.telemetry();
+        return AdaptiveFlowRuntimeSnapshot{
+            .enabled = adaptiveFlowController_.enabled(),
+            .preset = AdaptiveFlowController::presetName(adaptiveFlowPreset_),
+            .targetScale = telemetry.targetScale,
+            .minimumScale = telemetry.minimumScale,
+            .requestedScale = adaptiveFlowRequestedScale_,
+            .activeScale = adaptiveFlowActiveScale_,
+            .transitionPending = adaptiveFlowTransitionPending_,
+            .warmupRemaining = adaptiveFlowWarmupRemaining_,
+            .timingValid = adaptiveFlowTimingValid_,
+            .mipmapsMs = adaptiveFlowMipmapsMs_,
+            .flowMs = adaptiveFlowWorkMs_,
+            .totalLsfgMs = adaptiveFlowTotalLsfgMs_,
+            .budgetMs = adaptiveFlowBudgetMs_,
+            .generationCount = adaptiveFlowGenerationCount_,
+            .reason = AdaptiveFlowController::reasonName(adaptiveFlowReason_),
+        };
+    }
 #endif
 
     // Non-copyable, trivially moveable and destructible

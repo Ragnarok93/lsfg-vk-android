@@ -365,7 +365,8 @@ namespace {
             bool generationInitialized, bool generatedPresented, bool degraded,
             double outputFps, double sourceFps, double generatedFps,
             const RuntimeOutputStats& stats, int multiplier, bool performance,
-            bool adaptive, uint32_t targetFps) {
+            bool adaptive, uint32_t targetFps,
+            const AdaptiveFlowRuntimeSnapshot& adaptiveFlow) {
         if (configFile.empty())
             return;
 
@@ -394,7 +395,22 @@ namespace {
                 << "multiplier=" << multiplier << '\n'
                 << "adaptive=" << (adaptive ? 1 : 0) << '\n'
                 << "target_fps=" << targetFps << '\n'
-                << "performance=" << (performance ? 1 : 0) << '\n';
+                << "performance=" << (performance ? 1 : 0) << '\n'
+                << "adaptive_flow_enabled=" << (adaptiveFlow.enabled ? 1 : 0) << '\n'
+                << "adaptive_flow_preset=" << adaptiveFlow.preset << '\n'
+                << "adaptive_flow_target=" << adaptiveFlow.targetScale << '\n'
+                << "adaptive_flow_minimum=" << adaptiveFlow.minimumScale << '\n'
+                << "adaptive_flow_requested=" << adaptiveFlow.requestedScale << '\n'
+                << "adaptive_flow_active=" << adaptiveFlow.activeScale << '\n'
+                << "adaptive_flow_transition=" << (adaptiveFlow.transitionPending ? 1 : 0) << '\n'
+                << "adaptive_flow_warmup_remaining=" << adaptiveFlow.warmupRemaining << '\n'
+                << "adaptive_flow_timing_valid=" << (adaptiveFlow.timingValid ? 1 : 0) << '\n'
+                << "adaptive_flow_mipmaps_ms=" << adaptiveFlow.mipmapsMs << '\n'
+                << "adaptive_flow_work_ms=" << adaptiveFlow.flowMs << '\n'
+                << "adaptive_flow_lsfg_ms=" << adaptiveFlow.totalLsfgMs << '\n'
+                << "adaptive_flow_budget_ms=" << adaptiveFlow.budgetMs << '\n'
+                << "adaptive_flow_generation_count=" << adaptiveFlow.generationCount << '\n'
+                << "adaptive_flow_reason=" << adaptiveFlow.reason << '\n';
             out.close();
             if (!out)
                 throw std::runtime_error("failed to flush temporary stats file");
@@ -418,7 +434,7 @@ namespace {
     }
 
     void recordSuccessfulOutputCycle(VkSwapchainKHR swapchain,
-            const std::string& configFile, uint64_t generated,
+            const LsContext& context, const std::string& configFile, uint64_t generated,
             int multiplier, bool performance, bool adaptive, uint32_t targetFps) {
         auto& stats = runtimeOutputStats[swapchain];
         stats.windowSourceFrames++;
@@ -437,12 +453,13 @@ namespace {
         const double outputFps = sourceFps + generatedFps;
         const bool generationActive = multiplier > 1;
         const bool generatedPresented = generationActive && stats.totalGeneratedFrames > 0;
+        const auto adaptiveFlow = context.adaptiveFlowRuntimeSnapshot();
         writeRuntimeStatsFile(configFile,
             generationActive ? "generating" : "source_only",
             generationActive, generationActive, true, !generationActive, true,
             generatedPresented, false,
             outputFps, sourceFps, generatedFps, stats, multiplier, performance,
-            adaptive, targetFps);
+            adaptive, targetFps, adaptiveFlow);
 
         stats.windowStart = now;
         stats.windowSourceFrames = 0;
@@ -910,7 +927,7 @@ namespace {
             const auto res = Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
                 recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
-                    conf.config_file, 0, 1, conf.performance,
+                    swapchain, conf.config_file, 0, 1, conf.performance,
                     conf.adaptiveFramegen, conf.fpsLimit);
                 Utils::resetLimitN("swapPresent");
             } else {
@@ -935,7 +952,7 @@ namespace {
 
 #ifdef __ANDROID__
             recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
-                conf.config_file, swapchain.lastGeneratedFrameCount(),
+                swapchain, conf.config_file, swapchain.lastGeneratedFrameCount(),
                 conf.multiplier, conf.performance,
                 conf.adaptiveFramegen, conf.fpsLimit);
 #endif
