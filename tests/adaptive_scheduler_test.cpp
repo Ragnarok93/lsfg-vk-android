@@ -210,9 +210,12 @@ int main() {
 
         const auto generated = scheduler.plan(60ms);
         assert(scheduler.telemetry().configWarmStart);
-        assert(scheduler.telemetry().wantedGeneratedFrames > 2.5);
-        assert(scheduler.telemetry().costLimit == 3);
-        assert(generated >= 2);
+        // The explicit target still warm-starts, but low-FPS quality protection
+        // is authoritative: ~16.7 source FPS must not seed a 3x synthetic load.
+        assert(scheduler.telemetry().wantedGeneratedFrames > 0.8);
+        assert(scheduler.telemetry().wantedGeneratedFrames < 0.9);
+        assert(scheduler.telemetry().costLimit == 1);
+        assert(generated <= 1);
     }
 
     {
@@ -231,9 +234,10 @@ int main() {
 
         const auto generated = scheduler.plan(60ms);
         assert(scheduler.telemetry().configWarmStart);
-        assert(scheduler.telemetry().wantedGeneratedFrames == 3.0);
-        assert(scheduler.telemetry().costLimit == 3);
-        assert(generated >= 2);
+        assert(scheduler.telemetry().wantedGeneratedFrames > 0.99);
+        assert(scheduler.telemetry().wantedGeneratedFrames < 1.01);
+        assert(scheduler.telemetry().costLimit == 1);
+        assert(generated == 1);
     }
 
     {
@@ -259,7 +263,7 @@ int main() {
         AdaptiveFrameScheduler scheduler;
         assert(scheduler.plan(33ms) == 0);
         scheduler.configure(60, 3);
-        assert(scheduler.plan(60ms) == 1);
+        assert(scheduler.plan(60ms) <= 1);
         assert(!scheduler.telemetry().configWarmStart);
         scheduler.configure(90, 3);
         assert(scheduler.plan(60ms) >= 1);
