@@ -16,6 +16,7 @@ struct AdaptiveSchedulerTelemetry {
     bool costProbe{false};
     bool discontinuityReset{false};
     bool configWarmStart{false};
+    bool lowFpsCutoff{false};
 };
 
 /// Chooses the minimum number of interpolation frames needed to approach an
