@@ -3,6 +3,7 @@
 
 #include "v3_1p/shaders/gamma.hpp"
 #include "common/utils.hpp"
+#include "pool/resourcepool.hpp"
 #include "core/commandbuffer.hpp"
 #include "core/image.hpp"
 
@@ -128,8 +129,11 @@ Gamma::Gamma(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
 }
 
 void Gamma::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
-        uint64_t pass_idx, size_t activeGenerationCount) {
+        uint64_t pass_idx, size_t activeGenerationCount,
+        float interpolationPhase) {
     auto& pass = this->passesByGenerationCount.at(activeGenerationCount).at(pass_idx);
+    if (interpolationPhase > 0.0F)
+        LSFG::Pool::ResourcePool::writeTimestamp(pass.buffer, interpolationPhase);
 
     // first shader
     const auto extent = this->tempImgs1.at(0).getExtent();
