@@ -41,6 +41,8 @@ jobs:
           /tmp/lsfg-adaptive-scheduler-test
           python3 tests/android_adaptive_history_test.py
           python3 tests/android_ahb_portability_test.py
+          python3 tests/release_ci_portability_test.py
+          python3 tests/production_pipeline_cleanup_test.py
           python3 tests/android_deferred_zero_history_test.py
           python3 tests/android_capability_architecture_test.py
           python3 tests/android_candidate_b14_mipmaps_tail_fusion_test.py
