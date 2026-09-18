@@ -180,6 +180,15 @@ def patch_outer_header(path: Path) -> None:
     void waitPendingHistoryCompletionFd(size_t historySlot, bool throwOnTimeout);
 """
     text = once(text, old_state, new_state, f"{path}: slot-aware completion state")
+    text = once(
+        text,
+        "        Mini::Semaphore framegenInputSemaphore;\n",
+        "        Mini::Semaphore framegenInputSemaphore;\n"
+        "        // Keeps an imported SYNC_FD semaphore alive until this pass's\n"
+        "        // pre-copy fence proves the GPU wait has completed.\n"
+        "        Mini::Semaphore historyCompletionWaitSemaphore;\n",
+        f"{path}: GPU-side zero-history completion wait lifetime",
+    )
     path.write_text(text, encoding="utf-8")
 
 
@@ -328,8 +337,19 @@ void LsContext::waitPendingHistoryCompletionFd(size_t historySlot, bool throwOnT
 """
     new_consume = """    const size_t historySlot = static_cast<size_t>(this->frameIdx % 2);
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
-    if (this->pendingHistoryCompletionValid_.at(historySlot))
-        this->waitPendingHistoryCompletionFd(historySlot, true);
+    if (this->pendingHistoryCompletionValid_.at(historySlot)) {
+        const int historyCompletionFd =
+            this->pendingHistoryCompletionFds_.at(historySlot);
+        this->pendingHistoryCompletionFds_.at(historySlot) = -1;
+        this->pendingHistoryCompletionValid_.at(historySlot) = false;
+        pass.historyCompletionWaitSemaphore = Mini::Semaphore::importFd(
+            info.device, historyCompletionFd,
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+        gameRenderSemaphores2.emplace_back(
+            pass.historyCompletionWaitSemaphore.handle());
+        std::cerr << "lsfg-vk: zero-history-sync-fd gpu-retire slot="
+                  << historySlot << '\\n';
+    }
     if (this->previousSourceCopySignalValid_)
 """
     text = once(text, old_consume, new_consume, f"{path}: retire only reused slot")
