@@ -904,6 +904,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceDeadlineSamples = 0;
             metrics.windowSyntheticDeadlineSamples = 0;
             metrics.windowSyntheticOpportunities = 0;
+            metrics.windowSyntheticAcquireDrops = 0;
             metrics.windowDeadlineShadowRejects = 0;
             metrics.windowDeadlineShadowLate = 0;
             metrics.windowDeadlinePredictionSamples = 0;
@@ -1010,13 +1011,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << metrics.windowSyntheticOpportunities
                       << " synthetic_opportunities_total="
                       << metrics.totalSyntheticOpportunities
-                      << " deadline_shadow_rejects="
+                      << " synthetic_acquire_drops="
+                      << metrics.windowSyntheticAcquireDrops
+                      << " synthetic_acquire_drops_total="
+                      << metrics.totalSyntheticAcquireDrops
+                      << " deadline_rejects="
                       << metrics.windowDeadlineShadowRejects
-                      << " deadline_shadow_rejects_total="
+                      << " deadline_rejects_total="
                       << metrics.totalDeadlineShadowRejects
-                      << " deadline_shadow_late="
+                      << " deadline_calibration_late="
                       << metrics.windowDeadlineShadowLate
-                      << " deadline_shadow_late_total="
+                      << " deadline_calibration_late_total="
                       << metrics.totalDeadlineShadowLate
                       << " deadline_prediction_samples="
                       << metrics.windowDeadlinePredictionSamples
@@ -1027,7 +1032,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " prediction_error_margin_ms="
                       << this->deadlinePositivePredictionErrorEwmaMs_
                       << " intercepted_present_avg_ms=" << interceptPresentAvgMs
-                      << " generated_completion_sync=host-wait"
+                      << " adaptive_completion_async_available="
+                      << (this->asyncFramegenCompletionEnabled_
+                          && this->deadlineHostCostSamples_ >= 2 ? 1 : 0)
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
@@ -1239,8 +1246,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 throw LSFG::vulkan_error(adaptiveSourceResult,
                     "Failed to present Adaptive history-only source frame");
             }
-            if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset
-                    || reason != nullptr) {
+            if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset) {
                 std::cerr << "lsfg-vk: runtime stage=adaptive-history-advance"
                           << " generated=0 history_valid=1"
                           << " reason=" << (reason != nullptr ? reason : "cadence")
@@ -1539,16 +1545,29 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     updateAdaptiveFlowGovernor();
 
-    // 4. Copy generated frames to swapchain images and present them. Each
-    // copy submission signals two binary semaphores: one consumed by this
-    // generated present, and one reserved for the next generated/source
-    // present. A binary semaphore signal must not be consumed twice.
+    // 4. Copy generated frames to swapchain images and present them.
+    // Adaptive acquisition is strictly opportunistic: timeout zero means a
+    // synthetic frame can be discarded immediately instead of borrowing time
+    // from the protected source present. Fixed mode retains its existing
+    // bounded acquire behavior.
+    VkSemaphore lastGeneratedSourceChainSemaphore = VK_NULL_HANDLE;
+    size_t presentedGeneratedFrameCount = 0;
+    const uint64_t generatedAcquireTimeoutNs =
+        conf.adaptiveFramegen ? 0 : runtimeWaitTimeoutNs();
+
     for (size_t i = 0; i < generatedFrameCount; i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
-        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, runtimeWaitTimeoutNs(),
+        auto res = Layer::ovkAcquireNextImageKHR(
+            info.device, this->swapchain, generatedAcquireTimeoutNs,
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
+        if (conf.adaptiveFramegen
+                && (res == VK_NOT_READY || res == VK_TIMEOUT)) {
+            metrics.windowSyntheticAcquireDrops++;
+            metrics.totalSyntheticAcquireDrops++;
+            continue;
+        }
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowGeneratedPresentFailures++;
             metrics.totalGeneratedPresentFailures++;
@@ -1578,12 +1597,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             { pass.postCopySemaphores.at(i).handle(),
               pass.prevPostCopySemaphores.at(i).handle() });
 
-        std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
-        if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());
+        std::vector<VkSemaphore> waitSemaphores{
+            pass.postCopySemaphores.at(i).handle()
+        };
+        if (lastGeneratedSourceChainSemaphore != VK_NULL_HANDLE)
+            waitSemaphores.emplace_back(lastGeneratedSourceChainSemaphore);
 
         VkPresentTimeGOOGLE generatedPresentTime{};
         VkPresentTimesInfoGOOGLE generatedPresentTimes{};
-        const void* generatedDownstreamPNext = i == 0 ? pNext : nullptr;
+        const void* generatedDownstreamPNext =
+            presentedGeneratedFrameCount == 0 ? pNext : nullptr;
         const uint64_t generatedDesiredPresentTimeNs =
             i < interpolationPhases.size()
             ? sourceCycle.syntheticDeadlineNs(interpolationPhases.at(i))
@@ -1607,6 +1630,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.totalGeneratedPresentFailures++;
             throw LSFG::vulkan_error(res, "Failed to present swapchain image");
         }
+
+        lastGeneratedSourceChainSemaphore =
+            pass.prevPostCopySemaphores.at(i).handle();
+        presentedGeneratedFrameCount++;
         metrics.windowGeneratedFrames++;
         metrics.totalGeneratedFrames++;
         metrics.windowGeneratedPresentMs += std::chrono::duration<double, std::milli>(
@@ -1622,22 +1649,25 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 metrics.windowSyntheticDeadlineSamples++;
             }
         }
-        if (firstPresentDiagnostic && i == 0) {
-            std::cerr << "lsfg-vk: runtime stage=generated-present-ready image=" << imageIdx
-                      << " result=" << res << "\n";
+        if (firstPresentDiagnostic && presentedGeneratedFrameCount == 1) {
+            std::cerr << "lsfg-vk: runtime stage=generated-present-ready image="
+                      << imageIdx << " result=" << res << "\n";
         }
     }
+
+    this->lastGeneratedFrameCount_ = presentedGeneratedFrameCount;
 
     // 5. Present the actual game frame after generated frames using the signal
     // reserved for this present, rather than waiting a second time on the
     // generated-present semaphore.
-    VkSemaphore lastPrevPostCopySemaphore = generatedFrameCount > 0
-        ? pass.prevPostCopySemaphores.at(generatedFrameCount - 1).handle()
+    VkSemaphore lastPrevPostCopySemaphore =
+        lastGeneratedSourceChainSemaphore != VK_NULL_HANDLE
+        ? lastGeneratedSourceChainSemaphore
         : pass.preCopySemaphores.at(0).handle();
     VkPresentTimeGOOGLE finalSourcePresentTime{};
     VkPresentTimesInfoGOOGLE finalSourcePresentTimes{};
     const void* finalSourceDownstreamPNext =
-        generatedFrameCount == 0 ? pNext : nullptr;
+        presentedGeneratedFrameCount == 0 ? pNext : nullptr;
     const VkPresentInfoKHR finalPresentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = adaptivePresentPNext(
