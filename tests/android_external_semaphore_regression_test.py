@@ -155,12 +155,10 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         ):
             self.assertIn(marker, slot_aware)
 
-        self.assertIn("apply_async_zero_history_hardening(root)", apply_bundle)
-        self.assertIn("apply_slot_aware_zero_history(root)", apply_bundle)
-        self.assertLess(
-            apply_bundle.index("apply_async_zero_history_hardening(root)"),
-            apply_bundle.index("apply_slot_aware_zero_history(root)"),
-        )
+        self.assertNotIn("apply_async_zero_history(root)", apply_bundle)
+        self.assertNotIn("apply_async_zero_history_hardening(root)", apply_bundle)
+        self.assertNotIn("apply_slot_aware_zero_history(root)", apply_bundle)
+        self.assertNotIn("apply_transport_release_overlap(root)", apply_bundle)
 
 
 if __name__ == "__main__":
