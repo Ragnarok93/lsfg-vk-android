@@ -53,7 +53,8 @@ namespace LSFG_3_1P::Shaders {
         /// Dispatch the shaderchain.
         ///
         void Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
-            uint64_t pass_idx, size_t activeGenerationCount);
+            uint64_t pass_idx, size_t activeGenerationCount,
+            float interpolationPhase = -1.0F);
         /// Expose output images for Android queue-family acquire/release.
         [[nodiscard]] std::vector<Core::Image>& getOutImages() { return this->outImgs; }
         [[nodiscard]] const std::vector<Core::Image>& getOutImages() const { return this->outImgs; }
