@@ -113,6 +113,14 @@ namespace LSFG_3_1 {
     void presentContextWithCount(int32_t id, int inSem,
         const std::vector<int>& outSem, size_t activeGenerationCount);
 
+    /// Present explicitly distributed interpolation phases without changing the
+    /// configured runtime capacity. Each phase must be strictly inside (0, 1)
+    /// and monotonically increasing.
+    __attribute__((visibility("default")))
+    void presentContextWithPhases(int32_t id, int inSem,
+        const std::vector<int>& outSem,
+        const std::vector<float>& interpolationPhases);
+
 #ifdef __ANDROID__
     /// Wait only for the most recent submissions belonging to this context.
     /// Returns false when the timeout expires.
