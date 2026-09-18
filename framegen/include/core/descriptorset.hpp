@@ -58,6 +58,8 @@ namespace LSFG::Core {
         void bind(const CommandBuffer& commandBuffer, const Pipeline& pipeline) const;
         void bind(const CommandBuffer& commandBuffer, const Pipeline& pipeline,
             uint32_t dynamicOffset) const;
+        void bind(const CommandBuffer& commandBuffer, const Pipeline& pipeline,
+            bool useDynamicOffset, uint32_t dynamicOffset) const;
 
         /// Get the Vulkan handle.
         [[nodiscard]] auto handle() const { return *this->descriptorSet; }

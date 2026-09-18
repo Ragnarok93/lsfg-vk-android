@@ -61,6 +61,7 @@ namespace LSFG_3_1::Shaders {
         Delta& operator=(Delta&&) noexcept = default;
         ~Delta() = default;
     private:
+        bool dynamicInterpolationPhases{false};
         std::array<Core::ShaderModule, 10> shaderModules;
         std::array<Core::Pipeline, 10> pipelines;
         std::array<Core::Sampler, 3> samplers;

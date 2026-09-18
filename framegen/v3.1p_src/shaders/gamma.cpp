@@ -20,10 +20,15 @@ Gamma::Gamma(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
         std::optional<Core::Image> optImg)
         : inImgs1(std::move(inImgs1)), inImg2(std::move(inImg2)),
           optImg(std::move(optImg)) {
+    this->dynamicInterpolationPhases = vk.dynamicInterpolationPhases;
+    const VkDescriptorType timestampDescriptorType =
+        this->dynamicInterpolationPhases
+        ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+        : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     // create resources
     this->shaderModules = {{
         vk.shaders.getShader(vk.device, "p_gamma[0]",
-            { { 1 , VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC },
+            { { 1 , timestampDescriptorType },
               { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
               { 5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
               { 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } }),
@@ -40,7 +45,7 @@ Gamma::Gamma(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
               { 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
               { 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } }),
         vk.shaders.getShader(vk.device, "p_gamma[4]",
-            { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC },
+            { { 1, timestampDescriptorType },
               { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
               { 4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
               { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } })
@@ -74,14 +79,14 @@ Gamma::Gamma(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
     for (size_t count = 1; count <= vk.generationCount; count++) {
       for (size_t pass_idx = 0; pass_idx < count; pass_idx++) {
         auto& pass = this->passesByGenerationCount.at(count).emplace_back();
-        pass.buffer = vk.resources.createTimestampRing(vk.device,
+        pass.buffer = vk.resources.getTimestampBuffer(vk.device, this->dynamicInterpolationPhases,
             static_cast<float>(pass_idx + 1) / static_cast<float>(count + 1),
             !this->optImg.has_value());
         for (size_t i = 0; i < 3; i++) {
             pass.firstDescriptorSet.at(i) = Core::DescriptorSet(vk.device, vk.descriptorPool,
                 this->shaderModules.at(0));
             pass.firstDescriptorSet.at(i).update(vk.device)
-                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, pass.buffer,
+                .add(timestampDescriptorType, pass.buffer,
                 LSFG::Pool::ResourcePool::timestampRecordSize())
                 .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(1))
                 .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(2))
@@ -117,7 +122,7 @@ Gamma::Gamma(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
         pass.descriptorSets.at(3) = Core::DescriptorSet(vk.device, vk.descriptorPool,
             this->shaderModules.at(4));
         pass.descriptorSets.at(3).update(vk.device)
-            .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, pass.buffer,
+            .add(timestampDescriptorType, pass.buffer,
                 LSFG::Pool::ResourcePool::timestampRecordSize())
             .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(0))
             .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers.at(2))
@@ -134,9 +139,10 @@ void Gamma::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         uint64_t pass_idx, size_t activeGenerationCount,
         float interpolationPhase) {
     auto& pass = this->passesByGenerationCount.at(activeGenerationCount).at(pass_idx);
-    const uint32_t timestampOffset =
-        LSFG::Pool::ResourcePool::timestampRingOffset(pass.buffer, frameCount);
-    if (interpolationPhase > 0.0F)
+    const uint32_t timestampOffset = this->dynamicInterpolationPhases
+        ? LSFG::Pool::ResourcePool::timestampRingOffset(pass.buffer, frameCount)
+        : 0;
+    if (this->dynamicInterpolationPhases && interpolationPhase > 0.0F)
         LSFG::Pool::ResourcePool::writeTimestamp(
             pass.buffer, interpolationPhase, timestampOffset);
 
@@ -154,7 +160,7 @@ void Gamma::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
 
     this->pipelines.at(0).bind(buf);
     pass.firstDescriptorSet.at(frameCount % 3).bind(
-        buf, this->pipelines.at(0), timestampOffset);
+        buf, this->pipelines.at(0), this->dynamicInterpolationPhases, timestampOffset);
     buf.dispatch(threadsX, threadsY, 1);
 
     // second shader
@@ -198,6 +204,6 @@ void Gamma::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         .build();
 
     this->pipelines.at(4).bind(buf);
-    pass.descriptorSets.at(3).bind(buf, this->pipelines.at(4), timestampOffset);
+    pass.descriptorSets.at(3).bind(buf, this->pipelines.at(4), this->dynamicInterpolationPhases, timestampOffset);
     buf.dispatch(threadsX, threadsY, 1);
 }

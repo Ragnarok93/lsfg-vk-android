@@ -61,6 +61,16 @@ void DescriptorSet::bind(
         0, 1, &descriptorSetHandle, 1, &dynamicOffset);
 }
 
+void DescriptorSet::bind(
+        const CommandBuffer& commandBuffer, const Pipeline& pipeline,
+        bool useDynamicOffset, uint32_t dynamicOffset) const {
+    if (useDynamicOffset) {
+        this->bind(commandBuffer, pipeline, dynamicOffset);
+        return;
+    }
+    this->bind(commandBuffer, pipeline);
+}
+
 // updater class
 
 DescriptorSetUpdateBuilder& DescriptorSetUpdateBuilder::add(VkDescriptorType type, const Image& image) {

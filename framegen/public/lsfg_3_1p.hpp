@@ -28,6 +28,7 @@ namespace LSFG_3_1P {
     __attribute__((visibility("default")))
     void initialize(const LSFG::DeviceIdentity& identity, VkFormat sharedFormat,
         bool isHdr, float flowScale, uint64_t generationCount,
+        bool dynamicInterpolationPhases,
         const std::function<std::vector<uint8_t>(const std::string&)>& loader);
 
     /// Return immutable capability/provenance diagnostics for the selected backend.

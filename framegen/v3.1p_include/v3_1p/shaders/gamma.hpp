@@ -54,6 +54,7 @@ namespace LSFG_3_1P::Shaders {
         Gamma& operator=(Gamma&&) noexcept = default;
         ~Gamma() = default;
     private:
+        bool dynamicInterpolationPhases{false};
         std::array<Core::ShaderModule, 5> shaderModules;
         std::array<Core::Pipeline, 5> pipelines;
         std::array<Core::Sampler, 3> samplers;

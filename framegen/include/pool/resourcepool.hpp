@@ -49,6 +49,10 @@ namespace LSFG::Pool {
         /// may still be referenced by in-flight submissions.
         static constexpr size_t kTimestampRingSlots = 8;
 
+        Core::Buffer getTimestampBuffer(
+            const Core::Device& device, bool dynamicInterpolationPhases,
+            float timestamp = 0.0F, bool firstIter = false, bool firstIterS = false);
+
         Core::Buffer createTimestampRing(
             const Core::Device& device,
             float timestamp = 0.0F, bool firstIter = false, bool firstIterS = false);

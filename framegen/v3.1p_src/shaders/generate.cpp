@@ -21,9 +21,14 @@ Generate::Generate(Vulkan& vk,
         : inImg1(std::move(inImg1)), inImg2(std::move(inImg2)),
           inImg3(std::move(inImg3)), inImg4(std::move(inImg4)),
           inImg5(std::move(inImg5)) {
+    this->dynamicInterpolationPhases = vk.dynamicInterpolationPhases;
+    const VkDescriptorType timestampDescriptorType =
+        this->dynamicInterpolationPhases
+        ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+        : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     // create resources
     this->shaderModule = vk.shaders.getShader(vk.device, "p_generate",
-        { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC },
+        { { 1, timestampDescriptorType },
           { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
           { 5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
           { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } });
@@ -44,13 +49,13 @@ Generate::Generate(Vulkan& vk,
     for (size_t count = 1; count <= vk.generationCount; count++) {
       for (size_t i = 0; i < count; i++) {
         auto& pass = this->passesByGenerationCount.at(count).emplace_back();
-        pass.buffer = vk.resources.createTimestampRing(vk.device,
+        pass.buffer = vk.resources.getTimestampBuffer(vk.device, this->dynamicInterpolationPhases,
             static_cast<float>(i + 1) / static_cast<float>(count + 1));
         for (size_t j = 0; j < 2; j++) {
             pass.descriptorSet.at(j) = Core::DescriptorSet(vk.device, vk.descriptorPool,
                 this->shaderModule);
             pass.descriptorSet.at(j).update(vk.device)
-                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, pass.buffer,
+                .add(timestampDescriptorType, pass.buffer,
                 LSFG::Pool::ResourcePool::timestampRecordSize())
                 .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers)
                 .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, j == 0 ? this->inImg2 : this->inImg1)
@@ -69,9 +74,10 @@ void Generate::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         uint64_t pass_idx, size_t activeGenerationCount,
         float interpolationPhase) {
     auto& pass = this->passesByGenerationCount.at(activeGenerationCount).at(pass_idx);
-    const uint32_t timestampOffset =
-        LSFG::Pool::ResourcePool::timestampRingOffset(pass.buffer, frameCount);
-    if (interpolationPhase > 0.0F)
+    const uint32_t timestampOffset = this->dynamicInterpolationPhases
+        ? LSFG::Pool::ResourcePool::timestampRingOffset(pass.buffer, frameCount)
+        : 0;
+    if (this->dynamicInterpolationPhases && interpolationPhase > 0.0F)
         LSFG::Pool::ResourcePool::writeTimestamp(
             pass.buffer, interpolationPhase, timestampOffset);
 
@@ -90,7 +96,7 @@ void Generate::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
         .build();
 
     this->pipeline.bind(buf);
-    pass.descriptorSet.at(frameCount % 2).bind(buf, this->pipeline, timestampOffset);
+    pass.descriptorSet.at(frameCount % 2).bind(buf, this->pipeline, this->dynamicInterpolationPhases, timestampOffset);
     buf.dispatch(threadsX, threadsY, 1);
 }
 
@@ -102,8 +108,13 @@ Generate::Generate(Vulkan& vk,
           inImg3(std::move(inImg3)), inImg4(std::move(inImg4)),
           inImg5(std::move(inImg5)),
           outImgs(std::move(outImgs)) {
+    this->dynamicInterpolationPhases = vk.dynamicInterpolationPhases;
+    const VkDescriptorType timestampDescriptorType =
+        this->dynamicInterpolationPhases
+        ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+        : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     this->shaderModule = vk.shaders.getShader(vk.device, "p_generate",
-        { { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC },
+        { { 1, timestampDescriptorType },
           { 2, VK_DESCRIPTOR_TYPE_SAMPLER },
           { 5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },
           { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE } });
@@ -116,13 +127,13 @@ Generate::Generate(Vulkan& vk,
     for (size_t count = 1; count <= vk.generationCount; count++) {
       for (size_t i = 0; i < count; i++) {
         auto& pass = this->passesByGenerationCount.at(count).emplace_back();
-        pass.buffer = vk.resources.createTimestampRing(vk.device,
+        pass.buffer = vk.resources.getTimestampBuffer(vk.device, this->dynamicInterpolationPhases,
             static_cast<float>(i + 1) / static_cast<float>(count + 1));
         for (size_t j = 0; j < 2; j++) {
             pass.descriptorSet.at(j) = Core::DescriptorSet(vk.device, vk.descriptorPool,
                 this->shaderModule);
             pass.descriptorSet.at(j).update(vk.device)
-                .add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, pass.buffer,
+                .add(timestampDescriptorType, pass.buffer,
                 LSFG::Pool::ResourcePool::timestampRecordSize())
                 .add(VK_DESCRIPTOR_TYPE_SAMPLER, this->samplers)
                 .add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, j == 0 ? this->inImg2 : this->inImg1)

@@ -31,7 +31,7 @@ namespace LSFG::Core {
         template<typename T>
         Buffer(const Core::Device& device, const T& data, VkBufferUsageFlags usage)
                 : size(sizeof(T)) {
-            construct(device, reinterpret_cast<const void*>(&data), usage);
+            construct(device, reinterpret_cast<const void*>(&data), usage, false);
         }
 
         ///
@@ -46,7 +46,13 @@ namespace LSFG::Core {
         ///
         Buffer(const Core::Device& device, const void* data, size_t size, VkBufferUsageFlags usage)
                 : size(size) {
-            construct(device, data, usage);
+            construct(device, data, usage, false);
+        }
+
+        Buffer(const Core::Device& device, const void* data, size_t size,
+                VkBufferUsageFlags usage, bool persistentlyMapped)
+                : size(size) {
+            construct(device, data, usage, persistentlyMapped);
         }
 
         /// Get the Vulkan handle.
@@ -66,7 +72,8 @@ namespace LSFG::Core {
         Buffer& operator=(Buffer&&) noexcept = default;
         ~Buffer() = default;
     private:
-        void construct(const Core::Device& device, const void* data, VkBufferUsageFlags usage);
+        void construct(const Core::Device& device, const void* data,
+            VkBufferUsageFlags usage, bool persistentlyMapped);
 
         std::shared_ptr<VkBuffer> buffer;
         std::shared_ptr<VkDeviceMemory> memory;

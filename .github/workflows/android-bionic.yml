@@ -55,6 +55,7 @@ jobs:
           python3 tests/android_b15_subgroup_gate_test.py
           python3 tests/android_final_cpu_overhead_test.py
           python3 tests/android_fractional_phase_lifetime_test.py
+          python3 tests/android_fixed_mode_launch_isolation_test.py
           python3 tests/android_source_protected_timing_test.py
           python3 tests/android_source_protected_fastpath_test.py
           python3 tests/android_capability_architecture_test.py

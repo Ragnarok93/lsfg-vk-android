@@ -69,6 +69,7 @@ namespace LSFG_3_1::Shaders {
         Generate& operator=(Generate&&) noexcept = default;
         ~Generate() = default;
     private:
+        bool dynamicInterpolationPhases{false};
         Core::ShaderModule shaderModule;
         Core::Pipeline pipeline;
         std::array<Core::Sampler, 2> samplers;

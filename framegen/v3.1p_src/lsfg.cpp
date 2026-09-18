@@ -33,6 +33,7 @@ namespace {
         bool isHdr;
         float flowScale;
         uint64_t generationCount;
+        bool dynamicInterpolationPhases;
 
         bool operator==(const RuntimeSignature&) const = default;
     };
@@ -63,6 +64,7 @@ namespace {
 
 void LSFG_3_1P::initialize(const LSFG::DeviceIdentity& identity, VkFormat sharedFormat,
         bool isHdr, float flowScale, uint64_t generationCount,
+        bool dynamicInterpolationPhases,
         const std::function<std::vector<uint8_t>(const std::string&)>& loader) {
     const std::scoped_lock lock(runtimeMutex);
     const RuntimeSignature requestedSignature{
@@ -71,6 +73,7 @@ void LSFG_3_1P::initialize(const LSFG::DeviceIdentity& identity, VkFormat shared
         .isHdr = isHdr,
         .flowScale = flowScale,
         .generationCount = generationCount,
+        .dynamicInterpolationPhases = dynamicInterpolationPhases,
     };
     if (instance.has_value() && device.has_value()
             && activeSignature.has_value()
@@ -87,7 +90,8 @@ void LSFG_3_1P::initialize(const LSFG::DeviceIdentity& identity, VkFormat shared
             .device{*instance, identity, sharedFormat},
             .generationCount = generationCount,
             .flowScale = flowScale,
-            .isHdr = isHdr
+            .isHdr = isHdr,
+            .dynamicInterpolationPhases = dynamicInterpolationPhases
         });
         activeSignature = requestedSignature;
         contexts = std::unordered_map<int32_t, Context>();

@@ -14,7 +14,8 @@
 
 using namespace LSFG::Core;
 
-void Buffer::construct(const Core::Device& device, const void* data, VkBufferUsageFlags usage) {
+void Buffer::construct(const Core::Device& device, const void* data,
+        VkBufferUsageFlags usage, bool persistentlyMapped) {
     // create buffer
     const VkBufferCreateInfo desc{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -73,13 +74,11 @@ void Buffer::construct(const Core::Device& device, const void* data, VkBufferUsa
         throw LSFG::vulkan_error(res, "Failed to map memory for Vulkan buffer");
     std::copy_n(reinterpret_cast<const uint8_t*>(data), this->size, buf);
 
-    // Keep host-coherent uniform storage persistently mapped. This makes
-    // source-protected fractional timestamp updates a bounded memcpy rather
-    // than adding vkMapMemory/vkUnmapMemory calls to the frame hot path.
-    // The memory type above explicitly requires HOST_COHERENT.
-    this->mapped = {};
+    // Fixed mode keeps the proven upload-then-unmap UBO lifetime. Only the
+    // Adaptive fractional timestamp ring remains persistently mapped.
+    if (!persistentlyMapped)
+        vkUnmapMemory(device.handle(), memoryHandle);
 
-    // store buffer and memory in shared ptr
     this->buffer = std::shared_ptr<VkBuffer>(
         new VkBuffer(bufferHandle),
         [dev = device.handle()](VkBuffer* img) {
@@ -89,13 +88,17 @@ void Buffer::construct(const Core::Device& device, const void* data, VkBufferUsa
     );
     this->memory = std::shared_ptr<VkDeviceMemory>(
         new VkDeviceMemory(memoryHandle),
-        [dev = device.handle()](VkDeviceMemory* mem) {
-            vkUnmapMemory(dev, *mem);
+        [dev = device.handle(), persistentlyMapped](VkDeviceMemory* mem) {
+            if (persistentlyMapped)
+                vkUnmapMemory(dev, *mem);
             vkFreeMemory(dev, *mem, nullptr);
             delete mem;
         }
     );
-    this->mapped = std::shared_ptr<uint8_t>(this->memory, buf);
+    if (persistentlyMapped)
+        this->mapped = std::shared_ptr<uint8_t>(this->memory, buf);
+    else
+        this->mapped.reset();
 }
 
 void Buffer::write(const void* data, size_t bytes, size_t offset) const {

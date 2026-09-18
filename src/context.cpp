@@ -413,6 +413,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     lsfgInitialize(
         info.identity, format,
         conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
+        conf.adaptiveFramegen,
         [](const std::string& name) {
             auto dxbc = Extract::getShader(name);
             auto spirv = Extract::translateShader(dxbc);
@@ -583,6 +584,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     lsfgInitialize(
         info.identity, format,
         conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
+        conf.adaptiveFramegen,
         [](const std::string& name) {
             auto dxbc = Extract::getShader(name);
             auto spirv = Extract::translateShader(dxbc);

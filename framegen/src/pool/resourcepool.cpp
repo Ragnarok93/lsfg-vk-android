@@ -60,6 +60,14 @@ Core::Buffer ResourcePool::getBuffer(
     return buffer;
 }
 
+Core::Buffer ResourcePool::getTimestampBuffer(
+        const Core::Device& device, bool dynamicInterpolationPhases,
+        float timestamp, bool firstIter, bool firstIterS) {
+    if (!dynamicInterpolationPhases)
+        return this->getBuffer(device, timestamp, firstIter, firstIterS);
+    return this->createTimestampRing(device, timestamp, firstIter, firstIterS);
+}
+
 Core::Buffer ResourcePool::createTimestampRing(
         const Core::Device& device,
         float timestamp, bool firstIter, bool firstIterS) {
@@ -91,7 +99,8 @@ Core::Buffer ResourcePool::createTimestampRing(
         std::memcpy(storage.data() + slot * stride, &record, recordSize);
 
     return Core::Buffer(
-        device, storage.data(), storage.size(), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        device, storage.data(), storage.size(),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true);
 }
 
 VkDeviceSize ResourcePool::timestampRecordSize() noexcept {

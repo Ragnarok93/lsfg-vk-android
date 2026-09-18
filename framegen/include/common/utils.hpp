@@ -116,6 +116,7 @@ namespace LSFG {
         uint64_t generationCount;
         float flowScale;
         bool isHdr;
+        bool dynamicInterpolationPhases{false};
 
         Pool::ShaderPool shaders;
         Pool::ResourcePool resources;
