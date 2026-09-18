@@ -200,6 +200,8 @@ private:
         uint64_t totalAsyncFallbacks{0};
         uint64_t windowSyntheticOpportunities{0};
         uint64_t totalSyntheticOpportunities{0};
+        uint64_t windowSyntheticAcquireDrops{0};
+        uint64_t totalSyntheticAcquireDrops{0};
         uint64_t windowDeadlineShadowRejects{0};
         uint64_t totalDeadlineShadowRejects{0};
         uint64_t windowDeadlineShadowLate{0};
