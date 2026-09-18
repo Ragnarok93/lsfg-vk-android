@@ -28,6 +28,7 @@
 #include <string>
 #include <thread>
 #include <array>
+#include <cmath>
 
 namespace {
 
@@ -53,6 +54,37 @@ uint64_t runtimeWaitTimeoutNs() {
         return defaultMs * 1000000ULL;
     const uint64_t boundedMs = parsed > maxMs ? maxMs : static_cast<uint64_t>(parsed);
     return boundedMs * 1000000ULL;
+}
+
+AdaptiveFlowPreset adaptiveFlowPresetFromConfig(const std::string& preset) {
+    if (preset == "balanced")
+        return AdaptiveFlowPreset::Balanced;
+    if (preset == "low")
+        return AdaptiveFlowPreset::Low;
+    return AdaptiveFlowPreset::Quality;
+}
+
+bool adaptiveLsfgTransition(const AdaptiveSchedulerTelemetry& telemetry) {
+    return telemetry.sourceRateSnapped
+        || telemetry.costRaised
+        || telemetry.costBackedOff
+        || telemetry.costProbe
+        || telemetry.discontinuityReset
+        || telemetry.configWarmStart;
+}
+
+double adaptiveFlowFrameBudgetMs(
+        const Config::Configuration& conf,
+        std::chrono::nanoseconds sourceInterval,
+        size_t generatedFrameCount) {
+    if (conf.adaptiveFramegen && conf.fpsLimit > 0)
+        return 1000.0 / static_cast<double>(conf.fpsLimit);
+
+    const double sourceIntervalMs =
+        std::chrono::duration<double, std::milli>(sourceInterval).count();
+    if (!(sourceIntervalMs > 0.0) || !std::isfinite(sourceIntervalMs))
+        return 0.0;
+    return sourceIntervalMs / static_cast<double>(generatedFrameCount + 1);
 }
 
 VkImageSubresourceRange colorSubresourceRange() {
@@ -336,10 +368,33 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         lsfgInitialize = LSFG_3_1P::initialize;
         lsfgDeleteContext = LSFG_3_1P::deleteContext;
     }
+
+    this->adaptiveFlowPreset_ = adaptiveFlowPresetFromConfig(conf.adaptiveFlowPreset);
+    this->adaptiveFlowController_.configure(
+        conf.adaptiveFlowScale, this->adaptiveFlowPreset_);
+
+    std::vector<float> adaptiveFlowScales;
+    float initialFlowScale = conf.flowScale;
+    if (conf.adaptiveFlowScale) {
+        const auto presetStates =
+            AdaptiveFlowController::statesForPreset(this->adaptiveFlowPreset_);
+        adaptiveFlowScales.assign(presetStates.begin(), presetStates.end());
+        initialFlowScale = adaptiveFlowScales.front();
+        this->adaptiveFlowRequestedScale_ = initialFlowScale;
+        this->adaptiveFlowActiveScale_ = initialFlowScale;
+        std::cerr << "lsfg-vk: adaptive-flow-controller enabled=1"
+                  << " preset="
+                  << AdaptiveFlowController::presetName(this->adaptiveFlowPreset_)
+                  << " target=" << presetStates.front()
+                  << " minimum=" << presetStates.back()
+                  << " states=" << presetStates.size()
+                  << '\n';
+    }
+
     setenv("DISABLE_LSFG", "1", 1); // NOLINT
     lsfgInitialize(
         info.identity, format,
-        conf.hdr, 1.0F / conf.flowScale, runtimeMultiplier - 1,
+        conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
         [](const std::string& name) {
             auto dxbc = Extract::getShader(name);
             auto spirv = Extract::translateShader(dxbc);
@@ -379,14 +434,24 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         outAhbs.push_back(this->out_n.at(i).getAhb());
 
     int32_t ctxId;
-    if (conf.performance)
+    if (conf.adaptiveFlowScale) {
+        if (conf.performance)
+            ctxId = LSFG_3_1P::createAdaptiveContextFromAHB(
+                this->frame_0.getAhb(), this->frame_1.getAhb(),
+                outAhbs, extent, format, adaptiveFlowScales);
+        else
+            ctxId = LSFG_3_1::createAdaptiveContextFromAHB(
+                this->frame_0.getAhb(), this->frame_1.getAhb(),
+                outAhbs, extent, format, adaptiveFlowScales);
+    } else if (conf.performance) {
         ctxId = LSFG_3_1P::createContextFromAHB(
             this->frame_0.getAhb(), this->frame_1.getAhb(),
             outAhbs, extent, format);
-    else
+    } else {
         ctxId = LSFG_3_1::createContextFromAHB(
             this->frame_0.getAhb(), this->frame_1.getAhb(),
             outAhbs, extent, format);
+    }
 
     this->lsfgCtxId = std::shared_ptr<int32_t>(
         new int32_t(ctxId),
@@ -544,6 +609,79 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
     this->lastGeneratedFrameCount_ = generatedFrameCount;
 
+    const auto updateAdaptiveFlowGovernor = [&]() {
+        if (!conf.adaptiveFlowScale)
+            return;
+
+        const LSFG::AdaptiveFlowGpuTiming timing = conf.performance
+            ? LSFG_3_1P::getContextGpuTiming(*this->lsfgCtxId)
+            : LSFG_3_1::getContextGpuTiming(*this->lsfgCtxId);
+        const double budgetMs = adaptiveFlowFrameBudgetMs(
+            conf, sourceInterval, generatedFrameCount);
+        const bool schedulerTransition =
+            conf.adaptiveFramegen && adaptiveLsfgTransition(adaptiveTelemetry);
+        const bool timingUsable = timing.valid && !timing.transitionActive;
+        const bool budgetValid = budgetMs > 0.0 && std::isfinite(budgetMs);
+
+        AdaptiveFlowObservation observation{
+            .elapsed = sourceInterval,
+            .frameBudgetMs = budgetMs,
+            .totalLsfgMs = timingUsable ? timing.totalLsfgMs : 0.0,
+            .flowMs = timingUsable ? timing.opticalFlowMs : 0.0,
+            .mipmapsMs = timingUsable ? timing.mipmapsMs : 0.0,
+            .generationCount = timing.valid
+                ? timing.generationCount : generatedFrameCount,
+            .deadlineMissed = timingUsable && budgetValid
+                && timing.totalLsfgMs > budgetMs,
+            .schedulerTransition = schedulerTransition,
+            .valid = budgetValid && (schedulerTransition
+                || (timingUsable && sourceInterval.count() > 0)),
+        };
+
+        const float previousScale = this->adaptiveFlowController_.currentScale();
+        const float selectedScale =
+            this->adaptiveFlowController_.observe(observation);
+        const auto& flowTelemetry = this->adaptiveFlowController_.telemetry();
+
+        if (flowTelemetry.changed
+                && std::fabs(selectedScale - previousScale) > 0.0005F) {
+            if (conf.performance)
+                LSFG_3_1P::requestContextFlowScale(
+                    *this->lsfgCtxId, selectedScale);
+            else
+                LSFG_3_1::requestContextFlowScale(
+                    *this->lsfgCtxId, selectedScale);
+
+            std::cerr << "lsfg-vk: adaptive-flow-decision"
+                      << " previous=" << previousScale
+                      << " requested=" << selectedScale
+                      << " reason="
+                      << AdaptiveFlowController::reasonName(flowTelemetry.reason)
+                      << " mipmaps_ms=" << observation.mipmapsMs
+                      << " flow_ms=" << observation.flowMs
+                      << " lsfg_ms=" << observation.totalLsfgMs
+                      << " budget_ms=" << observation.frameBudgetMs
+                      << " generation_count=" << observation.generationCount
+                      << '\n';
+        }
+
+        const LSFG::AdaptiveFlowContextState state = conf.performance
+            ? LSFG_3_1P::getContextFlowScaleState(*this->lsfgCtxId)
+            : LSFG_3_1::getContextFlowScaleState(*this->lsfgCtxId);
+        this->adaptiveFlowRequestedScale_ = state.requestedScale;
+        this->adaptiveFlowActiveScale_ = state.activeScale;
+        this->adaptiveFlowWarmupRemaining_ = state.warmupRemaining;
+        this->adaptiveFlowTransitionPending_ = state.transitionPending;
+        this->adaptiveFlowTimingValid_ = timingUsable;
+        this->adaptiveFlowMipmapsMs_ = timing.valid ? timing.mipmapsMs : 0.0;
+        this->adaptiveFlowWorkMs_ = timing.valid ? timing.opticalFlowMs : 0.0;
+        this->adaptiveFlowTotalLsfgMs_ = timing.valid ? timing.totalLsfgMs : 0.0;
+        this->adaptiveFlowBudgetMs_ = budgetMs;
+        this->adaptiveFlowGenerationCount_ =
+            timing.valid ? timing.generationCount : generatedFrameCount;
+        this->adaptiveFlowReason_ = flowTelemetry.reason;
+    };
+
     if (conf.adaptiveFramegen) {
         if (adaptiveTelemetry.sourceRateSnapped) {
             metrics.windowAdaptiveRateSnaps++;
@@ -671,6 +809,29 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_discontinuities=" << metrics.windowAdaptiveDiscontinuities
                       << " adaptive_discontinuities_total=" << metrics.totalAdaptiveDiscontinuities
                       << " source_history_valid=" << (this->requiresSourceHistoryWarmup_ ? 0 : 1)
+                      << " adaptive_flow_enabled=" << (conf.adaptiveFlowScale ? 1 : 0)
+                      << " adaptive_flow_preset="
+                      << AdaptiveFlowController::presetName(this->adaptiveFlowPreset_)
+                      << " adaptive_flow_target="
+                      << this->adaptiveFlowController_.telemetry().targetScale
+                      << " adaptive_flow_minimum="
+                      << this->adaptiveFlowController_.telemetry().minimumScale
+                      << " adaptive_flow_requested=" << this->adaptiveFlowRequestedScale_
+                      << " adaptive_flow_active=" << this->adaptiveFlowActiveScale_
+                      << " adaptive_flow_transition="
+                      << (this->adaptiveFlowTransitionPending_ ? 1 : 0)
+                      << " adaptive_flow_warmup_remaining="
+                      << this->adaptiveFlowWarmupRemaining_
+                      << " adaptive_flow_timing_valid="
+                      << (this->adaptiveFlowTimingValid_ ? 1 : 0)
+                      << " adaptive_flow_mipmaps_ms=" << this->adaptiveFlowMipmapsMs_
+                      << " adaptive_flow_work_ms=" << this->adaptiveFlowWorkMs_
+                      << " adaptive_flow_lsfg_ms=" << this->adaptiveFlowTotalLsfgMs_
+                      << " adaptive_flow_budget_ms=" << this->adaptiveFlowBudgetMs_
+                      << " adaptive_flow_generation_count="
+                      << this->adaptiveFlowGenerationCount_
+                      << " adaptive_flow_reason="
+                      << AdaptiveFlowController::reasonName(this->adaptiveFlowReason_)
                       << " multiplier=" << conf.multiplier
                       << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                       << " target_fps=" << conf.fpsLimit
@@ -794,6 +955,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 *this->lsfgCtxId, -1, noOutSems, 0);
         metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
+        updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
         this->requiresSourceHistoryWarmup_ = false;
@@ -912,6 +1074,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
     if (firstPresentDiagnostic)
         std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
+    updateAdaptiveFlowGovernor();
 
     // 4. Copy generated frames to swapchain images and present them. Each
     // copy submission signals two binary semaphores: one consumed by this

@@ -9,6 +9,7 @@
 
 #include "hooks.hpp"
 #include "adaptive_scheduler.hpp"
+#include "adaptive_flow_controller.hpp"
 #include "mini/commandbuffer.hpp"
 #include "mini/commandpool.hpp"
 #include "mini/image.hpp"
@@ -82,6 +83,19 @@ private:
 
 #ifdef __ANDROID__
     AdaptiveFrameScheduler adaptiveScheduler_;
+    AdaptiveFlowController adaptiveFlowController_;
+    AdaptiveFlowPreset adaptiveFlowPreset_{AdaptiveFlowPreset::Quality};
+    float adaptiveFlowRequestedScale_{1.0F};
+    float adaptiveFlowActiveScale_{1.0F};
+    uint32_t adaptiveFlowWarmupRemaining_{0};
+    bool adaptiveFlowTransitionPending_{false};
+    bool adaptiveFlowTimingValid_{false};
+    double adaptiveFlowMipmapsMs_{0.0};
+    double adaptiveFlowWorkMs_{0.0};
+    double adaptiveFlowTotalLsfgMs_{0.0};
+    double adaptiveFlowBudgetMs_{0.0};
+    size_t adaptiveFlowGenerationCount_{0};
+    AdaptiveFlowDecisionReason adaptiveFlowReason_{AdaptiveFlowDecisionReason::None};
     bool requiresSourceHistoryWarmup_{false};
     bool previousSourceCopySignalValid_{false};
     // Optional fast path only. If either logical device cannot share an

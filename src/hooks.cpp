@@ -63,8 +63,18 @@ namespace {
 #ifdef __ANDROID__
         const bool residentTarget = previous.targeted && next.targeted;
         if (residentTarget) {
+            const bool adaptiveFlowModeChanged =
+                previous.adaptiveFlowScale != next.adaptiveFlowScale;
+            const bool adaptiveFlowPresetChanged =
+                previous.adaptiveFlowScale && next.adaptiveFlowScale
+                && previous.adaptiveFlowPreset != next.adaptiveFlowPreset;
+            const bool fixedFlowScaleChanged =
+                !previous.adaptiveFlowScale && !next.adaptiveFlowScale
+                && previous.flowScale != next.flowScale;
             return previous.dll != next.dll
-                || previous.flowScale != next.flowScale
+                || adaptiveFlowModeChanged
+                || adaptiveFlowPresetChanged
+                || fixedFlowScaleChanged
                 || previous.performance != next.performance
                 || previous.hdr != next.hdr
                 || previous.e_present != next.e_present;
@@ -812,6 +822,11 @@ namespace {
                               << Config::activeConf.multiplier
                               << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
                               << " targetFps=" << Config::activeConf.fpsLimit
+                              << " adaptiveFlow="
+                              << (Config::activeConf.adaptiveFlowScale ? 1 : 0)
+                              << " adaptiveFlowPreset="
+                              << Config::activeConf.adaptiveFlowPreset
+                              << " fixedFlowScale=" << Config::activeConf.flowScale
                               << " presentMode=" << Config::activeConf.e_present
                               << " enabled=" << (Config::activeConf.enable ? 1 : 0)
                               << " recreateSwapchain=" << (recreateSwapchain ? 1 : 0)
