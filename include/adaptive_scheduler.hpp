@@ -5,6 +5,32 @@
 #include <cstdint>
 #include <vector>
 
+struct SourceTimelineCycle {
+    bool valid{false};
+    uint64_t sourceIndex{};
+    uint64_t anchorNs{};
+    uint64_t intervalNs{};
+    uint64_t sourceDeadlineNs{};
+
+    [[nodiscard]] uint64_t syntheticDeadlineNs(double phase) const;
+};
+
+/// Source-arrival-derived presentation clock. It owns no generation policy:
+/// each real frame establishes one forward-looking interpolation interval and
+/// generated slots can only reference that immutable cycle.
+class SourceFrameTimeline {
+public:
+    SourceTimelineCycle observe(uint64_t sourceArrivalNs,
+        std::chrono::nanoseconds observedSourceInterval);
+    void reset();
+
+    [[nodiscard]] uint64_t intervalNs() const { return intervalNs_; }
+
+private:
+    uint64_t sourceIndex_{0};
+    uint64_t intervalNs_{0};
+};
+
 struct AdaptiveGenerationPlan {
     // Normalized synthetic opportunities inside the next protected source
     // interval. 0.0 is the source-arrival anchor and 1.0 is the source
