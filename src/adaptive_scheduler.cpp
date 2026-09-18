@@ -10,6 +10,7 @@ constexpr double kFastIntervalLow = 0.70;
 constexpr unsigned kSlowSamplesRequired = 3;
 constexpr unsigned kFastSamplesRequired = 6;
 constexpr double kDiscontinuitySeconds = 0.250;
+constexpr double kLowFpsCutoffIntervalSeconds = 0.100;
 
 // Governor timing intentionally favors stability over quickly chasing an
 // unreachable output target. The source-rate estimator is allowed to settle
@@ -75,6 +76,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.costProbe = false;
     telemetry_.discontinuityReset = false;
     telemetry_.configWarmStart = false;
+    telemetry_.lowFpsCutoff = false;
     telemetry_.generatedFrames = 0;
     telemetry_.wantedGeneratedFrames = 0.0;
 
@@ -97,6 +99,23 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         resetRuntimeState();
         reconfigureWarmStartPending_ = preserveWarmStart;
         telemetry_.discontinuityReset = true;
+        return 0;
+    }
+
+    // LSFG's adaptive safety floor: below 10 real FPS, interpolation is more
+    // likely to amplify large temporal discontinuities than improve motion.
+    // Drop all synthetic work and fractional debt immediately, but preserve an
+    // explicit hot-reload warm start so recovery resumes from fresh cadence
+    // evidence instead of bursting accumulated generation.
+    if (intervalSeconds > kLowFpsCutoffIntervalSeconds) {
+        const bool preserveWarmStart = reconfigureWarmStartPending_;
+        const double sourceFps = 1.0 / intervalSeconds;
+        resetRuntimeState();
+        reconfigureWarmStartPending_ = preserveWarmStart;
+        runtimeCadenceEstablished_ = true;
+        telemetry_.sourceFps = sourceFps;
+        telemetry_.smoothedSourceFps = sourceFps;
+        telemetry_.lowFpsCutoff = true;
         return 0;
     }
 
