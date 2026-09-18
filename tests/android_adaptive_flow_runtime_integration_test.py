@@ -100,26 +100,30 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("adaptiveFlowRuntimeSnapshot()", hooks)
 
 
-    def test_adaptive_presentation_uses_display_timing_with_fifo_fallback(self) -> None:
+    def test_adaptive_presentation_preserves_present_mode_without_display_timing(self) -> None:
         hooks_h = (ROOT / "include/hooks.hpp").read_text(encoding="utf-8")
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         context_h = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        # Adaptive delivery must not rely on MAILBOX accepting a burst of
-        # generated/source presents. Prefer the Android display-timing extension
-        # when available and retain FIFO ordering as the capability fallback.
         self.assertIn("VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME", hooks)
         self.assertIn("androidDisplayTimingSupported", hooks_h)
-        self.assertIn("adaptivePresentationPacing", hooks)
-        self.assertIn("VK_PRESENT_MODE_FIFO_KHR", hooks)
         self.assertIn("VkPresentTimesInfoGOOGLE", context)
         self.assertIn("desiredPresentTime", context)
         self.assertIn("adaptivePresentPeriodNs", context_h)
 
-        # Entering/leaving either adaptive governor changes the presentation
-        # contract and therefore must recreate the swapchain.
+        # Adaptive FIFO scheduling is valid only when the driver can honor
+        # explicit desiredPresentTime metadata. Otherwise preserve the existing
+        # game/configured present mode and the upstream pacing owner.
         self.assertIn(
+            "adaptivePresentationPacing(activeConf, deviceInfo.androidDisplayTimingSupported)",
+            hooks,
+        )
+        self.assertIn(
+            "adaptivePresentationPacing(conf, deviceInfo.androidDisplayTimingSupported)",
+            hooks,
+        )
+        self.assertNotIn(
             "adaptivePresentationPacing(previous) != adaptivePresentationPacing(next)",
             hooks,
         )
