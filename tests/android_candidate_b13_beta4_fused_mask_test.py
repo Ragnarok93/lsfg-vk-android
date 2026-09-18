@@ -90,7 +90,7 @@ class AndroidCandidateB13Beta4FusedMaskContractTest(unittest.TestCase):
         )
         self.assertIn(b13_call, build)
         self.assertGreater(build.index(b13_call), build.index(b11_call))
-        self.assertIn('B11_PROFILE_VARIANT}" != "b13"', build)
+        self.assertNotIn("B11_PROFILE_VARIANT", build)
 
 
 if __name__ == "__main__":
