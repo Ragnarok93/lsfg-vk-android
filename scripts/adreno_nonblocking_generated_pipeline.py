@@ -82,7 +82,7 @@ def patch_context_source(path: Path) -> None:
         return result;
     };
 
-    // nonblocking-generated-pipeline active=1 queue_target=1
+    // nonblocking-generated-pipeline active=1 queue_target=1 sourceWait=buffered-source
     //
     // Every generated batch gets one real-source interval to finish. Polling
     // waitContext with timeout=0 records completion/timing when ready but never
