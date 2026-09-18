@@ -11,7 +11,7 @@ class AndroidGeneratedHandoffPolicyTest(unittest.TestCase):
         zero = (ROOT / "scripts/adreno_async_zero_history.py").read_text(encoding="utf-8")
 
         self.assertIn("generatedAsyncAhbHandoffEnabled_", sync)
-        self.assertIn('driverName.find("Turnip")', sync)
+        self.assertIn('driverName.find(\\\"Turnip\\\")', sync)
         self.assertIn("std::string::npos", sync)
 
         # Generated and zero-history policies are intentionally independent:
@@ -37,7 +37,7 @@ class AndroidGeneratedHandoffPolicyTest(unittest.TestCase):
             sync,
         )
         self.assertIn(
-            'backendDiagnostics.driverName.find("Turnip") == std::string::npos',
+            'backendDiagnostics.driverName.find(\\\"Turnip\\\") == std::string::npos',
             sync,
         )
 
