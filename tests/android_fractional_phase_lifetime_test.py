@@ -7,6 +7,7 @@ pool_h = (ROOT / "framegen/include/pool/resourcepool.hpp").read_text(encoding="u
 pool_cpp = (ROOT / "framegen/src/pool/resourcepool.cpp").read_text(encoding="utf-8")
 descriptor_h = (ROOT / "framegen/include/core/descriptorset.hpp").read_text(encoding="utf-8")
 descriptor_cpp = (ROOT / "framegen/src/core/descriptorset.cpp").read_text(encoding="utf-8")
+descriptor_pool_cpp = (ROOT / "framegen/src/core/descriptorpool.cpp").read_text(encoding="utf-8")
 buffer_cpp = (ROOT / "framegen/src/core/buffer.cpp").read_text(encoding="utf-8")
 
 # Explicit fractional timestamps must be ringed by the same eight-frame lifetime
@@ -17,8 +18,8 @@ assert "createTimestampRing" in pool_h
 assert "timestampRingOffset" in pool_h
 assert "minUniformBufferOffsetAlignment" in pool_cpp
 assert "timestampRecordSize" in pool_cpp
-assert "VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC" in descriptor_cpp
-assert "dynamicOffsetCount" not in descriptor_cpp or "1, &dynamicOffset" in descriptor_cpp
+assert "VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC" in descriptor_pool_cpp
+assert "1, &dynamicOffset" in descriptor_cpp
 assert "uint32_t dynamicOffset" in descriptor_h
 
 # Persistently mapped timestamp storage must actually require both host-visible
