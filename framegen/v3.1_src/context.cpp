@@ -181,11 +181,9 @@ class ScopedAdaptiveFlowConstruction {
 public:
     ScopedAdaptiveFlowConstruction(Vulkan& vk, float userFlowScale)
         : vk_(vk), savedFlowScale_(vk.flowScale),
+          userFlowScale_(validateUserFlowScale(userFlowScale)),
           savedResources_(std::move(vk.resources)) {
-        if (!std::isfinite(userFlowScale) || userFlowScale < 0.25F
-                || userFlowScale > 1.0F)
-            throw std::invalid_argument("Adaptive Flow Scale must be within 0.25..1.0");
-        vk_.flowScale = 1.0F / userFlowScale;
+        vk_.flowScale = 1.0F / userFlowScale_;
         vk_.resources = Pool::ResourcePool(vk_.isHdr, vk_.flowScale);
     }
 
@@ -198,8 +196,17 @@ public:
     }
 
 private:
+    static float validateUserFlowScale(float userFlowScale) {
+        if (!std::isfinite(userFlowScale) || userFlowScale < 0.25F
+                || userFlowScale > 1.0F)
+            throw std::invalid_argument(
+                "Adaptive Flow Scale must be within 0.25..1.0");
+        return userFlowScale;
+    }
+
     Vulkan& vk_;
     float savedFlowScale_;
+    float userFlowScale_;
     Pool::ResourcePool savedResources_;
 };
 
