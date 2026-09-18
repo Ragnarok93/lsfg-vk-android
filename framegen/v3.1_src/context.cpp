@@ -279,10 +279,17 @@ void Context::present(Vulkan& vk,
             "Interpolation phase count must match active generation count");
     auto& data = this->data.at(this->frameIdx % 8);
 
-    if (data.shouldWait)
+    if (data.shouldWait) {
         for (size_t i = 0; i < data.generationCount; ++i)
             if (!data.completionFences.at(i).wait(vk.device, framegenWaitTimeoutNs()))
                 throw LSFG::vulkan_error(VK_TIMEOUT, "Fence wait timed out");
+#ifdef __ANDROID__
+        // Ring retirement is also the no-stall timing harvest point for the
+        // async Android completion path. The slot is known complete before any
+        // timestamp/output-semaphore resources in it are replaced.
+        this->recordAdaptiveFlowGpuTiming(vk, data);
+#endif
+    }
     data.shouldWait = generationCount > 0;
     data.generationCount = generationCount;
 #ifdef __ANDROID__
