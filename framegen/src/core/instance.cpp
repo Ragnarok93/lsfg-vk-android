@@ -63,7 +63,9 @@ public:
     ScopedPrivateInstanceLayerSuppression()
         : lock(privateInstanceEnvironmentMutex),
           previousDisable(readEnvironment("DISABLE_LSFG")),
-          previousInstanceLayers(readEnvironment("VK_INSTANCE_LAYERS")) {
+          previousInstanceLayers(readEnvironment("VK_INSTANCE_LAYERS")),
+          previousLoaderLayersEnable(readEnvironment("VK_LOADER_LAYERS_ENABLE")),
+          previousLoaderLayersDisable(readEnvironment("VK_LOADER_LAYERS_DISABLE")) {
         // GameNative force-enables the LSFG implicit layer for the game's
         // presentation instance. The framegen backend owns a separate compute
         // instance and must never recursively load LSFG into itself: destroying
@@ -71,17 +73,18 @@ public:
         // the outer layer is still executing.
         setenv("DISABLE_LSFG", "1", 1);
 
-        if (previousInstanceLayers.has_value()) {
-            const auto filtered = stripLayerName(
-                *previousInstanceLayers, "VK_LAYER_LS_frame_generation");
-            if (filtered.empty())
-                unsetenv("VK_INSTANCE_LAYERS");
-            else
-                setenv("VK_INSTANCE_LAYERS", filtered.c_str(), 1);
-        }
+        // GameNative currently force-enables LSFG through both the legacy
+        // VK_INSTANCE_LAYERS path and the modern loader filter. The private
+        // compute instance must not inherit either one. Disable all application
+        // layers for this one vkCreateInstance call; the wrapper remains an ICD.
+        unsetenv("VK_INSTANCE_LAYERS");
+        unsetenv("VK_LOADER_LAYERS_ENABLE");
+        setenv("VK_LOADER_LAYERS_DISABLE", "*", 1);
     }
 
     ~ScopedPrivateInstanceLayerSuppression() {
+        restoreEnvironment("VK_LOADER_LAYERS_DISABLE", previousLoaderLayersDisable);
+        restoreEnvironment("VK_LOADER_LAYERS_ENABLE", previousLoaderLayersEnable);
         restoreEnvironment("VK_INSTANCE_LAYERS", previousInstanceLayers);
         restoreEnvironment("DISABLE_LSFG", previousDisable);
     }
@@ -95,6 +98,8 @@ private:
     std::unique_lock<std::mutex> lock;
     std::optional<std::string> previousDisable;
     std::optional<std::string> previousInstanceLayers;
+    std::optional<std::string> previousLoaderLayersEnable;
+    std::optional<std::string> previousLoaderLayersDisable;
 };
 
 } // namespace
