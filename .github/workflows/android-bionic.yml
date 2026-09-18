@@ -38,6 +38,7 @@ jobs:
         run: |
           python3 tests/android_ahb_portability_test.py
           python3 tests/release_ci_portability_test.py
+          python3 tests/production_pipeline_cleanup_test.py
           python3 tests/android_external_semaphore_regression_test.py
           python3 tests/android_wsi_loader_bridge_test.py
           python3 tests/android_instance_dispatch_regression_test.py
