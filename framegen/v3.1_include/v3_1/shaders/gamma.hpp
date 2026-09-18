@@ -41,7 +41,8 @@ namespace LSFG_3_1::Shaders {
         /// Dispatch the shaderchain.
         ///
         void Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
-            uint64_t pass_idx, size_t activeGenerationCount);
+            uint64_t pass_idx, size_t activeGenerationCount,
+            float interpolationPhase = -1.0F);
 
         /// Get the output image
         [[nodiscard]] const auto& getOutImage() const { return this->outImg; }
