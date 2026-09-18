@@ -16,16 +16,22 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
 
         present_start = source.index("VkResult LsContext::present")
         handoff = source.index("submitAndWaitForAhbHandoff", present_start)
-        adaptive_zero = source.index("if (adaptiveZeroGeneration)", handoff)
+        history_start = source.index(
+            "const auto advanceAdaptiveHistoryAndPresentSource", handoff)
+        adaptive_zero = source.index("if (adaptiveZeroGeneration)", history_start)
         zero_end = source.index("if (warmupSourceHistory)", adaptive_zero)
-        zero_block = source[adaptive_zero:zero_end]
+        history_block = source[history_start:zero_end]
 
         self.assertGreater(adaptive_zero, handoff)
-        self.assertIn("presentContextWithCount", zero_block)
-        self.assertIn("stage=adaptive-history-advance", zero_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", zero_block)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", zero_block)
-        self.assertNotIn("enterSourceOnlyBypass", zero_block)
+        self.assertIn("presentContextWithCount", history_block)
+        self.assertIn("stage=adaptive-history-advance", history_block)
+        self.assertIn("requiresSourceHistoryWarmup_ = false", history_block)
+        self.assertIn(
+            'return advanceAdaptiveHistoryAndPresentSource("scheduler-zero")',
+            history_block,
+        )
+        self.assertNotIn("requiresSourceHistoryWarmup_ = true", history_block)
+        self.assertNotIn("enterSourceOnlyBypass", history_block)
 
     def test_framegen_zero_generation_refreshes_temporal_preprocessing(self) -> None:
         backend_sources = (
@@ -61,8 +67,8 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
             self.assertLess(alpha, beta_guard)
             self.assertLess(beta_guard, beta)
             self.assertLess(beta, zero_finish)
-            self.assertIn("preprocessingFence.wait", zero_block)
-            self.assertIn("framegenWaitTimeoutNs()", zero_block)
+            self.assertNotIn("preprocessingFence.wait", zero_block)
+            self.assertIn("data.preprocessingFence.reset", zero_block)
             self.assertIn("this->frameIdx++", zero_block)
             self.assertIn("return", zero_block)
 
@@ -107,7 +113,22 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
                 source_path.as_posix(),
             )
             self.assertIn("data.preprocessingFence", zero_block, source_path.as_posix())
-            self.assertIn("data.preprocessingFence.wait", zero_block, source_path.as_posix())
+            self.assertNotIn(
+                "data.preprocessingFence.wait",
+                zero_block,
+                source_path.as_posix(),
+            )
+            retirement = present[:zero_start]
+            self.assertIn(
+                "data.generationCount == 0",
+                retirement,
+                source_path.as_posix(),
+            )
+            self.assertIn(
+                "data.preprocessingFence.wait",
+                retirement,
+                source_path.as_posix(),
+            )
 
     def test_generated_passes_reuse_completion_fences(self) -> None:
         backend_sources = (
