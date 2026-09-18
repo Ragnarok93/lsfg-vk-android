@@ -145,8 +145,8 @@ def patch_outer_header(path: Path) -> None:
         DeferredZero,
         ReprimeHistory,
     };
-    static constexpr size_t kDeferredZeroDecisionThreshold = 6;
-    static constexpr uint64_t kDeferredZeroMinimumDurationMs = 250;
+    static constexpr size_t kDeferredZeroDecisionThreshold = 1;
+    static constexpr uint64_t kDeferredZeroMinimumDurationMs = 0;
     static constexpr uint64_t kRawHistoryBudgetBytes = 64ULL * 1024ULL * 1024ULL;
     HistoryMaintenanceState historyMaintenanceState_{HistoryMaintenanceState::LiveHistory};
     std::array<Mini::Image, 3> rawSourceHistory_{};
@@ -410,24 +410,18 @@ std::array<size_t, 3> LsContext::orderedRawHistorySlots() const {
         if (this->historyMaintenanceState_ == HistoryMaintenanceState::LiveHistory
                 && this->deferredZeroRawHistoryAllocated_
                 && !this->deferredZeroDisabledForContext_
-                && this->rawSourceHistoryCount_ >= 3
                 && this->consecutiveZeroDecisions_ >= kDeferredZeroDecisionThreshold
                 && zeroDemandMs >= kDeferredZeroMinimumDurationMs) {
-            try {
-                this->flushPendingAndroidWork(true);
-                this->historyMaintenanceState_ = HistoryMaintenanceState::DeferredZero;
-                metrics.windowDeferredZeroEntries++;
-                metrics.totalDeferredZeroEntries++;
-                std::cerr << "lsfg-vk: deferred-zero state=enter streak="
-                          << this->consecutiveZeroDecisions_
-                          << " elapsed_ms=" << zeroDemandMs << '\n';
-            } catch (const std::exception& error) {
-                this->deferredZeroDisabledForContext_ = true;
-                this->invalidateDeferredZeroHistory();
-                metrics.totalDeferredFallbacks++;
-                std::cerr << "lsfg-vk: deferred-zero entry-fallback reason="
-                          << error.what() << '\n';
-            }
+            // A zero-generation decision has no generated output to protect.
+            // Move directly to the game-device-local raw-history path instead
+            // of submitting private-framegen preprocessing and later blocking
+            // this presentation thread while recycling its SYNC_FD slot.
+            this->historyMaintenanceState_ = HistoryMaintenanceState::DeferredZero;
+            metrics.windowDeferredZeroEntries++;
+            metrics.totalDeferredZeroEntries++;
+            std::cerr << "lsfg-vk: deferred-zero state=enter streak="
+                      << this->consecutiveZeroDecisions_
+                      << " elapsed_ms=" << zeroDemandMs << '\n';
         }
     } else {
         this->zeroDemandActive_ = false;
