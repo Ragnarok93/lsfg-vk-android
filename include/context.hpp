@@ -152,6 +152,15 @@ private:
     // OPAQUE_FD semaphore, or an export fails at runtime, this is disabled for
     // the life of the context and the established synchronous fence path wins.
     bool asyncAhbHandoffEnabled_{false};
+
+    // Deadline admission remains shadow-only until device timing validates the
+    // predictor. The host completion EWMA is the fail-open coarse fallback when
+    // detailed Adaptive Flow GPU timing is unavailable.
+    bool deadlineHostCostValid_{false};
+    double deadlineHostCostEwmaMs_{0.0};
+    size_t deadlineHostCostGenerationCount_{0};
+    double deadlinePositivePredictionErrorEwmaMs_{0.0};
+
     struct RuntimeMetrics {
         using Clock = std::chrono::steady_clock;
 
