@@ -129,8 +129,7 @@ jobs:
 
           strings "$artifact" > /tmp/lsfg-strings.txt
           for required in \
-            'deferred-zero reprime-warmup-begin' \
-            'deferred-zero reprime-deferred request_count=' \
+            'adaptive-history-advance' \
             'candidate-b4-beta4-predicate-opt' \
             'candidate-b11-beta4-pow2-mask' \
             'candidate-b13-beta4-fused-mask' \
