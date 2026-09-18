@@ -947,6 +947,33 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const double sourceIntervalAvgMs = metrics.windowSourceIntervals > 0
                 ? metrics.windowSourceIntervalMs / static_cast<double>(metrics.windowSourceIntervals)
                 : 0.0;
+            const double sourceDeadlineErrorAvgMs =
+                metrics.windowSourceDeadlineSamples > 0
+                ? metrics.windowSourceDeadlineErrorMs
+                    / static_cast<double>(metrics.windowSourceDeadlineSamples)
+                : 0.0;
+            const double sourceDeadlineErrorAbsAvgMs =
+                metrics.windowSourceDeadlineSamples > 0
+                ? metrics.windowSourceDeadlineErrorAbsMs
+                    / static_cast<double>(metrics.windowSourceDeadlineSamples)
+                : 0.0;
+            const double syntheticDeadlineErrorAvgMs =
+                metrics.windowSyntheticDeadlineSamples > 0
+                ? metrics.windowSyntheticDeadlineErrorMs
+                    / static_cast<double>(metrics.windowSyntheticDeadlineSamples)
+                : 0.0;
+            const double predictedLsfgAvgMs =
+                metrics.windowDeadlinePredictionSamples > 0
+                ? metrics.windowPredictedLsfgMs
+                    / static_cast<double>(metrics.windowDeadlinePredictionSamples)
+                : 0.0;
+            const double actualLsfgAvgMs =
+                metrics.windowDeadlinePredictionSamples > 0
+                ? metrics.windowActualLsfgMs
+                    / static_cast<double>(metrics.windowDeadlinePredictionSamples)
+                : 0.0;
+            const double interceptPresentAvgMs = sourceCount > 0.0
+                ? metrics.windowInterceptPresentMs / sourceCount : 0.0;
 
             std::cerr << "lsfg-vk: metrics"
                       << " source_fps=" << sourceFps
@@ -973,9 +1000,41 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
                       << " source_interval_avg_ms=" << sourceIntervalAvgMs
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
+                      << " source_deadline_submit_error_avg_ms="
+                      << sourceDeadlineErrorAvgMs
+                      << " source_deadline_submit_error_abs_avg_ms="
+                      << sourceDeadlineErrorAbsAvgMs
+                      << " synthetic_deadline_submit_error_avg_ms="
+                      << syntheticDeadlineErrorAvgMs
+                      << " synthetic_opportunities="
+                      << metrics.windowSyntheticOpportunities
+                      << " synthetic_opportunities_total="
+                      << metrics.totalSyntheticOpportunities
+                      << " deadline_shadow_rejects="
+                      << metrics.windowDeadlineShadowRejects
+                      << " deadline_shadow_rejects_total="
+                      << metrics.totalDeadlineShadowRejects
+                      << " deadline_shadow_late="
+                      << metrics.windowDeadlineShadowLate
+                      << " deadline_shadow_late_total="
+                      << metrics.totalDeadlineShadowLate
+                      << " deadline_prediction_samples="
+                      << metrics.windowDeadlinePredictionSamples
+                      << " deadline_prediction_samples_total="
+                      << metrics.totalDeadlinePredictionSamples
+                      << " predicted_lsfg_avg_ms=" << predictedLsfgAvgMs
+                      << " actual_lsfg_avg_ms=" << actualLsfgAvgMs
+                      << " prediction_error_margin_ms="
+                      << this->deadlinePositivePredictionErrorEwmaMs_
+                      << " intercepted_present_avg_ms=" << interceptPresentAvgMs
+                      << " generated_completion_sync=host-wait"
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
+                      << " adaptive_governed_density="
+                      << adaptiveTelemetry.governedGeneratedDensity
+                      << " adaptive_fractional_phase="
+                      << adaptiveTelemetry.fractionalPhase
                       << " adaptive_cost_limit=" << adaptiveTelemetry.costLimit
                       << " adaptive_final_generated=" << adaptiveTelemetry.generatedFrames
                       << " adaptive_zero_cycles=" << metrics.windowAdaptiveZeroGenerationCycles
