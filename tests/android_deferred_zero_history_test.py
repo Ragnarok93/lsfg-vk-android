@@ -179,5 +179,23 @@ class AndroidDeferredZeroHistoryContractTest(unittest.TestCase):
         )
 
 
+    def test_zero_generation_enters_local_history_without_host_wait(self) -> None:
+        transform = (ROOT / "scripts/adreno_deferred_zero_history.py").read_text(encoding="utf-8")
+
+        self.assertIn("kDeferredZeroDecisionThreshold = 1", transform)
+        self.assertIn("kDeferredZeroMinimumDurationMs = 0", transform)
+
+        decision_start = transform.index("if (adaptiveZeroGeneration)")
+        decision_end = transform.index("metrics_marker =", decision_start)
+        decision = transform[decision_start:decision_end]
+        self.assertNotIn("flushPendingAndroidWork(true)", decision)
+
+        deferred_start = transform.index("deferred-zero source-only no-framegen")
+        deferred_end = transform.index("deferred-zero reprime-begin", deferred_start)
+        deferred = transform[deferred_start:deferred_end]
+        self.assertNotIn("waitPendingHistoryCompletionFd", deferred)
+        self.assertNotIn("presentContextWithCount", deferred)
+
+
 if __name__ == "__main__":
     unittest.main()
