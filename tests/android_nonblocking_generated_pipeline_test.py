@@ -68,10 +68,10 @@ class AndroidNonblockingGeneratedPipelineTest(unittest.TestCase):
 
         # Destruction/recreation still owns the bounded lifecycle drain. The
         # resident Off/On seam must only enqueue/release the buffered real image.
-        soft_start = transform.index("soft resident bypass never drains framegen synchronously")
-        soft_end = transform.index("soft-bypass-buffered-source", soft_start) + len(
-            "soft-bypass-buffered-source"
+        soft_start = transform.index(
+            'nonblocking_bypass = """void LsContext::enterSourceOnlyBypass(VkQueue queue)'
         )
+        soft_end = transform.index('"""', soft_start + len('nonblocking_bypass = """'))
         soft = transform[soft_start:soft_end]
         self.assertNotIn("waitContext(", soft)
         self.assertNotIn("flushPendingAndroidWork(true)", soft)
