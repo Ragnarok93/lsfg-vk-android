@@ -606,12 +606,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         conf.adaptiveFramegen ? conf.fpsLimit : 0,
         conf.multiplier > 1 ? static_cast<size_t>(conf.multiplier - 1) : 0);
     std::chrono::nanoseconds sourceInterval{};
+    constexpr double kRuntimeTimingDiscontinuityMs = 250.0;
     if (metrics.hasLastSourcePresent) {
         sourceInterval = std::chrono::duration_cast<std::chrono::nanoseconds>(
             cycleStart - metrics.lastSourcePresent);
         const double sourceIntervalMs = std::chrono::duration<double, std::milli>(
             sourceInterval).count();
-        constexpr double kRuntimeTimingDiscontinuityMs = 250.0;
         if (sourceIntervalMs < kRuntimeTimingDiscontinuityMs) {
             metrics.windowSourceIntervalMs += sourceIntervalMs;
             if (sourceIntervalMs > metrics.windowSourceIntervalMaxMs)
@@ -771,6 +771,40 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto cycleEnd = RuntimeMetrics::Clock::now();
         const double cycleMs = std::chrono::duration<double, std::milli>(
             cycleEnd - cycleStart).count();
+        if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
+            // Android can stop the guest while it is already inside this
+            // present call. In that case sourceInterval was sampled before the
+            // stop and looks normal, while host wall-clock dispatch/wait/cycle
+            // timers absorb the entire pause. Drop the whole current metrics
+            // window so a Quick Menu/suspend boundary cannot masquerade as a
+            // multi-second GPU or frame-pacing stall.
+            excludeCurrentCycleFromTimingMetrics = true;
+            std::cerr << "lsfg-vk: runtime-timing-discontinuity"
+                      << " cycle_ms=" << cycleMs
+                      << " action=reset-window\n";
+            metrics.windowStart = cycleEnd;
+            metrics.windowSourceFrames = 0;
+            metrics.windowGeneratedFrames = 0;
+            metrics.windowSourcePresentFailures = 0;
+            metrics.windowGeneratedPresentFailures = 0;
+            metrics.windowAdaptiveZeroGenerationCycles = 0;
+            metrics.windowAdaptiveRateSnaps = 0;
+            metrics.windowAdaptiveCostRaises = 0;
+            metrics.windowAdaptiveCostBackoffs = 0;
+            metrics.windowAdaptiveCostProbes = 0;
+            metrics.windowAdaptiveDiscontinuities = 0;
+            metrics.windowAsyncHandoffs = 0;
+            metrics.windowSyncHandoffs = 0;
+            metrics.windowCycleMs = 0.0;
+            metrics.windowCycleMaxMs = 0.0;
+            metrics.windowHandoffMs = 0.0;
+            metrics.windowDispatchMs = 0.0;
+            metrics.windowWaitIdleMs = 0.0;
+            metrics.windowGeneratedPresentMs = 0.0;
+            metrics.windowSourceIntervalMs = 0.0;
+            metrics.windowSourceIntervalMaxMs = 0.0;
+            metrics.windowSourceIntervals = 0;
+        }
         if (!excludeCurrentCycleFromTimingMetrics) {
             metrics.windowCycleMs += cycleMs;
             if (cycleMs > metrics.windowCycleMaxMs)

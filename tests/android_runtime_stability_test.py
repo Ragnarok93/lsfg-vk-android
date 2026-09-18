@@ -120,6 +120,12 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("kRuntimeTimingDiscontinuityMs = 250.0", source)
         self.assertIn("if (sourceIntervalMs < kRuntimeTimingDiscontinuityMs)", source)
         self.assertIn("bool excludeCurrentCycleFromTimingMetrics = false", source)
+        self.assertIn("cycleMs >= kRuntimeTimingDiscontinuityMs", source)
+        self.assertIn("excludeCurrentCycleFromTimingMetrics = true", source)
+        self.assertIn("runtime-timing-discontinuity", source)
+        self.assertIn("action=reset-window", source)
+        self.assertIn("metrics.windowWaitIdleMs = 0.0", source)
+        self.assertIn("metrics.windowDispatchMs = 0.0", source)
         self.assertIn("if (!excludeCurrentCycleFromTimingMetrics)", source)
 
     def test_framegen_runtime_reconfigures_instead_of_reusing_incompatible_outputs(self) -> None:
