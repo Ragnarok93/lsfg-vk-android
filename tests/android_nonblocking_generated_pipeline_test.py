@@ -28,8 +28,8 @@ class AndroidNonblockingGeneratedPipelineTest(unittest.TestCase):
             "framegenInFlight_",
             "framegen-late-drop",
             "waitContext(*this->lsfgCtxId, 0)",
-            "generatedCompletionFds",
-            "presentContextWithCountAndCompletionFds",
+            "framegenOutputEligible_",
+            "pendingGeneratedCount_",
             "sourceWait=buffered-source",
         ):
             self.assertIn(marker, transform)
