@@ -270,8 +270,13 @@ Context::Context(Vulkan& vk,
 
 void Context::present(Vulkan& vk,
         int inSem, const std::vector<int>& outSem,
-        size_t activeGenerationCount) {
+        size_t activeGenerationCount,
+        const std::vector<float>* interpolationPhases) {
     const size_t generationCount = std::min(activeGenerationCount, vk.generationCount);
+    if (interpolationPhases != nullptr
+            && interpolationPhases->size() != generationCount)
+        throw std::invalid_argument(
+            "Interpolation phase count must match active generation count");
     auto& data = this->data.at(this->frameIdx % 8);
 
     if (data.shouldWait)
@@ -447,6 +452,9 @@ void Context::present(Vulkan& vk,
 #endif
 
     for (size_t pass = 0; pass < generationCount; pass++) {
+        const float interpolationPhase = interpolationPhases != nullptr
+            ? interpolationPhases->at(pass)
+            : -1.0F;
         auto& internalSemaphore = data.internalSemaphores.at(pass);
         auto& outSemaphore = data.outSemaphores.at(pass);
         const bool hasOutSemaphore =
@@ -475,28 +483,28 @@ void Context::present(Vulkan& vk,
             const auto generationGraph = this->flowGraph(generationGraphIndex);
             for (size_t i = 0; i < 7; i++) {
                 generationGraph.gamma->at(i).Dispatch(
-                    buf2, this->frameIdx, pass, generationCount);
+                    buf2, this->frameIdx, pass, generationCount, interpolationPhase);
                 if (i >= 4)
                     generationGraph.delta->at(i - 4).Dispatch(
-                        buf2, this->frameIdx, pass, generationCount);
+                        buf2, this->frameIdx, pass, generationCount, interpolationPhase);
             }
             generationGraph.generate->Dispatch(
                 buf2, this->frameIdx, pass, generationCount);
         } else {
             for (size_t i = 0; i < 7; i++) {
-                this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);
+                this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount, interpolationPhase);
                 if (i >= 4)
-                    this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);
+                    this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount, interpolationPhase);
             }
-            this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);
+            this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount, interpolationPhase);
         }
 #else
         for (size_t i = 0; i < 7; i++) {
-            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);
+            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount, interpolationPhase);
             if (i >= 4)
-                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);
+                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount, interpolationPhase);
         }
-        this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);
+        this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount, interpolationPhase);
 #endif
 
 #ifdef __ANDROID__
