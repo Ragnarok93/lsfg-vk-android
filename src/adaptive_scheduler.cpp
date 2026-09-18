@@ -164,23 +164,20 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     updateCostLimit(wantedGenerated);
     telemetry_.costLimit = costLimit_;
 
-    // Apply the cost ceiling before fractional accumulation. This prevents an
-    // intentionally suppressed high-cost request from building a backlog that
-    // would burst as soon as the governor probes a higher level.
+    // Stability recovery: select a deterministic integer generation tier.
+    // Do not accumulate fractional debt or alternate 0/1 generated frames;
+    // those zero-generation transitions exercised the fragile temporal-history
+    // path and caused repeated loader/lifecycle failures on Android.
     const double governedWanted = std::min(
         wantedGenerated, static_cast<double>(costLimit_));
-    fractionalGeneratedBudget_ += governedWanted;
+    const auto roundedTier = static_cast<std::size_t>(std::clamp(
+        std::floor(governedWanted + 0.5),
+        0.0,
+        static_cast<double>(costLimit_)));
+    fractionalGeneratedBudget_ = 0.0;
 
-    const auto generated = static_cast<std::size_t>(
-        std::floor(fractionalGeneratedBudget_ + 1e-6));
-    const auto clamped = std::min(generated, costLimit_);
-    fractionalGeneratedBudget_ -= static_cast<double>(clamped);
-
-    if (clamped == costLimit_ && costLimit_ > 0)
-        fractionalGeneratedBudget_ = std::min(fractionalGeneratedBudget_, 0.999999);
-
-    telemetry_.generatedFrames = clamped;
-    return clamped;
+    telemetry_.generatedFrames = roundedTier;
+    return roundedTier;
 }
 
 void AdaptiveFrameScheduler::resetRateChangeCandidates() {
