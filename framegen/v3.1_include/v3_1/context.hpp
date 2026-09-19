@@ -83,7 +83,8 @@ namespace LSFG_3_1 {
             size_t activeGenerationCount,
             VkExternalSemaphoreHandleTypeFlagBits inSemHandleType =
                 VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
-            bool exportAndroidSyncFdOutputs = false);
+            bool exportAndroidSyncFdOutputs = false,
+            size_t interpolationGenerationCount = 0);
 
         [[nodiscard]] bool waitForLastPresent(Vulkan& vk, uint64_t timeoutNs);
 
