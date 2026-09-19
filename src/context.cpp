@@ -645,30 +645,39 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         : static_cast<size_t>(conf.multiplier - 1);
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
-    if (this->adaptiveDisplayTimingEnabled_) {
-        uint64_t candidatePeriodNs = 0;
-        if (conf.adaptiveFramegen && conf.fpsLimit > 0) {
-            candidatePeriodNs =
-                1'000'000'000ULL / static_cast<uint64_t>(conf.fpsLimit);
-        } else if (sourceInterval.count() > 0) {
-            candidatePeriodNs = static_cast<uint64_t>(
-                sourceInterval.count() / static_cast<int64_t>(generatedFrameCount + 1));
-        }
+    const uint64_t sourceArrivalTimeNs = monotonicNowNs();
+    const double sourceTimelineIntervalMs =
+        std::chrono::duration<double, std::milli>(sourceInterval).count();
+    const bool sourceTimelineDiscontinuity =
+        sourceTimelineIntervalMs >= kRuntimeTimingDiscontinuityMs;
 
-        if (candidatePeriodNs > 0) {
-            if (this->adaptivePresentPeriodNs_ == 0 || conf.adaptiveFramegen) {
-                this->adaptivePresentPeriodNs_ = candidatePeriodNs;
-            } else {
-                // Fixed-FG + Adaptive Flow has no explicit output target. Follow
-                // the observed source cadence without resetting the presentation
-                // anchor on every small source-interval fluctuation.
-                this->adaptivePresentPeriodNs_ =
-                    (this->adaptivePresentPeriodNs_ * 7ULL + candidatePeriodNs) / 8ULL;
-            }
-        }
-    } else {
+    if (sourceTimelineDiscontinuity) {
+        this->sourceTimeline_.reset();
+        this->currentSourceTimeline_ = {};
         this->adaptivePresentPeriodNs_ = 0;
-        this->adaptiveNextPresentTimeNs_ = 0;
+    } else {
+        this->currentSourceTimeline_ = this->sourceTimeline_.observe(
+            sourceArrivalTimeNs, sourceInterval, false);
+        if (this->currentSourceTimeline_.valid) {
+            this->adaptivePresentPeriodNs_ =
+                this->currentSourceTimeline_.intervalNs
+                / static_cast<uint64_t>(generatedFrameCount + 1);
+
+            if (this->currentSourceTimeline_.sourceIndex > 0) {
+                const double deadlineErrorMs = std::abs(
+                    static_cast<double>(
+                        this->currentSourceTimeline_.sourceDeadlineErrorNs))
+                    / 1'000'000.0;
+                metrics.windowSourceDeadlineErrorAbsMs += deadlineErrorMs;
+                metrics.windowSourceDeadlineErrorMaxMs = std::max(
+                    metrics.windowSourceDeadlineErrorMaxMs, deadlineErrorMs);
+                metrics.windowSourceDeadlineSamples++;
+                if (this->currentSourceTimeline_.rebased)
+                    metrics.windowSourceTimelineRebases++;
+            }
+        } else {
+            this->adaptivePresentPeriodNs_ = 0;
+        }
     }
 
     const bool adaptiveZeroGeneration = conf.adaptiveFramegen && generatedFrameCount == 0;
@@ -797,34 +806,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     const auto adaptivePresentPNext = [&](
             const void* downstream,
+            uint64_t desiredPresentTimeNs,
             VkPresentTimeGOOGLE& presentTime,
             VkPresentTimesInfoGOOGLE& presentTimes) -> const void* {
-        if (!this->adaptiveDisplayTimingEnabled_
-                || this->adaptivePresentPeriodNs_ == 0)
+        if (!this->adaptiveDisplayTimingEnabled_ || desiredPresentTimeNs == 0)
             return downstream;
 
         const uint64_t nowNs = monotonicNowNs();
         if (nowNs == 0)
             return downstream;
 
-        // Keep the first ready frame close to the next compositor opportunity,
-        // then meter every following generated/source image by the requested
-        // output period. Rebase after stalls/suspend so stale slots never cause
-        // a catch-up burst.
-        const uint64_t leadNs = std::max<uint64_t>(
-            250'000ULL,
-            std::min<uint64_t>(2'000'000ULL, this->adaptivePresentPeriodNs_ / 8ULL));
-        const uint64_t earliestNs = nowNs + leadNs;
-        if (this->adaptiveNextPresentTimeNs_ == 0
-                || this->adaptiveNextPresentTimeNs_
-                    + this->adaptivePresentPeriodNs_ < earliestNs) {
-            this->adaptiveNextPresentTimeNs_ = earliestNs;
-        }
-
-        const uint64_t desiredPresentTime = std::max(
-            this->adaptiveNextPresentTimeNs_, earliestNs);
-        this->adaptiveNextPresentTimeNs_ =
-            desiredPresentTime + this->adaptivePresentPeriodNs_;
+        // VK_GOOGLE_display_timing only supplies a "not earlier than" hint.
+        // Once a source-anchored slot is already late, do not invent a new
+        // generated-driven deadline: present it as soon as the WSI permits.
+        const uint64_t effectiveDesiredTimeNs =
+            desiredPresentTimeNs > nowNs ? desiredPresentTimeNs : 0;
 
         uint32_t presentId = this->adaptivePresentId_++;
         if (presentId == 0) {
@@ -833,7 +829,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
         presentTime = VkPresentTimeGOOGLE{
             .presentID = presentId,
-            .desiredPresentTime = desiredPresentTime,
+            .desiredPresentTime = effectiveDesiredTimeNs,
         };
         presentTimes = VkPresentTimesInfoGOOGLE{
             .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
@@ -854,6 +850,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << " display_timing="
                   << (this->adaptiveDisplayTimingEnabled_ ? 1 : 0)
                   << " present_period_ns=" << this->adaptivePresentPeriodNs_
+                  << " source_timeline_valid="
+                  << (this->currentSourceTimeline_.valid ? 1 : 0)
+                  << " source_index=" << this->currentSourceTimeline_.sourceIndex
                   << "\n";
     }
 
@@ -902,7 +901,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedPresentMs = 0.0;
             metrics.windowSourceIntervalMs = 0.0;
             metrics.windowSourceIntervalMaxMs = 0.0;
+            metrics.windowSourceDeadlineErrorAbsMs = 0.0;
+            metrics.windowSourceDeadlineErrorMaxMs = 0.0;
             metrics.windowSourceIntervals = 0;
+            metrics.windowSourceDeadlineSamples = 0;
+            metrics.windowSourceTimelineRebases = 0;
         }
         if (!excludeCurrentCycleFromTimingMetrics) {
             metrics.windowCycleMs += cycleMs;
@@ -927,6 +930,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const double sourceIntervalAvgMs = metrics.windowSourceIntervals > 0
                 ? metrics.windowSourceIntervalMs / static_cast<double>(metrics.windowSourceIntervals)
                 : 0.0;
+            const double sourceDeadlineErrorAvgMs =
+                metrics.windowSourceDeadlineSamples > 0
+                    ? metrics.windowSourceDeadlineErrorAbsMs
+                        / static_cast<double>(metrics.windowSourceDeadlineSamples)
+                    : 0.0;
 
             std::cerr << "lsfg-vk: metrics"
                       << " source_fps=" << sourceFps
@@ -953,6 +961,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
                       << " source_interval_avg_ms=" << sourceIntervalAvgMs
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
+                      << " source_deadline_error_avg_ms=" << sourceDeadlineErrorAvgMs
+                      << " source_deadline_error_max_ms="
+                      << metrics.windowSourceDeadlineErrorMaxMs
+                      << " source_timeline_rebases="
+                      << metrics.windowSourceTimelineRebases
+                      << " source_timeline_index="
+                      << this->currentSourceTimeline_.sourceIndex
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
@@ -1026,7 +1041,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedPresentMs = 0.0;
             metrics.windowSourceIntervalMs = 0.0;
             metrics.windowSourceIntervalMaxMs = 0.0;
+            metrics.windowSourceDeadlineErrorAbsMs = 0.0;
+            metrics.windowSourceDeadlineErrorMaxMs = 0.0;
             metrics.windowSourceIntervals = 0;
+            metrics.windowSourceDeadlineSamples = 0;
+            metrics.windowSourceTimelineRebases = 0;
         }
 
         this->frameIdx++;
@@ -1134,7 +1153,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const VkPresentInfoKHR adaptiveSourcePresentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = adaptivePresentPNext(
-                pNext, adaptiveSourcePresentTime, adaptiveSourcePresentTimes),
+                pNext,
+                this->currentSourceTimeline_.sourceDesiredTimeNs,
+                adaptiveSourcePresentTime, adaptiveSourcePresentTimes),
             .waitSemaphoreCount = 1,
             .pWaitSemaphores = &sourceReady,
             .swapchainCount = 1,
@@ -1168,7 +1189,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const VkPresentInfoKHR warmupPresentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = adaptivePresentPNext(
-                pNext, warmupPresentTime, warmupPresentTimes),
+                pNext,
+                this->currentSourceTimeline_.sourceDesiredTimeNs,
+                warmupPresentTime, warmupPresentTimes),
             .waitSemaphoreCount = 1,
             .pWaitSemaphores = &sourceReady,
             .swapchainCount = 1,
@@ -1288,10 +1311,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         VkPresentTimeGOOGLE generatedPresentTime{};
         VkPresentTimesInfoGOOGLE generatedPresentTimes{};
         const void* generatedDownstreamPNext = i == 0 ? pNext : nullptr;
+        const double syntheticFraction =
+            static_cast<double>(i + 1)
+            / static_cast<double>(generatedFrameCount + 1);
+        const uint64_t syntheticDesiredTimeNs =
+            this->sourceTimeline_.syntheticDesiredTimeNs(
+                this->currentSourceTimeline_, syntheticFraction);
         const VkPresentInfoKHR presentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = adaptivePresentPNext(
                 generatedDownstreamPNext,
+                syntheticDesiredTimeNs,
                 generatedPresentTime,
                 generatedPresentTimes),
             .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
@@ -1330,6 +1360,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = adaptivePresentPNext(
             finalSourceDownstreamPNext,
+            this->currentSourceTimeline_.sourceDesiredTimeNs,
             finalSourcePresentTime,
             finalSourcePresentTimes),
         .waitSemaphoreCount = 1,
@@ -1457,6 +1488,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
 #ifdef __ANDROID__
 void LsContext::enterSourceOnlyBypass() {
+    this->sourceTimeline_.reset();
+    this->currentSourceTimeline_ = {};
     this->lastGeneratedFrameCount_ = 0;
     this->requiresSourceHistoryWarmup_ = true;
     this->previousSourceCopySignalValid_ = false;
