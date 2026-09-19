@@ -47,8 +47,11 @@ int main() {
         assert(first.valid);
         const auto late = timeline.observe(2'050'000'000ULL, 20ms);
         assert(late.rebased);
-        assert(late.sourceDesiredTimeNs > 2'050'000'000ULL);
         assert(late.sourceDeadlineErrorNs == 30'000'000LL);
+        // A late source receives only a small forward-safety lead, never a
+        // fresh 20 ms generation window.
+        assert(late.previousSourceDesiredTimeNs == 2'050'000'000ULL);
+        assert(late.sourceDesiredTimeNs == 2'052'000'000ULL);
     }
 
     {
@@ -74,6 +77,26 @@ int main() {
         assert(stable.sourceDeadlineErrorNs == 0);
         assert(stable.previousSourceDesiredTimeNs == 5'032'000'000ULL);
         assert(stable.sourceDesiredTimeNs == 5'048'000'000ULL);
+    }
+
+    {
+        // Ordinary sub-threshold source jitter must not rebase every frame.
+        // Repeated rebases were visible as 10-25 events/second in the regressed
+        // runtime and made the synthetic budget chase the source itself.
+        SourceProtectedTimeline timeline;
+        assert(timeline.observe(6'000'000'000ULL, 16ms).valid);
+
+        const auto earlyJitter =
+            timeline.observe(6'014'500'000ULL, 16ms);
+        assert(earlyJitter.valid);
+        assert(!earlyJitter.rebased);
+        assert(earlyJitter.sourceDesiredTimeNs == 6'032'000'000ULL);
+
+        const auto lateJitter =
+            timeline.observe(6'033'000'000ULL, 16ms);
+        assert(lateJitter.valid);
+        assert(!lateJitter.rebased);
+        assert(lateJitter.sourceDesiredTimeNs == 6'048'000'000ULL);
     }
 
     {
