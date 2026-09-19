@@ -1650,6 +1650,28 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     size_t queuedGeneratedFrameCount = 0;
     for (size_t i = 0; i < generatedFrameCount; i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
+        const double syntheticFraction =
+            static_cast<double>(i + 1)
+            / static_cast<double>(generatedFrameCount + 1);
+        const uint64_t syntheticDesiredTimeNs =
+            this->sourceTimeline_.syntheticDesiredTimeNs(
+                this->currentSourceTimeline_, syntheticFraction);
+        const uint64_t syntheticAdmissionNowNs = monotonicNowNs();
+        if (syntheticDesiredTimeNs > 0
+                && syntheticAdmissionNowNs >= syntheticDesiredTimeNs) {
+            const size_t droppedGeneratedFrames = generatedFrameCount - i;
+            metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
+            metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
+            if (firstPresentDiagnostic) {
+                std::cerr << "lsfg-vk: runtime stage=generated-deadline-drop"
+                          << " planned=" << generatedFrameCount
+                          << " queued=" << queuedGeneratedFrameCount
+                          << " dropped=" << droppedGeneratedFrames
+                          << "\n";
+            }
+            break;
+        }
+
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
         auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, 0,
@@ -1701,12 +1723,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         VkPresentTimeGOOGLE generatedPresentTime{};
         VkPresentTimesInfoGOOGLE generatedPresentTimes{};
         const void* generatedDownstreamPNext = i == 0 ? pNext : nullptr;
-        const double syntheticFraction =
-            static_cast<double>(i + 1)
-            / static_cast<double>(generatedFrameCount + 1);
-        const uint64_t syntheticDesiredTimeNs =
-            this->sourceTimeline_.syntheticDesiredTimeNs(
-                this->currentSourceTimeline_, syntheticFraction);
         const VkPresentInfoKHR presentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = adaptivePresentPNext(

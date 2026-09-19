@@ -106,6 +106,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         generated = android_present[generated_start:source_start]
 
         self.assertIn("this->swapchain, 0,", generated)
+        self.assertIn("syntheticAdmissionNowNs >= syntheticDesiredTimeNs", generated)
+        self.assertIn("stage=generated-deadline-drop", generated)
         self.assertIn("res == VK_NOT_READY || res == VK_TIMEOUT", generated)
         self.assertIn(
             "droppedGeneratedFrames = generatedFrameCount - i", generated
