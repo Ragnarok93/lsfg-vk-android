@@ -1112,6 +1112,25 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " synthetic_drop_pressure="
                       << (observation.syntheticDropPressure ? 1 : 0)
                       << '\n';
+#ifdef __ANDROID__
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_FLOW",
+                "previous=%.3f requested=%.3f reason=%s flow_ms=%.3f lsfg_ms=%.3f "
+                "budget_ms=%.3f generation_count=%zu gpu=%.1f pressure_valid=%d "
+                "output_deficit=%d synthetic_drop_pressure=%d",
+                static_cast<double>(previousScale),
+                static_cast<double>(selectedScale),
+                AdaptiveFlowController::reasonName(flowTelemetry.reason),
+                observation.flowMs,
+                observation.totalLsfgMs,
+                observation.frameBudgetMs,
+                observation.generationCount,
+                observation.globalGpuUsagePercent,
+                observation.globalPressureValid ? 1 : 0,
+                observation.outputDeficit ? 1 : 0,
+                observation.syntheticDropPressure ? 1 : 0);
+#endif
         }
 
         const LSFG::AdaptiveFlowContextState state = conf.performance
@@ -1171,6 +1190,24 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " cost_probe=" << (adaptiveTelemetry.costProbe ? 1 : 0)
                       << " discontinuity=" << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
                       << "\n";
+#ifdef __ANDROID__
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_EVENT",
+                "source_fps=%.3f smoothed_source_fps=%.3f wanted_generated=%.3f "
+                "cost_limit=%zu final_generated=%zu rate_snap=%d cost_raise=%d "
+                "cost_backoff=%d cost_probe=%d discontinuity=%d",
+                adaptiveTelemetry.sourceFps,
+                adaptiveTelemetry.smoothedSourceFps,
+                adaptiveTelemetry.wantedGeneratedFrames,
+                adaptiveTelemetry.costLimit,
+                adaptiveTelemetry.generatedFrames,
+                adaptiveTelemetry.sourceRateSnapped ? 1 : 0,
+                adaptiveTelemetry.costRaised ? 1 : 0,
+                adaptiveTelemetry.costBackedOff ? 1 : 0,
+                adaptiveTelemetry.costProbe ? 1 : 0,
+                adaptiveTelemetry.discontinuityReset ? 1 : 0);
+#endif
         }
     }
 
@@ -1480,6 +1517,54 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " target_fps=" << conf.fpsLimit
                       << " performance=" << (conf.performance ? 1 : 0)
                       << "\n";
+
+#ifdef __ANDROID__
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_METRICS",
+                "source_fps=%.3f generated_fps=%.3f output_fps=%.3f "
+                "late=%llu admission=%llu deadline=%llu wsi=%llu "
+                "cycle_avg_ms=%.3f cycle_max_ms=%.3f handoff_ms=%.3f dispatch_ms=%.3f "
+                "wait_ms=%.3f source_interval_ms=%.3f source_interval_max_ms=%.3f "
+                "deadline_error_ms=%.3f rebases=%llu planned=%zu admitted=%zu "
+                "pred_total_ms=%.3f reserve_ms=%.3f effective_budget_ms=%.3f "
+                "wanted=%.3f cost_limit=%zu final_generated=%zu history_only=%llu "
+                "flow_active=%.3f flow_gpu=%.1f flow_output_fps=%.3f "
+                "flow_deficit=%d flow_reason=%s multiplier=%zu adaptive=%d target=%u",
+                sourceFps,
+                generatedFps,
+                outputFps,
+                static_cast<unsigned long long>(metrics.windowGeneratedLateDrops),
+                static_cast<unsigned long long>(metrics.windowAdmissionRejects),
+                static_cast<unsigned long long>(metrics.windowGeneratedDeadlineDrops),
+                static_cast<unsigned long long>(metrics.windowGeneratedWsiDrops),
+                cycleAvgMs,
+                metrics.windowCycleMaxMs,
+                handoffAvgMs,
+                dispatchAvgMs,
+                waitIdleAvgMs,
+                sourceIntervalAvgMs,
+                metrics.windowSourceIntervalMaxMs,
+                sourceDeadlineErrorAvgMs,
+                static_cast<unsigned long long>(metrics.windowSourceTimelineRebases),
+                plannedGeneratedFrameCount,
+                generatedFrameCount,
+                this->deadlineBatchDecision_.predictedTotalLsfgMs,
+                this->deadlineBatchDecision_.deliveryReserveMs,
+                this->deadlineBatchDecision_.effectiveUsableBudgetMs,
+                adaptiveTelemetry.wantedGeneratedFrames,
+                adaptiveTelemetry.costLimit,
+                adaptiveTelemetry.generatedFrames,
+                static_cast<unsigned long long>(metrics.windowAdaptiveZeroGenerationCycles),
+                static_cast<double>(this->adaptiveFlowActiveScale_),
+                this->adaptiveFlowGlobalGpuUsagePercent_,
+                metrics.lastWindowOutputFps,
+                this->adaptiveFlowController_.telemetry().outputDeficit ? 1 : 0,
+                AdaptiveFlowController::reasonName(this->adaptiveFlowReason_),
+                conf.multiplier,
+                conf.adaptiveFramegen ? 1 : 0,
+                conf.fpsLimit);
+#endif
 
             metrics.windowStart = cycleEnd;
             metrics.windowSourceFrames = 0;
