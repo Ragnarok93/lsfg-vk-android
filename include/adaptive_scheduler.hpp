@@ -17,7 +17,8 @@ struct AdaptiveSchedulerTelemetry {
     bool costProbe{false};
     bool discontinuityReset{false};
     bool configWarmStart{false};
-    bool lowFpsCutoff{false};
+    double fractionalPhase{};
+    std::size_t syntheticOpportunitiesCreated{};
 };
 
 struct SourceTimelineSample {
@@ -88,8 +89,9 @@ private:
 
     uint32_t targetFps_{};
     std::size_t maxGeneratedFrames_{};
-    double fractionalGeneratedBudget_{};
+    double fractionalOpportunityPhase_{};
     double smoothedSourceIntervalSeconds_{};
+    double lastTrustedSourceIntervalSeconds_{};
     bool hasSmoothedInterval_{false};
     // Unlike the current smoothing window, this survives timing discontinuities.
     // It distinguishes an established runtime that resumed before observing a
