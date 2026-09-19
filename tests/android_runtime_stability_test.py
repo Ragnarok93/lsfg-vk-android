@@ -214,7 +214,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
 
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn(
-            "info.googleDisplayTimingSupported\n        && conf.adaptiveFramegen",
+            "info.androidDisplayTimingSupported\n        && conf.adaptiveFramegen",
             context,
         )
         admission_start = context.index("Active deadline admission")
