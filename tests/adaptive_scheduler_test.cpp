@@ -459,7 +459,7 @@ int main() {
 
         predictor.observe(DeadlineAdmissionObservation{
             .mipmapsMs = 4.0,
-            .opticalFlowMs = 2.0,
+            .opticalFlowMs = 6.0,
             .totalLsfgMs = 9.0,
             .generationCount = 2,
             .valid = true,
@@ -468,7 +468,7 @@ int main() {
         const auto roomy = predictor.predict(2, 12.0);
         assert(roomy.valid);
         assert(roomy.predictedMipmapsMs > 3.99 && roomy.predictedMipmapsMs < 4.01);
-        assert(roomy.predictedOpticalFlowMs > 1.99 && roomy.predictedOpticalFlowMs < 2.01);
+        assert(roomy.predictedOpticalFlowMs > 5.99 && roomy.predictedOpticalFlowMs < 6.01);
         assert(roomy.predictedTotalLsfgMs > 8.99 && roomy.predictedTotalLsfgMs < 9.01);
         assert(roomy.safetyMarginMs >= 0.35);
         assert(roomy.wouldAdmit);
