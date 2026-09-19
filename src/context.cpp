@@ -669,9 +669,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
     metrics.lastSourcePresent = cycleStart;
     metrics.hasLastSourcePresent = true;
+    const size_t requestedFixedGeneratedFrameCount =
+        static_cast<size_t>(conf.multiplier - 1);
+    if (conf.adaptiveFramegen)
+        this->fixedSourceCadenceGovernor_.reset();
     const size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
-        : static_cast<size_t>(conf.multiplier - 1);
+        : this->fixedSourceCadenceGovernor_.plan(
+            sourceInterval,
+            requestedFixedGeneratedFrameCount,
+            this->lastDispatchedGeneratedFrameCount_,
+            !this->requiresSourceHistoryWarmup_);
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
@@ -686,6 +694,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
         this->deadlineAdmissionPredictor_.reset();
+        this->fixedSourceCadenceGovernor_.reset();
+        this->lastDispatchedGeneratedFrameCount_ = 0;
         this->sourceTimeline_.reset();
         this->currentSourceTimeline_ = {};
         this->adaptivePresentPeriodNs_ = 0;
@@ -699,6 +709,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
             this->requiresSourceHistoryWarmup_ = true;
             this->deadlineAdmissionPredictor_.reset();
+            this->fixedSourceCadenceGovernor_.reset();
+            this->lastDispatchedGeneratedFrameCount_ = 0;
         }
         if (this->currentSourceTimeline_.valid) {
             if (this->currentSourceTimeline_.sourceIndex > 0) {
@@ -850,7 +862,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     };
     const bool historyOnly =
         sourceHistoryWarmupActive
-        || (conf.adaptiveFramegen && plannedGeneratedFrameCount == 0)
+        || plannedGeneratedFrameCount == 0
         || (plannedGeneratedFrameCount > 0 && generatedFrameCount == 0);
     const AndroidFrameCycleMode cycleMode =
         historyOnly
@@ -1202,6 +1214,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << deadlinePredictionErrorAvgMs
                       << " deadline_prediction_samples="
                       << metrics.windowDeadlinePredictionSamples
+                      << " fixed_source_baseline_fps="
+                      << this->fixedSourceCadenceGovernor_.telemetry().baselineSourceFps
+                      << " fixed_source_interval_ratio="
+                      << this->fixedSourceCadenceGovernor_.telemetry().intervalRatio
+                      << " fixed_generation_limit="
+                      << this->fixedSourceCadenceGovernor_.telemetry().generationLimit
+                      << " fixed_source_backoff="
+                      << (this->fixedSourceCadenceGovernor_.telemetry().backedOff ? 1 : 0)
+                      << " fixed_source_raise="
+                      << (this->fixedSourceCadenceGovernor_.telemetry().raised ? 1 : 0)
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
@@ -1426,6 +1448,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     if (asyncExportFailed) {
+        this->lastDispatchedGeneratedFrameCount_ = 0;
         this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
         this->lastGeneratedFrameCount_ = 0;
@@ -1452,6 +1475,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     if (historyOnly) {
+        this->lastDispatchedGeneratedFrameCount_ = 0;
         // Zero-generation cadence still refreshes mipmaps/alpha history, but it
         // must not stall the real source. On the normal SYNC_FD path framegen
         // exports one batch-complete dependency after preprocessing and AHB
@@ -1609,6 +1633,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(adaptiveSourceResult, "pre-copy-history-only");
     }
 
+
+    this->lastDispatchedGeneratedFrameCount_ = generatedFrameCount;
 
     // 2. Tell framegen to generate intermediary frames. The normal Android
     //    path exports output-ready and batch-complete SYNC_FDs after submission,
@@ -2008,6 +2034,8 @@ void LsContext::enterSourceOnlyBypass() {
     this->lastGeneratedFrameCount_ = 0;
     this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ = true;
+    this->fixedSourceCadenceGovernor_.reset();
+    this->lastDispatchedGeneratedFrameCount_ = 0;
     this->previousSourceCopySignalValid_ = false;
 }
 #endif

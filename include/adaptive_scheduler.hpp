@@ -98,6 +98,47 @@ private:
     double perGeneratedMs_{0.0};
 };
 
+struct FixedSourceCadenceTelemetry {
+    double baselineSourceFps{};
+    double intervalRatio{1.0};
+    std::size_t requestedGeneratedFrames{};
+    std::size_t generationLimit{};
+    bool backedOff{false};
+    bool raised{false};
+    bool baselineValid{false};
+};
+
+/// Protects real/source cadence in Fixed frame-generation mode.
+///
+/// This governor never paces source frames and never changes interpolation
+/// positions. The user-selected multiplier is a ceiling: synthetic cost begins
+/// conservatively, rises one level at a time after stable cadence, and backs
+/// off when the preceding generated load materially stretches source intervals
+/// relative to a baseline learned without generated-frame work.
+class FixedSourceCadenceGovernor {
+public:
+    std::size_t plan(
+        std::chrono::nanoseconds sourceInterval,
+        std::size_t requestedGeneratedFrames,
+        std::size_t previousDispatchedGeneratedFrames,
+        bool generationAllowed);
+
+    void reset();
+
+    [[nodiscard]] const FixedSourceCadenceTelemetry& telemetry() const {
+        return telemetry_;
+    }
+
+private:
+    bool hasBaseline_{false};
+    double baselineIntervalSeconds_{};
+    std::size_t generationLimit_{1};
+    double pressureSeconds_{};
+    double recoverySeconds_{};
+    double cooldownSeconds_{};
+    FixedSourceCadenceTelemetry telemetry_{};
+};
+
 class AdaptiveFrameScheduler {
 public:
     AdaptiveFrameScheduler() = default;
