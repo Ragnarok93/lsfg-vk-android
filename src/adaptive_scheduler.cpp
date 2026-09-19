@@ -36,6 +36,7 @@ constexpr double kSourcePreservationConfirmSeconds = 0.60;
 constexpr double kSourcePreservationProbeSeconds = 0.60;
 constexpr double kSourcePreservationGainRatio = 1.08;
 constexpr double kSourcePreservationKeepOutputRatio = 0.95;
+constexpr double kSourcePreservationRetryHoldSeconds = 5.0;
 } // namespace
 
 SourceTimelineSample SourceProtectedTimeline::observe(
@@ -546,6 +547,8 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
                 lastCostChangeTimeSeconds_ = observedTimeSeconds_;
                 raiseHoldUntilSeconds_ =
                     observedTimeSeconds_ + kSuccessfulProbeHoldSeconds;
+                sourcePreservationProbeHoldUntilSeconds_ =
+                    observedTimeSeconds_ + kSourcePreservationRetryHoldSeconds;
                 telemetry_.costRaised = true;
                 telemetry_.costProbe = true;
             }
@@ -563,7 +566,8 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         && projectedOutputFps
             < static_cast<double>(targetFps_) * kSourcePreservationOutputRatio;
 
-    if (sourceStarvedAtCurrentCost) {
+    if (sourceStarvedAtCurrentCost
+            && observedTimeSeconds_ >= sourcePreservationProbeHoldUntilSeconds_) {
         if (sourcePreservationSinceSeconds_ < 0.0) {
             sourcePreservationSinceSeconds_ = observedTimeSeconds_;
             sourcePreservationFpsSum_ = sourceFps;
@@ -691,6 +695,7 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
     lastBackoffTimeSeconds_ = -1.0;
     successfulProbeHoldUntilSeconds_ = 0.0;
     raiseHoldUntilSeconds_ = 0.0;
+    sourcePreservationProbeHoldUntilSeconds_ = 0.0;
     resetUnmetDemand();
     telemetry_ = {};
     telemetry_.costLimit = costLimit_;
