@@ -158,6 +158,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("deadline_prediction_error_avg_ms=", source)
         self.assertIn("deadline_delivery_reserve_ms=", source)
         self.assertIn("deadline_effective_budget_ms=", source)
+        self.assertIn("admission_rejects=", source)
+        self.assertIn("generated_deadline_drops=", source)
+        self.assertIn("generated_wsi_drops=", source)
         self.assertIn("observeDeliveryMiss", source)
         self.assertIn("observeDeliverySuccess", source)
 
