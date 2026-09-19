@@ -320,32 +320,33 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     updateCostLimit(wantedGenerated);
     telemetry_.costLimit = costLimit_;
 
-    // Translate sustainable density into deterministic per-source synthetic
-    // opportunities. Only the fractional phase carries forward. Integer work
-    // and any downstream rejected opportunity are consumed in the current
-    // source interval; neither can become catch-up debt.
-    const double governedWantedRaw = std::min(
-        wantedGenerated, static_cast<double>(costLimit_));
-    constexpr double kIntegerSnapEpsilon = 1e-6;
-    const double nearestInteger = std::round(governedWantedRaw);
-    const double governedWanted =
-        std::fabs(governedWantedRaw - nearestInteger) <= kIntegerSnapEpsilon
-            ? nearestInteger
-            : governedWantedRaw;
-    const double wholeWanted = std::floor(governedWanted);
-    std::size_t opportunities = std::min(
-        static_cast<std::size_t>(wholeWanted), costLimit_);
-    const double fractionalWanted = std::clamp(
-        governedWanted - wholeWanted, 0.0, 0.999999);
+    // Drive synthetic opportunities from elapsed source time rather than
+    // repeatedly fractionalizing the smoothed source-rate estimate. Every real
+    // source interval contributes the number of target-output frames that
+    // elapsed during that interval, then consumes one slot for the real source
+    // frame itself. The residual phase is the only state carried forward.
+    //
+    // This behaves like a time-domain error diffuser: long source intervals get
+    // interpolation immediately, short intervals get less, and rejected/capped
+    // whole opportunities are consumed now instead of becoming catch-up debt.
+    const double intervalOutputDemand =
+        static_cast<double>(targetFps_) * intervalSeconds;
+    fractionalOpportunityPhase_ = std::max(
+        0.0,
+        fractionalOpportunityPhase_ + intervalOutputDemand - 1.0);
 
-    fractionalOpportunityPhase_ += fractionalWanted;
-    if (fractionalOpportunityPhase_ >= 1.0 - 1e-9) {
-        if (opportunities < costLimit_)
-            ++opportunities;
-        fractionalOpportunityPhase_ -= 1.0;
-    }
+    constexpr double kIntegerSnapEpsilon = 1e-9;
+    const auto wholeOpportunities = static_cast<std::size_t>(std::floor(
+        fractionalOpportunityPhase_ + kIntegerSnapEpsilon));
+    fractionalOpportunityPhase_ -= static_cast<double>(wholeOpportunities);
     fractionalOpportunityPhase_ = std::clamp(
         fractionalOpportunityPhase_, 0.0, 0.999999);
+
+    // The long-term cost governor remains the sustainable work ceiling. Any
+    // target-lattice opportunity above that ceiling is deliberately consumed,
+    // not deferred, so a later cheap frame cannot repay old generation debt.
+    const std::size_t opportunities = std::min(
+        { wholeOpportunities, costLimit_, maxGeneratedFrames_ });
 
     telemetry_.fractionalPhase = fractionalOpportunityPhase_;
     telemetry_.syntheticOpportunitiesCreated = opportunities;
