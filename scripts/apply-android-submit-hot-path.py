@@ -72,12 +72,12 @@ def patch_context_source(path: Path) -> None:
 
     waits_old = (
         "    std::vector<Core::Semaphore> waits = { data.inSemaphore };\n"
-        "    if (inSem < 0) waits.clear();\n"
+        "    if (!hasInputSemaphore) waits.clear();\n"
     )
     waits_new = (
         "    auto& waits = data.submitWaitSemaphores;\n"
         "    waits.clear();\n"
-        "    if (inSem >= 0)\n"
+        "    if (hasInputSemaphore)\n"
         "        waits.emplace_back(data.inSemaphore);\n"
     )
     text = replace_exact(
