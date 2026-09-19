@@ -908,6 +908,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                             rejectedGeneratedFrameCount;
                         metrics.totalGeneratedLateDrops +=
                             rejectedGeneratedFrameCount;
+                        metrics.windowAdmissionRejects +=
+                            rejectedGeneratedFrameCount;
+                        metrics.totalAdmissionRejects +=
+                            rejectedGeneratedFrameCount;
                         generatedFrameCount = admittedGeneratedFrameCount;
                     }
 
