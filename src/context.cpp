@@ -1355,8 +1355,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->deadlineBatchDecision_.predictedTotalLsfgMs
                       << " deadline_safety_margin_ms="
                       << this->deadlineBatchDecision_.safetyMarginMs
+                      << " deadline_delivery_reserve_ms="
+                      << this->deadlineBatchDecision_.deliveryReserveMs
                       << " deadline_usable_budget_ms="
                       << this->deadlineBatchDecision_.usableBudgetMs
+                      << " deadline_effective_budget_ms="
+                      << this->deadlineBatchDecision_.effectiveUsableBudgetMs
                       << " deadline_batch_admit="
                       << (this->deadlineBatchDecision_.wouldAdmit ? 1 : 0)
                       << " deadline_shadow_opportunities="
@@ -1963,6 +1967,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const uint64_t syntheticAdmissionNowNs = monotonicNowNs();
         if (syntheticDesiredTimeNs > 0
                 && syntheticAdmissionNowNs >= syntheticDesiredTimeNs) {
+            const double deliveryLatenessMs =
+                static_cast<double>(
+                    syntheticAdmissionNowNs - syntheticDesiredTimeNs)
+                / 1'000'000.0;
+            this->deadlineAdmissionPredictor_.observeDeliveryMiss(
+                deliveryLatenessMs);
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
             metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
@@ -1981,6 +1991,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, 0,
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
         if (res == VK_NOT_READY || res == VK_TIMEOUT) {
+            this->deadlineAdmissionPredictor_.observeDeliveryMiss(0.0);
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
             metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
@@ -2058,6 +2069,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    if (generatedFrameCount > 0
+            && queuedGeneratedFrameCount == generatedFrameCount) {
+        this->deadlineAdmissionPredictor_.observeDeliverySuccess();
+    }
     this->lastGeneratedFrameCount_ = queuedGeneratedFrameCount;
 
     // 5. Present the real game frame after only the synthetic frames that were
