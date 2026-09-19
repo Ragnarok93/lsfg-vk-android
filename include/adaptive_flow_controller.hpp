@@ -20,6 +20,7 @@ enum class AdaptiveFlowDecisionReason : uint8_t {
     Cooldown,
     InsufficientFlowContribution,
     SustainedPressure,
+    SustainedGlobalPressure,
     InsufficientRecoveryHeadroom,
     SustainedHeadroom,
 };
@@ -37,6 +38,16 @@ struct AdaptiveFlowObservation {
     double mipmapsMs{};
     std::size_t generationCount{};
     bool deadlineMissed{false};
+    /// Whole-device GPU utilization sampled out-of-band by GameNative.
+    double globalGpuUsagePercent{};
+    /// True when the global GPU sample is fresh and trustworthy.
+    bool globalPressureValid{false};
+    /// Whole-output cadence is materially below target or slow-frame pressure is high.
+    bool outputDeficit{false};
+    /// A synthetic opportunity was rejected/dropped since the previous observation.
+    bool syntheticDropPressure{false};
+    /// Current timing comes from a cycle that actually generated LSFG output.
+    bool generatedWorkSample{true};
     /// True when Adaptive LSFG has just changed/snap/probed/backed-off/reset.
     bool schedulerTransition{false};
     bool valid{false};
@@ -52,6 +63,9 @@ struct AdaptiveFlowTelemetry {
     double pressureRatio{};
     double flowBudgetRatio{};
     double estimatedNextTotalMs{};
+    double globalGpuUsagePercent{};
+    bool globalPressure{false};
+    bool outputDeficit{false};
 };
 
 /// A quality-seeking governor for Flow Scale. It owns no Vulkan objects and
