@@ -133,6 +133,34 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         self.assertIn("exportSyncFdOutputs && pass + 1 == generationCount", transform)
         self.assertIn("data.batchCompleteSemaphore", transform)
 
+    def test_zero_generation_exports_batch_completion_without_host_wait(self) -> None:
+        wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn(
+            "presentContextWithCountExportSyncFd(\n"
+            "                    *this->lsfgCtxId, framegenInputSemaphoreFd, 0",
+            wrapper,
+        )
+        self.assertIn("zero-history completion SYNC_FD import failed", wrapper)
+
+        for relative in (
+            "framegen/v3.1_src/context.cpp",
+            "framegen/v3.1p_src/context.cpp",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            zero_start = source.index("if (generationCount == 0)")
+            zero_end = source.index(
+                "const std::vector<Core::Semaphore> activeInternalSemaphores",
+                zero_start,
+            )
+            zero = source[zero_start:zero_end]
+            self.assertIn("exportZeroHistorySync", zero, relative)
+            self.assertIn("data.batchCompleteSemaphore", zero, relative)
+            self.assertIn("exportedSync.batchCompleteFd", zero, relative)
+            self.assertIn("exportedSync.gpuDependenciesExported = true", zero, relative)
+            submit = zero.index("data.cmdBuffer1.submit")
+            export_fd = zero.index("data.batchCompleteSemaphore.exportFd", submit)
+            self.assertLess(submit, export_fd, relative)
+
     def test_restored_build_does_not_compose_experimental_sync_stacks(self) -> None:
         """Experimental zero-history/nonblocking stacks remain archival, not production composition."""
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")

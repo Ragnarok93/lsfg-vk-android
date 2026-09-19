@@ -285,13 +285,18 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
     for (size_t age = completedWindow; age > 0; --age) {
         auto& completedData =
             this->data.at((this->frameIdx - age) % this->data.size());
-        if (!completedData.shouldWait || completedData.generationCount == 0)
+        if (!completedData.shouldWait)
             continue;
-        bool complete = true;
-        for (size_t i = 0; i < completedData.generationCount; ++i) {
-            if (!completedData.completionFences.at(i).isSignaled(vk.device)) {
-                complete = false;
-                break;
+        bool complete = false;
+        if (completedData.generationCount == 0) {
+            complete = completedData.preprocessingFence.isSignaled(vk.device);
+        } else {
+            complete = true;
+            for (size_t i = 0; i < completedData.generationCount; ++i) {
+                if (!completedData.completionFences.at(i).isSignaled(vk.device)) {
+                    complete = false;
+                    break;
+                }
             }
         }
         if (complete) {
@@ -304,9 +309,15 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
     auto& data = this->data.at(this->frameIdx % 8);
 
     if (data.shouldWait) {
-        for (size_t i = 0; i < data.generationCount; ++i)
-            if (!data.completionFences.at(i).wait(vk.device, framegenWaitTimeoutNs()))
-                throw LSFG::vulkan_error(VK_TIMEOUT, "Fence wait timed out");
+        if (data.generationCount == 0) {
+            if (!data.preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))
+                throw LSFG::vulkan_error(
+                    VK_TIMEOUT, "Temporal preprocessing fence wait timed out");
+        } else {
+            for (size_t i = 0; i < data.generationCount; ++i)
+                if (!data.completionFences.at(i).wait(vk.device, framegenWaitTimeoutNs()))
+                    throw LSFG::vulkan_error(VK_TIMEOUT, "Fence wait timed out");
+        }
 #ifdef __ANDROID__
         this->recordAdaptiveFlowGpuTiming(vk, data);
 #endif
@@ -450,9 +461,60 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
     if (!hasInputSemaphore) waits.clear();
 
     if (generationCount == 0) {
+#ifdef __ANDROID__
+        bool exportZeroHistorySync = false;
+        if (exportAndroidSyncFdOutputs) {
+            try {
+                data.batchCompleteSemaphore = Core::Semaphore(
+                    vk.device, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+                exportZeroHistorySync = true;
+            } catch (const std::exception& e) {
+                exportedSync.hostWaitFallback = true;
+                std::cerr << "lsfg-vk: zero-history SYNC_FD setup failed: "
+                          << e.what() << "; using bounded host fallback\n";
+            }
+        }
+#endif
+
         data.preprocessingFence.reset(vk.device);
+#ifdef __ANDROID__
+        std::vector<Core::Semaphore> zeroSignals;
+        if (exportZeroHistorySync)
+            zeroSignals.emplace_back(data.batchCompleteSemaphore);
+        data.cmdBuffer1.submit(vk.device.getComputeQueue(), data.preprocessingFence,
+            waits, std::nullopt, zeroSignals, std::nullopt);
+
+        if (exportZeroHistorySync) {
+            data.shouldWait = true;
+            data.generationCount = 0;
+            try {
+                exportedSync.batchCompleteFd = data.batchCompleteSemaphore.exportFd(
+                    vk.device, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+                exportedSync.gpuDependenciesExported = true;
+            } catch (const std::exception& e) {
+                if (!data.preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))
+                    throw LSFG::vulkan_error(
+                        VK_TIMEOUT, "Temporal preprocessing fence wait timed out");
+                this->recordAdaptiveFlowGpuTiming(vk, data);
+                data.shouldWait = false;
+                exportedSync.hostWaitFallback = true;
+                exportedSync.gpuDependenciesExported = false;
+                std::cerr << "lsfg-vk: zero-history SYNC_FD export failed: "
+                          << e.what() << "; completed with bounded host fallback\n";
+            }
+
+            if (adaptiveFlowShadowSubmitted)
+                ++this->pendingFlowWarmupFrames_;
+            if (adaptiveFlowCommitAfterSubmit)
+                this->commitAdaptiveFlowTransition(generationGraphIndex);
+            this->frameIdx++;
+            return exportedSync;
+        }
+#else
         data.cmdBuffer1.submit(vk.device.getComputeQueue(), data.preprocessingFence,
             waits, std::nullopt, {}, std::nullopt);
+#endif
+
         if (!data.preprocessingFence.wait(vk.device, framegenWaitTimeoutNs()))
             throw LSFG::vulkan_error(VK_TIMEOUT,
                 "Temporal preprocessing fence wait timed out");
@@ -672,15 +734,26 @@ bool Context::waitForLastPresent(Vulkan& vk, uint64_t timeoutNs) {
 
     const auto deadline = std::chrono::steady_clock::now()
         + std::chrono::nanoseconds(timeoutNs);
-    for (size_t i = 0; i < renderData.generationCount; ++i) {
+    if (renderData.generationCount == 0) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline)
             return false;
         const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
             deadline - now).count();
-        if (!renderData.completionFences.at(i).wait(
+        if (!renderData.preprocessingFence.wait(
                 vk.device, static_cast<uint64_t>(remaining)))
             return false;
+    } else {
+        for (size_t i = 0; i < renderData.generationCount; ++i) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+                return false;
+            const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                deadline - now).count();
+            if (!renderData.completionFences.at(i).wait(
+                    vk.device, static_cast<uint64_t>(remaining)))
+                return false;
+        }
     }
 #ifdef __ANDROID__
     this->recordAdaptiveFlowGpuTiming(vk, renderData);
@@ -693,10 +766,16 @@ bool Context::waitForCompletion(Vulkan& vk) {
     for (auto& renderData : this->data) {
         if (!renderData.shouldWait)
             continue;
-        for (size_t i = 0; i < renderData.generationCount; ++i) {
-            if (!renderData.completionFences.at(i).wait(
+        if (renderData.generationCount == 0) {
+            if (!renderData.preprocessingFence.wait(
                     vk.device, framegenWaitTimeoutNs()))
                 return false;
+        } else {
+            for (size_t i = 0; i < renderData.generationCount; ++i) {
+                if (!renderData.completionFences.at(i).wait(
+                        vk.device, framegenWaitTimeoutNs()))
+                    return false;
+            }
         }
         renderData.shouldWait = false;
     }

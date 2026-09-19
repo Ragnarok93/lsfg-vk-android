@@ -23,7 +23,9 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         history_block = source[history_only:history_end]
 
         self.assertGreater(history_only, handoff)
-        self.assertIn("presentContextWithCount", history_block)
+        self.assertIn("presentContextWithCountExportSyncFd", history_block)
+        self.assertIn("framegenBatchCompleteSemaphore", history_block)
+        self.assertIn("historyRequiresHostCompletionWait", history_block)
         self.assertIn("stage=history-only", history_block)
         self.assertIn("requiresSourceHistoryWarmup_ = false", history_block)
         self.assertNotIn("requiresSourceHistoryWarmup_ = true", history_block)
@@ -63,6 +65,10 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
             self.assertLess(alpha, beta_guard)
             self.assertLess(beta_guard, beta)
             self.assertLess(beta, zero_finish)
+            self.assertIn("exportZeroHistorySync", zero_block)
+            self.assertIn("data.batchCompleteSemaphore", zero_block)
+            self.assertIn("exportedSync.gpuDependenciesExported = true", zero_block)
+            self.assertIn("data.shouldWait = true", zero_block)
             self.assertIn("preprocessingFence.wait", zero_block)
             self.assertIn("framegenWaitTimeoutNs()", zero_block)
             self.assertIn("this->frameIdx++", zero_block)
@@ -110,6 +116,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
             )
             self.assertIn("data.preprocessingFence", zero_block, source_path.as_posix())
             self.assertIn("data.preprocessingFence.wait", zero_block, source_path.as_posix())
+            self.assertIn("exportZeroHistorySync", zero_block, source_path.as_posix())
 
     def test_generated_passes_reuse_completion_fences(self) -> None:
         backend_sources = (

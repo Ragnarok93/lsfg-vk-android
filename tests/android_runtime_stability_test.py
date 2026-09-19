@@ -130,6 +130,29 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             android_present,
         )
 
+    def test_zero_generation_history_uses_async_dependency_chain(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        android_start = source.index(
+            "#ifdef __ANDROID__", source.index("VkResult LsContext::present")
+        )
+        desktop_start = source.index("#else", android_start)
+        android_present = source[android_start:desktop_start]
+
+        self.assertIn(
+            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_\n"
+            "        && !warmupSourceHistory;",
+            android_present,
+        )
+        history_start = android_present.index("if (historyOnly)")
+        warmup_start = android_present.index(
+            "if (warmupSourceHistory)", history_start
+        )
+        history = android_present[history_start:warmup_start]
+        self.assertIn("presentContextWithCountExportSyncFd", history)
+        self.assertIn("framegenBatchCompleteValid = true", history)
+        self.assertIn("historyRequiresHostCompletionWait", history)
+        self.assertNotIn("submitAndWaitForAhbHandoff", history)
+
     def test_adaptive_path_uses_variable_count_without_owning_source_pacing(self) -> None:
         scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
