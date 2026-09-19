@@ -58,30 +58,38 @@ SourceTimelineSample SourceProtectedTimeline::observe(
         return sample;
     }
 
-    const auto nextSourceDeadline = [&]() {
-        return sourceArrivalTimeNs
-                > std::numeric_limits<uint64_t>::max() - intervalNs
+    constexpr uint64_t kMinLeadNs = 250'000ULL;
+    constexpr uint64_t kMaxLeadNs = 2'000'000ULL;
+    const uint64_t leadNs = std::clamp<uint64_t>(
+        intervalNs / 8ULL, kMinLeadNs, kMaxLeadNs);
+
+    const auto addSaturated = [](uint64_t base, uint64_t delta) {
+        return base > std::numeric_limits<uint64_t>::max() - delta
             ? std::numeric_limits<uint64_t>::max()
-            : sourceArrivalTimeNs + intervalNs;
+            : base + delta;
     };
 
     if (!initialized_) {
         initialized_ = true;
         sourceIndex_ = 0;
         sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
-        sourceDesiredTimeNs_ = nextSourceDeadline();
+        sourceDesiredTimeNs_ = addSaturated(sourceArrivalTimeNs, intervalNs);
         sample.rebased = true;
         sample.sourceDeadlineErrorNs = 0;
     } else {
         ++sourceIndex_;
 
-        // Compare the real source against the prediction made by the previous
-        // source, then anchor this interval to the real arrival. The old
-        // cumulative candidate kept the very first interval as a permanent
-        // phase offset; one startup/resume outlier could therefore leave an
-        // otherwise-stable source tens of milliseconds ahead/behind forever.
+        // Compare the source against the prior prediction, but do not reward a
+        // late source with a whole new source interval of synthetic budget.
+        // That creates a positive feedback loop under load:
+        //   late source -> larger FG budget -> more GPU work -> later source.
+        //
+        // Early phase drift is different: correcting an epoch that sits ahead
+        // of the real source only removes synthetic budget, so it is safe to
+        // snap that error away once it is materially larger than normal jitter.
         const uint64_t predictedArrivalTimeNs = sourceDesiredTimeNs_;
         uint64_t absoluteErrorNs = 0;
+        bool sourceArrivedEarly = false;
         if (sourceArrivalTimeNs >= predictedArrivalTimeNs) {
             const uint64_t delta = sourceArrivalTimeNs - predictedArrivalTimeNs;
             absoluteErrorNs = delta;
@@ -90,6 +98,7 @@ SourceTimelineSample SourceProtectedTimeline::observe(
                 ? std::numeric_limits<int64_t>::max()
                 : static_cast<int64_t>(delta);
         } else {
+            sourceArrivedEarly = true;
             const uint64_t delta = predictedArrivalTimeNs - sourceArrivalTimeNs;
             absoluteErrorNs = delta;
             sample.sourceDeadlineErrorNs = delta
@@ -105,9 +114,25 @@ SourceTimelineSample SourceProtectedTimeline::observe(
             kMinPhaseCorrectionNs,
             kMaxPhaseCorrectionNs);
 
-        sample.rebased = absoluteErrorNs >= materialPhaseErrorNs;
-        sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
-        sourceDesiredTimeNs_ = nextSourceDeadline();
+        const uint64_t cadenceCandidateNs =
+            addSaturated(predictedArrivalTimeNs, intervalNs);
+        const uint64_t earliestFutureTimeNs =
+            addSaturated(sourceArrivalTimeNs, leadNs);
+
+        const bool correctEarlyPhase =
+            sourceArrivedEarly && absoluteErrorNs >= materialPhaseErrorNs;
+        if (correctEarlyPhase) {
+            sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
+            sourceDesiredTimeNs_ =
+                addSaturated(sourceArrivalTimeNs, intervalNs);
+            sample.rebased = true;
+        } else {
+            sourceDesiredTimeNs_ =
+                std::max(cadenceCandidateNs, earliestFutureTimeNs);
+            sample.rebased = sourceDesiredTimeNs_ != cadenceCandidateNs;
+            sample.previousSourceDesiredTimeNs =
+                sample.rebased ? sourceArrivalTimeNs : predictedArrivalTimeNs;
+        }
     }
 
     lastIntervalNs_ = intervalNs;
