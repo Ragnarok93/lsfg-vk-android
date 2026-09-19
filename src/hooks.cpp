@@ -60,7 +60,7 @@ namespace {
     bool adaptivePresentationPacing(const Config::Configuration& conf) {
 #ifdef __ANDROID__
         return conf.targeted && conf.enable && conf.multiplier > 1
-            && (conf.adaptiveFramegen || conf.adaptiveFlowScale);
+            && conf.adaptiveFramegen;
 #else
         (void)conf;
         return false;

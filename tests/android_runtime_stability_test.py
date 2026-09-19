@@ -189,25 +189,29 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait", history)
         self.assertNotIn("submitAndWaitForAhbHandoff", history)
 
-    def test_fixed_mode_governs_generated_cost_without_owning_source_pacing(self) -> None:
+    def test_fixed_mode_preserves_requested_multiplier_and_adaptive_flow_does_not_own_pacing(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         scheduler = (ROOT / "include/adaptive_scheduler.hpp").read_text(
             encoding="utf-8"
         )
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("FixedSourceCadenceGovernor", scheduler)
-        self.assertIn("fixedSourceCadenceGovernor_", header)
-        self.assertIn("lastDispatchedGeneratedFrameCount_", header)
-        self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
-        self.assertIn("fixed_generation_limit=", source)
-        self.assertIn("fixed_source_interval_ratio=", source)
-        self.assertIn("plannedGeneratedFrameCount == 0", source)
+        self.assertNotIn("FixedSourceCadenceGovernor", scheduler)
+        self.assertNotIn("fixedSourceCadenceGovernor_", header)
         self.assertIn(
-            "lastDispatchedGeneratedFrameCount_ = generatedFrameCount",
+            ": requestedFixedGeneratedFrameCount;",
             source,
         )
-        self.assertNotIn("sleep_for", scheduler)
+        self.assertIn("fixed_requested_generated=", source)
+        self.assertNotIn("fixed_generation_limit=", source)
+
+        pacing_start = hooks.index("bool adaptivePresentationPacing")
+        pacing_end = hooks.index("bool requiresSwapchainRecreation", pacing_start)
+        pacing = hooks[pacing_start:pacing_end]
+        self.assertIn("conf.adaptiveFramegen", pacing)
+        self.assertNotIn("conf.adaptiveFlowScale", pacing)
+
 
     def test_adaptive_path_uses_variable_count_without_owning_source_pacing(self) -> None:
         scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")

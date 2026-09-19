@@ -19,7 +19,9 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         self.assertIn("enum class AndroidFrameCycleMode", source)
         self.assertIn("AndroidFrameCycleMode::HistoryOnly", source)
         history_only = source.index("if (historyOnly)", handoff)
-        history_end = source.index("if (warmupSourceHistory)", history_only)
+        history_end = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_only
+        )
         history_block = source[history_only:history_end]
 
         self.assertGreater(history_only, handoff)

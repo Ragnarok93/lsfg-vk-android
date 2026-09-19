@@ -671,15 +671,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     metrics.hasLastSourcePresent = true;
     const size_t requestedFixedGeneratedFrameCount =
         static_cast<size_t>(conf.multiplier - 1);
-    if (conf.adaptiveFramegen)
-        this->fixedSourceCadenceGovernor_.reset();
     const size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
-        : this->fixedSourceCadenceGovernor_.plan(
-            sourceInterval,
-            requestedFixedGeneratedFrameCount,
-            this->lastDispatchedGeneratedFrameCount_,
-            !this->requiresSourceHistoryWarmup_);
+        : requestedFixedGeneratedFrameCount;
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
@@ -694,7 +688,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
         this->deadlineAdmissionPredictor_.reset();
-        this->fixedSourceCadenceGovernor_.reset();
         this->lastDispatchedGeneratedFrameCount_ = 0;
         this->sourceTimeline_.reset();
         this->currentSourceTimeline_ = {};
@@ -709,7 +702,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
             this->requiresSourceHistoryWarmup_ = true;
             this->deadlineAdmissionPredictor_.reset();
-            this->fixedSourceCadenceGovernor_.reset();
             this->lastDispatchedGeneratedFrameCount_ = 0;
         }
         if (this->currentSourceTimeline_.valid) {
@@ -1214,16 +1206,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << deadlinePredictionErrorAvgMs
                       << " deadline_prediction_samples="
                       << metrics.windowDeadlinePredictionSamples
-                      << " fixed_source_baseline_fps="
-                      << this->fixedSourceCadenceGovernor_.telemetry().baselineSourceFps
-                      << " fixed_source_interval_ratio="
-                      << this->fixedSourceCadenceGovernor_.telemetry().intervalRatio
-                      << " fixed_generation_limit="
-                      << this->fixedSourceCadenceGovernor_.telemetry().generationLimit
-                      << " fixed_source_backoff="
-                      << (this->fixedSourceCadenceGovernor_.telemetry().backedOff ? 1 : 0)
-                      << " fixed_source_raise="
-                      << (this->fixedSourceCadenceGovernor_.telemetry().raised ? 1 : 0)
+                      << " fixed_requested_generated="
+                      << requestedFixedGeneratedFrameCount
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
