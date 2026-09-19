@@ -14,6 +14,7 @@ constexpr unsigned kFastSamplesRequired = 6;
 // absolute FPS threshold would incorrectly disable generation for legitimately
 // slow sources.
 constexpr double kDiscontinuityRatio = 8.0;
+constexpr uint64_t kSourceTimelineDiscontinuityRatio = 8ULL;
 
 // Governor timing intentionally favors stability over quickly chasing an
 // unreachable output target. The source-rate estimator is allowed to settle
@@ -47,12 +48,21 @@ SourceTimelineSample SourceProtectedTimeline::observe(
         return sample;
 
     const uint64_t intervalNs = static_cast<uint64_t>(intervalCount);
+    if (discontinuity
+            || (initialized_
+                && lastIntervalNs_ > 0
+                && intervalNs
+                    > lastIntervalNs_ * kSourceTimelineDiscontinuityRatio)) {
+        reset();
+        return sample;
+    }
+
     constexpr uint64_t kMinLeadNs = 250'000ULL;
     constexpr uint64_t kMaxLeadNs = 2'000'000ULL;
     const uint64_t leadNs = std::clamp<uint64_t>(
         intervalNs / 8ULL, kMinLeadNs, kMaxLeadNs);
 
-    if (!initialized_ || discontinuity) {
+    if (!initialized_) {
         initialized_ = true;
         sourceIndex_ = 0;
         sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
@@ -95,6 +105,7 @@ SourceTimelineSample SourceProtectedTimeline::observe(
         }
     }
 
+    lastIntervalNs_ = intervalNs;
     sample.sourceIndex = sourceIndex_;
     sample.intervalNs = intervalNs;
     sample.sourceDesiredTimeNs = sourceDesiredTimeNs_;
@@ -121,6 +132,7 @@ void SourceProtectedTimeline::reset() {
     initialized_ = false;
     sourceIndex_ = 0;
     sourceDesiredTimeNs_ = 0;
+    lastIntervalNs_ = 0;
 }
 
 void DeadlineAdmissionPredictor::observe(
