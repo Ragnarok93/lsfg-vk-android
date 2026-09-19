@@ -139,6 +139,9 @@ private:
     size_t adaptiveFlowGenerationCount_{0};
     AdaptiveFlowDecisionReason adaptiveFlowReason_{AdaptiveFlowDecisionReason::None};
 
+    DeadlineAdmissionPredictor deadlineAdmissionPredictor_;
+    DeadlineAdmissionDecision deadlineShadowBatchDecision_{};
+
     // Adaptive presentation pacing. VK_GOOGLE_display_timing is optional; the
     // swapchain still uses FIFO ordering when this capability is unavailable.
     bool adaptiveDisplayTimingEnabled_{false};
@@ -202,6 +205,11 @@ private:
         uint64_t totalAsyncFallbacks{0};
         uint64_t windowGeneratedLateDrops{0};
         uint64_t totalGeneratedLateDrops{0};
+        uint64_t windowDeadlineShadowOpportunities{0};
+        uint64_t windowDeadlineShadowWouldAdmit{0};
+        uint64_t windowDeadlineShadowWouldReject{0};
+        uint64_t totalDeadlineShadowOpportunities{0};
+        uint64_t totalDeadlineShadowWouldReject{0};
 
         double windowCycleMs{0.0};
         double windowCycleMaxMs{0.0};
@@ -213,6 +221,8 @@ private:
         double windowSourceIntervalMaxMs{0.0};
         double windowSourceDeadlineErrorAbsMs{0.0};
         double windowSourceDeadlineErrorMaxMs{0.0};
+        double windowDeadlinePredictionAbsErrorMs{0.0};
+        uint64_t windowDeadlinePredictionSamples{0};
         uint64_t windowSourceIntervals{0};
         uint64_t windowSourceDeadlineSamples{0};
         uint64_t windowSourceTimelineRebases{0};
