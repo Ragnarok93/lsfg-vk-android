@@ -34,8 +34,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("updateAdaptiveFlowGovernor();", source)
         self.assertNotIn("vkDeviceWaitIdle", source)
 
-        # Adaptive LSFG owns cadence first; its transition events suppress Flow
-        # evidence instead of making both governors react to the same transient.
+        # Adaptive LSFG still owns cadence. Ordinary scheduler transitions hold
+        # local Flow evidence, while sustained whole-device GPU pressure is
+        # allowed to survive the hold so the two governors do not become blind.
         for field in (
             "sourceRateSnapped",
             "costRaised",
@@ -48,6 +49,59 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn(".schedulerTransition = schedulerTransition", source)
         self.assertIn("kAdaptiveFlowCadenceDiscontinuityMs = 250.0", source)
         self.assertIn("!cadenceDiscontinuity", source)
+
+    def test_global_gpu_pressure_is_sampled_out_of_band_without_rebuild(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn('runtime-pressure.txt', source)
+        self.assertIn("readRuntimePressure", source)
+        self.assertIn("std::chrono::milliseconds(500)", source)
+        self.assertIn("std::chrono::seconds(2)", source)
+        self.assertIn("adaptiveFlowGlobalPressureValid_", header)
+        self.assertIn("adaptiveFlowGlobalGpuUsagePercent_", header)
+        self.assertIn("adaptiveFlowGeneratedTimingValid_", header)
+        self.assertIn("adaptiveFlowRetainedTotalLsfgMs_", header)
+        self.assertIn("adaptiveFlowLastObservedLateDrops_", header)
+
+        # Whole-device pressure is evidence only. It must not touch the source
+        # timeline, sleep the present thread, or cause a configuration reload.
+        reader_start = source.index("RuntimePressureSample readRuntimePressure")
+        reader_end = source.index("VkImageSubresourceRange", reader_start)
+        reader = source[reader_start:reader_end]
+        self.assertNotIn("updateConfig", reader)
+        self.assertNotIn("sleep_for", reader)
+        self.assertNotIn("sourceTimeline_", reader)
+
+    def test_history_only_cycles_can_pressure_flow_but_never_prove_headroom(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        controller = (ROOT / "src/adaptive_flow_controller.cpp").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("generatedWorkSample", source)
+        self.assertIn("adaptiveFlowRetainedWorkMs_", source)
+        self.assertIn("adaptiveFlowRetainedTotalLsfgMs_", source)
+        self.assertIn(".generatedWorkSample = generatedWorkSample", source)
+
+        self.assertIn("const bool localPressure", controller)
+        self.assertIn("observation.generatedWorkSample", controller)
+        self.assertIn("globalPressure", controller)
+        self.assertIn("&& observation.generatedWorkSample", controller)
+        self.assertIn("kGlobalGpuPressurePercent = 96.0", controller)
+        self.assertIn("kGlobalGpuRecoveryPercent = 88.0", controller)
+
+    def test_global_pressure_uses_output_deficit_and_late_drop_evidence(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("adaptiveOutputDeficit", source)
+        self.assertIn("fixedOutputDeficit", source)
+        self.assertIn("metrics.totalGeneratedLateDrops", source)
+        self.assertIn("syntheticDropPressure", source)
+        self.assertIn(".globalGpuUsagePercent =", source)
+        self.assertIn(".globalPressureValid =", source)
+        self.assertIn(".outputDeficit = outputDeficit", source)
+        self.assertIn(".syntheticDropPressure = syntheticDropPressure", source)
 
     def test_budget_tracks_adaptive_target_or_fixed_output_period(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -141,6 +195,14 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "adaptive_flow_lsfg_ms=",
             "adaptive_flow_budget_ms=",
             "adaptive_flow_generation_count=",
+            "adaptive_flow_global_pressure_valid=",
+            "adaptive_flow_global_gpu_percent=",
+            "adaptive_flow_global_output_fps=",
+            "adaptive_flow_global_p95_ms=",
+            "adaptive_flow_global_slow_ratio=",
+            "adaptive_flow_global_pressure=",
+            "adaptive_flow_output_deficit=",
+            "adaptive_flow_synthetic_drop_pressure=",
             "adaptive_flow_reason=",
         )
         for field in fields:
