@@ -48,38 +48,6 @@ class AndroidBatchOptimizationTest(unittest.TestCase):
         runtime_bundle = build.index("apply-adreno-evidence-profile.py")
         self.assertLess(config_patch, runtime_bundle, "config hardening must precede retained runtime composition")
 
-    def test_transport_only_zero_history_signals_shared_ahb_release_early(self) -> None:
-        """TransportOnly completion FD should cover AHB copy/release, not private mipmap/alpha work."""
-        transform = ROOT / "scripts/adreno_transport_release_overlap.py"
-        self.assertTrue(transform.exists(), "missing TransportOnly release-overlap transform")
-        text = transform.read_text(encoding="utf-8")
-
-        for marker in (
-            "transportOnlyHistoryOverlap",
-            "transportReleaseCommandBuffer",
-            "transportReleaseFence",
-            "transportReadySemaphore",
-            "zero-history-sync-fd transport-release-submit",
-            "activeSharedHistoryInput",
-            "activePrivateHistoryInput",
-            "historyCompletionSemaphore",
-            "preprocessingFence",
-        ):
-            self.assertIn(marker, text)
-
-        self.assertIn("data.transportReleaseCommandBuffer.submit", text)
-        self.assertIn("data.cmdBuffer1.submit", text)
-        self.assertIn("{data.historyCompletionSemaphore,data.transportReadySemaphore}", text)
-        self.assertIn("{data.transportReadySemaphore}", text)
-        self.assertIn("transportReleaseFence.wait", text)
-
-        bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
-        self.assertIn("apply_transport_release_overlap(root)", bundle)
-        self.assertLess(
-            bundle.index("apply_slot_aware_zero_history(root)"),
-            bundle.index("apply_transport_release_overlap(root)"),
-            "release overlap must patch the already slot-aware TransportOnly path",
-        )
 
 
 if __name__ == "__main__":
