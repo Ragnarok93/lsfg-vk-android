@@ -87,6 +87,12 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("deadlineAdmissionPredictor_.observe", source)
         self.assertIn("deadline_planned_generated=", source)
         self.assertIn("deadline_admitted_generated=", source)
+        self.assertIn("interpolation_denominator=", source)
+        self.assertIn("interpolationGenerationCount", source)
+        self.assertIn(
+            "static_cast<double>(interpolationGenerationCount + 1)",
+            source,
+        )
         self.assertIn("deadline_prediction_error_avg_ms=", source)
 
         # Admission can lower synthetic density, but it cannot alter the source
