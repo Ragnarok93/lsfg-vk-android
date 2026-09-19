@@ -2028,7 +2028,6 @@ void LsContext::enterSourceOnlyBypass() {
     this->lastGeneratedFrameCount_ = 0;
     this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ = true;
-    this->fixedSourceCadenceGovernor_.reset();
     this->lastDispatchedGeneratedFrameCount_ = 0;
     this->previousSourceCopySignalValid_ = false;
 }
