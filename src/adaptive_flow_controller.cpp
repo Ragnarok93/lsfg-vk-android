@@ -160,12 +160,13 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         const double predictedReliefMs = observation.flowMs * (1.0 - scaleWorkRatio);
         const double predictedReliefRatio = predictedReliefMs / observation.frameBudgetMs;
 
-        const double minimumFlowBudgetRatio = globalPressure
-            ? 0.04 : kMinimumFlowBudgetRatio;
-        const double minimumPredictedReliefRatio = globalPressure
-            ? 0.01 : kMinimumPredictedReliefRatio;
-        if (telemetry_.flowBudgetRatio < minimumFlowBudgetRatio
-                || predictedReliefRatio < minimumPredictedReliefRatio) {
+        // Whole-device saturation says the system is under pressure; it does
+        // not prove Flow is large enough to be a useful actuator. Keep the same
+        // material-contribution gate under local and global pressure so quality
+        // is never traded for a few tenths of a millisecond that cannot
+        // plausibly recover the requested cadence.
+        if (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
+                || predictedReliefRatio < kMinimumPredictedReliefRatio) {
             resetEvidence();
             telemetry_.reason = AdaptiveFlowDecisionReason::InsufficientFlowContribution;
             return telemetry_.currentScale;
@@ -195,9 +196,17 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool globalRecoveryHeadroom =
         !observation.globalPressureValid
         || observation.globalGpuUsagePercent <= kGlobalGpuRecoveryPercent;
+    const bool retainedHistoryRecoveryEligible =
+        !observation.generatedWorkSample
+        && observation.globalPressureValid
+        && globalRecoveryHeadroom
+        && !observation.outputDeficit
+        && !observation.syntheticDropPressure;
+    const bool recoveryTimingEligible =
+        observation.generatedWorkSample || retainedHistoryRecoveryEligible;
     if (canRaise
             && !observation.deadlineMissed
-            && observation.generatedWorkSample
+            && recoveryTimingEligible
             && !observation.outputDeficit
             && !observation.syntheticDropPressure
             && globalRecoveryHeadroom) {

@@ -188,9 +188,11 @@ int main() {
     }
 
     {
-        // History-only cycles can never prove recovery headroom. After global
-        // pressure lowers the scale, many cheap zero-generation samples must
-        // not immediately raise quality again.
+        // History-only operation may recover quality only from retained timing
+        // of a real generated cycle plus fresh whole-device headroom and an
+        // already-met LSFG output target. This prevents a cheap zero-generation
+        // cycle from pretending generation is cheap while avoiding permanent
+        // quality pinning once Adaptive no longer needs synthetic frames.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 6; ++i) {
             controller.observe(sample(
@@ -204,7 +206,42 @@ int main() {
                 5.0, 1.5, 16.666, false, false,
                 45.0, true, false, false, false));
         }
+        assert(near(controller.currentScale(), 1.00F));
+    }
+
+    {
+        // Retained history timing alone is insufficient when current global
+        // headroom is unavailable. Do not upscale from stale timing blindly.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 6; ++i) {
+            controller.observe(sample(
+                8.0, 3.0, 16.666, false, false,
+                99.0, true, true, false, false));
+        }
         assert(near(controller.currentScale(), 0.90F));
+
+        for (int i = 0; i < 70; ++i) {
+            controller.observe(sample(
+                5.0, 1.5, 16.666, false, false,
+                0.0, false, false, false, false));
+        }
+        assert(near(controller.currentScale(), 0.90F));
+    }
+
+    {
+        // Global saturation by itself must not sacrifice Flow quality when the
+        // next scale step has too little scale-sensitive work to materially
+        // improve the frame budget.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 30; ++i) {
+            controller.observe(sample(
+                8.0, 0.8, 16.666, false, false,
+                99.0, true, true, false, true));
+        }
+        assert(near(controller.currentScale(), 1.00F));
+        assert(
+            controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::InsufficientFlowContribution);
     }
 
     {
