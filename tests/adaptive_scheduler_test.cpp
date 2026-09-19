@@ -39,19 +39,17 @@ int main() {
     }
 
     {
-        // If the real source itself arrives after the previous source epoch,
-        // rebase from source evidence instead of producing historical desired
-        // present timestamps or catch-up debt.
+        // Phase follows the real source arrival, while the future generation
+        // window follows predicted cadence rather than the lateness itself.
         SourceProtectedTimeline timeline;
         const auto first = timeline.observe(2'000'000'000ULL, 20ms);
         assert(first.valid);
         const auto late = timeline.observe(2'050'000'000ULL, 20ms);
         assert(late.rebased);
         assert(late.sourceDeadlineErrorNs == 30'000'000LL);
-        // A late source receives only a small forward-safety lead, never a
-        // fresh 20 ms generation window.
         assert(late.previousSourceDesiredTimeNs == 2'050'000'000ULL);
-        assert(late.sourceDesiredTimeNs == 2'052'000'000ULL);
+        assert(late.intervalNs == 20'000'000ULL);
+        assert(late.sourceDesiredTimeNs == 2'070'000'000ULL);
     }
 
     {
