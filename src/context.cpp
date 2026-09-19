@@ -698,18 +698,83 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         cycleMode == AndroidFrameCycleMode::SourceWarmup;
     this->lastGeneratedFrameCount_ = generatedFrameCount;
 
-    const auto updateAdaptiveFlowGovernor = [&]() {
-        if (!conf.adaptiveFlowScale || !this->adaptiveFlowRuntimeAvailable_)
-            return;
+    // Slice 4: shadow-only deadline admission. The source timeline remains the
+    // sole clock; these decisions are diagnostic and cannot suppress work yet.
+    this->deadlineShadowBatchDecision_ = {};
+    if (cycleMode == AndroidFrameCycleMode::Generate
+            && generatedFrameCount > 0
+            && this->currentSourceTimeline_.valid) {
+        const uint64_t admissionNowNs = monotonicNowNs();
+        if (admissionNowNs > 0
+                && this->currentSourceTimeline_.sourceDesiredTimeNs > admissionNowNs) {
+            const double sourceBudgetMs =
+                static_cast<double>(
+                    this->currentSourceTimeline_.sourceDesiredTimeNs - admissionNowNs)
+                / 1'000'000.0;
+            this->deadlineShadowBatchDecision_ =
+                this->deadlineAdmissionPredictor_.predict(
+                    generatedFrameCount, sourceBudgetMs);
 
+            for (size_t slot = 0; slot < generatedFrameCount; ++slot) {
+                const double interpolationFraction =
+                    static_cast<double>(slot + 1)
+                    / static_cast<double>(generatedFrameCount + 1);
+                const uint64_t slotDeadlineNs =
+                    this->sourceTimeline_.syntheticDesiredTimeNs(
+                        this->currentSourceTimeline_, interpolationFraction);
+                const double slotBudgetMs =
+                    slotDeadlineNs > admissionNowNs
+                        ? static_cast<double>(slotDeadlineNs - admissionNowNs)
+                            / 1'000'000.0
+                        : 0.0;
+                const auto slotDecision =
+                    this->deadlineAdmissionPredictor_.predict(
+                        slot + 1, slotBudgetMs);
+                if (!slotDecision.valid)
+                    continue;
+
+                ++metrics.windowDeadlineShadowOpportunities;
+                ++metrics.totalDeadlineShadowOpportunities;
+                if (slotDecision.wouldAdmit) {
+                    ++metrics.windowDeadlineShadowWouldAdmit;
+                } else {
+                    ++metrics.windowDeadlineShadowWouldReject;
+                    ++metrics.totalDeadlineShadowWouldReject;
+                }
+            }
+        }
+    }
+
+    const auto updateAdaptiveFlowGovernor = [&]() {
         const LSFG::AdaptiveFlowGpuTiming timing = conf.performance
             ? LSFG_3_1P::getContextGpuTiming(*this->lsfgCtxId)
             : LSFG_3_1::getContextGpuTiming(*this->lsfgCtxId);
+        const bool timingUsable = timing.valid && !timing.transitionActive;
+
+        if (timingUsable && timing.generationCount > 0) {
+            if (this->deadlineShadowBatchDecision_.valid) {
+                metrics.windowDeadlinePredictionAbsErrorMs += std::abs(
+                    timing.totalLsfgMs
+                    - this->deadlineShadowBatchDecision_.predictedTotalLsfgMs);
+                ++metrics.windowDeadlinePredictionSamples;
+            }
+            this->deadlineAdmissionPredictor_.observe(
+                DeadlineAdmissionObservation{
+                    .mipmapsMs = timing.mipmapsMs,
+                    .opticalFlowMs = timing.opticalFlowMs,
+                    .totalLsfgMs = timing.totalLsfgMs,
+                    .generationCount = timing.generationCount,
+                    .valid = true,
+                });
+        }
+
+        if (!conf.adaptiveFlowScale || !this->adaptiveFlowRuntimeAvailable_)
+            return;
+
         const double budgetMs = adaptiveFlowFrameBudgetMs(
             conf, sourceInterval, generatedFrameCount);
         const bool schedulerTransition =
             conf.adaptiveFramegen && adaptiveLsfgTransition(adaptiveTelemetry);
-        const bool timingUsable = timing.valid && !timing.transitionActive;
         const bool budgetValid = budgetMs > 0.0 && std::isfinite(budgetMs);
         constexpr double kAdaptiveFlowCadenceDiscontinuityMs = 250.0;
         const double sourceIntervalMs =
@@ -906,6 +971,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowAdaptiveDiscontinuities = 0;
             metrics.windowAsyncHandoffs = 0;
             metrics.windowSyncHandoffs = 0;
+            metrics.windowDeadlineShadowOpportunities = 0;
+            metrics.windowDeadlineShadowWouldAdmit = 0;
+            metrics.windowDeadlineShadowWouldReject = 0;
+            metrics.windowDeadlineShadowOpportunities = 0;
+            metrics.windowDeadlineShadowWouldAdmit = 0;
+            metrics.windowDeadlineShadowWouldReject = 0;
+            metrics.windowDeadlineShadowOpportunities = 0;
+            metrics.windowDeadlineShadowWouldAdmit = 0;
+            metrics.windowDeadlineShadowWouldReject = 0;
+            metrics.windowDeadlineShadowOpportunities = 0;
+            metrics.windowDeadlineShadowWouldAdmit = 0;
+            metrics.windowDeadlineShadowWouldReject = 0;
+            metrics.windowDeadlineShadowOpportunities = 0;
+            metrics.windowDeadlineShadowWouldAdmit = 0;
+            metrics.windowDeadlineShadowWouldReject = 0;
             metrics.windowCycleMs = 0.0;
             metrics.windowCycleMaxMs = 0.0;
             metrics.windowHandoffMs = 0.0;
@@ -916,6 +996,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceIntervalMaxMs = 0.0;
             metrics.windowSourceDeadlineErrorAbsMs = 0.0;
             metrics.windowSourceDeadlineErrorMaxMs = 0.0;
+            metrics.windowDeadlinePredictionAbsErrorMs = 0.0;
+            metrics.windowDeadlinePredictionSamples = 0;
             metrics.windowSourceIntervals = 0;
             metrics.windowSourceDeadlineSamples = 0;
             metrics.windowSourceTimelineRebases = 0;
@@ -947,6 +1029,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 metrics.windowSourceDeadlineSamples > 0
                     ? metrics.windowSourceDeadlineErrorAbsMs
                         / static_cast<double>(metrics.windowSourceDeadlineSamples)
+                    : 0.0;
+            const double deadlinePredictionErrorAvgMs =
+                metrics.windowDeadlinePredictionSamples > 0
+                    ? metrics.windowDeadlinePredictionAbsErrorMs
+                        / static_cast<double>(metrics.windowDeadlinePredictionSamples)
                     : 0.0;
 
             std::cerr << "lsfg-vk: metrics"
@@ -981,6 +1068,32 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << metrics.windowSourceTimelineRebases
                       << " source_timeline_index="
                       << this->currentSourceTimeline_.sourceIndex
+                      << " deadline_shadow_valid="
+                      << (this->deadlineShadowBatchDecision_.valid ? 1 : 0)
+                      << " deadline_pred_mipmaps_ms="
+                      << this->deadlineShadowBatchDecision_.predictedMipmapsMs
+                      << " deadline_pred_flow_ms="
+                      << this->deadlineShadowBatchDecision_.predictedOpticalFlowMs
+                      << " deadline_pred_total_ms="
+                      << this->deadlineShadowBatchDecision_.predictedTotalLsfgMs
+                      << " deadline_safety_margin_ms="
+                      << this->deadlineShadowBatchDecision_.safetyMarginMs
+                      << " deadline_usable_budget_ms="
+                      << this->deadlineShadowBatchDecision_.usableBudgetMs
+                      << " deadline_shadow_batch_admit="
+                      << (this->deadlineShadowBatchDecision_.wouldAdmit ? 1 : 0)
+                      << " deadline_shadow_opportunities="
+                      << metrics.windowDeadlineShadowOpportunities
+                      << " deadline_shadow_would_admit="
+                      << metrics.windowDeadlineShadowWouldAdmit
+                      << " deadline_shadow_would_reject="
+                      << metrics.windowDeadlineShadowWouldReject
+                      << " deadline_shadow_would_reject_total="
+                      << metrics.totalDeadlineShadowWouldReject
+                      << " deadline_prediction_error_avg_ms="
+                      << deadlinePredictionErrorAvgMs
+                      << " deadline_prediction_samples="
+                      << metrics.windowDeadlinePredictionSamples
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
@@ -1059,6 +1172,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceIntervalMaxMs = 0.0;
             metrics.windowSourceDeadlineErrorAbsMs = 0.0;
             metrics.windowSourceDeadlineErrorMaxMs = 0.0;
+            metrics.windowDeadlinePredictionAbsErrorMs = 0.0;
+            metrics.windowDeadlinePredictionSamples = 0;
             metrics.windowSourceIntervals = 0;
             metrics.windowSourceDeadlineSamples = 0;
             metrics.windowSourceTimelineRebases = 0;
