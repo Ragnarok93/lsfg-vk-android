@@ -148,8 +148,12 @@ void DeadlineAdmissionPredictor::observe(
         return;
     }
 
+    // AdaptiveFlowGpuTiming::opticalFlowMs is cumulative through the
+    // optical-flow preprocess and already includes mipmaps. Treat it as the
+    // shared pre-generation cost; adding mipmaps again would double-count the
+    // same GPU interval and systematically overpredict synthetic work.
     const double sharedMs =
-        observation.mipmapsMs + observation.opticalFlowMs;
+        std::max(observation.mipmapsMs, observation.opticalFlowMs);
     const double generatedResidualMs = std::max(
         0.0, observation.totalLsfgMs - sharedMs);
     const double perGeneratedMs = generatedResidualMs
@@ -182,7 +186,7 @@ DeadlineAdmissionDecision DeadlineAdmissionPredictor::predict(
     decision.predictedMipmapsMs = mipmapsMs_;
     decision.predictedOpticalFlowMs = opticalFlowMs_;
     decision.predictedTotalLsfgMs =
-        mipmapsMs_ + opticalFlowMs_
+        std::max(mipmapsMs_, opticalFlowMs_)
         + perGeneratedMs_ * static_cast<double>(generationCount);
     decision.safetyMarginMs = std::max(
         kSafetyMarginFloorMs,
