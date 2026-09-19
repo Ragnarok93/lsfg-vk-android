@@ -117,7 +117,9 @@ int main() {
         coreCalls = khrCalls = 0;
         const auto result = b14::querySubgroupProperties(1, validCore, validKhr);
         assert(result.route == b14::SubgroupQueryRoute::Core);
-        assert(coreCalls == 1 && khrCalls == 0);
+        // B14 is deliberately fail-closed, so the helper also probes the KHR
+        // alias before retaining the complete core metadata.
+        assert(coreCalls == 1 && khrCalls == 1);
         assert(!b14::supportsCooperativeMipmaps(result.properties));
     }
     {
