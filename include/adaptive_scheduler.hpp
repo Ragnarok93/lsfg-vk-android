@@ -182,6 +182,7 @@ private:
     double sourcePreservationProbeStartedSeconds_{};
     double sourcePreservationProbeFpsSum_{};
     std::size_t sourcePreservationProbeSamples_{};
+    double sourcePreservationProbeHoldUntilSeconds_{};
 
     AdaptiveSchedulerTelemetry telemetry_{};
 };
