@@ -140,7 +140,7 @@ private:
     AdaptiveFlowDecisionReason adaptiveFlowReason_{AdaptiveFlowDecisionReason::None};
 
     DeadlineAdmissionPredictor deadlineAdmissionPredictor_;
-    DeadlineAdmissionDecision deadlineShadowBatchDecision_{};
+    DeadlineAdmissionDecision deadlineBatchDecision_{};
 
     // Adaptive presentation pacing. VK_GOOGLE_display_timing is optional; the
     // swapchain still uses FIFO ordering when this capability is unavailable.

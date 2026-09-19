@@ -57,30 +57,50 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             source,
         )
 
-    def test_deadline_admission_is_shadow_only(self) -> None:
+    def test_deadline_admission_protects_source_without_catchup_debt(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn("DeadlineAdmissionPredictor deadlineAdmissionPredictor_", header)
-        self.assertIn("deadlineShadowBatchDecision_", header)
-        self.assertIn("Slice 4: shadow-only deadline admission", source)
+        self.assertIn("deadlineBatchDecision_", header)
+        self.assertIn("Active deadline admission", source)
+        self.assertIn("plannedGeneratedFrameCount", source)
+        self.assertIn("admittedGeneratedFrameCount", source)
+        self.assertIn(
+            "generatedFrameCount = admittedGeneratedFrameCount",
+            source,
+        )
+        self.assertIn(
+            "candidate > 0; --candidate",
+            source,
+        )
+        self.assertIn(
+            "slot + 1, slotBudgetMs",
+            source,
+        )
+        self.assertIn(
+            "plannedGeneratedFrameCount > 0\n"
+            "                        && generatedFrameCount == 0",
+            source,
+        )
+        self.assertIn("AndroidFrameCycleMode::HistoryOnly", source)
         self.assertIn("deadlineAdmissionPredictor_.predict", source)
         self.assertIn("deadlineAdmissionPredictor_.observe", source)
-        self.assertIn("deadline_shadow_opportunities=", source)
-        self.assertIn("deadline_shadow_would_reject=", source)
+        self.assertIn("deadline_planned_generated=", source)
+        self.assertIn("deadline_admitted_generated=", source)
         self.assertIn("deadline_prediction_error_avg_ms=", source)
 
-        # Shadow mode must not alter the dispatch count or source timing.
-        self.assertIn(
-            "*this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems",
-            source,
+        # Admission can lower synthetic density, but it cannot alter the source
+        # timeline or create pacing/catch-up work of its own.
+        admission_start = source.index("Active deadline admission")
+        governor_start = source.index(
+            "const auto updateAdaptiveFlowGovernor", admission_start
         )
-        self.assertIn(
-            "generatedFrameCount, this->asyncAhbHandoffHandleType_",
-            source,
-        )
-        self.assertNotIn("deadlineRejectedGeneratedFrameCount", source)
-        self.assertNotIn("deadlineAdmittedGeneratedFrameCount", source)
+        admission = source[admission_start:governor_start]
+        self.assertNotIn("sleep_for", admission)
+        self.assertNotIn("sourceDesiredTimeNs_ =", admission)
+        self.assertNotIn("fractionalOpportunityPhase_", admission)
+
 
     def test_fixed_value_is_dormant_while_adaptive_flow_is_active(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")

@@ -449,9 +449,10 @@ int main() {
 
 
     {
-        // Deadline admission starts in shadow mode. It must predict from
-        // observed GPU costs without making source-rate assumptions, and the
-        // safety margin must turn an otherwise-fitting job into a rejection
+        // Deadline admission predicts from observed GPU cost without source-rate
+        // assumptions. The runtime may use this to reject synthetic work, while
+        // the predictor itself remains independent of fractional scheduling.
+        // The safety margin must turn an otherwise-fitting job into a rejection
         // when the remaining source-owned presentation budget is too small.
         DeadlineAdmissionPredictor predictor;
         const auto cold = predictor.predict(2, 12.0);

@@ -669,9 +669,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
     metrics.lastSourcePresent = cycleStart;
     metrics.hasLastSourcePresent = true;
-    const size_t generatedFrameCount = conf.adaptiveFramegen
+    const size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
         : static_cast<size_t>(conf.multiplier - 1);
+    size_t generatedFrameCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
     const uint64_t sourceArrivalTimeNs = monotonicNowNs();
@@ -689,10 +690,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->currentSourceTimeline_ = this->sourceTimeline_.observe(
             sourceArrivalTimeNs, sourceInterval, false);
         if (this->currentSourceTimeline_.valid) {
-            this->adaptivePresentPeriodNs_ =
-                this->currentSourceTimeline_.intervalNs
-                / static_cast<uint64_t>(generatedFrameCount + 1);
-
             if (this->currentSourceTimeline_.sourceIndex > 0) {
                 const double deadlineErrorMs = std::abs(
                     static_cast<double>(
@@ -710,69 +707,141 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    const bool sourceWarmupRequested =
+        plannedGeneratedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
+
+    // Active deadline admission: generation is subordinate to the protected
+    // source timeline. Use measured GPU cost to choose the largest evenly
+    // distributed synthetic count whose prefixes can meet their own slots.
+    // A rejected opportunity is dropped, never accumulated as catch-up debt.
+    this->deadlineBatchDecision_ = {};
+    if (!sourceWarmupRequested
+            && generatedFrameCount > 0
+            && this->currentSourceTimeline_.valid) {
+        const uint64_t admissionNowNs = monotonicNowNs();
+        if (admissionNowNs > 0) {
+            if (this->currentSourceTimeline_.sourceDesiredTimeNs <= admissionNowNs) {
+                metrics.windowGeneratedLateDrops += generatedFrameCount;
+                metrics.totalGeneratedLateDrops += generatedFrameCount;
+                generatedFrameCount = 0;
+            } else {
+                const double sourceBudgetMs =
+                    static_cast<double>(
+                        this->currentSourceTimeline_.sourceDesiredTimeNs - admissionNowNs)
+                    / 1'000'000.0;
+                const auto plannedBatchDecision =
+                    this->deadlineAdmissionPredictor_.predict(
+                        generatedFrameCount, sourceBudgetMs);
+
+                // Preserve the historical opportunity counters as predictor
+                // diagnostics, but the decision below is now authoritative.
+                if (plannedBatchDecision.valid) {
+                    for (size_t slot = 0; slot < generatedFrameCount; ++slot) {
+                        const double interpolationFraction =
+                            static_cast<double>(slot + 1)
+                            / static_cast<double>(generatedFrameCount + 1);
+                        const uint64_t slotDeadlineNs =
+                            this->sourceTimeline_.syntheticDesiredTimeNs(
+                                this->currentSourceTimeline_, interpolationFraction);
+                        const double slotBudgetMs =
+                            slotDeadlineNs > admissionNowNs
+                                ? static_cast<double>(slotDeadlineNs - admissionNowNs)
+                                    / 1'000'000.0
+                                : 0.0;
+                        const auto slotDecision =
+                            this->deadlineAdmissionPredictor_.predict(
+                                slot + 1, slotBudgetMs);
+                        if (!slotDecision.valid)
+                            continue;
+
+                        ++metrics.windowDeadlineShadowOpportunities;
+                        ++metrics.totalDeadlineShadowOpportunities;
+                        if (slotDecision.wouldAdmit) {
+                            ++metrics.windowDeadlineShadowWouldAdmit;
+                        } else {
+                            ++metrics.windowDeadlineShadowWouldReject;
+                            ++metrics.totalDeadlineShadowWouldReject;
+                        }
+                    }
+
+                    size_t admittedGeneratedFrameCount = 0;
+                    for (size_t candidate = generatedFrameCount;
+                            candidate > 0; --candidate) {
+                        bool candidateFits = true;
+                        for (size_t slot = 0; slot < candidate; ++slot) {
+                            const double interpolationFraction =
+                                static_cast<double>(slot + 1)
+                                / static_cast<double>(candidate + 1);
+                            const uint64_t slotDeadlineNs =
+                                this->sourceTimeline_.syntheticDesiredTimeNs(
+                                    this->currentSourceTimeline_,
+                                    interpolationFraction);
+                            const double slotBudgetMs =
+                                slotDeadlineNs > admissionNowNs
+                                    ? static_cast<double>(
+                                        slotDeadlineNs - admissionNowNs)
+                                        / 1'000'000.0
+                                    : 0.0;
+                            const auto slotDecision =
+                                this->deadlineAdmissionPredictor_.predict(
+                                    slot + 1, slotBudgetMs);
+                            if (!slotDecision.valid || !slotDecision.wouldAdmit) {
+                                candidateFits = false;
+                                break;
+                            }
+                        }
+                        if (candidateFits) {
+                            admittedGeneratedFrameCount = candidate;
+                            break;
+                        }
+                    }
+
+                    if (admittedGeneratedFrameCount < generatedFrameCount) {
+                        const size_t rejectedGeneratedFrameCount =
+                            generatedFrameCount - admittedGeneratedFrameCount;
+                        metrics.windowGeneratedLateDrops +=
+                            rejectedGeneratedFrameCount;
+                        metrics.totalGeneratedLateDrops +=
+                            rejectedGeneratedFrameCount;
+                        generatedFrameCount = admittedGeneratedFrameCount;
+                    }
+
+                    if (generatedFrameCount > 0) {
+                        this->deadlineBatchDecision_ =
+                            this->deadlineAdmissionPredictor_.predict(
+                                generatedFrameCount, sourceBudgetMs);
+                    }
+                }
+            }
+        }
+    }
+
+    if (this->currentSourceTimeline_.valid) {
+        this->adaptivePresentPeriodNs_ =
+            this->currentSourceTimeline_.intervalNs
+            / static_cast<uint64_t>(generatedFrameCount + 1);
+    } else {
+        this->adaptivePresentPeriodNs_ = 0;
+    }
+
     enum class AndroidFrameCycleMode {
         Generate,
         HistoryOnly,
         SourceWarmup,
     };
     const AndroidFrameCycleMode cycleMode =
-        conf.adaptiveFramegen && generatedFrameCount == 0
-            ? AndroidFrameCycleMode::HistoryOnly
-            : (generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_
-                ? AndroidFrameCycleMode::SourceWarmup
+        sourceWarmupRequested
+            ? AndroidFrameCycleMode::SourceWarmup
+            : ((conf.adaptiveFramegen && plannedGeneratedFrameCount == 0)
+                    || (plannedGeneratedFrameCount > 0
+                        && generatedFrameCount == 0)
+                ? AndroidFrameCycleMode::HistoryOnly
                 : AndroidFrameCycleMode::Generate);
     const bool historyOnly =
         cycleMode == AndroidFrameCycleMode::HistoryOnly;
     const bool warmupSourceHistory =
         cycleMode == AndroidFrameCycleMode::SourceWarmup;
     this->lastGeneratedFrameCount_ = generatedFrameCount;
-
-    // Slice 4: shadow-only deadline admission. The source timeline remains the
-    // sole clock; these decisions are diagnostic and cannot suppress work yet.
-    this->deadlineShadowBatchDecision_ = {};
-    if (cycleMode == AndroidFrameCycleMode::Generate
-            && generatedFrameCount > 0
-            && this->currentSourceTimeline_.valid) {
-        const uint64_t admissionNowNs = monotonicNowNs();
-        if (admissionNowNs > 0
-                && this->currentSourceTimeline_.sourceDesiredTimeNs > admissionNowNs) {
-            const double sourceBudgetMs =
-                static_cast<double>(
-                    this->currentSourceTimeline_.sourceDesiredTimeNs - admissionNowNs)
-                / 1'000'000.0;
-            this->deadlineShadowBatchDecision_ =
-                this->deadlineAdmissionPredictor_.predict(
-                    generatedFrameCount, sourceBudgetMs);
-
-            for (size_t slot = 0; slot < generatedFrameCount; ++slot) {
-                const double interpolationFraction =
-                    static_cast<double>(slot + 1)
-                    / static_cast<double>(generatedFrameCount + 1);
-                const uint64_t slotDeadlineNs =
-                    this->sourceTimeline_.syntheticDesiredTimeNs(
-                        this->currentSourceTimeline_, interpolationFraction);
-                const double slotBudgetMs =
-                    slotDeadlineNs > admissionNowNs
-                        ? static_cast<double>(slotDeadlineNs - admissionNowNs)
-                            / 1'000'000.0
-                        : 0.0;
-                const auto slotDecision =
-                    this->deadlineAdmissionPredictor_.predict(
-                        slot + 1, slotBudgetMs);
-                if (!slotDecision.valid)
-                    continue;
-
-                ++metrics.windowDeadlineShadowOpportunities;
-                ++metrics.totalDeadlineShadowOpportunities;
-                if (slotDecision.wouldAdmit) {
-                    ++metrics.windowDeadlineShadowWouldAdmit;
-                } else {
-                    ++metrics.windowDeadlineShadowWouldReject;
-                    ++metrics.totalDeadlineShadowWouldReject;
-                }
-            }
-        }
-    }
 
     const auto updateAdaptiveFlowGovernor = [&]() {
         const LSFG::AdaptiveFlowGpuTiming timing = conf.performance
@@ -781,10 +850,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const bool timingUsable = timing.valid && !timing.transitionActive;
 
         if (timingUsable && timing.generationCount > 0) {
-            if (this->deadlineShadowBatchDecision_.valid) {
+            if (this->deadlineBatchDecision_.valid) {
                 metrics.windowDeadlinePredictionAbsErrorMs += std::abs(
                     timing.totalLsfgMs
-                    - this->deadlineShadowBatchDecision_.predictedTotalLsfgMs);
+                    - this->deadlineBatchDecision_.predictedTotalLsfgMs);
                 ++metrics.windowDeadlinePredictionSamples;
             }
             this->deadlineAdmissionPredictor_.observe(
@@ -1088,20 +1157,24 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << metrics.windowSourceTimelineRebases
                       << " source_timeline_index="
                       << this->currentSourceTimeline_.sourceIndex
-                      << " deadline_shadow_valid="
-                      << (this->deadlineShadowBatchDecision_.valid ? 1 : 0)
+                      << " deadline_admission_valid="
+                      << (this->deadlineBatchDecision_.valid ? 1 : 0)
+                      << " deadline_planned_generated="
+                      << plannedGeneratedFrameCount
+                      << " deadline_admitted_generated="
+                      << generatedFrameCount
                       << " deadline_pred_mipmaps_ms="
-                      << this->deadlineShadowBatchDecision_.predictedMipmapsMs
+                      << this->deadlineBatchDecision_.predictedMipmapsMs
                       << " deadline_pred_flow_ms="
-                      << this->deadlineShadowBatchDecision_.predictedOpticalFlowMs
+                      << this->deadlineBatchDecision_.predictedOpticalFlowMs
                       << " deadline_pred_total_ms="
-                      << this->deadlineShadowBatchDecision_.predictedTotalLsfgMs
+                      << this->deadlineBatchDecision_.predictedTotalLsfgMs
                       << " deadline_safety_margin_ms="
-                      << this->deadlineShadowBatchDecision_.safetyMarginMs
+                      << this->deadlineBatchDecision_.safetyMarginMs
                       << " deadline_usable_budget_ms="
-                      << this->deadlineShadowBatchDecision_.usableBudgetMs
-                      << " deadline_shadow_batch_admit="
-                      << (this->deadlineShadowBatchDecision_.wouldAdmit ? 1 : 0)
+                      << this->deadlineBatchDecision_.usableBudgetMs
+                      << " deadline_batch_admit="
+                      << (this->deadlineBatchDecision_.wouldAdmit ? 1 : 0)
                       << " deadline_shadow_opportunities="
                       << metrics.windowDeadlineShadowOpportunities
                       << " deadline_shadow_would_admit="
