@@ -13,7 +13,12 @@ AdaptiveFlowObservation sample(
         double flowMs,
         double budgetMs = 16.666,
         bool schedulerTransition = false,
-        bool deadlineMissed = false) {
+        bool deadlineMissed = false,
+        double globalGpuUsagePercent = 0.0,
+        bool globalPressureValid = false,
+        bool outputDeficit = false,
+        bool syntheticDropPressure = false,
+        bool generatedWorkSample = true) {
     return AdaptiveFlowObservation{
         .elapsed = 100ms,
         .frameBudgetMs = budgetMs,
@@ -22,6 +27,11 @@ AdaptiveFlowObservation sample(
         .mipmapsMs = flowMs * 0.4,
         .generationCount = 1,
         .deadlineMissed = deadlineMissed,
+        .globalGpuUsagePercent = globalGpuUsagePercent,
+        .globalPressureValid = globalPressureValid,
+        .outputDeficit = outputDeficit,
+        .syntheticDropPressure = syntheticDropPressure,
+        .generatedWorkSample = generatedWorkSample,
         .schedulerTransition = schedulerTransition,
         .valid = true,
     };
@@ -157,6 +167,65 @@ int main() {
         resumed.elapsed = 10s;
         controller.observe(resumed);
         assert(near(controller.currentScale(), 0.90F));
+    }
+
+    {
+        // Whole-device GPU saturation plus a real output deficit must lower
+        // Flow Scale even when the current cycle is history-only. The retained
+        // generated-work timing supplies the scale-sensitive relief estimate.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 6; ++i) {
+            controller.observe(sample(
+                8.0, 3.0, 16.666, false, false,
+                99.0, true, true, false, false));
+        }
+        assert(near(controller.currentScale(), 0.90F));
+        assert(
+            controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::SustainedGlobalPressure
+            || controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::Cooldown);
+    }
+
+    {
+        // History-only cycles can never prove recovery headroom. After global
+        // pressure lowers the scale, many cheap zero-generation samples must
+        // not immediately raise quality again.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 6; ++i) {
+            controller.observe(sample(
+                8.0, 3.0, 16.666, false, false,
+                99.0, true, true, false, false));
+        }
+        assert(near(controller.currentScale(), 0.90F));
+
+        for (int i = 0; i < 70; ++i) {
+            controller.observe(sample(
+                5.0, 1.5, 16.666, false, false,
+                45.0, true, false, false, false));
+        }
+        assert(near(controller.currentScale(), 0.90F));
+    }
+
+    {
+        // An Adaptive-LSFG transition may hold the actuator, but sustained
+        // whole-device pressure must survive that hold instead of restarting
+        // its confirmation timer from zero.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Balanced);
+        for (int i = 0; i < 4; ++i) {
+            controller.observe(sample(
+                8.0, 3.0, 16.666, false, false,
+                99.0, true, true));
+        }
+        controller.observe(sample(
+            8.0, 3.0, 16.666, true, false,
+            99.0, true, true));
+        for (int i = 0; i < 14; ++i) {
+            controller.observe(sample(
+                8.0, 3.0, 16.666, false, false,
+                99.0, true, true));
+        }
+        assert(near(controller.currentScale(), 0.70F));
     }
 
     {
