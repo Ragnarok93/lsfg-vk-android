@@ -176,6 +176,23 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, build + "\n" + profile)
 
+    def test_admission_preserves_planned_interpolation_denominator(self) -> None:
+        public_headers = (
+            ROOT / "framegen/public/lsfg_3_1.hpp",
+            ROOT / "framegen/public/lsfg_3_1p.hpp",
+        )
+        context_sources = (
+            ROOT / "framegen/v3.1_src/context.cpp",
+            ROOT / "framegen/v3.1p_src/context.cpp",
+        )
+        for path in public_headers:
+            source = path.read_text(encoding="utf-8")
+            self.assertIn("size_t interpolationGenerationCount = 0", source, path.as_posix())
+        for path in context_sources:
+            source = path.read_text(encoding="utf-8")
+            self.assertIn("const size_t interpolationCount", source, path.as_posix())
+            self.assertIn("pass, interpolationCount", source, path.as_posix())
+
 
 if __name__ == "__main__":
     unittest.main()
