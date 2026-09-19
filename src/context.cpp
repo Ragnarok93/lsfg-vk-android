@@ -681,9 +681,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    const bool adaptiveZeroGeneration = conf.adaptiveFramegen && generatedFrameCount == 0;
+    enum class AndroidFrameCycleMode {
+        Generate,
+        HistoryOnly,
+        SourceWarmup,
+    };
+    const AndroidFrameCycleMode cycleMode =
+        conf.adaptiveFramegen && generatedFrameCount == 0
+            ? AndroidFrameCycleMode::HistoryOnly
+            : (generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_
+                ? AndroidFrameCycleMode::SourceWarmup
+                : AndroidFrameCycleMode::Generate);
+    const bool historyOnly =
+        cycleMode == AndroidFrameCycleMode::HistoryOnly;
     const bool warmupSourceHistory =
-        generatedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
+        cycleMode == AndroidFrameCycleMode::SourceWarmup;
     this->lastGeneratedFrameCount_ = generatedFrameCount;
 
     const auto updateAdaptiveFlowGovernor = [&]() {
@@ -977,8 +989,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_fractional_phase=" << adaptiveTelemetry.fractionalPhase
                       << " adaptive_synthetic_opportunities="
                       << adaptiveTelemetry.syntheticOpportunitiesCreated
-                      << " adaptive_zero_cycles=" << metrics.windowAdaptiveZeroGenerationCycles
-                      << " adaptive_zero_cycles_total=" << metrics.totalAdaptiveZeroGenerationCycles
+                      << " history_only_cycles=" << metrics.windowAdaptiveZeroGenerationCycles
+                      << " history_only_cycles_total=" << metrics.totalAdaptiveZeroGenerationCycles
                       << " adaptive_rate_snaps=" << metrics.windowAdaptiveRateSnaps
                       << " adaptive_rate_snaps_total=" << metrics.totalAdaptiveRateSnaps
                       << " adaptive_cost_raises=" << metrics.windowAdaptiveCostRaises
@@ -1086,9 +1098,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.preCopySemaphores.at(1).handle(),
     };
 
-    // Warm-up and zero-generation cycles deliberately retain the proven host
-    // fence path. Only ordinary generated cycles can use the optional dedicated
-    // cross-device semaphore, keeping source-only/history transitions unchanged.
+    // SourceWarmup and HistoryOnly retain the proven synchronous handoff in
+    // this slice. HistoryOnly is an active-LSFG history-maintenance mode, not a
+    // source-only lifecycle transition. Asynchronous retirement is evaluated
+    // separately under the synchronization safety gate.
     bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
         && generatedFrameCount > 0
         && !warmupSourceHistory;
@@ -1130,7 +1143,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << (useAsyncHandoff ? "gpu-semaphore" : "host-fence") << "\n";
     }
 
-    if (adaptiveZeroGeneration) {
+    if (historyOnly) {
         // The framegen zero-count path advances its temporal frame index without
         // dispatching interpolation shaders. The source AHB was already updated
         // above, keeping the alternating real-frame history coherent for the next
@@ -1176,12 +1189,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "Failed to present Adaptive zero-generation source frame");
         }
         if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset) {
-            std::cerr << "lsfg-vk: runtime stage=adaptive-history-advance"
+            std::cerr << "lsfg-vk: runtime stage=history-only"
                       << " generated=0 history_valid=1"
                       << " discontinuity=" << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
                       << "\n";
         }
-        return finishSourcePresent(adaptiveSourceResult, "pre-copy-adaptive-zero");
+        return finishSourcePresent(adaptiveSourceResult, "pre-copy-history-only");
     }
 
     if (warmupSourceHistory) {

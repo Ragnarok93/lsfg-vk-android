@@ -16,16 +16,18 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
 
         present_start = source.index("VkResult LsContext::present")
         handoff = source.index("submitAndWaitForAhbHandoff", present_start)
-        adaptive_zero = source.index("if (adaptiveZeroGeneration)", handoff)
-        zero_end = source.index("if (warmupSourceHistory)", adaptive_zero)
-        zero_block = source[adaptive_zero:zero_end]
+        self.assertIn("enum class AndroidFrameCycleMode", source)
+        self.assertIn("AndroidFrameCycleMode::HistoryOnly", source)
+        history_only = source.index("if (historyOnly)", handoff)
+        history_end = source.index("if (warmupSourceHistory)", history_only)
+        history_block = source[history_only:history_end]
 
-        self.assertGreater(adaptive_zero, handoff)
-        self.assertIn("presentContextWithCount", zero_block)
-        self.assertIn("stage=adaptive-history-advance", zero_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", zero_block)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", zero_block)
-        self.assertNotIn("enterSourceOnlyBypass", zero_block)
+        self.assertGreater(history_only, handoff)
+        self.assertIn("presentContextWithCount", history_block)
+        self.assertIn("stage=history-only", history_block)
+        self.assertIn("requiresSourceHistoryWarmup_ = false", history_block)
+        self.assertNotIn("requiresSourceHistoryWarmup_ = true", history_block)
+        self.assertNotIn("enterSourceOnlyBypass", history_block)
 
     def test_framegen_zero_generation_refreshes_temporal_preprocessing(self) -> None:
         backend_sources = (
