@@ -122,9 +122,16 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             source_tail,
         )
         self.assertIn(
-            "queuedGeneratedFrameCount == 0 ? pNext : nullptr",
+            ".pNext = adaptivePresentPNext(\n"
+            "            pNext,",
             source_tail,
         )
+        self.assertIn(
+            ".pNext = adaptivePresentPNext(\n"
+            "                nullptr,",
+            generated,
+        )
+        self.assertNotIn("generatedDownstreamPNext", generated)
         self.assertIn(
             "this->lastGeneratedFrameCount_ = queuedGeneratedFrameCount",
             android_present,

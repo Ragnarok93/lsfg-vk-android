@@ -1826,11 +1826,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         VkPresentTimeGOOGLE generatedPresentTime{};
         VkPresentTimesInfoGOOGLE generatedPresentTimes{};
-        const void* generatedDownstreamPNext = i == 0 ? pNext : nullptr;
         const VkPresentInfoKHR presentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            // The application's pNext chain describes its real source present.
+            // Synthetic presents carry only LSFG's own optional timing hint.
             .pNext = adaptivePresentPNext(
-                generatedDownstreamPNext,
+                nullptr,
                 syntheticDesiredTimeNs,
                 generatedPresentTime,
                 generatedPresentTimes),
@@ -1867,12 +1868,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         : pass.preCopySemaphores.at(0).handle();
     VkPresentTimeGOOGLE finalSourcePresentTime{};
     VkPresentTimesInfoGOOGLE finalSourcePresentTimes{};
-    const void* finalSourceDownstreamPNext =
-        queuedGeneratedFrameCount == 0 ? pNext : nullptr;
     const VkPresentInfoKHR finalPresentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = adaptivePresentPNext(
-            finalSourceDownstreamPNext,
+            pNext,
             this->currentSourceTimeline_.sourceDesiredTimeNs,
             finalSourcePresentTime,
             finalSourcePresentTimes),
