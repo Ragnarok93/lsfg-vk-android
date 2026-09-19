@@ -241,6 +241,10 @@ Context::Context(Vulkan& vk,
         for (auto& completionFence : data.completionFences)
             completionFence = Core::Fence(vk.device);
         data.cmdBuffers2.resize(vk.generationCount);
+#ifdef __ANDROID__
+        data.adaptiveFlowTimingQueryPool =
+            Core::TimestampQueryPool(vk.device, 4);
+#endif
     }
 
     this->mipmaps = Shaders::Mipmaps(vk, this->inImg_0, this->inImg_1);
@@ -331,8 +335,7 @@ void Context::present(Vulkan& vk,
 
 #ifdef __ANDROID__
     Core::TimestampQueryPool* adaptiveFlowTimingPool = nullptr;
-    if (!this->adaptiveFlowScales_.empty()
-            && data.adaptiveFlowTimingQueryPool.supported()) {
+    if (data.adaptiveFlowTimingQueryPool.supported()) {
         adaptiveFlowTimingPool = &data.adaptiveFlowTimingQueryPool;
         adaptiveFlowTimingPool->reset(data.cmdBuffer1.handle());
         adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 0);
@@ -375,6 +378,8 @@ void Context::present(Vulkan& vk,
         }
     } else {
         this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);
+        if (adaptiveFlowTimingPool != nullptr)
+            adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 1);
         for (size_t i = 0; i < 7; i++)
             this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
         if (generationCount > 0)
@@ -654,6 +659,10 @@ Context::Context(Vulkan& vk,
         for (auto& completionFence : data.completionFences)
             completionFence = Core::Fence(vk.device);
         data.cmdBuffers2.resize(vk.generationCount);
+#ifdef __ANDROID__
+        data.adaptiveFlowTimingQueryPool =
+            Core::TimestampQueryPool(vk.device, 4);
+#endif
     }
 
     this->mipmaps = Shaders::Mipmaps(vk, this->inImg_0, this->inImg_1);
@@ -706,9 +715,6 @@ Context::Context(Vulkan& vk,
     }
 
     this->adaptiveFlowScales_ = adaptiveFlowScales;
-    for (auto& renderData : this->data)
-        renderData.adaptiveFlowTimingQueryPool =
-            Core::TimestampQueryPool(vk.device, 4);
     this->activeFlowGraphIndex_ = 0;
     this->requestedFlowScale_ = adaptiveFlowScales.front();
     this->adaptiveFlowGraphs_.reserve(adaptiveFlowScales.size() - 1);
@@ -814,8 +820,7 @@ void Context::dispatchAdaptiveFlowPreprocess(
 
 void Context::recordAdaptiveFlowGpuTiming(
         Vulkan& vk, RenderData& renderData) {
-    if (this->adaptiveFlowScales_.empty()
-            || !renderData.adaptiveFlowTimingQueryPool.supported())
+    if (!renderData.adaptiveFlowTimingQueryPool.supported())
         return;
 
     const auto durations =
