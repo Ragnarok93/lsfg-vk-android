@@ -57,6 +57,46 @@ private:
 /// Chooses the minimum number of interpolation frames needed to approach an
 /// output FPS target. It owns no Vulkan objects, never paces source frames, and
 /// is independently testable.
+struct DeadlineAdmissionObservation {
+    double mipmapsMs{};
+    double opticalFlowMs{};
+    double totalLsfgMs{};
+    std::size_t generationCount{};
+    bool valid{false};
+};
+
+struct DeadlineAdmissionDecision {
+    double predictedMipmapsMs{};
+    double predictedOpticalFlowMs{};
+    double predictedTotalLsfgMs{};
+    double safetyMarginMs{};
+    double usableBudgetMs{};
+    bool wouldAdmit{false};
+    bool valid{false};
+};
+
+/// Predicts whether one synthetic batch should fit inside the source-owned
+/// presentation budget. This class is deliberately policy-local: it estimates
+/// cost and makes a fast admission comparison, but it never changes source
+/// timing, fractional demand, Flow Scale, or the long-term generation ceiling.
+class DeadlineAdmissionPredictor {
+public:
+    void observe(const DeadlineAdmissionObservation& observation);
+    [[nodiscard]] DeadlineAdmissionDecision predict(
+        std::size_t generationCount, double usableBudgetMs) const;
+    void reset();
+
+private:
+    static constexpr double kEwmaAlpha = 0.20;
+    static constexpr double kSafetyMarginRatio = 0.12;
+    static constexpr double kSafetyMarginFloorMs = 0.35;
+
+    bool hasEstimate_{false};
+    double mipmapsMs_{0.0};
+    double opticalFlowMs_{0.0};
+    double perGeneratedMs_{0.0};
+};
+
 class AdaptiveFrameScheduler {
 public:
     AdaptiveFrameScheduler() = default;
