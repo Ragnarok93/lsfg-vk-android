@@ -52,6 +52,31 @@ int main() {
     }
 
     {
+        // A startup/resume outlier must not become a permanent phase offset.
+        // The previous implementation advanced from its old desired epoch, so
+        // an 80 ms seed followed by stable 16 ms source arrivals stayed 64 ms
+        // ahead indefinitely. Real source arrivals are authoritative.
+        SourceProtectedTimeline timeline;
+        const auto seeded = timeline.observe(5'000'000'000ULL, 80ms);
+        assert(seeded.valid);
+        assert(seeded.sourceDesiredTimeNs == 5'080'000'000ULL);
+
+        const auto corrected = timeline.observe(5'016'000'000ULL, 16ms);
+        assert(corrected.valid);
+        assert(corrected.rebased);
+        assert(corrected.sourceDeadlineErrorNs == -64'000'000LL);
+        assert(corrected.previousSourceDesiredTimeNs == 5'016'000'000ULL);
+        assert(corrected.sourceDesiredTimeNs == 5'032'000'000ULL);
+
+        const auto stable = timeline.observe(5'032'000'000ULL, 16ms);
+        assert(stable.valid);
+        assert(!stable.rebased);
+        assert(stable.sourceDeadlineErrorNs == 0);
+        assert(stable.previousSourceDesiredTimeNs == 5'032'000'000ULL);
+        assert(stable.sourceDesiredTimeNs == 5'048'000'000ULL);
+    }
+
+    {
         // Source timeline discontinuities are cadence-relative in every mode.
         // A suspend-like outlier must not create a historical synthetic span or
         // a delayed source deadline, while a slow-but-stable cadence remains valid.
