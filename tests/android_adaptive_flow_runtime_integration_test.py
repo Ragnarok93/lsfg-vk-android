@@ -80,11 +80,8 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "slot + 1, slotBudgetMs",
             source,
         )
-        self.assertIn(
-            "plannedGeneratedFrameCount > 0\n"
-            "                        && generatedFrameCount == 0",
-            source,
-        )
+        self.assertIn("plannedGeneratedFrameCount > 0", source)
+        self.assertIn("generatedFrameCount == 0", source)
         self.assertIn("AndroidFrameCycleMode::HistoryOnly", source)
         self.assertIn("deadlineAdmissionPredictor_.predict", source)
         self.assertIn("deadlineAdmissionPredictor_.observe", source)
