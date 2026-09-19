@@ -57,6 +57,27 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             source,
         )
 
+    def test_deadline_admission_is_shadow_only(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("DeadlineAdmissionPredictor deadlineAdmissionPredictor_", header)
+        self.assertIn("deadlineShadowBatchDecision_", header)
+        self.assertIn("Slice 4: shadow-only deadline admission", source)
+        self.assertIn("deadlineAdmissionPredictor_.predict", source)
+        self.assertIn("deadlineAdmissionPredictor_.observe", source)
+        self.assertIn("deadline_shadow_opportunities=", source)
+        self.assertIn("deadline_shadow_would_reject=", source)
+        self.assertIn("deadline_prediction_error_avg_ms=", source)
+
+        # Shadow mode must not alter the dispatch count or source timing.
+        self.assertIn(
+            "*this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, generatedFrameCount",
+            source,
+        )
+        self.assertNotIn("deadlineRejectedGeneratedFrameCount", source)
+        self.assertNotIn("deadlineAdmittedGeneratedFrameCount", source)
+
     def test_fixed_value_is_dormant_while_adaptive_flow_is_active(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
