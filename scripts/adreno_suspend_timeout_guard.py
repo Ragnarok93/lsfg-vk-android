@@ -46,7 +46,7 @@ NEW_WAIT = '''    if (requireHostCompletionWait) {
                       << " recovered=" << (framegenReady ? 1 : 0)
                       << " initial_wait_ms="
                       << (static_cast<double>(framegenCompletionWaitElapsedNs) / 1000000.0)
-                      << " recheck_ms=" << resumeRecheckMs << "\n";
+                      << " recheck_ms=" << resumeRecheckMs << "\\n";
         }
 
         if (!framegenRecoveredAfterTimeout) {
