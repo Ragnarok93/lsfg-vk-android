@@ -308,12 +308,12 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("source-direct-present", source[present_start:handoff_start])
 
 
-    def test_generation_resumes_only_after_three_source_history_updates(self) -> None:
-        """Startup and source-only bypass rebuild all three temporal slots."""
+    def test_generation_resumes_only_after_full_source_history_flush(self) -> None:
+        """Startup and bypass flush the contaminated first sample plus all three temporal slots."""
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("kSourceHistoryWarmupFrames = 3", header)
+        self.assertIn("kSourceHistoryWarmupFrames = 4", header)
         beta = (ROOT / "framegen/v3.1_src/shaders/beta.cpp").read_text(
             encoding="utf-8"
         )
