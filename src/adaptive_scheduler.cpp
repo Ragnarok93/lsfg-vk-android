@@ -9,8 +9,11 @@ constexpr double kSlowIntervalHigh = 1.40;
 constexpr double kFastIntervalLow = 0.70;
 constexpr unsigned kSlowSamplesRequired = 3;
 constexpr unsigned kFastSamplesRequired = 6;
-constexpr double kDiscontinuitySeconds = 0.250;
-constexpr double kLowFpsCutoffIntervalSeconds = 0.100;
+// Treat a single interval as a suspend/stall discontinuity only when it is an
+// extreme outlier relative to an already-established source cadence. An
+// absolute FPS threshold would incorrectly disable generation for legitimately
+// slow sources.
+constexpr double kDiscontinuityRatio = 8.0;
 
 // Governor timing intentionally favors stability over quickly chasing an
 // unreachable output target. The source-rate estimator is allowed to settle
@@ -162,9 +165,10 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.costProbe = false;
     telemetry_.discontinuityReset = false;
     telemetry_.configWarmStart = false;
-    telemetry_.lowFpsCutoff = false;
     telemetry_.generatedFrames = 0;
     telemetry_.wantedGeneratedFrames = 0.0;
+    telemetry_.fractionalPhase = fractionalOpportunityPhase_;
+    telemetry_.syntheticOpportunitiesCreated = 0;
 
     if (targetFps_ == 0 || maxGeneratedFrames_ == 0) {
         telemetry_.costLimit = 0;
@@ -175,33 +179,19 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     if (!(intervalSeconds > 0.0) || !std::isfinite(intervalSeconds))
         return 0;
 
-    // A pause, app switch, shader-compilation stall, or Quick Menu suspension
-    // is not a useful source cadence sample. Reset controller state rather than
-    // accumulating output debt or blaming frame generation for a discontinuity.
-    // Preserve an explicit hot-reload warm start so the menu pause itself does
-    // not erase the user's newly selected target before the first valid sample.
-    if (intervalSeconds >= kDiscontinuitySeconds) {
+    // Distinguish a suspend/stall from a legitimately slow source by comparing
+    // against established cadence rather than an absolute FPS band. The first
+    // sample at any source rate is always eligible. After an extreme outlier,
+    // consume that one sample as a discontinuity and let the next real interval
+    // establish the new cadence without synthetic catch-up debt.
+    if (lastTrustedSourceIntervalSeconds_ > 0.0
+            && intervalSeconds
+                > lastTrustedSourceIntervalSeconds_ * kDiscontinuityRatio) {
         const bool preserveWarmStart = reconfigureWarmStartPending_;
         resetRuntimeState();
+        lastTrustedSourceIntervalSeconds_ = 0.0;
         reconfigureWarmStartPending_ = preserveWarmStart;
         telemetry_.discontinuityReset = true;
-        return 0;
-    }
-
-    // LSFG's adaptive safety floor: below 10 real FPS, interpolation is more
-    // likely to amplify large temporal discontinuities than improve motion.
-    // Drop all synthetic work and fractional debt immediately, but preserve an
-    // explicit hot-reload warm start so recovery resumes from fresh cadence
-    // evidence instead of bursting accumulated generation.
-    if (intervalSeconds > kLowFpsCutoffIntervalSeconds) {
-        const bool preserveWarmStart = reconfigureWarmStartPending_;
-        const double sourceFps = 1.0 / intervalSeconds;
-        resetRuntimeState();
-        reconfigureWarmStartPending_ = preserveWarmStart;
-        runtimeCadenceEstablished_ = true;
-        telemetry_.sourceFps = sourceFps;
-        telemetry_.smoothedSourceFps = sourceFps;
-        telemetry_.lowFpsCutoff = true;
         return 0;
     }
 
@@ -211,6 +201,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     runtimeCadenceEstablished_ = true;
     observedTimeSeconds_ += intervalSeconds;
     updateSourceRate(intervalSeconds);
+    lastTrustedSourceIntervalSeconds_ = smoothedSourceIntervalSeconds_;
 
     const double wantedGenerated = std::clamp(
         static_cast<double>(targetFps_) * smoothedSourceIntervalSeconds_ - 1.0,
@@ -246,23 +237,31 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     updateCostLimit(wantedGenerated);
     telemetry_.costLimit = costLimit_;
 
-    // Apply the cost ceiling before fractional accumulation. This prevents an
-    // intentionally suppressed high-cost request from building a backlog that
-    // would burst as soon as the governor probes a higher level.
+    // Translate sustainable density into deterministic per-source synthetic
+    // opportunities. Only the fractional phase carries forward. Integer work
+    // and any downstream rejected opportunity are consumed in the current
+    // source interval; neither can become catch-up debt.
     const double governedWanted = std::min(
         wantedGenerated, static_cast<double>(costLimit_));
-    fractionalGeneratedBudget_ += governedWanted;
+    const double wholeWanted = std::floor(governedWanted + 1e-9);
+    std::size_t opportunities = std::min(
+        static_cast<std::size_t>(wholeWanted), costLimit_);
+    const double fractionalWanted = std::clamp(
+        governedWanted - wholeWanted, 0.0, 0.999999);
 
-    const auto generated = static_cast<std::size_t>(
-        std::floor(fractionalGeneratedBudget_ + 1e-6));
-    const auto clamped = std::min(generated, costLimit_);
-    fractionalGeneratedBudget_ -= static_cast<double>(clamped);
+    fractionalOpportunityPhase_ += fractionalWanted;
+    if (fractionalOpportunityPhase_ >= 1.0 - 1e-9) {
+        if (opportunities < costLimit_)
+            ++opportunities;
+        fractionalOpportunityPhase_ -= 1.0;
+    }
+    fractionalOpportunityPhase_ = std::clamp(
+        fractionalOpportunityPhase_, 0.0, 0.999999);
 
-    if (clamped == costLimit_ && costLimit_ > 0)
-        fractionalGeneratedBudget_ = std::min(fractionalGeneratedBudget_, 0.999999);
-
-    telemetry_.generatedFrames = clamped;
-    return clamped;
+    telemetry_.fractionalPhase = fractionalOpportunityPhase_;
+    telemetry_.syntheticOpportunitiesCreated = opportunities;
+    telemetry_.generatedFrames = opportunities;
+    return opportunities;
 }
 
 void AdaptiveFrameScheduler::resetRateChangeCandidates() {
@@ -578,7 +577,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
 }
 
 void AdaptiveFrameScheduler::resetRuntimeState() {
-    fractionalGeneratedBudget_ = 0.0;
+    fractionalOpportunityPhase_ = 0.0;
     smoothedSourceIntervalSeconds_ = 0.0;
     hasSmoothedInterval_ = false;
     reconfigureWarmStartPending_ = false;
@@ -601,5 +600,6 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
 
 void AdaptiveFrameScheduler::reset() {
     runtimeCadenceEstablished_ = false;
+    lastTrustedSourceIntervalSeconds_ = 0.0;
     resetRuntimeState();
 }
