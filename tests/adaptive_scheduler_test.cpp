@@ -45,10 +45,10 @@ int main() {
         SourceProtectedTimeline timeline;
         const auto first = timeline.observe(2'000'000'000ULL, 20ms);
         assert(first.valid);
-        const auto late = timeline.observe(2'030'000'000ULL, 20ms);
+        const auto late = timeline.observe(2'050'000'000ULL, 20ms);
         assert(late.rebased);
-        assert(late.sourceDesiredTimeNs > 2'030'000'000ULL);
-        assert(late.sourceDeadlineErrorNs == 10'000'000LL);
+        assert(late.sourceDesiredTimeNs > 2'050'000'000ULL);
+        assert(late.sourceDeadlineErrorNs == 30'000'000LL);
     }
 
     {
