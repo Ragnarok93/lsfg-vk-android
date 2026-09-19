@@ -52,6 +52,30 @@ int main() {
     }
 
     {
+        // Source timeline discontinuities are cadence-relative in every mode.
+        // A suspend-like outlier must not create a historical synthetic span or
+        // a delayed source deadline, while a slow-but-stable cadence remains valid.
+        SourceProtectedTimeline timeline;
+        assert(timeline.observe(3'000'000'000ULL, 16ms).valid);
+        assert(timeline.observe(3'016'000'000ULL, 16ms).valid);
+
+        const auto suspended =
+            timeline.observe(3'516'000'000ULL, 500ms);
+        assert(!suspended.valid);
+
+        const auto resumed =
+            timeline.observe(3'532'000'000ULL, 16ms);
+        assert(resumed.valid);
+        assert(resumed.rebased);
+        assert(resumed.sourceIndex == 0);
+        assert(resumed.sourceDesiredTimeNs == 3'548'000'000ULL);
+
+        SourceProtectedTimeline slowTimeline;
+        assert(slowTimeline.observe(4'000'000'000ULL, 125ms).valid);
+        assert(slowTimeline.observe(4'125'000'000ULL, 125ms).valid);
+    }
+
+    {
         AdaptiveFrameScheduler scheduler(60, 3);
         assert(scheduler.plan(33333333ns) == 1);
         assert(scheduler.plan(33333333ns) == 1);
