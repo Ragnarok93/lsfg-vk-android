@@ -212,6 +212,18 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("conf.adaptiveFramegen", pacing)
         self.assertNotIn("conf.adaptiveFlowScale", pacing)
 
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn(
+            "info.googleDisplayTimingSupported\n        && conf.adaptiveFramegen",
+            context,
+        )
+        admission_start = context.index("Active deadline admission")
+        admission_end = context.index(
+            "if (this->currentSourceTimeline_.valid)", admission_start
+        )
+        admission_guard = context[admission_start:admission_end]
+        self.assertIn("if (conf.adaptiveFramegen", admission_guard)
+
 
     def test_adaptive_path_uses_variable_count_without_owning_source_pacing(self) -> None:
         scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")

@@ -731,7 +731,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // distributed synthetic count whose prefixes can meet their own slots.
     // A rejected opportunity is dropped, never accumulated as catch-up debt.
     this->deadlineBatchDecision_ = {};
-    if (!sourceHistoryWarmupActive
+    if (conf.adaptiveFramegen
+            && !sourceHistoryWarmupActive
             && generatedFrameCount > 0
             && this->currentSourceTimeline_.valid) {
         const uint64_t admissionNowNs = monotonicNowNs();
