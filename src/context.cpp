@@ -675,6 +675,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         ? this->adaptiveScheduler_.plan(sourceInterval)
         : requestedFixedGeneratedFrameCount;
     size_t generatedFrameCount = plannedGeneratedFrameCount;
+    const size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
     const uint64_t sourceArrivalTimeNs = monotonicNowNs();
@@ -764,7 +765,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     for (size_t slot = 0; slot < generatedFrameCount; ++slot) {
                         const double interpolationFraction =
                             static_cast<double>(slot + 1)
-                            / static_cast<double>(generatedFrameCount + 1);
+                            / static_cast<double>(interpolationGenerationCount + 1);
                         const uint64_t slotDeadlineNs =
                             this->sourceTimeline_.syntheticDesiredTimeNs(
                                 this->currentSourceTimeline_, interpolationFraction);
@@ -796,7 +797,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         for (size_t slot = 0; slot < candidate; ++slot) {
                             const double interpolationFraction =
                                 static_cast<double>(slot + 1)
-                                / static_cast<double>(candidate + 1);
+                                / static_cast<double>(interpolationGenerationCount + 1);
                             const uint64_t slotDeadlineNs =
                                 this->sourceTimeline_.syntheticDesiredTimeNs(
                                     this->currentSourceTimeline_,
@@ -842,9 +843,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     if (this->currentSourceTimeline_.valid) {
+        const size_t timingGenerationCount =
+            generatedFrameCount > 0 ? interpolationGenerationCount : 0;
         this->adaptivePresentPeriodNs_ =
             this->currentSourceTimeline_.intervalNs
-            / static_cast<uint64_t>(generatedFrameCount + 1);
+            / static_cast<uint64_t>(timingGenerationCount + 1);
     } else {
         this->adaptivePresentPeriodNs_ = 0;
     }
@@ -1183,6 +1186,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << plannedGeneratedFrameCount
                       << " deadline_admitted_generated="
                       << generatedFrameCount
+                      << " interpolation_denominator="
+                      << interpolationGenerationCount
                       << " deadline_pred_mipmaps_ms="
                       << this->deadlineBatchDecision_.predictedMipmapsMs
                       << " deadline_pred_flow_ms="
@@ -1641,18 +1646,22 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         framegenSync = conf.performance
             ? LSFG_3_1P::presentContextWithCountExportSyncFd(
                 *this->lsfgCtxId, framegenInputSemaphoreFd,
-                generatedFrameCount, this->asyncAhbHandoffHandleType_)
+                generatedFrameCount, this->asyncAhbHandoffHandleType_,
+                interpolationGenerationCount)
             : LSFG_3_1::presentContextWithCountExportSyncFd(
                 *this->lsfgCtxId, framegenInputSemaphoreFd,
-                generatedFrameCount, this->asyncAhbHandoffHandleType_);
+                generatedFrameCount, this->asyncAhbHandoffHandleType_,
+                interpolationGenerationCount);
     } else if (conf.performance) {
         LSFG_3_1P::presentContextWithCount(
             *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems,
-            generatedFrameCount, this->asyncAhbHandoffHandleType_);
+            generatedFrameCount, this->asyncAhbHandoffHandleType_,
+                interpolationGenerationCount);
     } else {
         LSFG_3_1::presentContextWithCount(
             *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems,
-            generatedFrameCount, this->asyncAhbHandoffHandleType_);
+            generatedFrameCount, this->asyncAhbHandoffHandleType_,
+                interpolationGenerationCount);
     }
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
@@ -1767,7 +1776,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         const double syntheticFraction =
             static_cast<double>(i + 1)
-            / static_cast<double>(generatedFrameCount + 1);
+            / static_cast<double>(interpolationGenerationCount + 1);
         const uint64_t syntheticDesiredTimeNs =
             this->sourceTimeline_.syntheticDesiredTimeNs(
                 this->currentSourceTimeline_, syntheticFraction);
