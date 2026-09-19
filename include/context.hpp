@@ -244,6 +244,12 @@ private:
         uint64_t totalAsyncFallbacks{0};
         uint64_t windowGeneratedLateDrops{0};
         uint64_t totalGeneratedLateDrops{0};
+        uint64_t windowAdmissionRejects{0};
+        uint64_t totalAdmissionRejects{0};
+        uint64_t windowGeneratedDeadlineDrops{0};
+        uint64_t totalGeneratedDeadlineDrops{0};
+        uint64_t windowGeneratedWsiDrops{0};
+        uint64_t totalGeneratedWsiDrops{0};
         uint64_t windowDeadlineShadowOpportunities{0};
         uint64_t windowDeadlineShadowWouldAdmit{0};
         uint64_t windowDeadlineShadowWouldReject{0};
