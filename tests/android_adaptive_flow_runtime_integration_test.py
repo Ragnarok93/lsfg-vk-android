@@ -144,6 +144,14 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("interpolation_denominator=", source)
         self.assertIn("interpolationGenerationCount", source)
         self.assertIn(
+            "interpolationGenerationCount = generatedFrameCount",
+            source,
+        )
+        self.assertIn(
+            "static_cast<double>(candidate + 1)",
+            source,
+        )
+        self.assertIn(
             "static_cast<double>(interpolationGenerationCount + 1)",
             source,
         )
