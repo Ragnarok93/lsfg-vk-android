@@ -88,13 +88,19 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         present = source.split("VkResult LsContext::present", 1)[1]
         android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
         self.assertIn("this->asyncAhbHandoffEnabled_", android_present)
-        self.assertIn("&& generatedFrameCount > 0", android_present)
-        self.assertIn("&& !warmupSourceHistory", android_present)
         self.assertIn(
-            "submitAndWaitForAhbHandoff",
+            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;",
             android_present,
-            "Unsupported, warm-up, and non-generated cycles must retain the proven host-fence fallback",
+            "Generated and zero-generation/history cycles must share the normal async SYNC_FD source handoff",
         )
+        self.assertNotIn("&& generatedFrameCount > 0", android_present)
+        self.assertNotIn("&& !warmupSourceHistory", android_present)
+        self.assertIn(
+            "if (!useAsyncHandoff && !asyncSubmissionIssued)",
+            android_present,
+            "The bounded host-fence handoff remains only as compatibility/error fallback",
+        )
+        self.assertIn("submitAndWaitForAhbHandoff", android_present)
 
     def test_generated_ahb_uses_external_ownership_copy_path(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
