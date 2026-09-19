@@ -396,9 +396,9 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         conf.adaptiveFlowScale, this->adaptiveFlowPreset_);
     this->adaptiveDisplayTimingEnabled_ =
         info.androidDisplayTimingSupported
-        && (conf.adaptiveFramegen || conf.adaptiveFlowScale);
+        && conf.adaptiveFramegen;
     std::cerr << "lsfg-vk: adaptive-present-pacing"
-              << " fifo=1"
+              << " fifo=" << (conf.adaptiveFramegen ? 1 : 0)
               << " display_timing="
               << (this->adaptiveDisplayTimingEnabled_ ? 1 : 0)
               << " adaptive_fg=" << (conf.adaptiveFramegen ? 1 : 0)
