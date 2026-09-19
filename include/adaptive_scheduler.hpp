@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 struct AdaptiveSchedulerTelemetry {
     double sourceFps{};
@@ -17,6 +18,39 @@ struct AdaptiveSchedulerTelemetry {
     bool discontinuityReset{false};
     bool configWarmStart{false};
     bool lowFpsCutoff{false};
+};
+
+struct SourceTimelineSample {
+    uint64_t sourceIndex{};
+    uint64_t intervalNs{};
+    uint64_t previousSourceDesiredTimeNs{};
+    uint64_t sourceDesiredTimeNs{};
+    int64_t sourceDeadlineErrorNs{};
+    bool rebased{false};
+    bool valid{false};
+};
+
+/// Maintains a presentation epoch driven only by real/source arrivals.
+///
+/// The timeline deliberately has no generated-present API: generated work may
+/// query interpolation positions inside the current source interval, but only a
+/// subsequent source observation can advance the source deadline.
+class SourceProtectedTimeline {
+public:
+    SourceTimelineSample observe(
+        uint64_t sourceArrivalTimeNs,
+        std::chrono::nanoseconds sourceInterval,
+        bool discontinuity = false);
+
+    [[nodiscard]] uint64_t syntheticDesiredTimeNs(
+        const SourceTimelineSample& sample, double interpolationFraction) const;
+
+    void reset();
+
+private:
+    bool initialized_{false};
+    uint64_t sourceIndex_{0};
+    uint64_t sourceDesiredTimeNs_{0};
 };
 
 /// Chooses the minimum number of interpolation frames needed to approach an
