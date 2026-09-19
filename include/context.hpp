@@ -143,8 +143,9 @@ private:
     // swapchain still uses FIFO ordering when this capability is unavailable.
     bool adaptiveDisplayTimingEnabled_{false};
     uint64_t adaptivePresentPeriodNs_{0};
-    uint64_t adaptiveNextPresentTimeNs_{0};
     uint32_t adaptivePresentId_{1};
+    SourceProtectedTimeline sourceTimeline_;
+    SourceTimelineSample currentSourceTimeline_;
 
     bool requiresSourceHistoryWarmup_{false};
     bool previousSourceCopySignalValid_{false};
@@ -210,7 +211,11 @@ private:
         double windowGeneratedPresentMs{0.0};
         double windowSourceIntervalMs{0.0};
         double windowSourceIntervalMaxMs{0.0};
+        double windowSourceDeadlineErrorAbsMs{0.0};
+        double windowSourceDeadlineErrorMaxMs{0.0};
         uint64_t windowSourceIntervals{0};
+        uint64_t windowSourceDeadlineSamples{0};
+        uint64_t windowSourceTimelineRebases{0};
     } runtimeMetrics;
 
     // Reused for the game-device -> framegen AHB handoff. Async generated
