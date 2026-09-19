@@ -28,7 +28,12 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait", history_block)
         self.assertIn("stage=history-only", history_block)
         self.assertIn("requiresSourceHistoryWarmup_ = false", history_block)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", history_block)
+        timeout_start = history_block.index("if (!historyReady)")
+        normal_history = history_block[:timeout_start]
+        timeout_recovery = history_block[timeout_start:]
+        self.assertNotIn("requiresSourceHistoryWarmup_ = true", normal_history)
+        self.assertIn("requiresSourceHistoryWarmup_ = true", timeout_recovery)
+        self.assertIn("history-completion-timeout", timeout_recovery)
         self.assertNotIn("enterSourceOnlyBypass", history_block)
 
     def test_framegen_zero_generation_refreshes_temporal_preprocessing(self) -> None:
