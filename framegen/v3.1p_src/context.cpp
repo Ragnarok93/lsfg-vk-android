@@ -277,7 +277,8 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         int inSem, const std::vector<int>& outSem,
         size_t activeGenerationCount,
         VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
-        bool exportAndroidSyncFdOutputs) {
+        bool exportAndroidSyncFdOutputs,
+        size_t interpolationGenerationCount) {
     LSFG::AndroidFrameSyncFds exportedSync{};
 
 #ifdef __ANDROID__
@@ -307,6 +308,13 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
     }
 #endif
     const size_t generationCount = std::min(activeGenerationCount, vk.generationCount);
+    const size_t interpolationCount = std::min(
+        std::max(
+            interpolationGenerationCount == 0
+                ? generationCount
+                : interpolationGenerationCount,
+            generationCount),
+        static_cast<size_t>(vk.generationCount));
     auto& data = this->data.at(this->frameIdx % 8);
 
     if (data.shouldWait) {
@@ -604,28 +612,28 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
             const auto generationGraph = this->flowGraph(generationGraphIndex);
             for (size_t i = 0; i < 7; i++) {
                 generationGraph.gamma->at(i).Dispatch(
-                    buf2, this->frameIdx, pass, generationCount);
+                    buf2, this->frameIdx, pass, interpolationCount);
                 if (i >= 4)
                     generationGraph.delta->at(i - 4).Dispatch(
-                        buf2, this->frameIdx, pass, generationCount);
+                        buf2, this->frameIdx, pass, interpolationCount);
             }
             generationGraph.generate->Dispatch(
-                buf2, this->frameIdx, pass, generationCount);
+                buf2, this->frameIdx, pass, interpolationCount);
         } else {
             for (size_t i = 0; i < 7; i++) {
-                this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);
+                this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
                 if (i >= 4)
-                    this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);
+                    this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
             }
-            this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);
+            this->generate.Dispatch(buf2, this->frameIdx, pass, interpolationCount);
         }
 #else
         for (size_t i = 0; i < 7; i++) {
-            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, generationCount);
+            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
             if (i >= 4)
-                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, generationCount);
+                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
         }
-        this->generate.Dispatch(buf2, this->frameIdx, pass, generationCount);
+        this->generate.Dispatch(buf2, this->frameIdx, pass, interpolationCount);
 #endif
 
 #ifdef __ANDROID__
