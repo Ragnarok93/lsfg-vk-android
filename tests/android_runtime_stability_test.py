@@ -183,7 +183,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
         self.assertIn("previousSourceCopySignalValid_ = false", bypass)
         self.assertIn("const bool warmupSourceHistory", source)
-        self.assertIn("if (this->previousSourceCopySignalValid_)", source)
+        self.assertIn(
+            "if (this->previousSourceCopySignalValid_ && previousPass != nullptr)",
+            source,
+        )
         self.assertIn("stage=source-history-warmup", source)
         self.assertIn("return finishSourcePresent", source)
 
