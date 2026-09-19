@@ -423,5 +423,44 @@ int main() {
         assert(maxGap <= 6);
     }
 
+
+    {
+        // Deadline admission starts in shadow mode. It must predict from
+        // observed GPU costs without making source-rate assumptions, and the
+        // safety margin must turn an otherwise-fitting job into a rejection
+        // when the remaining source-owned presentation budget is too small.
+        DeadlineAdmissionPredictor predictor;
+        const auto cold = predictor.predict(2, 12.0);
+        assert(!cold.valid);
+
+        predictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 4.0,
+            .opticalFlowMs = 2.0,
+            .totalLsfgMs = 9.0,
+            .generationCount = 2,
+            .valid = true,
+        });
+
+        const auto roomy = predictor.predict(2, 12.0);
+        assert(roomy.valid);
+        assert(roomy.predictedMipmapsMs > 3.99 && roomy.predictedMipmapsMs < 4.01);
+        assert(roomy.predictedOpticalFlowMs > 1.99 && roomy.predictedOpticalFlowMs < 2.01);
+        assert(roomy.predictedTotalLsfgMs > 8.99 && roomy.predictedTotalLsfgMs < 9.01);
+        assert(roomy.safetyMarginMs >= 0.35);
+        assert(roomy.wouldAdmit);
+
+        const auto tight = predictor.predict(2, 9.2);
+        assert(tight.valid);
+        assert(!tight.wouldAdmit);
+
+        // The per-output residual scales with requested synthetic work while
+        // mipmaps/flow remain shared costs. This is a prediction only; a later
+        // rejected opportunity is never fed back into fractional scheduling.
+        const auto oneOutput = predictor.predict(1, 12.0);
+        assert(oneOutput.valid);
+        assert(oneOutput.predictedTotalLsfgMs > 7.49);
+        assert(oneOutput.predictedTotalLsfgMs < roomy.predictedTotalLsfgMs);
+    }
+
     return 0;
 }
