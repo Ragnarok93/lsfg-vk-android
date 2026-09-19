@@ -8,6 +8,50 @@ using namespace std::chrono_literals;
 
 int main() {
     {
+        // Source deadlines advance once per real source observation. Querying
+        // synthetic positions cannot advance or re-phase the protected source
+        // timeline.
+        SourceProtectedTimeline timeline;
+        const auto first = timeline.observe(1'000'000'000ULL, 16ms);
+        assert(first.valid);
+        assert(first.rebased);
+        assert(first.sourceIndex == 0);
+        assert(first.sourceDesiredTimeNs == 1'016'000'000ULL);
+
+        const auto quarter =
+            timeline.syntheticDesiredTimeNs(first, 0.25);
+        const auto threeQuarter =
+            timeline.syntheticDesiredTimeNs(first, 0.75);
+        assert(quarter == 1'004'000'000ULL);
+        assert(threeQuarter == 1'012'000'000ULL);
+
+        const auto second = timeline.observe(1'016'000'000ULL, 16ms);
+        assert(second.sourceIndex == 1);
+        assert(second.previousSourceDesiredTimeNs == first.sourceDesiredTimeNs);
+        assert(second.sourceDesiredTimeNs == 1'032'000'000ULL);
+        assert(second.sourceDeadlineErrorNs == 0);
+
+        // A synthetic opportunity can be ignored/rejected without changing the
+        // next source deadline because no generated-work feedback enters observe().
+        (void) timeline.syntheticDesiredTimeNs(second, 0.5);
+        const auto third = timeline.observe(1'032'000'000ULL, 16ms);
+        assert(third.sourceDesiredTimeNs == 1'048'000'000ULL);
+    }
+
+    {
+        // If the real source itself arrives after the previous source epoch,
+        // rebase from source evidence instead of producing historical desired
+        // present timestamps or catch-up debt.
+        SourceProtectedTimeline timeline;
+        const auto first = timeline.observe(2'000'000'000ULL, 20ms);
+        assert(first.valid);
+        const auto late = timeline.observe(2'030'000'000ULL, 20ms);
+        assert(late.rebased);
+        assert(late.sourceDesiredTimeNs > 2'030'000'000ULL);
+        assert(late.sourceDeadlineErrorNs == 10'000'000LL);
+    }
+
+    {
         AdaptiveFrameScheduler scheduler(60, 3);
         assert(scheduler.plan(33333333ns) == 1);
         assert(scheduler.plan(33333333ns) == 1);
