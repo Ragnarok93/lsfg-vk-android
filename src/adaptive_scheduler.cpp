@@ -241,9 +241,15 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     // opportunities. Only the fractional phase carries forward. Integer work
     // and any downstream rejected opportunity are consumed in the current
     // source interval; neither can become catch-up debt.
-    const double governedWanted = std::min(
+    const double governedWantedRaw = std::min(
         wantedGenerated, static_cast<double>(costLimit_));
-    const double wholeWanted = std::floor(governedWanted + 1e-9);
+    constexpr double kIntegerSnapEpsilon = 1e-6;
+    const double nearestInteger = std::round(governedWantedRaw);
+    const double governedWanted =
+        std::fabs(governedWantedRaw - nearestInteger) <= kIntegerSnapEpsilon
+            ? nearestInteger
+            : governedWantedRaw;
+    const double wholeWanted = std::floor(governedWanted);
     std::size_t opportunities = std::min(
         static_cast<std::size_t>(wholeWanted), costLimit_);
     const double fractionalWanted = std::clamp(
