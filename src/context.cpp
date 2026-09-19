@@ -810,6 +810,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             if (this->currentSourceTimeline_.sourceDesiredTimeNs <= admissionNowNs) {
                 metrics.windowGeneratedLateDrops += generatedFrameCount;
                 metrics.totalGeneratedLateDrops += generatedFrameCount;
+                metrics.windowAdmissionRejects += generatedFrameCount;
+                metrics.totalAdmissionRejects += generatedFrameCount;
                 generatedFrameCount = 0;
             } else {
                 const double sourceBudgetMs =
@@ -828,6 +830,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     metrics.windowGeneratedLateDrops +=
                         rejectedGeneratedFrameCount;
                     metrics.totalGeneratedLateDrops +=
+                        rejectedGeneratedFrameCount;
+                    metrics.windowAdmissionRejects +=
+                        rejectedGeneratedFrameCount;
+                    metrics.totalAdmissionRejects +=
                         rejectedGeneratedFrameCount;
                     generatedFrameCount = 1;
                 } else if (plannedBatchDecision.valid) {
@@ -1242,6 +1248,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceFrames = 0;
             metrics.windowGeneratedFrames = 0;
             metrics.windowGeneratedLateDrops = 0;
+            metrics.windowAdmissionRejects = 0;
+            metrics.windowGeneratedDeadlineDrops = 0;
+            metrics.windowGeneratedWsiDrops = 0;
             metrics.windowSourcePresentFailures = 0;
             metrics.windowGeneratedPresentFailures = 0;
             metrics.windowAdaptiveZeroGenerationCycles = 0;
@@ -1319,6 +1328,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_present_failures_total=" << metrics.totalGeneratedPresentFailures
                       << " generated_late_drops=" << metrics.windowGeneratedLateDrops
                       << " generated_late_drops_total=" << metrics.totalGeneratedLateDrops
+                      << " admission_rejects=" << metrics.windowAdmissionRejects
+                      << " admission_rejects_total=" << metrics.totalAdmissionRejects
+                      << " generated_deadline_drops="
+                      << metrics.windowGeneratedDeadlineDrops
+                      << " generated_deadline_drops_total="
+                      << metrics.totalGeneratedDeadlineDrops
+                      << " generated_wsi_drops=" << metrics.windowGeneratedWsiDrops
+                      << " generated_wsi_drops_total=" << metrics.totalGeneratedWsiDrops
                       << " cycle_avg_ms=" << cycleAvgMs
                       << " cycle_max_ms=" << metrics.windowCycleMaxMs
                       << " ahb_handoff_avg_ms=" << handoffAvgMs
@@ -1976,6 +1993,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
             metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
+            metrics.windowGeneratedDeadlineDrops += droppedGeneratedFrames;
+            metrics.totalGeneratedDeadlineDrops += droppedGeneratedFrames;
             if (firstPresentDiagnostic) {
                 std::cerr << "lsfg-vk: runtime stage=generated-deadline-drop"
                           << " planned=" << generatedFrameCount
@@ -1995,6 +2014,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
             metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
+            metrics.windowGeneratedWsiDrops += droppedGeneratedFrames;
+            metrics.totalGeneratedWsiDrops += droppedGeneratedFrames;
             if (firstPresentDiagnostic) {
                 std::cerr << "lsfg-vk: runtime stage=generated-wsi-drop"
                           << " planned=" << generatedFrameCount
