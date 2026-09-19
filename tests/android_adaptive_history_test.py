@@ -27,11 +27,12 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         self.assertIn("framegenBatchCompleteSemaphore", history_block)
         self.assertIn("historyRequiresHostCompletionWait", history_block)
         self.assertIn("stage=history-only", history_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", history_block)
+        self.assertIn("sourceHistoryWarmupRemaining_ > 0", history_block)
+        self.assertIn("--this->sourceHistoryWarmupRemaining_", history_block)
+        self.assertIn("history_warmup_remaining=", history_block)
         timeout_start = history_block.index("if (!historyReady)")
-        normal_history = history_block[:timeout_start]
         timeout_recovery = history_block[timeout_start:]
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", normal_history)
+        self.assertIn("kSourceHistoryWarmupFrames", timeout_recovery)
         self.assertIn("requiresSourceHistoryWarmup_ = true", timeout_recovery)
         self.assertIn("history-completion-timeout", timeout_recovery)
         self.assertNotIn("enterSourceOnlyBypass", history_block)
@@ -189,6 +190,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
     def test_source_only_bypass_remains_lifecycle_reset(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
+        self.assertIn("sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames", bypass)
         self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
         self.assertIn("previousSourceCopySignalValid_ = false", bypass)
 

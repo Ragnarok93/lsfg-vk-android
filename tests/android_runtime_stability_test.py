@@ -139,15 +139,14 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         android_present = source[android_start:desktop_start]
 
         self.assertIn(
-            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_\n"
-            "        && !warmupSourceHistory;",
+            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;",
             android_present,
         )
         history_start = android_present.index("if (historyOnly)")
-        warmup_start = android_present.index(
-            "if (warmupSourceHistory)", history_start
+        generation_start = android_present.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
         )
-        history = android_present[history_start:warmup_start]
+        history = android_present[history_start:generation_start]
         self.assertIn("presentContextWithCountExportSyncFd", history)
         self.assertIn("framegenBatchCompleteValid = true", history)
         self.assertIn("historyRequiresHostCompletionWait", history)
@@ -218,40 +217,53 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             self.assertIn("resetRuntime", delete_body)
 
     def test_adaptive_zero_generation_crosses_handoff_and_advances_history(self) -> None:
-        """Fractional zero-generation cadence must update temporal history, not enter Off."""
+        """Fractional zero-generation cadence fills the same temporal history ring."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present_start = source.index("VkResult LsContext::present")
         handoff_start = source.index("submitAndWaitForAhbHandoff", present_start)
         self.assertIn("AndroidFrameCycleMode::HistoryOnly", source)
         history_start = source.index("if (historyOnly)", handoff_start)
-        warmup_start = source.index("if (warmupSourceHistory)", history_start)
-        history_block = source[history_start:warmup_start]
+        generation_start = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        history_block = source[history_start:generation_start]
 
         self.assertGreater(history_start, handoff_start)
-        self.assertIn("presentContextWithCount", history_block)
-        self.assertIn("stage=history-only", history_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", history_block)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", history_block)
+        self.assertIn("presentContextWithCountExportSyncFd", history_block)
+        self.assertIn("--this->sourceHistoryWarmupRemaining_", history_block)
+        self.assertIn("history_warmup_remaining=", history_block)
         self.assertNotIn("source-direct-present", source[present_start:handoff_start])
 
-    def test_generation_resumes_only_after_source_only_history_warmup(self) -> None:
-        """Actual source-only bypass must invalidate history before fixed generation resumes."""
+
+    def test_generation_resumes_only_after_three_source_history_updates(self) -> None:
+        """Startup and source-only bypass rebuild all three temporal slots."""
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("requiresSourceHistoryWarmup_", header)
-        self.assertIn("previousSourceCopySignalValid_", header)
-        bypass_start = source.index("void LsContext::enterSourceOnlyBypass")
-        bypass = source[bypass_start:]
+        self.assertIn("kSourceHistoryWarmupFrames = 3", header)
+        self.assertIn(
+            "sourceHistoryWarmupRemaining_{kSourceHistoryWarmupFrames}",
+            header,
+        )
+        self.assertIn("requiresSourceHistoryWarmup_{true}", header)
+        bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
+        self.assertIn(
+            "sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames",
+            bypass,
+        )
         self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
         self.assertIn("previousSourceCopySignalValid_ = false", bypass)
-        self.assertIn("const bool warmupSourceHistory", source)
+
+        self.assertIn("const bool sourceHistoryWarmupActive", source)
+        self.assertIn("sourceHistoryWarmupActive\n        ||", source)
+        self.assertIn("--this->sourceHistoryWarmupRemaining_", source)
+        self.assertNotIn("AndroidFrameCycleMode::SourceWarmup", source)
+        self.assertNotIn("stage=source-history-warmup", source)
         self.assertIn(
             "if (this->previousSourceCopySignalValid_ && previousPass != nullptr)",
             source,
         )
-        self.assertIn("stage=source-history-warmup", source)
-        self.assertIn("return finishSourcePresent", source)
+
 
     def test_context_creation_failure_recreates_original_swapchain(self) -> None:
         """Regression: failed LSFG setup must not leave a modified swapchain contextless."""

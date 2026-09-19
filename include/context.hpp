@@ -150,7 +150,9 @@ private:
     SourceProtectedTimeline sourceTimeline_;
     SourceTimelineSample currentSourceTimeline_;
 
-    bool requiresSourceHistoryWarmup_{false};
+    static constexpr uint32_t kSourceHistoryWarmupFrames = 3;
+    uint32_t sourceHistoryWarmupRemaining_{kSourceHistoryWarmupFrames};
+    bool requiresSourceHistoryWarmup_{true};
     bool previousSourceCopySignalValid_{false};
 
     // Queue-target 1 delivery for Android: the application's real frame is

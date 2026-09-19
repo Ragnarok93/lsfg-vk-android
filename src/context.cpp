@@ -683,6 +683,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         conf.adaptiveFramegen && adaptiveTelemetry.discontinuityReset;
 
     if (sourceTimelineDiscontinuity) {
+        this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
+        this->requiresSourceHistoryWarmup_ = true;
         this->sourceTimeline_.reset();
         this->currentSourceTimeline_ = {};
         this->adaptivePresentPeriodNs_ = 0;
@@ -707,15 +709,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    const bool sourceWarmupRequested =
-        plannedGeneratedFrameCount > 0 && this->requiresSourceHistoryWarmup_;
+    const bool sourceHistoryWarmupActive =
+        this->requiresSourceHistoryWarmup_
+        && this->sourceHistoryWarmupRemaining_ > 0;
 
     // Active deadline admission: generation is subordinate to the protected
     // source timeline. Use measured GPU cost to choose the largest evenly
     // distributed synthetic count whose prefixes can meet their own slots.
     // A rejected opportunity is dropped, never accumulated as catch-up debt.
     this->deadlineBatchDecision_ = {};
-    if (!sourceWarmupRequested
+    if (!sourceHistoryWarmupActive
             && generatedFrameCount > 0
             && this->currentSourceTimeline_.valid) {
         const uint64_t admissionNowNs = monotonicNowNs();
@@ -735,7 +738,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
                 // Preserve the historical opportunity counters as predictor
                 // diagnostics, but the decision below is now authoritative.
-                if (plannedBatchDecision.valid) {
+                if (!plannedBatchDecision.valid && generatedFrameCount > 1) {
+                    const size_t rejectedGeneratedFrameCount =
+                        generatedFrameCount - 1;
+                    metrics.windowGeneratedLateDrops +=
+                        rejectedGeneratedFrameCount;
+                    metrics.totalGeneratedLateDrops +=
+                        rejectedGeneratedFrameCount;
+                    generatedFrameCount = 1;
+                } else if (plannedBatchDecision.valid) {
                     for (size_t slot = 0; slot < generatedFrameCount; ++slot) {
                         const double interpolationFraction =
                             static_cast<double>(slot + 1)
@@ -827,21 +838,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     enum class AndroidFrameCycleMode {
         Generate,
         HistoryOnly,
-        SourceWarmup,
     };
-    const AndroidFrameCycleMode cycleMode =
-        sourceWarmupRequested
-            ? AndroidFrameCycleMode::SourceWarmup
-            : ((conf.adaptiveFramegen && plannedGeneratedFrameCount == 0)
-                    || (plannedGeneratedFrameCount > 0
-                        && generatedFrameCount == 0)
-                ? AndroidFrameCycleMode::HistoryOnly
-                : AndroidFrameCycleMode::Generate);
     const bool historyOnly =
-        cycleMode == AndroidFrameCycleMode::HistoryOnly;
-    const bool warmupSourceHistory =
-        cycleMode == AndroidFrameCycleMode::SourceWarmup;
-    this->lastGeneratedFrameCount_ = generatedFrameCount;
+        sourceHistoryWarmupActive
+        || (conf.adaptiveFramegen && plannedGeneratedFrameCount == 0)
+        || (plannedGeneratedFrameCount > 0 && generatedFrameCount == 0);
+    const AndroidFrameCycleMode cycleMode =
+        historyOnly
+            ? AndroidFrameCycleMode::HistoryOnly
+            : AndroidFrameCycleMode::Generate;
+    this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
 
     const auto updateAdaptiveFlowGovernor = [&]() {
         const LSFG::AdaptiveFlowGpuTiming timing = conf.performance
@@ -1208,6 +1214,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_discontinuities=" << metrics.windowAdaptiveDiscontinuities
                       << " adaptive_discontinuities_total=" << metrics.totalAdaptiveDiscontinuities
                       << " source_history_valid=" << (this->requiresSourceHistoryWarmup_ ? 0 : 1)
+                      << " source_history_warmup_remaining="
+                      << this->sourceHistoryWarmupRemaining_
                       << " adaptive_flow_enabled=" << (this->adaptiveFlowRuntimeAvailable_ ? 1 : 0)
                        << " adaptive_flow_mode_requested=" << (conf.adaptiveFlowScale ? 1 : 0)
                       << " adaptive_flow_preset="
@@ -1319,11 +1327,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.preCopySemaphores.at(1).handle(),
     };
 
-    // SourceWarmup retains the proven synchronous handoff because it does not
-    // submit framegen work. Generate and HistoryOnly cycles prefer SYNC_FD so
-    // source-copy completion can flow into framegen without blocking this thread.
-    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
-        && !warmupSourceHistory;
+    // Every enabled cycle submits either interpolation or zero-count history
+    // preprocessing. Prefer SYNC_FD for both so the source thread never needs a
+    // host wait in the normal path.
+    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;
     bool asyncSubmissionIssued = false;
     bool asyncExportFailed = false;
     int framegenInputSemaphoreFd = -1;
@@ -1398,6 +1405,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     if (asyncExportFailed) {
+        this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
         this->lastGeneratedFrameCount_ = 0;
         const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
@@ -1501,6 +1509,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - historyWaitStart).count();
             if (!historyReady) {
+                this->sourceHistoryWarmupRemaining_ =
+                    kSourceHistoryWarmupFrames;
                 this->requiresSourceHistoryWarmup_ = true;
                 this->lastGeneratedFrameCount_ = 0;
                 const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
@@ -1533,7 +1543,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
-        this->requiresSourceHistoryWarmup_ = false;
+        if (this->sourceHistoryWarmupRemaining_ > 0)
+            --this->sourceHistoryWarmupRemaining_;
+        this->requiresSourceHistoryWarmup_ =
+            this->sourceHistoryWarmupRemaining_ > 0;
         this->lastGeneratedFrameCount_ = 0;
 
         const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
@@ -1565,6 +1578,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated=0 history_valid=1"
                       << " async_completion="
                       << (pass.framegenBatchCompleteValid ? 1 : 0)
+                      << " history_warmup_remaining="
+                      << this->sourceHistoryWarmupRemaining_
                       << " discontinuity="
                       << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
                       << "\n";
@@ -1572,34 +1587,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(adaptiveSourceResult, "pre-copy-history-only");
     }
 
-    if (warmupSourceHistory) {
-        this->requiresSourceHistoryWarmup_ = false;
-        this->lastGeneratedFrameCount_ = 0;
-        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
-        VkPresentTimeGOOGLE warmupPresentTime{};
-        VkPresentTimesInfoGOOGLE warmupPresentTimes{};
-        const VkPresentInfoKHR warmupPresentInfo{
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = adaptivePresentPNext(
-                pNext,
-                this->currentSourceTimeline_.sourceDesiredTimeNs,
-                warmupPresentTime, warmupPresentTimes),
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &sourceReady,
-            .swapchainCount = 1,
-            .pSwapchains = &this->swapchain,
-            .pImageIndices = &presentIdx,
-        };
-        const auto warmupResult = Layer::ovkQueuePresentKHR(queue, &warmupPresentInfo);
-        if (warmupResult != VK_SUCCESS && warmupResult != VK_SUBOPTIMAL_KHR) {
-            metrics.windowSourcePresentFailures++;
-            metrics.totalSourcePresentFailures++;
-            throw LSFG::vulkan_error(warmupResult,
-                "Failed to present source-history warmup frame");
-        }
-        std::cerr << "lsfg-vk: runtime stage=source-history-warmup\n";
-        return finishSourcePresent(warmupResult, "pre-copy-warmup");
-    }
 
     // 2. Tell framegen to generate intermediary frames. The normal Android
     //    path exports output-ready and batch-complete SYNC_FDs after submission,
@@ -1998,6 +1985,7 @@ void LsContext::enterSourceOnlyBypass() {
     this->sourceTimeline_.reset();
     this->currentSourceTimeline_ = {};
     this->lastGeneratedFrameCount_ = 0;
+    this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ = true;
     this->previousSourceCopySignalValid_ = false;
 }
