@@ -130,6 +130,36 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             android_present,
         )
 
+    def test_first_source_initializes_both_ahb_inputs(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        present = source[source.index("VkResult LsContext::present"):]
+        first_copy = present.index("copySwapchainToExternalAhb")
+        duplicate = present.index("if (this->frameIdx == 0)", first_copy)
+        second_copy = present.index("copySwapchainToExternalAhb", duplicate)
+        self.assertLess(first_copy, duplicate)
+        self.assertLess(duplicate, second_copy)
+        self.assertIn("this->frame_1.handle()", present[second_copy:second_copy + 400])
+
+    def test_fixed_and_adaptive_discontinuities_rebuild_history(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("sourceTimelineDiscontinuity", source)
+        self.assertIn("hadValidSourceTimeline", source)
+        self.assertIn(
+            "hadValidSourceTimeline\n"
+            "                && !this->currentSourceTimeline_.valid",
+            source,
+        )
+        self.assertGreaterEqual(
+            source.count(
+                "sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames"
+            ),
+            3,
+        )
+        self.assertGreaterEqual(
+            source.count("deadlineAdmissionPredictor_.reset()"),
+            2,
+        )
+
     def test_zero_generation_history_uses_async_dependency_chain(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         android_start = source.index(
@@ -241,6 +271,11 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn("kSourceHistoryWarmupFrames = 3", header)
+        beta = (ROOT / "framegen/v3.1_src/shaders/beta.cpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("for (size_t i = 0; i < 3; i++)", beta)
+        self.assertIn("firstDescriptorSet.at(frameCount % 3)", beta)
         self.assertIn(
             "sourceHistoryWarmupRemaining_{kSourceHistoryWarmupFrames}",
             header,

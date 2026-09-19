@@ -685,12 +685,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (sourceTimelineDiscontinuity) {
         this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
+        this->deadlineAdmissionPredictor_.reset();
         this->sourceTimeline_.reset();
         this->currentSourceTimeline_ = {};
         this->adaptivePresentPeriodNs_ = 0;
     } else {
+        const bool hadValidSourceTimeline = this->currentSourceTimeline_.valid;
         this->currentSourceTimeline_ = this->sourceTimeline_.observe(
             sourceArrivalTimeNs, sourceInterval, false);
+        if (hadValidSourceTimeline
+                && !this->currentSourceTimeline_.valid
+                && sourceInterval.count() > 0) {
+            this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
+            this->requiresSourceHistoryWarmup_ = true;
+            this->deadlineAdmissionPredictor_.reset();
+        }
         if (this->currentSourceTimeline_.valid) {
             if (this->currentSourceTimeline_.sourceIndex > 0) {
                 const double deadlineErrorMs = std::abs(
@@ -1305,6 +1314,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->extent.width, this->extent.height,
         info.queue.first, this->frameIdx < 2);
 
+    // Framegen owns a two-image source pair and some AHB transport modes acquire
+    // both images even during zero-count preprocessing. Define both images on
+    // the first source frame; the second slot is overwritten by the next real
+    // source before interpolation is permitted after the three-frame warmup.
+    if (this->frameIdx == 0) {
+        copySwapchainToExternalAhb(pass.preCopyBuf.handle(),
+            this->swapchainImages.at(presentIdx),
+            this->frame_1.handle(),
+            this->extent.width, this->extent.height,
+            info.queue.first, true);
+    }
+
     pass.preCopyBuf.end();
 
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
@@ -1575,7 +1596,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
         if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset) {
             std::cerr << "lsfg-vk: runtime stage=history-only"
-                      << " generated=0 history_valid=1"
+                      << " generated=0 history_valid="
+                      << (this->requiresSourceHistoryWarmup_ ? 0 : 1)
                       << " async_completion="
                       << (pass.framegenBatchCompleteValid ? 1 : 0)
                       << " history_warmup_remaining="
