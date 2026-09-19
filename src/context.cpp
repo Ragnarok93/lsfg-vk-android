@@ -744,7 +744,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         ? this->adaptiveScheduler_.plan(sourceInterval)
         : requestedFixedGeneratedFrameCount;
     size_t generatedFrameCount = plannedGeneratedFrameCount;
-    const size_t interpolationGenerationCount = plannedGeneratedFrameCount;
+    size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
     const uint64_t sourceArrivalTimeNs = monotonicNowNs();
@@ -864,9 +864,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                             candidate > 0; --candidate) {
                         bool candidateFits = true;
                         for (size_t slot = 0; slot < candidate; ++slot) {
+                            // Admission occurs before dispatch. Evaluate each
+                            // candidate using the spacing it would actually use
+                            // so a 2 -> 1 reduction tests a midpoint rather than
+                            // retaining a prefix-biased 1/3 position.
                             const double interpolationFraction =
                                 static_cast<double>(slot + 1)
-                                / static_cast<double>(interpolationGenerationCount + 1);
+                                / static_cast<double>(candidate + 1);
                             const uint64_t slotDeadlineNs =
                                 this->sourceTimeline_.syntheticDesiredTimeNs(
                                     this->currentSourceTimeline_,
@@ -910,6 +914,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             }
         }
     }
+
+    // Admission is complete before any framegen dispatch. Re-space the
+    // surviving batch evenly across the protected source interval; rejected
+    // opportunities are consumed and never become catch-up debt.
+    interpolationGenerationCount = generatedFrameCount;
 
     if (this->currentSourceTimeline_.valid) {
         const size_t timingGenerationCount =
