@@ -576,6 +576,28 @@ int main() {
         assert(tight.valid);
         assert(!tight.wouldAdmit);
 
+        // Admission must also learn unmodeled end-to-end delivery pressure.
+        // A frame that was predicted to fit but still arrived 2 ms late adds a
+        // delivery reserve; repeated successful batches decay it instead of
+        // turning one transient into a permanent throughput cap.
+        const auto beforeMiss = predictor.predict(1, 8.5);
+        assert(beforeMiss.valid);
+        assert(beforeMiss.wouldAdmit);
+        assert(beforeMiss.deliveryReserveMs == 0.0);
+
+        predictor.observeDeliveryMiss(2.0);
+        const auto afterMiss = predictor.predict(1, 8.5);
+        assert(afterMiss.valid);
+        assert(afterMiss.deliveryReserveMs >= 1.99);
+        assert(afterMiss.effectiveUsableBudgetMs < beforeMiss.effectiveUsableBudgetMs);
+        assert(!afterMiss.wouldAdmit);
+
+        for (int i = 0; i < 100; ++i)
+            predictor.observeDeliverySuccess();
+        const auto recovered = predictor.predict(1, 8.5);
+        assert(recovered.deliveryReserveMs < 0.05);
+        assert(recovered.wouldAdmit);
+
         // The per-output residual scales with requested synthetic work while
         // mipmaps/flow remain shared costs. This is a prediction only; a later
         // rejected opportunity is never fed back into fractional scheduling.
