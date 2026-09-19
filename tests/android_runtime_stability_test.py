@@ -105,8 +105,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "adaptiveScheduler_.plan(sourceInterval)",
             "adaptiveScheduler_.telemetry()",
             "presentContextWithCount",
-            "adaptiveZeroGeneration",
-            "stage=adaptive-history-advance",
+            "AndroidFrameCycleMode::HistoryOnly",
+            "stage=history-only",
         ):
             self.assertIn(token, source)
 
@@ -159,15 +159,16 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present_start = source.index("VkResult LsContext::present")
         handoff_start = source.index("submitAndWaitForAhbHandoff", present_start)
-        zero_start = source.index("if (adaptiveZeroGeneration)", handoff_start)
-        warmup_start = source.index("if (warmupSourceHistory)", zero_start)
-        zero_block = source[zero_start:warmup_start]
+        self.assertIn("AndroidFrameCycleMode::HistoryOnly", source)
+        history_start = source.index("if (historyOnly)", handoff_start)
+        warmup_start = source.index("if (warmupSourceHistory)", history_start)
+        history_block = source[history_start:warmup_start]
 
-        self.assertGreater(zero_start, handoff_start)
-        self.assertIn("presentContextWithCount", zero_block)
-        self.assertIn("adaptive-history-advance", zero_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", zero_block)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", zero_block)
+        self.assertGreater(history_start, handoff_start)
+        self.assertIn("presentContextWithCount", history_block)
+        self.assertIn("stage=history-only", history_block)
+        self.assertIn("requiresSourceHistoryWarmup_ = false", history_block)
+        self.assertNotIn("requiresSourceHistoryWarmup_ = true", history_block)
         self.assertNotIn("source-direct-present", source[present_start:handoff_start])
 
     def test_generation_resumes_only_after_source_only_history_warmup(self) -> None:
