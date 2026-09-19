@@ -176,10 +176,33 @@ void DeadlineAdmissionPredictor::observe(
     hasEstimate_ = true;
 }
 
+void DeadlineAdmissionPredictor::observeDeliveryMiss(double latenessMs) {
+    if (!std::isfinite(latenessMs) || latenessMs < 0.0)
+        return;
+
+    const double sample = std::clamp(
+        std::max(latenessMs, kDeliveryReserveFloorMs),
+        kDeliveryReserveFloorMs,
+        kDeliveryReserveMaxMs);
+    deliveryReserveMs_ = deliveryReserveMs_ > 0.0
+        ? deliveryReserveMs_
+            + kDeliveryReserveAlpha * (sample - deliveryReserveMs_)
+        : sample;
+}
+
+void DeadlineAdmissionPredictor::observeDeliverySuccess() {
+    deliveryReserveMs_ *= kDeliveryReserveSuccessDecay;
+    if (deliveryReserveMs_ < 0.01)
+        deliveryReserveMs_ = 0.0;
+}
+
 DeadlineAdmissionDecision DeadlineAdmissionPredictor::predict(
         std::size_t generationCount, double usableBudgetMs) const {
     DeadlineAdmissionDecision decision{
         .usableBudgetMs = usableBudgetMs,
+        .deliveryReserveMs = deliveryReserveMs_,
+        .effectiveUsableBudgetMs = std::max(
+            0.0, usableBudgetMs - deliveryReserveMs_),
     };
     if (!hasEstimate_
             || generationCount == 0
@@ -200,7 +223,7 @@ DeadlineAdmissionDecision DeadlineAdmissionPredictor::predict(
         && decision.predictedTotalLsfgMs > 0.0;
     decision.wouldAdmit = decision.valid
         && decision.predictedTotalLsfgMs + decision.safetyMarginMs
-            <= usableBudgetMs;
+            <= decision.effectiveUsableBudgetMs;
     return decision;
 }
 
@@ -209,6 +232,7 @@ void DeadlineAdmissionPredictor::reset() {
     mipmapsMs_ = 0.0;
     opticalFlowMs_ = 0.0;
     perGeneratedMs_ = 0.0;
+    deliveryReserveMs_ = 0.0;
 }
 
 AdaptiveFrameScheduler::AdaptiveFrameScheduler(
