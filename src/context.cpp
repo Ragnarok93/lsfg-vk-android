@@ -1409,6 +1409,22 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_flow_budget_ms=" << this->adaptiveFlowBudgetMs_
                       << " adaptive_flow_generation_count="
                       << this->adaptiveFlowGenerationCount_
+                      << " adaptive_flow_global_pressure_valid="
+                      << (this->adaptiveFlowGlobalPressureValid_ ? 1 : 0)
+                      << " adaptive_flow_global_gpu_percent="
+                      << this->adaptiveFlowGlobalGpuUsagePercent_
+                      << " adaptive_flow_global_output_fps="
+                      << this->adaptiveFlowGlobalOutputFps_
+                      << " adaptive_flow_global_p95_ms="
+                      << this->adaptiveFlowGlobalFrameTimeP95Ms_
+                      << " adaptive_flow_global_slow_ratio="
+                      << this->adaptiveFlowGlobalSlowFrameRatio_
+                      << " adaptive_flow_global_pressure="
+                      << (this->adaptiveFlowController_.telemetry().globalPressure ? 1 : 0)
+                      << " adaptive_flow_output_deficit="
+                      << (this->adaptiveFlowController_.telemetry().outputDeficit ? 1 : 0)
+                      << " adaptive_flow_synthetic_drop_pressure="
+                      << (this->adaptiveFlowSyntheticDropPressure_ ? 1 : 0)
                       << " adaptive_flow_reason="
                       << AdaptiveFlowController::reasonName(this->adaptiveFlowReason_)
                       << " adaptive_present_timing="
