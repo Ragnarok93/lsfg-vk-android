@@ -404,6 +404,21 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("runtime stage=config-reload-soft-toggle", hooks)
         self.assertIn("recreateSwapchain=0", hooks)
 
+    def test_syncfd_source_export_failure_recreates_temporal_context(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("if (asyncExportFailed)")
+        end = source.index("if (historyOnly)", start)
+        recovery = source[start:end]
+
+        self.assertIn("Layer::ovkQueuePresentKHR", recovery)
+        self.assertIn("VK_ERROR_OUT_OF_DATE_KHR", recovery)
+        self.assertIn("pre-copy-syncfd-fail-open-recreate", recovery)
+        self.assertIn("kSourceHistoryWarmupFrames", recovery)
+        self.assertNotIn(
+            'finishSourcePresent(failOpenResult, "pre-copy-syncfd-fail-open")',
+            recovery,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
