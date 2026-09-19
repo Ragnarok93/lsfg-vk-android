@@ -14,6 +14,13 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         self.assertNotIn("delayUntilNextSourceOutput", source)
         self.assertNotIn("std::this_thread::sleep_for(delay)", source)
 
+        context_header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        self.assertIn(
+            "kSourceHistoryWarmupFrames = 4",
+            context_header,
+            "Startup/discontinuity warmup must replace the initially duplicated or stale motion slot before generation",
+        )
+
         present_start = source.index("VkResult LsContext::present")
         handoff = source.index("submitAndWaitForAhbHandoff", present_start)
         self.assertIn("enum class AndroidFrameCycleMode", source)
