@@ -646,10 +646,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
     const uint64_t sourceArrivalTimeNs = monotonicNowNs();
-    const double sourceTimelineIntervalMs =
-        std::chrono::duration<double, std::milli>(sourceInterval).count();
+    // Scheduler discontinuities are cadence-relative. Do not reinterpret a
+    // legitimately slow source as a timing failure through an absolute FPS
+    // threshold here.
     const bool sourceTimelineDiscontinuity =
-        sourceTimelineIntervalMs >= kRuntimeTimingDiscontinuityMs;
+        conf.adaptiveFramegen && adaptiveTelemetry.discontinuityReset;
 
     if (sourceTimelineDiscontinuity) {
         this->sourceTimeline_.reset();
@@ -973,6 +974,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
                       << " adaptive_cost_limit=" << adaptiveTelemetry.costLimit
                       << " adaptive_final_generated=" << adaptiveTelemetry.generatedFrames
+                      << " adaptive_fractional_phase=" << adaptiveTelemetry.fractionalPhase
+                      << " adaptive_synthetic_opportunities="
+                      << adaptiveTelemetry.syntheticOpportunitiesCreated
                       << " adaptive_zero_cycles=" << metrics.windowAdaptiveZeroGenerationCycles
                       << " adaptive_zero_cycles_total=" << metrics.totalAdaptiveZeroGenerationCycles
                       << " adaptive_rate_snaps=" << metrics.windowAdaptiveRateSnaps
