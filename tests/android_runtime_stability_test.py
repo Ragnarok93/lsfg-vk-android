@@ -90,6 +90,44 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
                 "Framegen completion and teardown must use bounded context fences rather than an uninterruptible device-wide idle wait",
             )
 
+    def test_generated_wsi_acquire_is_opportunistic_and_source_safe(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        android_start = source.index(
+            "#ifdef __ANDROID__", source.index("VkResult LsContext::present")
+        )
+        desktop_start = source.index("#else", android_start)
+        android_present = source[android_start:desktop_start]
+        generated_start = android_present.index(
+            "// 4. Generated presentation is opportunistic."
+        )
+        source_start = android_present.index(
+            "// 5. Present the real game frame", generated_start
+        )
+        generated = android_present[generated_start:source_start]
+
+        self.assertIn("this->swapchain, 0,", generated)
+        self.assertIn("res == VK_NOT_READY || res == VK_TIMEOUT", generated)
+        self.assertIn(
+            "droppedGeneratedFrames = generatedFrameCount - i", generated
+        )
+        self.assertIn("metrics.windowGeneratedLateDrops", generated)
+        self.assertIn("metrics.totalGeneratedLateDrops", generated)
+        self.assertNotIn("runtimeWaitTimeoutNs()", generated)
+
+        source_tail = android_present[source_start:]
+        self.assertIn(
+            "lastPrevPostCopySemaphore = queuedGeneratedFrameCount > 0",
+            source_tail,
+        )
+        self.assertIn(
+            "queuedGeneratedFrameCount == 0 ? pNext : nullptr",
+            source_tail,
+        )
+        self.assertIn(
+            "this->lastGeneratedFrameCount_ = queuedGeneratedFrameCount",
+            android_present,
+        )
+
     def test_adaptive_path_uses_variable_count_without_owning_source_pacing(self) -> None:
         scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")

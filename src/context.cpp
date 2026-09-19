@@ -990,6 +990,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowStart = cycleEnd;
             metrics.windowSourceFrames = 0;
             metrics.windowGeneratedFrames = 0;
+            metrics.windowGeneratedLateDrops = 0;
             metrics.windowSourcePresentFailures = 0;
             metrics.windowGeneratedPresentFailures = 0;
             metrics.windowAdaptiveZeroGenerationCycles = 0;
@@ -1065,6 +1066,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_present_failures=" << metrics.windowGeneratedPresentFailures
                       << " source_present_failures_total=" << metrics.totalSourcePresentFailures
                       << " generated_present_failures_total=" << metrics.totalGeneratedPresentFailures
+                      << " generated_late_drops=" << metrics.windowGeneratedLateDrops
+                      << " generated_late_drops_total=" << metrics.totalGeneratedLateDrops
                       << " cycle_avg_ms=" << cycleAvgMs
                       << " cycle_max_ms=" << metrics.windowCycleMaxMs
                       << " ahb_handoff_avg_ms=" << handoffAvgMs
@@ -1169,6 +1172,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowStart = cycleEnd;
             metrics.windowSourceFrames = 0;
             metrics.windowGeneratedFrames = 0;
+            metrics.windowGeneratedLateDrops = 0;
             metrics.windowSourcePresentFailures = 0;
             metrics.windowGeneratedPresentFailures = 0;
             metrics.windowAdaptiveZeroGenerationCycles = 0;
@@ -1566,16 +1570,30 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << "\n";
     updateAdaptiveFlowGovernor();
 
-    // 4. Copy generated frames to swapchain images and present them. Each
-    // copy submission signals two binary semaphores: one consumed by this
-    // generated present, and one reserved for the next generated/source
-    // present. A binary semaphore signal must not be consumed twice.
+    // 4. Generated presentation is opportunistic. Never wait for a synthetic
+    // swapchain image: if WSI has no image immediately available, drop this and
+    // the remaining synthetic opportunities so the real source present can be
+    // queued without generated-frame backpressure.
+    size_t queuedGeneratedFrameCount = 0;
     for (size_t i = 0; i < generatedFrameCount; i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
-        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, runtimeWaitTimeoutNs(),
+        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, 0,
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
+        if (res == VK_NOT_READY || res == VK_TIMEOUT) {
+            const size_t droppedGeneratedFrames = generatedFrameCount - i;
+            metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
+            metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
+            if (firstPresentDiagnostic) {
+                std::cerr << "lsfg-vk: runtime stage=generated-wsi-drop"
+                          << " planned=" << generatedFrameCount
+                          << " queued=" << queuedGeneratedFrameCount
+                          << " dropped=" << droppedGeneratedFrames
+                          << "\n";
+            }
+            break;
+        }
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowGeneratedPresentFailures++;
             metrics.totalGeneratedPresentFailures++;
@@ -1635,6 +1653,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.totalGeneratedPresentFailures++;
             throw LSFG::vulkan_error(res, "Failed to present swapchain image");
         }
+        queuedGeneratedFrameCount++;
         metrics.windowGeneratedFrames++;
         metrics.totalGeneratedFrames++;
         metrics.windowGeneratedPresentMs += std::chrono::duration<double, std::milli>(
@@ -1645,16 +1664,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    // 5. Present the actual game frame after generated frames using the signal
-    // reserved for this present, rather than waiting a second time on the
-    // generated-present semaphore.
-    VkSemaphore lastPrevPostCopySemaphore = generatedFrameCount > 0
-        ? pass.prevPostCopySemaphores.at(generatedFrameCount - 1).handle()
+    this->lastGeneratedFrameCount_ = queuedGeneratedFrameCount;
+
+    // 5. Present the real game frame after only the synthetic frames that were
+    // actually queued. A WSI drop therefore shortens this cycle instead of
+    // making the source wait for an unavailable synthetic swapchain image.
+    VkSemaphore lastPrevPostCopySemaphore = queuedGeneratedFrameCount > 0
+        ? pass.prevPostCopySemaphores.at(queuedGeneratedFrameCount - 1).handle()
         : pass.preCopySemaphores.at(0).handle();
     VkPresentTimeGOOGLE finalSourcePresentTime{};
     VkPresentTimesInfoGOOGLE finalSourcePresentTimes{};
     const void* finalSourceDownstreamPNext =
-        generatedFrameCount == 0 ? pNext : nullptr;
+        queuedGeneratedFrameCount == 0 ? pNext : nullptr;
     const VkPresentInfoKHR finalPresentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = adaptivePresentPNext(
@@ -1674,7 +1695,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.totalSourcePresentFailures++;
         throw LSFG::vulkan_error(res, "Failed to present swapchain image");
     }
-    return finishSourcePresent(res, "prev-post-copy");
+    return finishSourcePresent(
+        res, queuedGeneratedFrameCount > 0
+            ? "prev-post-copy"
+            : "pre-copy-generated-drop");
 
 #else
     // Desktop Linux path: OPAQUE_FD semaphore-based synchronization
