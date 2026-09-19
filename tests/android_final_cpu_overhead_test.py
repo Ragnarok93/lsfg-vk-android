@@ -72,7 +72,8 @@ assert "data.cmdBuffer1.reset();" in context
 assert "buf2.reset();" in context
 
 # Per-slot caller scratch retains enough capacity for the exact hot-path shapes:
-# one wait, one optional output signal, and all active internal pass signals.
+# one wait, up to two output-side signals (output-ready + batch-complete),
+# and all active internal pass signals.
 for field in (
     "submitWaitSemaphores",
     "submitSignalSemaphores",
@@ -80,13 +81,13 @@ for field in (
 ):
     assert field in context_h
 assert "data.submitWaitSemaphores.reserve(1);" in context
-assert "data.submitSignalSemaphores.reserve(1);" in context
+assert "data.submitSignalSemaphores.reserve(2);" in context
 assert "data.activeInternalSemaphores.reserve(vk.generationCount);" in context
 assert "activeInternalSemaphores.assign(" in context
 
 # Inspect only present(). A second Android Context constructor appears later in
 # this source file and intentionally retains the one-time slot allocations.
-present_start = context.index("void Context::present(")
+present_start = context.index("Context::present(")
 present_end = context.index("bool Context::waitForLastPresent", present_start)
 present = context[present_start:present_end]
 assert "data.cmdBuffer1 = Core::CommandBuffer(vk.device, vk.commandPool);" not in present
