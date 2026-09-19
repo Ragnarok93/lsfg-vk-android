@@ -34,6 +34,92 @@ constexpr double kSourcePreservationGainRatio = 1.08;
 constexpr double kSourcePreservationKeepOutputRatio = 0.95;
 } // namespace
 
+SourceTimelineSample SourceProtectedTimeline::observe(
+        uint64_t sourceArrivalTimeNs,
+        std::chrono::nanoseconds sourceInterval,
+        bool discontinuity) {
+    SourceTimelineSample sample{};
+    const auto intervalCount = sourceInterval.count();
+    if (sourceArrivalTimeNs == 0 || intervalCount <= 0)
+        return sample;
+
+    const uint64_t intervalNs = static_cast<uint64_t>(intervalCount);
+    constexpr uint64_t kMinLeadNs = 250'000ULL;
+    constexpr uint64_t kMaxLeadNs = 2'000'000ULL;
+    const uint64_t leadNs = std::clamp<uint64_t>(
+        intervalNs / 8ULL, kMinLeadNs, kMaxLeadNs);
+
+    if (!initialized_ || discontinuity) {
+        initialized_ = true;
+        sourceIndex_ = 0;
+        sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
+        sourceDesiredTimeNs_ = sourceArrivalTimeNs + intervalNs;
+        sample.rebased = true;
+        sample.sourceDeadlineErrorNs = 0;
+    } else {
+        ++sourceIndex_;
+        sample.previousSourceDesiredTimeNs = sourceDesiredTimeNs_;
+
+        const uint64_t earliestFutureTimeNs =
+            sourceArrivalTimeNs > std::numeric_limits<uint64_t>::max() - leadNs
+                ? std::numeric_limits<uint64_t>::max()
+                : sourceArrivalTimeNs + leadNs;
+        const uint64_t cadenceCandidateNs =
+            sourceDesiredTimeNs_ > std::numeric_limits<uint64_t>::max() - intervalNs
+                ? std::numeric_limits<uint64_t>::max()
+                : sourceDesiredTimeNs_ + intervalNs;
+
+        // If the real source itself arrived after the existing presentation
+        // epoch, rebase from that source arrival. This is source lateness, not
+        // generated-frame debt. Generated success/failure never enters here.
+        sourceDesiredTimeNs_ = std::max(cadenceCandidateNs, earliestFutureTimeNs);
+        sample.rebased = sourceDesiredTimeNs_ != cadenceCandidateNs;
+
+        if (sourceArrivalTimeNs >= sample.previousSourceDesiredTimeNs) {
+            const uint64_t delta =
+                sourceArrivalTimeNs - sample.previousSourceDesiredTimeNs;
+            sample.sourceDeadlineErrorNs = delta
+                > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
+                ? std::numeric_limits<int64_t>::max()
+                : static_cast<int64_t>(delta);
+        } else {
+            const uint64_t delta =
+                sample.previousSourceDesiredTimeNs - sourceArrivalTimeNs;
+            sample.sourceDeadlineErrorNs = delta
+                > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
+                ? std::numeric_limits<int64_t>::min()
+                : -static_cast<int64_t>(delta);
+        }
+    }
+
+    sample.sourceIndex = sourceIndex_;
+    sample.intervalNs = intervalNs;
+    sample.sourceDesiredTimeNs = sourceDesiredTimeNs_;
+    sample.valid = true;
+    return sample;
+}
+
+uint64_t SourceProtectedTimeline::syntheticDesiredTimeNs(
+        const SourceTimelineSample& sample, double interpolationFraction) const {
+    if (!sample.valid
+            || !(interpolationFraction > 0.0)
+            || !(interpolationFraction < 1.0)
+            || sample.sourceDesiredTimeNs <= sample.previousSourceDesiredTimeNs)
+        return 0;
+
+    const long double span = static_cast<long double>(
+        sample.sourceDesiredTimeNs - sample.previousSourceDesiredTimeNs);
+    const long double offset = span * static_cast<long double>(interpolationFraction);
+    const uint64_t offsetNs = static_cast<uint64_t>(offset);
+    return sample.previousSourceDesiredTimeNs + offsetNs;
+}
+
+void SourceProtectedTimeline::reset() {
+    initialized_ = false;
+    sourceIndex_ = 0;
+    sourceDesiredTimeNs_ = 0;
+}
+
 AdaptiveFrameScheduler::AdaptiveFrameScheduler(
         uint32_t targetFps, std::size_t maxGeneratedFrames)
         : targetFps_(targetFps),
