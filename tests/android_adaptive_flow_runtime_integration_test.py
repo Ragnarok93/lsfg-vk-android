@@ -156,6 +156,10 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             source,
         )
         self.assertIn("deadline_prediction_error_avg_ms=", source)
+        self.assertIn("deadline_delivery_reserve_ms=", source)
+        self.assertIn("deadline_effective_budget_ms=", source)
+        self.assertIn("observeDeliveryMiss", source)
+        self.assertIn("observeDeliverySuccess", source)
 
         # Admission can lower synthetic density, but it cannot alter the source
         # timeline or create pacing/catch-up work of its own.
