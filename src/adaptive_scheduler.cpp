@@ -123,6 +123,73 @@ void SourceProtectedTimeline::reset() {
     sourceDesiredTimeNs_ = 0;
 }
 
+void DeadlineAdmissionPredictor::observe(
+        const DeadlineAdmissionObservation& observation) {
+    if (!observation.valid
+            || observation.generationCount == 0
+            || !std::isfinite(observation.mipmapsMs)
+            || !std::isfinite(observation.opticalFlowMs)
+            || !std::isfinite(observation.totalLsfgMs)
+            || observation.mipmapsMs < 0.0
+            || observation.opticalFlowMs < 0.0
+            || observation.totalLsfgMs <= 0.0) {
+        return;
+    }
+
+    const double sharedMs =
+        observation.mipmapsMs + observation.opticalFlowMs;
+    const double generatedResidualMs = std::max(
+        0.0, observation.totalLsfgMs - sharedMs);
+    const double perGeneratedMs = generatedResidualMs
+        / static_cast<double>(observation.generationCount);
+
+    const auto blend = [&](double current, double sample) {
+        return hasEstimate_
+            ? current + kEwmaAlpha * (sample - current)
+            : sample;
+    };
+
+    mipmapsMs_ = blend(mipmapsMs_, observation.mipmapsMs);
+    opticalFlowMs_ = blend(opticalFlowMs_, observation.opticalFlowMs);
+    perGeneratedMs_ = blend(perGeneratedMs_, perGeneratedMs);
+    hasEstimate_ = true;
+}
+
+DeadlineAdmissionDecision DeadlineAdmissionPredictor::predict(
+        std::size_t generationCount, double usableBudgetMs) const {
+    DeadlineAdmissionDecision decision{
+        .usableBudgetMs = usableBudgetMs,
+    };
+    if (!hasEstimate_
+            || generationCount == 0
+            || !(usableBudgetMs > 0.0)
+            || !std::isfinite(usableBudgetMs)) {
+        return decision;
+    }
+
+    decision.predictedMipmapsMs = mipmapsMs_;
+    decision.predictedOpticalFlowMs = opticalFlowMs_;
+    decision.predictedTotalLsfgMs =
+        mipmapsMs_ + opticalFlowMs_
+        + perGeneratedMs_ * static_cast<double>(generationCount);
+    decision.safetyMarginMs = std::max(
+        kSafetyMarginFloorMs,
+        decision.predictedTotalLsfgMs * kSafetyMarginRatio);
+    decision.valid = std::isfinite(decision.predictedTotalLsfgMs)
+        && decision.predictedTotalLsfgMs > 0.0;
+    decision.wouldAdmit = decision.valid
+        && decision.predictedTotalLsfgMs + decision.safetyMarginMs
+            <= usableBudgetMs;
+    return decision;
+}
+
+void DeadlineAdmissionPredictor::reset() {
+    hasEstimate_ = false;
+    mipmapsMs_ = 0.0;
+    opticalFlowMs_ = 0.0;
+    perGeneratedMs_ = 0.0;
+}
+
 AdaptiveFrameScheduler::AdaptiveFrameScheduler(
         uint32_t targetFps, std::size_t maxGeneratedFrames)
         : targetFps_(targetFps),
