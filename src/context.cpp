@@ -6,7 +6,6 @@
 #include "utils/utils.hpp"
 #include "hooks.hpp"
 #include "layer.hpp"
-#include "android_diagnostics.hpp"
 
 #ifdef __ANDROID__
 #include <android/hardware_buffer.h>
@@ -30,7 +29,6 @@
 #include <chrono>
 #include <memory>
 #include <string>
-#include <sstream>
 #include <thread>
 #include <array>
 #include <cmath>
@@ -1326,8 +1324,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         / static_cast<double>(metrics.windowDeadlinePredictionSamples)
                     : 0.0;
 
-            std::ostringstream metricsLine;
-            metricsLine << "lsfg-vk: metrics"
+            std::cerr << "lsfg-vk: metrics"
                       << " source_fps=" << sourceFps
                       << " generated_fps=" << generatedFps
                       << " output_fps=" << outputFps
@@ -1481,11 +1478,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " multiplier=" << conf.multiplier
                       << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                       << " target_fps=" << conf.fpsLimit
-                      << " performance=" << (conf.performance ? 1 : 0);
-
-            const std::string metricsText = metricsLine.str();
-            std::cerr << metricsText << "\n";
-            AndroidDiagnostics::appendRuntimeLine(conf.config_file, metricsText);
+                      << " performance=" << (conf.performance ? 1 : 0)
+                      << "\n";
 
             metrics.windowStart = cycleEnd;
             metrics.windowSourceFrames = 0;
