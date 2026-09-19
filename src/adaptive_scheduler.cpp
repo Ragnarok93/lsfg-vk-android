@@ -57,52 +57,56 @@ SourceTimelineSample SourceProtectedTimeline::observe(
         return sample;
     }
 
-    constexpr uint64_t kMinLeadNs = 250'000ULL;
-    constexpr uint64_t kMaxLeadNs = 2'000'000ULL;
-    const uint64_t leadNs = std::clamp<uint64_t>(
-        intervalNs / 8ULL, kMinLeadNs, kMaxLeadNs);
+    const auto nextSourceDeadline = [&]() {
+        return sourceArrivalTimeNs
+                > std::numeric_limits<uint64_t>::max() - intervalNs
+            ? std::numeric_limits<uint64_t>::max()
+            : sourceArrivalTimeNs + intervalNs;
+    };
 
     if (!initialized_) {
         initialized_ = true;
         sourceIndex_ = 0;
         sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
-        sourceDesiredTimeNs_ = sourceArrivalTimeNs + intervalNs;
+        sourceDesiredTimeNs_ = nextSourceDeadline();
         sample.rebased = true;
         sample.sourceDeadlineErrorNs = 0;
     } else {
         ++sourceIndex_;
-        sample.previousSourceDesiredTimeNs = sourceDesiredTimeNs_;
 
-        const uint64_t earliestFutureTimeNs =
-            sourceArrivalTimeNs > std::numeric_limits<uint64_t>::max() - leadNs
-                ? std::numeric_limits<uint64_t>::max()
-                : sourceArrivalTimeNs + leadNs;
-        const uint64_t cadenceCandidateNs =
-            sourceDesiredTimeNs_ > std::numeric_limits<uint64_t>::max() - intervalNs
-                ? std::numeric_limits<uint64_t>::max()
-                : sourceDesiredTimeNs_ + intervalNs;
-
-        // If the real source itself arrived after the existing presentation
-        // epoch, rebase from that source arrival. This is source lateness, not
-        // generated-frame debt. Generated success/failure never enters here.
-        sourceDesiredTimeNs_ = std::max(cadenceCandidateNs, earliestFutureTimeNs);
-        sample.rebased = sourceDesiredTimeNs_ != cadenceCandidateNs;
-
-        if (sourceArrivalTimeNs >= sample.previousSourceDesiredTimeNs) {
-            const uint64_t delta =
-                sourceArrivalTimeNs - sample.previousSourceDesiredTimeNs;
+        // Compare the real source against the prediction made by the previous
+        // source, then anchor this interval to the real arrival. The old
+        // cumulative candidate kept the very first interval as a permanent
+        // phase offset; one startup/resume outlier could therefore leave an
+        // otherwise-stable source tens of milliseconds ahead/behind forever.
+        const uint64_t predictedArrivalTimeNs = sourceDesiredTimeNs_;
+        uint64_t absoluteErrorNs = 0;
+        if (sourceArrivalTimeNs >= predictedArrivalTimeNs) {
+            const uint64_t delta = sourceArrivalTimeNs - predictedArrivalTimeNs;
+            absoluteErrorNs = delta;
             sample.sourceDeadlineErrorNs = delta
                 > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
                 ? std::numeric_limits<int64_t>::max()
                 : static_cast<int64_t>(delta);
         } else {
-            const uint64_t delta =
-                sample.previousSourceDesiredTimeNs - sourceArrivalTimeNs;
+            const uint64_t delta = predictedArrivalTimeNs - sourceArrivalTimeNs;
+            absoluteErrorNs = delta;
             sample.sourceDeadlineErrorNs = delta
                 > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
                 ? std::numeric_limits<int64_t>::min()
                 : -static_cast<int64_t>(delta);
         }
+
+        constexpr uint64_t kMinPhaseCorrectionNs = 1'000'000ULL;
+        constexpr uint64_t kMaxPhaseCorrectionNs = 8'000'000ULL;
+        const uint64_t materialPhaseErrorNs = std::clamp<uint64_t>(
+            intervalNs / 4ULL,
+            kMinPhaseCorrectionNs,
+            kMaxPhaseCorrectionNs);
+
+        sample.rebased = absoluteErrorNs >= materialPhaseErrorNs;
+        sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
+        sourceDesiredTimeNs_ = nextSourceDeadline();
     }
 
     lastIntervalNs_ = intervalNs;
