@@ -72,6 +72,8 @@ struct DeadlineAdmissionDecision {
     double predictedTotalLsfgMs{};
     double safetyMarginMs{};
     double usableBudgetMs{};
+    double deliveryReserveMs{};
+    double effectiveUsableBudgetMs{};
     bool wouldAdmit{false};
     bool valid{false};
 };
@@ -83,6 +85,11 @@ struct DeadlineAdmissionDecision {
 class DeadlineAdmissionPredictor {
 public:
     void observe(const DeadlineAdmissionObservation& observation);
+    /// Learn unmodeled submit-to-delivery pressure only from a frame that was
+    /// admitted but still missed its synthetic deadline/WSI opportunity.
+    void observeDeliveryMiss(double latenessMs);
+    /// Slowly relax the learned delivery reserve after a fully queued batch.
+    void observeDeliverySuccess();
     [[nodiscard]] DeadlineAdmissionDecision predict(
         std::size_t generationCount, double usableBudgetMs) const;
     void reset();
@@ -91,11 +98,16 @@ private:
     static constexpr double kEwmaAlpha = 0.20;
     static constexpr double kSafetyMarginRatio = 0.12;
     static constexpr double kSafetyMarginFloorMs = 0.35;
+    static constexpr double kDeliveryReserveFloorMs = 0.50;
+    static constexpr double kDeliveryReserveMaxMs = 8.0;
+    static constexpr double kDeliveryReserveAlpha = 0.25;
+    static constexpr double kDeliveryReserveSuccessDecay = 0.95;
 
     bool hasEstimate_{false};
     double mipmapsMs_{0.0};
     double opticalFlowMs_{0.0};
     double perGeneratedMs_{0.0};
+    double deliveryReserveMs_{0.0};
 };
 
 class AdaptiveFrameScheduler {
