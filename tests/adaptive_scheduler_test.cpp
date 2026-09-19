@@ -386,32 +386,41 @@ int main() {
     }
 
     {
-        // AFG follows LSFG's low-FPS safety policy: interpolation is completely
-        // disabled below 10 real FPS instead of extrapolating across enormous
-        // temporal gaps. The target remains configured so generation resumes
-        // automatically when source cadence recovers.
+        // Source rate by itself is never a reason to disable interpolation.
+        // A slow but stable source remains eligible under the same generation
+        // semantics as every other cadence.
         AdaptiveFrameScheduler scheduler(60, 3);
-        for (int frame = 0; frame < 12; ++frame)
-            assert(scheduler.plan(125ms) == 0); // 8 FPS
-        assert(scheduler.telemetry().lowFpsCutoff);
-        assert(scheduler.telemetry().generatedFrames == 0);
-
-        bool resumed = false;
-        for (int frame = 0; frame < 20; ++frame)
-            resumed = resumed || scheduler.plan(40ms) > 0; // 25 FPS
-        assert(resumed);
-        assert(!scheduler.telemetry().lowFpsCutoff);
+        for (int frame = 0; frame < 12; ++frame) {
+            assert(scheduler.plan(125ms) > 0); // stable 8 FPS source
+            assert(!scheduler.telemetry().discontinuityReset);
+        }
     }
 
     {
-        // The cutoff is strictly below 10 FPS: an exact 100 ms source interval
-        // remains eligible for fractional AFG planning.
+        // Fractional density creates deterministic opportunities rather than
+        // changing a coarse multiplier mode. Ignoring an opportunity is not
+        // fed back into the distributor, so it cannot become catch-up debt.
         AdaptiveFrameScheduler scheduler(60, 3);
-        bool generated = false;
-        for (int frame = 0; frame < 12; ++frame)
-            generated = generated || scheduler.plan(100ms) > 0;
-        assert(generated);
-        assert(!scheduler.telemetry().lowFpsCutoff);
+        std::size_t opportunities = 0;
+        std::size_t priorOpportunityFrame = 0;
+        std::size_t maxGap = 0;
+        for (std::size_t frame = 1; frame <= 20; ++frame) {
+            const auto created = scheduler.plan(20ms); // ~0.2 generated/source
+            assert(created <= 1);
+            assert(scheduler.telemetry().syntheticOpportunitiesCreated == created);
+            assert(scheduler.telemetry().fractionalPhase >= 0.0);
+            assert(scheduler.telemetry().fractionalPhase < 1.0);
+            if (created != 0) {
+                if (priorOpportunityFrame != 0)
+                    maxGap = std::max(maxGap, frame - priorOpportunityFrame);
+                priorOpportunityFrame = frame;
+                opportunities += created;
+                // Deliberately pretend downstream rejected this opportunity.
+                // The next plan() call receives no rejection/debt feedback.
+            }
+        }
+        assert(opportunities >= 3 && opportunities <= 5);
+        assert(maxGap <= 6);
     }
 
     return 0;
