@@ -1461,7 +1461,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             throw LSFG::vulkan_error(
                 failOpenResult, "Failed source present after SYNC_FD export failure");
         }
-        return finishSourcePresent(failOpenResult, "pre-copy-syncfd-fail-open");
+        // The game-side source copy submission advanced while framegen did
+        // not consume this source. Recreate the LSFG/swapchain context after
+        // presenting the real frame so the two temporal indices cannot remain
+        // permanently offset.
+        return finishSourcePresent(
+            VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-syncfd-fail-open-recreate");
     }
 
     if (historyOnly) {
