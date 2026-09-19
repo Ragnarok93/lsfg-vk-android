@@ -169,6 +169,7 @@ private:
     // Optional fast path only. Prefer one-shot SYNC_FD on Android, retain
     // OPAQUE_FD compatibility, and fall back to the established host fence.
     bool asyncAhbHandoffEnabled_{false};
+    bool asyncFramegenCompletionEnabled_{false};
     VkExternalSemaphoreHandleTypeFlagBits asyncAhbHandoffHandleType_{
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT};
     struct RuntimeMetrics {
@@ -246,6 +247,8 @@ private:
         // Dedicated cross-device signal. It is never shared with source-present
         // or next-source-copy waits, so each binary semaphore has one consumer.
         Mini::Semaphore framegenInputSemaphore;
+        Mini::Semaphore framegenBatchCompleteSemaphore;
+        bool framegenBatchCompleteValid{false};
 #endif
 
         std::vector<Mini::Semaphore> renderSemaphores; // signal when lsfg is done with frame n

@@ -5,6 +5,7 @@
 #include <vulkan/vulkan_core.h>
 
 #include <memory>
+#include <unistd.h>
 
 using namespace Mini;
 
@@ -64,6 +65,51 @@ Semaphore::Semaphore(
         device, &desc, nullptr, &semaphoreHandle);
     if (res != VK_SUCCESS || semaphoreHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Unable to create exportable semaphore");
+
+    this->semaphore = ownSemaphore(device, semaphoreHandle);
+}
+
+Semaphore::Semaphore(
+        VkDevice device, int fd,
+        VkExternalSemaphoreHandleTypeFlagBits handleType) {
+    if (fd < 0)
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+            "Invalid semaphore import fd");
+
+    const VkSemaphoreCreateInfo desc{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+    };
+    VkSemaphore semaphoreHandle{};
+    auto res = Layer::ovkCreateSemaphore(device, &desc, nullptr, &semaphoreHandle);
+    if (res != VK_SUCCESS || semaphoreHandle == VK_NULL_HANDLE) {
+        ::close(fd);
+        throw LSFG::vulkan_error(res, "Unable to create imported semaphore");
+    }
+
+    const auto importSemaphoreFd = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
+        Layer::ovkGetDeviceProcAddr(device, "vkImportSemaphoreFdKHR"));
+    if (importSemaphoreFd == nullptr) {
+        Layer::ovkDestroySemaphore(device, semaphoreHandle, nullptr);
+        ::close(fd);
+        throw LSFG::vulkan_error(VK_ERROR_EXTENSION_NOT_PRESENT,
+            "External semaphore fd import is unavailable");
+    }
+
+    const bool syncFd =
+        handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+    const VkImportSemaphoreFdInfoKHR importInfo{
+        .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+        .semaphore = semaphoreHandle,
+        .flags = syncFd ? VK_SEMAPHORE_IMPORT_TEMPORARY_BIT : 0U,
+        .handleType = handleType,
+        .fd = fd,
+    };
+    res = importSemaphoreFd(device, &importInfo);
+    if (res != VK_SUCCESS) {
+        Layer::ovkDestroySemaphore(device, semaphoreHandle, nullptr);
+        ::close(fd);
+        throw LSFG::vulkan_error(res, "Unable to import semaphore from fd");
+    }
 
     this->semaphore = ownSemaphore(device, semaphoreHandle);
 }

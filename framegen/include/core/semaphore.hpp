@@ -40,6 +40,12 @@ namespace LSFG::Core {
         Semaphore(const Core::Device& device, int fd);
         Semaphore(const Core::Device& device, int fd,
             VkExternalSemaphoreHandleTypeFlagBits handleType);
+        Semaphore(const Core::Device& device,
+            VkExternalSemaphoreHandleTypeFlagBits handleType);
+
+        [[nodiscard]] int exportFd(
+            const Core::Device& device,
+            VkExternalSemaphoreHandleTypeFlagBits handleType) const;
 
         ///
         /// Signal the semaphore to a specific value.

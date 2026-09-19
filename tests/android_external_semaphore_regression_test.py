@@ -68,6 +68,71 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", source)
             self.assertIn("if (!hasInputSemaphore) waits.clear();", source)
 
+    def test_generated_output_completion_uses_sync_fd_without_normal_host_wait(self) -> None:
+        wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(encoding="utf-8")
+
+        self.assertIn("AndroidFrameSyncFds", backend)
+        self.assertIn("presentContextWithCountExportSyncFd", wrapper)
+        self.assertIn("gpuDependenciesExported", wrapper)
+        self.assertIn("framegenBatchCompleteSemaphore", wrapper)
+        self.assertIn("requireHostCompletionWait", wrapper)
+        self.assertIn("if (requireHostCompletionWait)", wrapper)
+
+        dispatch = wrapper.index("presentContextWithCountExportSyncFd")
+        fallback = wrapper.index("if (requireHostCompletionWait)", dispatch)
+        self.assertLess(dispatch, fallback)
+        self.assertIn("outputReadyWaitValid", wrapper[dispatch:fallback])
+
+    def test_batch_completion_is_consumed_by_next_source_copy(self) -> None:
+        wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        producer = wrapper.index("pass.framegenBatchCompleteSemaphore = Mini::Semaphore")
+        consumer = wrapper.index("previousPass->framegenBatchCompleteSemaphore.handle()")
+        clear = wrapper.index("previousPass->framegenBatchCompleteValid = false", consumer)
+        self.assertLess(consumer, producer)
+        self.assertLess(consumer, clear)
+
+    def test_direct_input_ahbs_are_released_before_batch_complete_signal(self) -> None:
+        for relative in (
+            "framegen/v3.1_src/context.cpp",
+            "framegen/v3.1p_src/context.cpp",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            output_copy = source.index("if (this->outputCopyRequired)")
+            final_release = source.index(
+                "pass + 1 == generationCount && !this->inputCopyRequired",
+                output_copy,
+            )
+            batch_signal = source.index(
+                "signals.emplace_back(data.batchCompleteSemaphore)",
+                final_release,
+            )
+            self.assertLess(final_release, batch_signal)
+            self.assertIn("add_external_release(", source[final_release:batch_signal])
+            self.assertIn("this->inImg_0", source[final_release:batch_signal])
+            self.assertIn("this->inImg_1", source[final_release:batch_signal])
+
+    def test_async_input_export_failure_fails_open_without_reusing_host_fence(self) -> None:
+        wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        async_submit = wrapper.index(
+            "submitAhbHandoff(info.device, pass.preCopyBuf, info.queue.second"
+        )
+        export_fd = wrapper.index("framegenInputSemaphore.exportFd", async_submit)
+        fail_open = wrapper.index("pre-copy-syncfd-fail-open", export_fd)
+
+        self.assertIn("VK_NULL_HANDLE, nullptr", wrapper[async_submit:export_fd])
+        self.assertNotIn("waitForAhbHandoff(", wrapper[export_fd:fail_open])
+        self.assertIn("requiresSourceHistoryWarmup_ = true", wrapper[export_fd:fail_open])
+
+    def test_submit_hot_path_preserves_batch_complete_signal(self) -> None:
+        transform = (ROOT / "scripts/apply-android-submit-hot-path.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("data.submitSignalSemaphores.reserve(2)", transform)
+        self.assertIn("exportSyncFdOutputs && pass + 1 == generationCount", transform)
+        self.assertIn("data.batchCompleteSemaphore", transform)
+
     def test_restored_build_does_not_compose_experimental_sync_stacks(self) -> None:
         """Experimental zero-history/nonblocking stacks remain archival, not production composition."""
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")

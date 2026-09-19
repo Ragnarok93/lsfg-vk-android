@@ -78,11 +78,12 @@ namespace LSFG_3_1 {
         ///
         /// @throws LSFG::vulkan_error if the context fails to present.
         ///
-        void present(Vulkan& vk,
+        LSFG::AndroidFrameSyncFds present(Vulkan& vk,
             int inSem, const std::vector<int>& outSem,
             size_t activeGenerationCount,
             VkExternalSemaphoreHandleTypeFlagBits inSemHandleType =
-                VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+                VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+            bool exportAndroidSyncFdOutputs = false);
 
         [[nodiscard]] bool waitForLastPresent(Vulkan& vk, uint64_t timeoutNs);
 
@@ -110,6 +111,7 @@ namespace LSFG_3_1 {
             Core::Semaphore inSemaphore; // signaled when input is ready
             std::vector<Core::Semaphore> internalSemaphores; // signaled when first step is done
             std::vector<Core::Semaphore> outSemaphores; // signaled when each pass is done
+            Core::Semaphore batchCompleteSemaphore; // separate SYNC_FD batch dependency
             std::vector<Core::Fence> completionFences; // fence for completion of each pass
             Core::Fence preprocessingFence; // reused for zero-generation temporal preprocessing
 #ifdef __ANDROID__

@@ -150,6 +150,27 @@ void LSFG_3_1::presentContextWithCount(int32_t id, int inSem,
         *device, inSem, outSem, activeGenerationCount, inSemHandleType);
 }
 
+#ifdef __ANDROID__
+LSFG::AndroidFrameSyncFds LSFG_3_1::presentContextWithCountExportSyncFd(
+        int32_t id, int inSem, size_t activeGenerationCount,
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    if (activeGenerationCount > device->generationCount)
+        throw std::runtime_error("LSFG active generation count exceeds runtime capacity");
+
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
+
+    const std::vector<int> noImportedOutputs;
+    return it->second.present(
+        *device, inSem, noImportedOutputs, activeGenerationCount,
+        inSemHandleType, true);
+}
+#endif
+
 void LSFG_3_1::deleteContext(int32_t id) {
     const std::scoped_lock lock(runtimeMutex);
     if (!instance.has_value() || !device.has_value())

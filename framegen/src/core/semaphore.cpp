@@ -39,6 +39,54 @@ Semaphore::Semaphore(const Core::Device& device, std::optional<uint32_t> initial
     );
 }
 
+Semaphore::Semaphore(const Core::Device& device,
+        VkExternalSemaphoreHandleTypeFlagBits handleType) {
+    const VkExportSemaphoreCreateInfo exportInfo{
+        .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+        .handleTypes = handleType,
+    };
+    const VkSemaphoreCreateInfo desc{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &exportInfo,
+    };
+    VkSemaphore semaphoreHandle{};
+    const auto res = vkCreateSemaphore(
+        device.handle(), &desc, nullptr, &semaphoreHandle);
+    if (res != VK_SUCCESS || semaphoreHandle == VK_NULL_HANDLE)
+        throw LSFG::vulkan_error(res, "Unable to create exportable semaphore");
+
+    this->isTimeline = false;
+    this->semaphore = std::shared_ptr<VkSemaphore>(
+        new VkSemaphore(semaphoreHandle),
+        [dev = device.handle()](VkSemaphore* ownedSemaphore) {
+            vkDestroySemaphore(dev, *ownedSemaphore, nullptr);
+        }
+    );
+}
+
+int Semaphore::exportFd(
+        const Core::Device& device,
+        VkExternalSemaphoreHandleTypeFlagBits handleType) const {
+    const auto getSemaphoreFd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
+        vkGetDeviceProcAddr(device.handle(), "vkGetSemaphoreFdKHR"));
+    if (getSemaphoreFd == nullptr)
+        throw LSFG::vulkan_error(VK_ERROR_EXTENSION_NOT_PRESENT,
+            "External semaphore fd export is unavailable");
+
+    const VkSemaphoreGetFdInfoKHR fdInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+        .semaphore = this->handle(),
+        .handleType = handleType,
+    };
+    int fd = -1;
+    const auto res = getSemaphoreFd(device.handle(), &fdInfo, &fd);
+    const bool completedSyncFd =
+        handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT && fd == -1;
+    if (res != VK_SUCCESS || (fd < 0 && !completedSyncFd))
+        throw LSFG::vulkan_error(res, "Unable to export semaphore to fd");
+    return fd;
+}
+
 Semaphore::Semaphore(const Core::Device& device, int fd)
     : Semaphore(device, fd, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT) {}
 

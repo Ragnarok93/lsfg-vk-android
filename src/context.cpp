@@ -11,6 +11,7 @@
 #include <android/hardware_buffer.h>
 #include <android/log.h>
 #include <time.h>
+#include <unistd.h>
 #endif
 
 #include <vulkan/vulkan_core.h>
@@ -288,9 +289,13 @@ void submitAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuffer,
         VkQueue queue, const std::vector<VkSemaphore>& waitSemaphores,
         const std::vector<VkSemaphore>& signalSemaphores,
         VkFence fence, PFN_vkResetFences resetFences) {
-    if (fence == VK_NULL_HANDLE || resetFences == nullptr)
+    if (fence == VK_NULL_HANDLE) {
+        commandBuffer.submit(queue, waitSemaphores, signalSemaphores);
+        return;
+    }
+    if (resetFences == nullptr)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
-            "Android AHB handoff fence is unavailable");
+            "Android AHB handoff fence reset is unavailable");
 
     const auto resetRes = resetFences(device, 1, &fence);
     if (resetRes != VK_SUCCESS)
@@ -545,6 +550,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     const auto gameGetSemaphoreFd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
         Layer::ovkGetDeviceProcAddr(info.device, "vkGetSemaphoreFdKHR"));
+    const auto gameImportSemaphoreFd = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkImportSemaphoreFdKHR"));
     const bool syncFdHandoffSupported =
         info.androidSyncFdSemaphoreSupported
         && backendDiagnostics.externalSemaphoreSyncFd;
@@ -557,6 +564,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->asyncAhbHandoffHandleType_ = syncFdHandoffSupported
         ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
         : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    this->asyncFramegenCompletionEnabled_ =
+        syncFdHandoffSupported && gameImportSemaphoreFd != nullptr;
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
               << ", mode=" << LSFG::ahbTransportModeName(ahbTransportMode)
@@ -566,6 +575,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
               << (this->asyncAhbHandoffEnabled_
                     ? handoffTypeName(this->asyncAhbHandoffHandleType_)
                     : "host-fence")
+              << ", completion="
+              << (this->asyncFramegenCompletionEnabled_ ? "sync-fd" : "host-wait")
               << ")\n";
 
 #else
@@ -1212,9 +1223,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     pass.preCopyBuf.end();
 
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
-    if (this->previousSourceCopySignalValid_)
-        gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
-            .preCopySemaphores.at(1).handle());
+    RenderPassInfo* previousPass = nullptr;
+    bool consumePreviousBatchComplete = false;
+    if (this->frameIdx > 0)
+        previousPass = &this->passInfos.at((this->frameIdx - 1) % 8);
+    if (this->previousSourceCopySignalValid_ && previousPass != nullptr)
+        gameRenderSemaphores2.emplace_back(
+            previousPass->preCopySemaphores.at(1).handle());
+    if (previousPass != nullptr && previousPass->framegenBatchCompleteValid) {
+        gameRenderSemaphores2.emplace_back(
+            previousPass->framegenBatchCompleteSemaphore.handle());
+        consumePreviousBatchComplete = true;
+    }
 
     const auto handoffStart = RuntimeMetrics::Clock::now();
     std::vector<VkSemaphore> preCopySignals{
@@ -1229,6 +1249,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && generatedFrameCount > 0
         && !warmupSourceHistory;
     bool asyncSubmissionIssued = false;
+    bool asyncExportFailed = false;
     int framegenInputSemaphoreFd = -1;
 
     if (useAsyncHandoff) {
@@ -1250,8 +1271,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (useAsyncHandoff) {
         submitAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
-            *this->ahbHandoffFence, this->resetHandoffFences);
+            VK_NULL_HANDLE, nullptr);
         asyncSubmissionIssued = true;
+        if (consumePreviousBatchComplete && previousPass != nullptr)
+            previousPass->framegenBatchCompleteValid = false;
 
         try {
             // SYNC_FD copy transference requires its signal operation to be
@@ -1261,20 +1284,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowAsyncHandoffs++;
             metrics.totalAsyncHandoffs++;
         } catch (const std::exception& e) {
-            // The copy was already submitted. Retire that exact submission
-            // through the existing bounded fence rather than submitting twice.
-            waitForAhbHandoff(
-                info.device, *this->ahbHandoffFence, this->waitHandoffFences);
+            // The copy was already submitted without a reusable fence. Do not
+            // dispatch framegen unsynchronized and do not block the source
+            // thread. Present the real frame from the source-copy signal and
+            // require one history warmup before generation resumes.
             this->asyncAhbHandoffEnabled_ = false;
             useAsyncHandoff = false;
+            asyncExportFailed = true;
             framegenInputSemaphoreFd = -1;
-            metrics.windowSyncHandoffs++;
-            metrics.totalSyncHandoffs++;
             metrics.totalAsyncFallbacks++;
             std::cerr << "lsfg-vk: Android async AHB handoff disabled after "
                       << handoffTypeName(this->asyncAhbHandoffHandleType_)
                       << " export failure: " << e.what()
-                      << "; current copy retired by host fence\n";
+                      << "; failing open to source-only cycle\n";
         }
     }
 
@@ -1283,6 +1305,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             gameRenderSemaphores2, preCopySignals,
             *this->ahbHandoffFence, this->resetHandoffFences,
             this->waitHandoffFences);
+        if (consumePreviousBatchComplete && previousPass != nullptr)
+            previousPass->framegenBatchCompleteValid = false;
         metrics.windowSyncHandoffs++;
         metrics.totalSyncHandoffs++;
     }
@@ -1295,6 +1319,31 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         ? handoffTypeName(this->asyncAhbHandoffHandleType_)
                         : "host-fence")
                   << "\n";
+    }
+
+    if (asyncExportFailed) {
+        this->requiresSourceHistoryWarmup_ = true;
+        this->lastGeneratedFrameCount_ = 0;
+        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+        const VkPresentInfoKHR failOpenPresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = pNext,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &sourceReady,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        const auto failOpenResult =
+            Layer::ovkQueuePresentKHR(queue, &failOpenPresentInfo);
+        if (failOpenResult != VK_SUCCESS
+                && failOpenResult != VK_SUBOPTIMAL_KHR) {
+            metrics.windowSourcePresentFailures++;
+            metrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(
+                failOpenResult, "Failed source present after SYNC_FD export failure");
+        }
+        return finishSourcePresent(failOpenResult, "pre-copy-syncfd-fail-open");
     }
 
     if (historyOnly) {
@@ -1380,11 +1429,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(warmupResult, "pre-copy-warmup");
     }
 
-    // 2. Tell framegen to generate intermediary frames. It acquires the input
-    //    and output AHBs from EXTERNAL and releases them back to EXTERNAL. The
-    //    optional input FD makes the framegen GPU wait directly for the game
-    //    source-copy submission instead of stalling this presentation thread.
+    // 2. Tell framegen to generate intermediary frames. The normal Android
+    //    path exports output-ready and batch-complete SYNC_FDs after submission,
+    //    allowing game-device work to queue without a host completion wait.
     std::vector<int> noOutSems;
+    std::vector<bool> outputReadyWaitValid(generatedFrameCount, false);
+    LSFG::AndroidFrameSyncFds framegenSync{};
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
                   << (conf.performance ? "performance" : "quality")
@@ -1395,31 +1445,98 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << "\n";
     }
     const auto dispatchStart = RuntimeMetrics::Clock::now();
-    if (conf.performance)
+    if (this->asyncFramegenCompletionEnabled_) {
+        framegenSync = conf.performance
+            ? LSFG_3_1P::presentContextWithCountExportSyncFd(
+                *this->lsfgCtxId, framegenInputSemaphoreFd,
+                generatedFrameCount, this->asyncAhbHandoffHandleType_)
+            : LSFG_3_1::presentContextWithCountExportSyncFd(
+                *this->lsfgCtxId, framegenInputSemaphoreFd,
+                generatedFrameCount, this->asyncAhbHandoffHandleType_);
+    } else if (conf.performance) {
         LSFG_3_1P::presentContextWithCount(
             *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems,
             generatedFrameCount, this->asyncAhbHandoffHandleType_);
-    else
+    } else {
         LSFG_3_1::presentContextWithCount(
             *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems,
             generatedFrameCount, this->asyncAhbHandoffHandleType_);
+    }
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)
-        std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-returned\n";
+        std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-returned"
+                  << " completion="
+                  << (framegenSync.gpuDependenciesExported ? "sync-fd"
+                      : (framegenSync.hostWaitFallback ? "host-fallback"
+                          : "host-wait"))
+                  << "\n";
 
-    // 3. Ensure framegen's separate VkDevice has completed its release barriers
-    //    before the game device acquires generated AHBs for readback/blit. Keep
-    //    this existing bounded completion wait for correctness; the optimization
-    //    only removes the earlier source-copy host wait.
-    const auto waitIdleStart = RuntimeMetrics::Clock::now();
-    const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
-    const bool framegenReady = conf.performance
-        ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
-        : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-    metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-        RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    bool requireHostCompletionWait = !this->asyncFramegenCompletionEnabled_;
+    if (this->asyncFramegenCompletionEnabled_
+            && framegenSync.gpuDependenciesExported) {
+        bool importFailed = framegenSync.outputReadyFds.size() != generatedFrameCount;
+        try {
+            if (!importFailed) {
+                for (size_t i = 0; i < generatedFrameCount; ++i) {
+                    const int fd = framegenSync.outputReadyFds.at(i);
+                    if (fd < 0)
+                        continue;
+                    pass.renderSemaphores.at(i) = Mini::Semaphore(
+                        info.device, fd,
+                        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+                    framegenSync.outputReadyFds.at(i) = -1;
+                    outputReadyWaitValid.at(i) = true;
+                }
+                if (framegenSync.batchCompleteFd >= 0) {
+                    pass.framegenBatchCompleteSemaphore = Mini::Semaphore(
+                        info.device, framegenSync.batchCompleteFd,
+                        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+                    framegenSync.batchCompleteFd = -1;
+                    pass.framegenBatchCompleteValid = true;
+                } else {
+                    pass.framegenBatchCompleteValid = false;
+                }
+            }
+        } catch (const std::exception& e) {
+            importFailed = true;
+            std::cerr << "lsfg-vk: framegen completion SYNC_FD import failed: "
+                      << e.what() << "; using bounded host fallback\n";
+        }
+
+        if (importFailed) {
+            for (const int fd : framegenSync.outputReadyFds)
+                if (fd >= 0) ::close(fd);
+            if (framegenSync.batchCompleteFd >= 0)
+                ::close(framegenSync.batchCompleteFd);
+            std::fill(outputReadyWaitValid.begin(), outputReadyWaitValid.end(), false);
+            pass.framegenBatchCompleteValid = false;
+            this->asyncFramegenCompletionEnabled_ = false;
+            requireHostCompletionWait = true;
+        }
+    } else if (this->asyncFramegenCompletionEnabled_
+            && framegenSync.hostWaitFallback) {
+        requireHostCompletionWait = false;
+        pass.framegenBatchCompleteValid = false;
+    } else if (this->asyncFramegenCompletionEnabled_) {
+        requireHostCompletionWait = true;
+        this->asyncFramegenCompletionEnabled_ = false;
+    }
+
+    // 3. Compatibility/error fallback only. The normal SYNC_FD path queues the
+    //    game-device copies against framegen completion and does not block here.
+    bool framegenReady = true;
+    if (requireHostCompletionWait) {
+        const auto waitIdleStart = RuntimeMetrics::Clock::now();
+        const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
+        framegenReady = conf.performance
+            ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
+            : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
+        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    }
     if (!framegenReady) {
+        const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
         this->lastGeneratedFrameCount_ = 0;
         std::cerr << "lsfg-vk: runtime stage=framegen-completion-timeout timeout_ms="
                   << (framegenCompletionTimeoutNs / 1'000'000ULL)
@@ -1444,7 +1561,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-timeout");
     }
     if (firstPresentDiagnostic)
-        std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready\n";
+        std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready"
+                  << " host_wait=" << (requireHostCompletionWait ? 1 : 0)
+                  << "\n";
     updateAdaptiveFlowGovernor();
 
     // 4. Copy generated frames to swapchain images and present them. Each
@@ -1475,8 +1594,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             info.queue.first);
 
         pass.postCopyBufs.at(i).end();
+        std::vector<VkSemaphore> generatedCopyWaits{
+            pass.acquireSemaphores.at(i).handle()
+        };
+        if (outputReadyWaitValid.at(i))
+            generatedCopyWaits.emplace_back(pass.renderSemaphores.at(i).handle());
         pass.postCopyBufs.at(i).submit(info.queue.second,
-            { pass.acquireSemaphores.at(i).handle() },
+            generatedCopyWaits,
             { pass.postCopySemaphores.at(i).handle(),
               pass.prevPostCopySemaphores.at(i).handle() });
 

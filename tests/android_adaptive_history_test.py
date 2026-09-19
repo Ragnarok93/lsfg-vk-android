@@ -43,7 +43,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
 
         for source_path in backend_sources:
             source = source_path.read_text(encoding="utf-8")
-            present_start = source.index("void Context::present")
+            present_start = source.index("Context::present(")
             wait_start = source.index("bool Context::waitForLastPresent", present_start)
             present = source[present_start:wait_start]
 
@@ -89,7 +89,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         for header_path, source_path in backend_pairs:
             header = header_path.read_text(encoding="utf-8")
             source = source_path.read_text(encoding="utf-8")
-            present_start = source.index("void Context::present")
+            present_start = source.index("Context::present(")
             wait_start = source.index("bool Context::waitForLastPresent", present_start)
             present = source[present_start:wait_start]
             zero_start = present.index("if (generationCount == 0)")
@@ -119,7 +119,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
 
         for source_path in backend_sources:
             source = source_path.read_text(encoding="utf-8")
-            present_start = source.index("void Context::present")
+            present_start = source.index("Context::present(")
             wait_start = source.index("bool Context::waitForLastPresent", present_start)
             present = source[present_start:wait_start]
             pass_start = present.index("for (size_t pass = 0; pass < generationCount; pass++)")
@@ -149,7 +149,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
 
         for source_path in backend_sources:
             source = source_path.read_text(encoding="utf-8")
-            present_start = source.index("void Context::present")
+            present_start = source.index("Context::present(")
             wait_start = source.index("bool Context::waitForLastPresent", present_start)
             present = source[present_start:wait_start]
 

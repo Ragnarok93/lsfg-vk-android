@@ -116,6 +116,13 @@ namespace LSFG_3_1 {
             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
 
 #ifdef __ANDROID__
+    __attribute__((visibility("default")))
+    LSFG::AndroidFrameSyncFds presentContextWithCountExportSyncFd(
+        int32_t id, int inSem, size_t activeGenerationCount,
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType);
+#endif
+
+#ifdef __ANDROID__
     /// Wait only for the most recent submissions belonging to this context.
     /// Returns false when the timeout expires.
     __attribute__((visibility("default")))

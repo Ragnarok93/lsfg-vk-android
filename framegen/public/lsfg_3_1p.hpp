@@ -102,6 +102,13 @@ namespace LSFG_3_1P {
 
 #ifdef __ANDROID__
     __attribute__((visibility("default")))
+    LSFG::AndroidFrameSyncFds presentContextWithCountExportSyncFd(
+        int32_t id, int inSem, size_t activeGenerationCount,
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType);
+#endif
+
+#ifdef __ANDROID__
+    __attribute__((visibility("default")))
     bool waitContext(int32_t id, uint64_t timeoutNs);
 #endif
 

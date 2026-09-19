@@ -273,17 +273,46 @@ Context::Context(Vulkan& vk,
         outN, format);
 }
 
-void Context::present(Vulkan& vk,
+LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         int inSem, const std::vector<int>& outSem,
         size_t activeGenerationCount,
-        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType) {
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
+        bool exportAndroidSyncFdOutputs) {
+    LSFG::AndroidFrameSyncFds exportedSync{};
+
+#ifdef __ANDROID__
+    const size_t completedWindow =
+        std::min<size_t>(this->frameIdx, this->data.size());
+    for (size_t age = completedWindow; age > 0; --age) {
+        auto& completedData =
+            this->data.at((this->frameIdx - age) % this->data.size());
+        if (!completedData.shouldWait || completedData.generationCount == 0)
+            continue;
+        bool complete = true;
+        for (size_t i = 0; i < completedData.generationCount; ++i) {
+            if (!completedData.completionFences.at(i).isSignaled(vk.device)) {
+                complete = false;
+                break;
+            }
+        }
+        if (complete) {
+            this->recordAdaptiveFlowGpuTiming(vk, completedData);
+            completedData.shouldWait = false;
+        }
+    }
+#endif
     const size_t generationCount = std::min(activeGenerationCount, vk.generationCount);
     auto& data = this->data.at(this->frameIdx % 8);
 
-    if (data.shouldWait)
+    if (data.shouldWait) {
         for (size_t i = 0; i < data.generationCount; ++i)
             if (!data.completionFences.at(i).wait(vk.device, framegenWaitTimeoutNs()))
                 throw LSFG::vulkan_error(VK_TIMEOUT, "Fence wait timed out");
+#ifdef __ANDROID__
+        this->recordAdaptiveFlowGpuTiming(vk, data);
+#endif
+        data.shouldWait = false;
+    }
     data.shouldWait = generationCount > 0;
     data.generationCount = generationCount;
 #ifdef __ANDROID__
@@ -436,7 +465,7 @@ void Context::present(Vulkan& vk,
             this->commitAdaptiveFlowTransition(generationGraphIndex);
 #endif
         this->frameIdx++;
-        return;
+        return exportedSync;
     }
 
     const std::vector<Core::Semaphore> activeInternalSemaphores(
@@ -458,12 +487,38 @@ void Context::present(Vulkan& vk,
     auto* presentGenerate = &this->generate;
 #endif
 
+    bool exportSyncFdOutputs =
+#ifdef __ANDROID__
+        exportAndroidSyncFdOutputs && generationCount > 0;
+#else
+        false;
+#endif
+    bool hostWaitFallback = false;
+#ifdef __ANDROID__
+    if (exportSyncFdOutputs) {
+        try {
+            for (size_t pass = 0; pass < generationCount; ++pass)
+                data.outSemaphores.at(pass) = Core::Semaphore(
+                    vk.device, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+            data.batchCompleteSemaphore = Core::Semaphore(
+                vk.device, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+        } catch (const std::exception& e) {
+            std::cerr << "lsfg-vk: framegen output SYNC_FD setup failed: "
+                      << e.what() << "; using bounded host fallback\n";
+            exportSyncFdOutputs = false;
+            hostWaitFallback = true;
+        }
+    }
+#endif
+
     for (size_t pass = 0; pass < generationCount; pass++) {
         auto& internalSemaphore = data.internalSemaphores.at(pass);
         auto& outSemaphore = data.outSemaphores.at(pass);
-        const bool hasOutSemaphore =
+        const bool hasImportedOutSemaphore =
             pass < outSem.size() && outSem.at(pass) >= 0;
-        if (hasOutSemaphore)
+        const bool hasOutSemaphore =
+            exportSyncFdOutputs || hasImportedOutSemaphore;
+        if (!exportSyncFdOutputs && hasImportedOutSemaphore)
             outSemaphore = Core::Semaphore(vk.device, outSem.at(pass));
         auto& completionFence = data.completionFences.at(pass);
         completionFence.reset(vk.device);
@@ -533,6 +588,12 @@ void Context::present(Vulkan& vk,
                 VK_ACCESS_2_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL);
             add_external_transfer_release(barriers, vk, sharedOut,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            if (pass + 1 == generationCount && !this->inputCopyRequired) {
+                add_external_release(
+                    barriers, vk, this->inImg_0, VK_ACCESS_2_SHADER_READ_BIT);
+                add_external_release(
+                    barriers, vk, this->inImg_1, VK_ACCESS_2_SHADER_READ_BIT);
+            }
             emit_external_barriers(buf2, barriers);
         } else {
             std::vector<VkImageMemoryBarrier2> releaseBarriers;
@@ -551,12 +612,55 @@ void Context::present(Vulkan& vk,
         std::vector<Core::Semaphore> signals;
         if (hasOutSemaphore)
             signals.emplace_back(outSemaphore);
+#ifdef __ANDROID__
+        if (exportSyncFdOutputs && pass + 1 == generationCount)
+            signals.emplace_back(data.batchCompleteSemaphore);
+#endif
         buf2.submit(vk.device.getComputeQueue(), completionFence,
             { internalSemaphore }, std::nullopt,
             signals, std::nullopt);
     }
 
+#ifdef __ANDROID__
+    if (exportSyncFdOutputs) {
+        try {
+            exportedSync.outputReadyFds.reserve(generationCount);
+            for (size_t pass = 0; pass < generationCount; ++pass) {
+                exportedSync.outputReadyFds.emplace_back(
+                    data.outSemaphores.at(pass).exportFd(
+                        vk.device, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT));
+            }
+            exportedSync.batchCompleteFd = data.batchCompleteSemaphore.exportFd(
+                vk.device, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+            exportedSync.gpuDependenciesExported = true;
+        } catch (const std::exception& e) {
+            for (const int fd : exportedSync.outputReadyFds)
+                if (fd >= 0) ::close(fd);
+            exportedSync.outputReadyFds.clear();
+            if (exportedSync.batchCompleteFd >= 0)
+                ::close(exportedSync.batchCompleteFd);
+            exportedSync.batchCompleteFd = -1;
+            std::cerr << "lsfg-vk: framegen output SYNC_FD export failed: "
+                      << e.what() << "; using bounded host fallback\n";
+            hostWaitFallback = true;
+        }
+    }
+
+    if (hostWaitFallback) {
+        for (size_t pass = 0; pass < generationCount; ++pass) {
+            if (!data.completionFences.at(pass).wait(vk.device, framegenWaitTimeoutNs()))
+                throw LSFG::vulkan_error(
+                    VK_TIMEOUT, "Framegen output fallback wait timed out");
+        }
+        this->recordAdaptiveFlowGpuTiming(vk, data);
+        data.shouldWait = false;
+        exportedSync.hostWaitFallback = true;
+        exportedSync.gpuDependenciesExported = false;
+    }
+#endif
+
     this->frameIdx++;
+    return exportedSync;
 }
 
 bool Context::waitForLastPresent(Vulkan& vk, uint64_t timeoutNs) {
@@ -603,6 +707,7 @@ bool Context::waitForCompletion(Vulkan& vk) {
 #ifdef __ANDROID__
 
 #include <android/hardware_buffer.h>
+#include <unistd.h>
 
 Context::Context(Vulkan& vk,
         AHardwareBuffer* in0, AHardwareBuffer* in1,

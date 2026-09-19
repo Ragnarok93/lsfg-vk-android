@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 namespace LSFG {
 
@@ -34,6 +35,13 @@ struct AdaptiveFlowGpuTiming {
     size_t generationCount{0};
     bool transitionActive{false};
     bool valid{false};
+};
+
+struct AndroidFrameSyncFds {
+    std::vector<int> outputReadyFds;
+    int batchCompleteFd{-1};
+    bool gpuDependenciesExported{false};
+    bool hostWaitFallback{false};
 };
 
 struct BackendDiagnostics {

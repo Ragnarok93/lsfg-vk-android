@@ -14,6 +14,8 @@ namespace Mini {
         explicit Semaphore(VkDevice device);
         Semaphore(VkDevice device, int* fd);
         Semaphore(VkDevice device, VkExternalSemaphoreHandleTypeFlagBits handleType);
+        Semaphore(VkDevice device, int fd,
+            VkExternalSemaphoreHandleTypeFlagBits handleType);
 
         [[nodiscard]] int exportFd(
             VkDevice device, VkExternalSemaphoreHandleTypeFlagBits handleType) const;
