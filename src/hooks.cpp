@@ -438,6 +438,22 @@ namespace {
                 << "adaptive_flow_lsfg_ms=" << adaptiveFlow.totalLsfgMs << '\n'
                 << "adaptive_flow_budget_ms=" << adaptiveFlow.budgetMs << '\n'
                 << "adaptive_flow_generation_count=" << adaptiveFlow.generationCount << '\n'
+                << "adaptive_flow_global_pressure_valid="
+                << (adaptiveFlow.globalPressureValid ? 1 : 0) << '\n'
+                << "adaptive_flow_global_gpu_percent="
+                << adaptiveFlow.globalGpuUsagePercent << '\n'
+                << "adaptive_flow_global_output_fps="
+                << adaptiveFlow.globalOutputFps << '\n'
+                << "adaptive_flow_global_p95_ms="
+                << adaptiveFlow.globalFrameTimeP95Ms << '\n'
+                << "adaptive_flow_global_slow_ratio="
+                << adaptiveFlow.globalSlowFrameRatio << '\n'
+                << "adaptive_flow_global_pressure="
+                << (adaptiveFlow.globalPressure ? 1 : 0) << '\n'
+                << "adaptive_flow_output_deficit="
+                << (adaptiveFlow.outputDeficit ? 1 : 0) << '\n'
+                << "adaptive_flow_synthetic_drop_pressure="
+                << (adaptiveFlow.syntheticDropPressure ? 1 : 0) << '\n'
                 << "adaptive_flow_reason=" << adaptiveFlow.reason << '\n';
             out.close();
             if (!out)
