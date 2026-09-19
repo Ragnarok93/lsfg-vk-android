@@ -135,30 +135,43 @@ void LSFG_3_1::presentContext(int32_t id, int inSem, const std::vector<int>& out
 
 void LSFG_3_1::presentContextWithCount(int32_t id, int inSem,
         const std::vector<int>& outSem, size_t activeGenerationCount,
-        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType) {
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
+        size_t interpolationGenerationCount) {
     const std::scoped_lock lock(runtimeMutex);
     if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
     if (activeGenerationCount > device->generationCount)
         throw std::runtime_error("LSFG active generation count exceeds runtime capacity");
+    if (interpolationGenerationCount > device->generationCount)
+        throw std::runtime_error("LSFG interpolation generation count exceeds runtime capacity");
+    if (interpolationGenerationCount != 0
+            && interpolationGenerationCount < activeGenerationCount)
+        throw std::runtime_error("LSFG interpolation generation count is below active count");
 
     auto it = contexts.find(id);
     if (it == contexts.end())
         throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
 
     it->second.present(
-        *device, inSem, outSem, activeGenerationCount, inSemHandleType);
+        *device, inSem, outSem, activeGenerationCount, inSemHandleType,
+        false, interpolationGenerationCount);
 }
 
 #ifdef __ANDROID__
 LSFG::AndroidFrameSyncFds LSFG_3_1::presentContextWithCountExportSyncFd(
         int32_t id, int inSem, size_t activeGenerationCount,
-        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType) {
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
+        size_t interpolationGenerationCount) {
     const std::scoped_lock lock(runtimeMutex);
     if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
     if (activeGenerationCount > device->generationCount)
         throw std::runtime_error("LSFG active generation count exceeds runtime capacity");
+    if (interpolationGenerationCount > device->generationCount)
+        throw std::runtime_error("LSFG interpolation generation count exceeds runtime capacity");
+    if (interpolationGenerationCount != 0
+            && interpolationGenerationCount < activeGenerationCount)
+        throw std::runtime_error("LSFG interpolation generation count is below active count");
 
     auto it = contexts.find(id);
     if (it == contexts.end())
@@ -167,7 +180,7 @@ LSFG::AndroidFrameSyncFds LSFG_3_1::presentContextWithCountExportSyncFd(
     const std::vector<int> noImportedOutputs;
     return it->second.present(
         *device, inSem, noImportedOutputs, activeGenerationCount,
-        inSemHandleType, true);
+        inSemHandleType, true, interpolationGenerationCount);
 }
 #endif
 
