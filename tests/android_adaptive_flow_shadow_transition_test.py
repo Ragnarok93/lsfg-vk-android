@@ -84,6 +84,49 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             # The transition is recorded in the existing command/submission path.
             self.assertNotIn("vkDeviceWaitIdle", source, context_source.as_posix())
 
+    def test_gpu_timing_is_available_for_fixed_and_adaptive_flow(self) -> None:
+        for _, context_header, context_source, _ in BACKENDS:
+            header = context_header.read_text(encoding="utf-8")
+            source = context_source.read_text(encoding="utf-8")
+
+            self.assertIn("adaptiveFlowTimingQueryPool", header, context_header.as_posix())
+            self.assertIn(
+                "data.adaptiveFlowTimingQueryPool =",
+                source,
+                context_source.as_posix(),
+            )
+            self.assertIn(
+                "if (data.adaptiveFlowTimingQueryPool.supported())",
+                source,
+                context_source.as_posix(),
+            )
+            self.assertNotIn(
+                "if (!this->adaptiveFlowScales_.empty()\n"
+                "            && data.adaptiveFlowTimingQueryPool.supported())",
+                source,
+                context_source.as_posix(),
+            )
+
+            # Fixed Flow writes the same 0/1/2/3 timestamp boundaries as the
+            # Adaptive Flow graph, so admission prediction has measurements in
+            # both modes without changing generation policy.
+            fixed_start = source.index("} else {\n        this->mipmaps.Dispatch")
+            fixed_end = source.index("#else", fixed_start)
+            fixed_block = source[fixed_start:fixed_end]
+            self.assertIn(
+                "adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 1)",
+                fixed_block,
+                context_source.as_posix(),
+            )
+            record_start = source.index("void Context::recordAdaptiveFlowGpuTiming")
+            record_end = source.index("LSFG::AdaptiveFlowGpuTiming Context::gpuTiming", record_start)
+            record = source[record_start:record_end]
+            self.assertNotIn(
+                "this->adaptiveFlowScales_.empty()",
+                record,
+                context_source.as_posix(),
+            )
+
     def test_pending_transition_is_last_value_wins_and_cancellable(self) -> None:
         for _, _, context_source, _ in BACKENDS:
             source = context_source.read_text(encoding="utf-8")
