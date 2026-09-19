@@ -335,7 +335,11 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         0.0,
         fractionalOpportunityPhase_ + intervalOutputDemand - 1.0);
 
-    constexpr double kIntegerSnapEpsilon = 1e-9;
+    // Nanosecond source intervals such as 33,333,333 ns cannot represent
+    // exact rational frame periods in binary floating point. Snap values that
+    // are within one part per million of the next whole opportunity so stable
+    // integer cadence ratios do not alternate 0/1 from representation error.
+    constexpr double kIntegerSnapEpsilon = 1e-6;
     const auto wholeOpportunities = static_cast<std::size_t>(std::floor(
         fractionalOpportunityPhase_ + kIntegerSnapEpsilon));
     fractionalOpportunityPhase_ -= static_cast<double>(wholeOpportunities);
