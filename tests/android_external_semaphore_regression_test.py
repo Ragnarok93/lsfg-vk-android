@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
     def test_input_semaphore_does_not_require_output_semaphore_fds(self) -> None:
-        """GPU input handoff is valid even when Android uses fence-based output completion."""
+        """GPU input handoff stays independent from generated-output completion FDs."""
         for relative in (
             "framegen/v3.1_src/context.cpp",
             "framegen/v3.1p_src/context.cpp",
@@ -16,146 +16,43 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             self.assertNotIn(
                 "if (inSem >= 0) outSemaphore = Core::Semaphore(vk.device, outSem.empty() ? -1 : outSem.at(pass));",
                 source,
-                f"{relative}: an input semaphore must not force import of a synthetic -1 output fd",
+                f"{relative}: input handoff must not force a synthetic -1 output fd import",
             )
-            self.assertIn(
-                "pass < outSem.size()",
-                source,
-                f"{relative}: output semaphore import must be gated by an actual output fd",
-            )
-            self.assertIn(
-                "outSem.at(pass) >= 0",
-                source,
-                f"{relative}: negative output fd sentinels must never reach Core::Semaphore(fd)",
-            )
+            self.assertIn("pass < outSem.size()", source, relative)
+            self.assertIn("outSem.at(pass) >= 0", source, relative)
 
-    def test_adaptive_zero_generation_defers_completion_fd_without_reverse_vulkan_import(self) -> None:
-        """Zero-generation completion must not import a framegen sync fd into the game VkDevice."""
-        transform = "\n".join(
-            (ROOT / relative).read_text(encoding="utf-8")
-            for relative in (
-                "scripts/adreno_syncfd_handoff.py",
-                "scripts/adreno_async_zero_history.py",
-                "scripts/adreno_slot_aware_zero_history.py",
-            )
-        )
+    def test_opaque_fd_import_has_explicit_failure_ownership(self) -> None:
+        """OPAQUE_FD import must consume the fd on success and close it on pre-import failure."""
+        source = (ROOT / "framegen/src/core/semaphore.cpp").read_text(encoding="utf-8")
 
         for marker in (
-            "historyCompletionFd",
-            "pendingHistoryCompletionFds_",
-            "waitPendingHistoryCompletionFd",
-            "adaptiveZeroGeneration",
-            "zero-history-sync-fd",
-            "preprocessingPending",
-            "handoffFencePending",
-            "presentContextWithCountAndHistoryFd",
+            "VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
+            "vkImportSemaphoreFdKHR",
+            "::close(fd);",
+            "Successful import transfers ownership of fd to Vulkan.",
         ):
-            self.assertIn(marker, transform)
+            self.assertIn(marker, source)
 
-        self.assertNotIn("pendingHistoryCompletionSemaphore_", transform)
         self.assertNotIn(
-            "pendingHistoryCompletionSemaphore_=Mini::Semaphore::importFd",
-            transform,
+            "VK_SEMAPHORE_IMPORT_TEMPORARY_BIT",
+            source,
+            "OPAQUE_FD imports are permanent payload imports, not temporary SYNC_FD imports",
         )
 
-    def test_zero_history_retirement_is_slot_aware_without_pacing_delay(self) -> None:
-        """A zero pass may overlap the next frame but must retire before its input slot is reused."""
-        transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
+    def test_restored_build_does_not_compose_experimental_sync_stacks(self) -> None:
+        """Experimental zero-history/nonblocking stacks remain archival, not production composition."""
+        build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
+        profile = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
 
-        for marker in (
-            "std::array<int, 2> pendingHistoryCompletionFds_",
-            "std::array<bool, 2> pendingHistoryCompletionValid_",
-            "historySlot = static_cast<size_t>(this->frameIdx % 2)",
-            "waitPendingHistoryCompletionFd(size_t historySlot",
-            "pendingHistoryCompletionFds_.at(historySlot)",
-            "pendingHistoryCompletionValid_.at(historySlot)",
-            "waitPendingHistoryCompletionFd(historySlot, true)",
-            "zeroGenerationDirectStorage",
-            "activeHistoryInput",
-            "ahbTransportMode!=LSFG::AhbTransportMode::Unsupported",
+        for forbidden in (
+            "scripts/adreno_nonblocking_generated_pipeline.py",
+            "apply_deferred_zero_history(root)",
+            "apply_async_zero_history(root)",
+            "apply_slot_aware_zero_history(root)",
+            "apply_transport_release_overlap(root)",
+            "apply_syncfd_handoff(root)",
         ):
-            self.assertIn(marker, transform)
-
-        self.assertNotIn("delayUntilNextSourceOutput", transform)
-        self.assertNotIn("sleep_for", transform)
-
-    def test_zero_generation_direct_storage_owns_only_active_input(self) -> None:
-        """Slot-aware retirement is safe only when zero preprocessing owns the parity input alone."""
-        transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
-
-        for marker in (
-            "zeroGenerationDirectStorage = generationCount == 0 && !this->inputCopyRequired",
-            "activeHistoryInput = (this->frameIdx % 2 == 0)",
-            "add_external_acquire(acquireBarriers, vk, activeHistoryInput",
-            "add_external_release(releaseBarriers, vk, activeHistoryInput",
-            "this->asyncZeroHistoryEnabled_=",
-            "this->asyncAhbHandoffEnabled_ && ",
-            "this->asyncAhbHandoffHandleType_==VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT && ",
-            "ahbTransportMode!=LSFG::AhbTransportMode::Unsupported",
-        ):
-            self.assertIn(marker, transform)
-
-    def test_zero_generation_transport_only_owns_only_active_shared_history(self) -> None:
-        """Transport-only zero passes must copy one parity AHB so slot-aware retirement is safe."""
-        transform = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
-
-        for marker in (
-            "zeroGenerationTransportOnly = generationCount == 0 && this->inputCopyRequired",
-            "activeSharedHistoryInput = (this->frameIdx % 2 == 0)",
-            "activePrivateHistoryInput = (this->frameIdx % 2 == 0)",
-            "copy_same_format(data.cmdBuffer1, activeSharedHistoryInput, activePrivateHistoryInput)",
-            "zero-generation transport-only active input acquire",
-            "zero-generation transport-only active input release",
-            "ahbTransportMode!=LSFG::AhbTransportMode::Unsupported",
-        ):
-            self.assertIn(marker, transform)
-
-        self.assertIn(
-            "copy_same_format(data.cmdBuffer1, this->sharedInImg_0, this->inImg_0)",
-            transform,
-        )
-        self.assertIn(
-            "copy_same_format(data.cmdBuffer1, this->sharedInImg_1, this->inImg_1)",
-            transform,
-        )
-        self.assertNotIn("delayUntilNextSourceOutput", transform)
-        self.assertNotIn("sleep_for", transform)
-
-    def test_async_zero_history_hardens_lifecycle_and_public_api(self) -> None:
-        """Deferred zero-history work must be drained on bypass/teardown without hiding waitContext."""
-        hardening_path = ROOT / "scripts/adreno_async_zero_history_hardening.py"
-        self.assertTrue(hardening_path.exists(), "missing async zero-history lifecycle hardening transform")
-        hardening = hardening_path.read_text(encoding="utf-8")
-        slot_aware = (ROOT / "scripts/adreno_slot_aware_zero_history.py").read_text(encoding="utf-8")
-        apply_bundle = (ROOT / "scripts/apply-adreno-evidence-profile.py").read_text(encoding="utf-8")
-
-        for marker in (
-            "flushPendingAndroidWork",
-            "performanceBackend_",
-            "pendingHistoryCompletionValid_",
-            "handoffFencePending",
-            "enterSourceOnlyBypass",
-            "presentContextWithCountAndHistoryFd",
-            "preserve waitContext visibility",
-            "bool waitContext(int32_t id, uint64_t timeoutNs)",
-        ):
-            self.assertIn(marker, hardening)
-
-        for marker in (
-            "pendingHistoryCompletionValid_.at(0)",
-            "pendingHistoryCompletionValid_.at(1)",
-            "waitPendingHistoryCompletionFd(historySlot, throwOnTimeout)",
-            "pendingHistoryCompletionFds_.fill(-1)",
-            "pendingHistoryCompletionValid_.fill(false)",
-        ):
-            self.assertIn(marker, slot_aware)
-
-        self.assertIn("apply_async_zero_history_hardening(root)", apply_bundle)
-        self.assertIn("apply_slot_aware_zero_history(root)", apply_bundle)
-        self.assertLess(
-            apply_bundle.index("apply_async_zero_history_hardening(root)"),
-            apply_bundle.index("apply_slot_aware_zero_history(root)"),
-        )
+            self.assertNotIn(forbidden, build + "\n" + profile)
 
 
 if __name__ == "__main__":

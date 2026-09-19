@@ -45,9 +45,8 @@ jobs:
           python3 tests/android_wsi_provenance_test.py
           python3 tests/android_runtime_stability_test.py
           python3 tests/android_suspend_timeout_guard_test.py
-          python3 tests/android_nonblocking_generated_pipeline_test.py
           python3 tests/android_adaptive_history_test.py
-          python3 tests/android_deferred_zero_history_test.py
+          python3 tests/android_restored_baseline_build_policy_test.py
           python3 tests/android_batch_optimization_test.py
           python3 tests/android_candidate_b4_beta4_predicate_test.py
           python3 tests/android_candidate_b13_beta4_fused_mask_test.py
@@ -130,8 +129,8 @@ jobs:
 
           strings "$artifact" > /tmp/lsfg-strings.txt
           for required in \
-            'deferred-zero reprime-warmup-begin' \
-            'deferred-zero reprime-deferred request_count=' \
+            'source_deadline_error_avg_ms=' \
+            'adaptive_fractional_phase=' \
             'candidate-b4-beta4-predicate-opt' \
             'candidate-b11-beta4-pow2-mask' \
             'candidate-b13-beta4-fused-mask' \
