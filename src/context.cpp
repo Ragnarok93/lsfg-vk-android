@@ -19,6 +19,7 @@
 #include <lsfg_3_1p.hpp>
 
 #include <filesystem>
+#include <fstream>
 #include <algorithm>
 #include <exception>
 #include <iostream>
@@ -104,6 +105,74 @@ double adaptiveFlowFrameBudgetMs(
         return 0.0;
     return sourceIntervalMs / static_cast<double>(generatedFrameCount + 1);
 }
+
+struct RuntimePressureSample {
+    bool valid{false};
+    double gpuUsagePercent{0.0};
+    double outputFps{0.0};
+    double frameTimeP95Ms{0.0};
+    double slowFrameRatio{0.0};
+};
+
+RuntimePressureSample readRuntimePressure(
+        const std::filesystem::path& configFile) {
+    RuntimePressureSample sample{};
+    if (configFile.empty())
+        return sample;
+
+    const auto path = configFile.parent_path() / "runtime-pressure.txt";
+    std::error_code ec;
+    const auto modified = std::filesystem::last_write_time(path, ec);
+    if (ec)
+        return sample;
+
+    const auto age = std::filesystem::file_time_type::clock::now() - modified;
+    if (age < std::filesystem::file_time_type::duration::zero()
+            || age > std::chrono::seconds(2))
+        return sample;
+
+    std::ifstream input(path);
+    if (!input)
+        return sample;
+
+    bool sawGpu = false;
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto separator = line.find('=');
+        if (separator == std::string::npos)
+            continue;
+        const std::string key = line.substr(0, separator);
+        const std::string value = line.substr(separator + 1);
+        try {
+            const double parsed = std::stod(value);
+            if (!std::isfinite(parsed))
+                continue;
+            if (key == "gpu_usage_percent") {
+                sample.gpuUsagePercent = parsed;
+                sawGpu = true;
+            } else if (key == "output_fps") {
+                sample.outputFps = parsed;
+            } else if (key == "frame_time_p95_ms") {
+                sample.frameTimeP95Ms = parsed;
+            } else if (key == "slow_frame_ratio") {
+                sample.slowFrameRatio = parsed;
+            }
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
+
+    sample.valid =
+        sawGpu
+        && sample.gpuUsagePercent >= 0.0
+        && sample.gpuUsagePercent <= 100.0
+        && sample.outputFps >= 0.0
+        && sample.frameTimeP95Ms >= 0.0
+        && sample.slowFrameRatio >= 0.0
+        && sample.slowFrameRatio <= 1.0;
+    return sample;
+}
+
 
 VkImageSubresourceRange colorSubresourceRange() {
     return VkImageSubresourceRange{
@@ -871,8 +940,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             ? LSFG_3_1P::getContextGpuTiming(*this->lsfgCtxId)
             : LSFG_3_1::getContextGpuTiming(*this->lsfgCtxId);
         const bool timingUsable = timing.valid && !timing.transitionActive;
+        const bool generatedWorkSample =
+            timingUsable && timing.generationCount > 0;
 
-        if (timingUsable && timing.generationCount > 0) {
+        if (generatedWorkSample) {
+            this->adaptiveFlowGeneratedTimingValid_ = true;
+            this->adaptiveFlowRetainedMipmapsMs_ = timing.mipmapsMs;
+            this->adaptiveFlowRetainedWorkMs_ = timing.opticalFlowMs;
+            this->adaptiveFlowRetainedTotalLsfgMs_ = timing.totalLsfgMs;
+            this->adaptiveFlowRetainedGenerationCount_ = timing.generationCount;
+
             if (this->deadlineBatchDecision_.valid) {
                 metrics.windowDeadlinePredictionAbsErrorMs += std::abs(
                     timing.totalLsfgMs
@@ -892,6 +969,23 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (!conf.adaptiveFlowScale || !this->adaptiveFlowRuntimeAvailable_)
             return;
 
+        const auto pressureNow = std::chrono::steady_clock::now();
+        if (this->adaptiveFlowNextPressureRead_.time_since_epoch().count() == 0
+                || pressureNow >= this->adaptiveFlowNextPressureRead_) {
+            this->adaptiveFlowNextPressureRead_ =
+                pressureNow + std::chrono::milliseconds(500);
+            const auto pressure = readRuntimePressure(conf.config_file);
+            this->adaptiveFlowGlobalPressureValid_ = pressure.valid;
+            this->adaptiveFlowGlobalGpuUsagePercent_ =
+                pressure.valid ? pressure.gpuUsagePercent : 0.0;
+            this->adaptiveFlowGlobalOutputFps_ =
+                pressure.valid ? pressure.outputFps : 0.0;
+            this->adaptiveFlowGlobalFrameTimeP95Ms_ =
+                pressure.valid ? pressure.frameTimeP95Ms : 0.0;
+            this->adaptiveFlowGlobalSlowFrameRatio_ =
+                pressure.valid ? pressure.slowFrameRatio : 0.0;
+        }
+
         const double budgetMs = adaptiveFlowFrameBudgetMs(
             conf, sourceInterval, generatedFrameCount);
         const bool schedulerTransition =
@@ -903,20 +997,63 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const bool cadenceDiscontinuity =
             sourceIntervalMs >= kAdaptiveFlowCadenceDiscontinuityMs;
 
+        const bool adaptiveOutputDeficit =
+            conf.adaptiveFramegen
+            && conf.fpsLimit > 0
+            && this->adaptiveFlowGlobalPressureValid_
+            && this->adaptiveFlowGlobalOutputFps_ > 0.0
+            && this->adaptiveFlowGlobalOutputFps_
+                < static_cast<double>(conf.fpsLimit) * 0.97;
+        const bool fixedOutputDeficit =
+            !conf.adaptiveFramegen
+            && this->adaptiveFlowGlobalPressureValid_
+            && (this->adaptiveFlowGlobalSlowFrameRatio_ >= 0.08
+                || (budgetValid
+                    && this->adaptiveFlowGlobalFrameTimeP95Ms_
+                        > budgetMs * 1.25));
+        const bool outputDeficit =
+            adaptiveOutputDeficit || fixedOutputDeficit;
+
+        const bool syntheticDropPressure =
+            metrics.totalGeneratedLateDrops
+                > this->adaptiveFlowLastObservedLateDrops_;
+        this->adaptiveFlowLastObservedLateDrops_ =
+            metrics.totalGeneratedLateDrops;
+        this->adaptiveFlowSyntheticDropPressure_ = syntheticDropPressure;
+
+        const bool retainedTimingUsable =
+            this->adaptiveFlowGeneratedTimingValid_
+            && this->adaptiveFlowRetainedGenerationCount_ > 0;
+        const double observationMipmapsMs = generatedWorkSample
+            ? timing.mipmapsMs : this->adaptiveFlowRetainedMipmapsMs_;
+        const double observationFlowMs = generatedWorkSample
+            ? timing.opticalFlowMs : this->adaptiveFlowRetainedWorkMs_;
+        const double observationTotalMs = generatedWorkSample
+            ? timing.totalLsfgMs : this->adaptiveFlowRetainedTotalLsfgMs_;
+        const size_t observationGenerationCount = generatedWorkSample
+            ? timing.generationCount : this->adaptiveFlowRetainedGenerationCount_;
+
         AdaptiveFlowObservation observation{
             .elapsed = sourceInterval,
             .frameBudgetMs = budgetMs,
-            .totalLsfgMs = timingUsable ? timing.totalLsfgMs : 0.0,
-            .flowMs = timingUsable ? timing.opticalFlowMs : 0.0,
-            .mipmapsMs = timingUsable ? timing.mipmapsMs : 0.0,
-            .generationCount = timing.valid
-                ? timing.generationCount : generatedFrameCount,
-            .deadlineMissed = timingUsable && budgetValid
+            .totalLsfgMs = observationTotalMs,
+            .flowMs = observationFlowMs,
+            .mipmapsMs = observationMipmapsMs,
+            .generationCount = observationGenerationCount,
+            .deadlineMissed = generatedWorkSample && budgetValid
                 && timing.totalLsfgMs > budgetMs,
+            .globalGpuUsagePercent =
+                this->adaptiveFlowGlobalGpuUsagePercent_,
+            .globalPressureValid =
+                this->adaptiveFlowGlobalPressureValid_,
+            .outputDeficit = outputDeficit,
+            .syntheticDropPressure = syntheticDropPressure,
+            .generatedWorkSample = generatedWorkSample,
             .schedulerTransition = schedulerTransition,
-            .valid = budgetValid && (schedulerTransition
-                || (!cadenceDiscontinuity
-                    && timingUsable && sourceInterval.count() > 0)),
+            .valid = budgetValid
+                && !cadenceDiscontinuity
+                && sourceInterval.count() > 0
+                && retainedTimingUsable,
         };
 
         const float previousScale = this->adaptiveFlowController_.currentScale();
@@ -943,6 +1080,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " lsfg_ms=" << observation.totalLsfgMs
                       << " budget_ms=" << observation.frameBudgetMs
                       << " generation_count=" << observation.generationCount
+                      << " generated_work_sample="
+                      << (observation.generatedWorkSample ? 1 : 0)
+                      << " global_gpu_percent="
+                      << observation.globalGpuUsagePercent
+                      << " global_pressure_valid="
+                      << (observation.globalPressureValid ? 1 : 0)
+                      << " output_deficit="
+                      << (observation.outputDeficit ? 1 : 0)
+                      << " synthetic_drop_pressure="
+                      << (observation.syntheticDropPressure ? 1 : 0)
                       << '\n';
         }
 
@@ -953,13 +1100,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->adaptiveFlowActiveScale_ = state.activeScale;
         this->adaptiveFlowWarmupRemaining_ = state.warmupRemaining;
         this->adaptiveFlowTransitionPending_ = state.transitionPending;
-        this->adaptiveFlowTimingValid_ = timingUsable;
-        this->adaptiveFlowMipmapsMs_ = timing.valid ? timing.mipmapsMs : 0.0;
-        this->adaptiveFlowWorkMs_ = timing.valid ? timing.opticalFlowMs : 0.0;
-        this->adaptiveFlowTotalLsfgMs_ = timing.valid ? timing.totalLsfgMs : 0.0;
+        this->adaptiveFlowTimingValid_ = retainedTimingUsable;
+        this->adaptiveFlowMipmapsMs_ =
+            retainedTimingUsable ? observationMipmapsMs : 0.0;
+        this->adaptiveFlowWorkMs_ =
+            retainedTimingUsable ? observationFlowMs : 0.0;
+        this->adaptiveFlowTotalLsfgMs_ =
+            retainedTimingUsable ? observationTotalMs : 0.0;
         this->adaptiveFlowBudgetMs_ = budgetMs;
         this->adaptiveFlowGenerationCount_ =
-            timing.valid ? timing.generationCount : generatedFrameCount;
+            retainedTimingUsable ? observationGenerationCount : 0;
         this->adaptiveFlowReason_ = flowTelemetry.reason;
     };
 
