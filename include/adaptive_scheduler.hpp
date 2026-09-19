@@ -52,6 +52,7 @@ private:
     bool initialized_{false};
     uint64_t sourceIndex_{0};
     uint64_t sourceDesiredTimeNs_{0};
+    uint64_t lastIntervalNs_{0};
 };
 
 /// Chooses the minimum number of interpolation frames needed to approach an
