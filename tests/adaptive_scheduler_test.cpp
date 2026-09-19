@@ -237,7 +237,7 @@ int main() {
 
         bool sawSlowSnap = false;
         bool sawRaise = false;
-        for (int frame = 0; frame < 19; ++frame) {
+        for (int frame = 0; frame < 22; ++frame) {
             scheduler.plan(34ms);
             sawSlowSnap = sawSlowSnap
                 || scheduler.telemetry().sourceRateSnapped;
