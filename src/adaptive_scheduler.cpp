@@ -58,11 +58,6 @@ SourceTimelineSample SourceProtectedTimeline::observe(
         return sample;
     }
 
-    constexpr uint64_t kMinLeadNs = 250'000ULL;
-    constexpr uint64_t kMaxLeadNs = 2'000'000ULL;
-    const uint64_t leadNs = std::clamp<uint64_t>(
-        intervalNs / 8ULL, kMinLeadNs, kMaxLeadNs);
-
     const auto addSaturated = [](uint64_t base, uint64_t delta) {
         return base > std::numeric_limits<uint64_t>::max() - delta
             ? std::numeric_limits<uint64_t>::max()
@@ -72,24 +67,19 @@ SourceTimelineSample SourceProtectedTimeline::observe(
     if (!initialized_) {
         initialized_ = true;
         sourceIndex_ = 0;
+        predictedIntervalNs_ = intervalNs;
         sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
-        sourceDesiredTimeNs_ = addSaturated(sourceArrivalTimeNs, intervalNs);
+        sourceDesiredTimeNs_ =
+            addSaturated(sourceArrivalTimeNs, predictedIntervalNs_);
         sample.rebased = true;
         sample.sourceDeadlineErrorNs = 0;
     } else {
         ++sourceIndex_;
 
-        // Compare the source against the prior prediction, but do not reward a
-        // late source with a whole new source interval of synthetic budget.
-        // That creates a positive feedback loop under load:
-        //   late source -> larger FG budget -> more GPU work -> later source.
-        //
-        // Early phase drift is different: correcting an epoch that sits ahead
-        // of the real source only removes synthetic budget, so it is safe to
-        // snap that error away once it is materially larger than normal jitter.
+        // Measure the phase error against the prediction made by the previous
+        // real source frame. Generated success/failure never feeds this clock.
         const uint64_t predictedArrivalTimeNs = sourceDesiredTimeNs_;
         uint64_t absoluteErrorNs = 0;
-        bool sourceArrivedEarly = false;
         if (sourceArrivalTimeNs >= predictedArrivalTimeNs) {
             const uint64_t delta = sourceArrivalTimeNs - predictedArrivalTimeNs;
             absoluteErrorNs = delta;
@@ -98,7 +88,6 @@ SourceTimelineSample SourceProtectedTimeline::observe(
                 ? std::numeric_limits<int64_t>::max()
                 : static_cast<int64_t>(delta);
         } else {
-            sourceArrivedEarly = true;
             const uint64_t delta = predictedArrivalTimeNs - sourceArrivalTimeNs;
             absoluteErrorNs = delta;
             sample.sourceDeadlineErrorNs = delta
@@ -110,34 +99,38 @@ SourceTimelineSample SourceProtectedTimeline::observe(
         constexpr uint64_t kMinPhaseCorrectionNs = 1'000'000ULL;
         constexpr uint64_t kMaxPhaseCorrectionNs = 8'000'000ULL;
         const uint64_t materialPhaseErrorNs = std::clamp<uint64_t>(
-            intervalNs / 4ULL,
+            predictedIntervalNs_ / 4ULL,
             kMinPhaseCorrectionNs,
             kMaxPhaseCorrectionNs);
+        sample.rebased = absoluteErrorNs >= materialPhaseErrorNs;
 
-        const uint64_t cadenceCandidateNs =
-            addSaturated(predictedArrivalTimeNs, intervalNs);
-        const uint64_t earliestFutureTimeNs =
-            addSaturated(sourceArrivalTimeNs, leadNs);
+        // Real source arrival is the phase anchor, but raw frame time is not the
+        // next generation budget. Increase the prediction slowly under a
+        // sustained slowdown so one late source cannot grant a huge synthetic
+        // window, and contract quickly when the source speeds up so generation
+        // cannot steal time from a sooner next source.
+        const long double predicted =
+            static_cast<long double>(predictedIntervalNs_);
+        const long double observed = static_cast<long double>(intervalNs);
+        const long double boundedObserved = std::clamp(
+            observed,
+            predicted * 0.50L,
+            predicted * 1.50L);
+        const long double alpha =
+            boundedObserved < predicted ? 0.50L : 0.20L;
+        const long double updated =
+            predicted + alpha * (boundedObserved - predicted);
+        predictedIntervalNs_ = std::max<uint64_t>(
+            1ULL, static_cast<uint64_t>(std::llround(updated)));
 
-        const bool correctEarlyPhase =
-            sourceArrivedEarly && absoluteErrorNs >= materialPhaseErrorNs;
-        if (correctEarlyPhase) {
-            sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
-            sourceDesiredTimeNs_ =
-                addSaturated(sourceArrivalTimeNs, intervalNs);
-            sample.rebased = true;
-        } else {
-            sourceDesiredTimeNs_ =
-                std::max(cadenceCandidateNs, earliestFutureTimeNs);
-            sample.rebased = sourceDesiredTimeNs_ != cadenceCandidateNs;
-            sample.previousSourceDesiredTimeNs =
-                sample.rebased ? sourceArrivalTimeNs : predictedArrivalTimeNs;
-        }
+        sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
+        sourceDesiredTimeNs_ =
+            addSaturated(sourceArrivalTimeNs, predictedIntervalNs_);
     }
 
     lastIntervalNs_ = intervalNs;
     sample.sourceIndex = sourceIndex_;
-    sample.intervalNs = intervalNs;
+    sample.intervalNs = predictedIntervalNs_;
     sample.sourceDesiredTimeNs = sourceDesiredTimeNs_;
     sample.valid = true;
     return sample;
@@ -163,6 +156,7 @@ void SourceProtectedTimeline::reset() {
     sourceIndex_ = 0;
     sourceDesiredTimeNs_ = 0;
     lastIntervalNs_ = 0;
+    predictedIntervalNs_ = 0;
 }
 
 void DeadlineAdmissionPredictor::observe(

@@ -55,48 +55,69 @@ int main() {
     }
 
     {
-        // A startup/resume outlier must not become a permanent phase offset.
-        // The previous implementation advanced from its old desired epoch, so
-        // an 80 ms seed followed by stable 16 ms source arrivals stayed 64 ms
-        // ahead indefinitely. Real source arrivals are authoritative.
+        // A single slow frame cannot become a giant synthetic budget. The
+        // source arrival is authoritative for phase, while cadence expands only
+        // gradually from the previous real-source prediction.
         SourceProtectedTimeline timeline;
-        const auto seeded = timeline.observe(5'000'000'000ULL, 80ms);
-        assert(seeded.valid);
-        assert(seeded.sourceDesiredTimeNs == 5'080'000'000ULL);
+        const auto initial = timeline.observe(5'000'000'000ULL, 16ms);
+        assert(initial.valid);
+        assert(initial.intervalNs == 16'000'000ULL);
+        assert(initial.sourceDesiredTimeNs == 5'016'000'000ULL);
 
-        const auto corrected = timeline.observe(5'016'000'000ULL, 16ms);
-        assert(corrected.valid);
-        assert(corrected.rebased);
-        assert(corrected.sourceDeadlineErrorNs == -64'000'000LL);
-        assert(corrected.previousSourceDesiredTimeNs == 5'016'000'000ULL);
-        assert(corrected.sourceDesiredTimeNs == 5'032'000'000ULL);
+        const auto slowSpike = timeline.observe(5'050'000'000ULL, 50ms);
+        assert(slowSpike.valid);
+        assert(slowSpike.rebased);
+        assert(slowSpike.sourceDeadlineErrorNs == 34'000'000LL);
+        assert(slowSpike.previousSourceDesiredTimeNs == 5'050'000'000ULL);
+        // Upward prediction is capped to +10% per source observation:
+        // bounded observation=24ms, alpha=.2 => 17.6ms.
+        assert(slowSpike.intervalNs == 17'600'000ULL);
+        assert(slowSpike.sourceDesiredTimeNs == 5'067'600'000ULL);
 
-        const auto stable = timeline.observe(5'032'000'000ULL, 16ms);
-        assert(stable.valid);
-        assert(!stable.rebased);
-        assert(stable.sourceDeadlineErrorNs == 0);
-        assert(stable.previousSourceDesiredTimeNs == 5'032'000'000ULL);
-        assert(stable.sourceDesiredTimeNs == 5'048'000'000ULL);
+        const auto sustainedSlow =
+            timeline.observe(5'100'000'000ULL, 50ms);
+        assert(sustainedSlow.valid);
+        assert(sustainedSlow.intervalNs == 19'360'000ULL);
+        assert(sustainedSlow.sourceDesiredTimeNs == 5'119'360'000ULL);
     }
 
     {
-        // Ordinary sub-threshold source jitter must not rebase every frame.
-        // Repeated rebases were visible as 10-25 events/second in the regressed
-        // runtime and made the synthetic budget chase the source itself.
+        // When the source speeds up, the prediction contracts much faster so
+        // frame generation cannot keep spending against an obsolete long
+        // interval.
         SourceProtectedTimeline timeline;
-        assert(timeline.observe(6'000'000'000ULL, 16ms).valid);
+        assert(timeline.observe(6'000'000'000ULL, 32ms).valid);
 
-        const auto earlyJitter =
-            timeline.observe(6'014'500'000ULL, 16ms);
-        assert(earlyJitter.valid);
-        assert(!earlyJitter.rebased);
-        assert(earlyJitter.sourceDesiredTimeNs == 6'032'000'000ULL);
+        const auto fast =
+            timeline.observe(6'016'000'000ULL, 16ms);
+        assert(fast.valid);
+        // 32ms -> bounded 16ms, alpha=.5 => 24ms.
+        assert(fast.intervalNs == 24'000'000ULL);
+        assert(fast.previousSourceDesiredTimeNs == 6'016'000'000ULL);
+        assert(fast.sourceDesiredTimeNs == 6'040'000'000ULL);
 
-        const auto lateJitter =
-            timeline.observe(6'033'000'000ULL, 16ms);
-        assert(lateJitter.valid);
-        assert(!lateJitter.rebased);
-        assert(lateJitter.sourceDesiredTimeNs == 6'048'000'000ULL);
+        const auto faster =
+            timeline.observe(6'032'000'000ULL, 16ms);
+        assert(faster.valid);
+        assert(faster.intervalNs == 20'000'000ULL);
+        assert(faster.sourceDesiredTimeNs == 6'052'000'000ULL);
+    }
+
+    {
+        // Small source jitter changes the measured error but never shifts the
+        // synthetic interval start away from the real source arrival.
+        SourceProtectedTimeline timeline;
+        assert(timeline.observe(7'000'000'000ULL, 16ms).valid);
+
+        const auto jitter =
+            timeline.observe(7'016'500'000ULL, 16'500'000ns);
+        assert(jitter.valid);
+        assert(!jitter.rebased);
+        assert(jitter.previousSourceDesiredTimeNs == 7'016'500'000ULL);
+        assert(jitter.sourceDesiredTimeNs > jitter.previousSourceDesiredTimeNs);
+        const auto midpoint = timeline.syntheticDesiredTimeNs(jitter, 0.5);
+        assert(midpoint > jitter.previousSourceDesiredTimeNs);
+        assert(midpoint < jitter.sourceDesiredTimeNs);
     }
 
     {
