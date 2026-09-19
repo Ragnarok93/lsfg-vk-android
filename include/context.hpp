@@ -151,7 +151,7 @@ private:
     SourceProtectedTimeline sourceTimeline_;
     SourceTimelineSample currentSourceTimeline_;
 
-    static constexpr uint32_t kSourceHistoryWarmupFrames = 3;
+    static constexpr uint32_t kSourceHistoryWarmupFrames = 4;
     uint32_t sourceHistoryWarmupRemaining_{kSourceHistoryWarmupFrames};
     bool requiresSourceHistoryWarmup_{true};
     bool previousSourceCopySignalValid_{false};
