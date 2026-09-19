@@ -1570,6 +1570,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceFrames = 0;
             metrics.windowGeneratedFrames = 0;
             metrics.windowGeneratedLateDrops = 0;
+            metrics.windowAdmissionRejects = 0;
+            metrics.windowGeneratedDeadlineDrops = 0;
+            metrics.windowGeneratedWsiDrops = 0;
             metrics.windowSourcePresentFailures = 0;
             metrics.windowGeneratedPresentFailures = 0;
             metrics.windowAdaptiveZeroGenerationCycles = 0;
@@ -2109,7 +2112,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, 0,
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
         if (res == VK_NOT_READY || res == VK_TIMEOUT) {
-            this->deadlineAdmissionPredictor_.observeDeliveryMiss(0.0);
+            // Swapchain-image availability is downstream presentation
+            // capacity, not evidence that framegen compute missed its source
+            // deadline. Keep the deadline predictor trained only on actual
+            // submit-to-deadline lateness.
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
             metrics.totalGeneratedLateDrops += droppedGeneratedFrames;

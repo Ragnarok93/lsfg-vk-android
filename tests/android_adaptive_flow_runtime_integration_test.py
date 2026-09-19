@@ -196,6 +196,39 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertNotIn("fractionalOpportunityPhase_", admission)
 
 
+    def test_drop_metrics_are_true_per_window_counters(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        reset_start = source.index("metrics.windowGeneratedLateDrops = 0")
+        reset_end = source.index("metrics.windowCycleMs = 0.0", reset_start)
+        reset = source[reset_start:reset_end]
+        for field in (
+            "metrics.windowGeneratedLateDrops = 0",
+            "metrics.windowAdmissionRejects = 0",
+            "metrics.windowGeneratedDeadlineDrops = 0",
+            "metrics.windowGeneratedWsiDrops = 0",
+        ):
+            self.assertIn(field, reset)
+
+    def test_wsi_unavailability_does_not_poison_deadline_predictor(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        wsi_start = source.index("if (res == VK_NOT_READY || res == VK_TIMEOUT)")
+        wsi_end = source.index("if (res != VK_SUCCESS", wsi_start)
+        wsi_drop = source[wsi_start:wsi_end]
+        self.assertIn("windowGeneratedWsiDrops", wsi_drop)
+        self.assertNotIn(
+            "deadlineAdmissionPredictor_.observeDeliveryMiss",
+            wsi_drop,
+        )
+
+        deadline_start = source.index("runtime stage=generated-deadline-drop")
+        deadline_prefix = source[max(0, deadline_start - 900):deadline_start]
+        self.assertIn(
+            "deadlineAdmissionPredictor_.observeDeliveryMiss",
+            deadline_prefix,
+        )
+
     def test_fixed_value_is_dormant_while_adaptive_flow_is_active(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
