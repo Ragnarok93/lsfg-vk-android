@@ -73,7 +73,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertNotIn("sleep_for", reader)
         self.assertNotIn("sourceTimeline_", reader)
 
-    def test_history_only_cycles_can_pressure_flow_but_never_prove_headroom(self) -> None:
+    def test_history_only_uses_retained_generated_timing_for_guarded_recovery(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         controller = (ROOT / "src/adaptive_flow_controller.cpp").read_text(
             encoding="utf-8"
@@ -84,10 +84,17 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("adaptiveFlowRetainedTotalLsfgMs_", source)
         self.assertIn(".generatedWorkSample = generatedWorkSample", source)
 
+        # Current zero-generation timing cannot masquerade as cheap generated
+        # work. Pressure still requires a real generated sample, while recovery
+        # may use the retained real generated timing only with fresh global
+        # headroom and a met LSFG output target.
         self.assertIn("const bool localPressure", controller)
         self.assertIn("observation.generatedWorkSample", controller)
-        self.assertIn("globalPressure", controller)
-        self.assertIn("&& observation.generatedWorkSample", controller)
+        self.assertIn("retainedHistoryRecoveryEligible", controller)
+        self.assertIn("!observation.generatedWorkSample", controller)
+        self.assertIn("observation.globalPressureValid", controller)
+        self.assertIn("globalRecoveryHeadroom", controller)
+        self.assertIn("recoveryTimingEligible", controller)
         self.assertIn("kGlobalGpuPressurePercent = 96.0", controller)
         self.assertIn("kGlobalGpuRecoveryPercent = 88.0", controller)
 
