@@ -14,7 +14,10 @@ constexpr double kRecoveryPredictedRatio = 0.82;
 constexpr double kMinimumFlowBudgetRatio = 0.10;
 constexpr double kMinimumPredictedReliefRatio = 0.03;
 constexpr double kDownConfirmSeconds = 0.90;
+constexpr double kGlobalDownConfirmSeconds = 0.50;
 constexpr double kUpConfirmSeconds = 4.0;
+constexpr double kGlobalGpuPressurePercent = 96.0;
+constexpr double kGlobalGpuRecoveryPercent = 88.0;
 constexpr double kTransitionCooldownSeconds = 1.25;
 constexpr double kSchedulerTransitionHoldSeconds = 1.25;
 
@@ -102,17 +105,33 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
 
     telemetry_.pressureRatio = observation.totalLsfgMs / observation.frameBudgetMs;
     telemetry_.flowBudgetRatio = observation.flowMs / observation.frameBudgetMs;
+    telemetry_.globalGpuUsagePercent = observation.globalPressureValid
+        ? observation.globalGpuUsagePercent : 0.0;
+    telemetry_.outputDeficit = observation.outputDeficit;
+    const bool globalPressure =
+        observation.globalPressureValid
+        && observation.globalGpuUsagePercent >= kGlobalGpuPressurePercent
+        && (observation.outputDeficit || observation.syntheticDropPressure);
+    telemetry_.globalPressure = globalPressure;
 
     if (observation.schedulerTransition) {
         schedulerHoldUntilSeconds_ = std::max(
             schedulerHoldUntilSeconds_, observedSeconds_ + kSchedulerTransitionHoldSeconds);
-        resetEvidence();
+        headroomSeconds_ = 0.0;
+        if (globalPressure)
+            pressureSeconds_ += evidenceSeconds;
+        else
+            pressureSeconds_ = 0.0;
         telemetry_.reason = AdaptiveFlowDecisionReason::SchedulerTransition;
         return telemetry_.currentScale;
     }
 
     if (observedSeconds_ < schedulerHoldUntilSeconds_) {
-        resetEvidence();
+        headroomSeconds_ = 0.0;
+        if (globalPressure)
+            pressureSeconds_ += evidenceSeconds;
+        else
+            pressureSeconds_ = 0.0;
         telemetry_.reason = AdaptiveFlowDecisionReason::SchedulerTransition;
         return telemetry_.currentScale;
     }
@@ -128,8 +147,11 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool canLower = index + 1 < presetStates.size();
     const bool canRaise = index > 0;
 
-    const bool pressure = observation.deadlineMissed
-        || telemetry_.pressureRatio >= kPressureRatio;
+    const bool localPressure =
+        observation.generatedWorkSample
+        && (observation.deadlineMissed
+            || telemetry_.pressureRatio >= kPressureRatio);
+    const bool pressure = localPressure || globalPressure;
 
     if (pressure && canLower) {
         const double currentScale = static_cast<double>(presetStates[index]);
@@ -138,8 +160,12 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         const double predictedReliefMs = observation.flowMs * (1.0 - scaleWorkRatio);
         const double predictedReliefRatio = predictedReliefMs / observation.frameBudgetMs;
 
-        if (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
-                || predictedReliefRatio < kMinimumPredictedReliefRatio) {
+        const double minimumFlowBudgetRatio = globalPressure
+            ? 0.04 : kMinimumFlowBudgetRatio;
+        const double minimumPredictedReliefRatio = globalPressure
+            ? 0.01 : kMinimumPredictedReliefRatio;
+        if (telemetry_.flowBudgetRatio < minimumFlowBudgetRatio
+                || predictedReliefRatio < minimumPredictedReliefRatio) {
             resetEvidence();
             telemetry_.reason = AdaptiveFlowDecisionReason::InsufficientFlowContribution;
             return telemetry_.currentScale;
@@ -147,11 +173,15 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
 
         pressureSeconds_ += evidenceSeconds;
         headroomSeconds_ = 0.0;
-        if (pressureSeconds_ >= kDownConfirmSeconds) {
+        const double downConfirmSeconds = globalPressure
+            ? kGlobalDownConfirmSeconds : kDownConfirmSeconds;
+        if (pressureSeconds_ >= downConfirmSeconds) {
             telemetry_.stateIndex++;
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
             telemetry_.changed = true;
-            telemetry_.reason = AdaptiveFlowDecisionReason::SustainedPressure;
+            telemetry_.reason = globalPressure
+                ? AdaptiveFlowDecisionReason::SustainedGlobalPressure
+                : AdaptiveFlowDecisionReason::SustainedPressure;
             cooldownUntilSeconds_ = observedSeconds_ + kTransitionCooldownSeconds;
             resetEvidence();
         } else {
@@ -162,7 +192,15 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
 
     pressureSeconds_ = 0.0;
 
-    if (canRaise && !observation.deadlineMissed) {
+    const bool globalRecoveryHeadroom =
+        !observation.globalPressureValid
+        || observation.globalGpuUsagePercent <= kGlobalGpuRecoveryPercent;
+    if (canRaise
+            && !observation.deadlineMissed
+            && observation.generatedWorkSample
+            && !observation.outputDeficit
+            && !observation.syntheticDropPressure
+            && globalRecoveryHeadroom) {
         const double currentScale = static_cast<double>(presetStates[index]);
         const double higherScale = static_cast<double>(presetStates[index - 1]);
         const double addedFlowMs = observation.flowMs
@@ -219,6 +257,7 @@ const char* AdaptiveFlowController::reasonName(AdaptiveFlowDecisionReason reason
     case AdaptiveFlowDecisionReason::Cooldown: return "cooldown";
     case AdaptiveFlowDecisionReason::InsufficientFlowContribution: return "insufficient_flow_contribution";
     case AdaptiveFlowDecisionReason::SustainedPressure: return "sustained_gpu_pressure";
+    case AdaptiveFlowDecisionReason::SustainedGlobalPressure: return "sustained_global_gpu_pressure";
     case AdaptiveFlowDecisionReason::InsufficientRecoveryHeadroom: return "insufficient_recovery_headroom";
     case AdaptiveFlowDecisionReason::SustainedHeadroom: return "sustained_headroom";
     }
