@@ -444,6 +444,10 @@ namespace {
                 << adaptiveFlow.globalGpuUsagePercent << '\n'
                 << "adaptive_flow_global_output_fps="
                 << adaptiveFlow.globalOutputFps << '\n'
+                << "adaptive_flow_lsfg_output_valid="
+                << (adaptiveFlow.lsfgOutputValid ? 1 : 0) << '\n'
+                << "adaptive_flow_lsfg_output_fps="
+                << adaptiveFlow.lsfgOutputFps << '\n'
                 << "adaptive_flow_global_p95_ms="
                 << adaptiveFlow.globalFrameTimeP95Ms << '\n'
                 << "adaptive_flow_global_slow_ratio="

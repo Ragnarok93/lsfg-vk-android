@@ -40,6 +40,8 @@ struct AdaptiveFlowRuntimeSnapshot {
     bool globalPressureValid{false};
     double globalGpuUsagePercent{0.0};
     double globalOutputFps{0.0};
+    bool lsfgOutputValid{false};
+    double lsfgOutputFps{0.0};
     double globalFrameTimeP95Ms{0.0};
     double globalSlowFrameRatio{0.0};
     bool globalPressure{false};
@@ -109,6 +111,8 @@ public:
             .globalPressureValid = adaptiveFlowGlobalPressureValid_,
             .globalGpuUsagePercent = adaptiveFlowGlobalGpuUsagePercent_,
             .globalOutputFps = adaptiveFlowGlobalOutputFps_,
+            .lsfgOutputValid = runtimeMetrics.lastWindowOutputFpsValid,
+            .lsfgOutputFps = runtimeMetrics.lastWindowOutputFps,
             .globalFrameTimeP95Ms = adaptiveFlowGlobalFrameTimeP95Ms_,
             .globalSlowFrameRatio = adaptiveFlowGlobalSlowFrameRatio_,
             .globalPressure = telemetry.globalPressure,
@@ -271,6 +275,15 @@ private:
         uint64_t windowSourceIntervals{0};
         uint64_t windowSourceDeadlineSamples{0};
         uint64_t windowSourceTimelineRebases{0};
+
+        // Previous completed LSFG metrics window. Adaptive Flow uses this
+        // source+generated output domain for target-deficit decisions; the
+        // GameNative sidecar FPS is a different measurement domain and remains
+        // diagnostic-only.
+        bool lastWindowOutputFpsValid{false};
+        bool lastWindowAdaptiveFramegen{false};
+        uint32_t lastWindowTargetFps{0};
+        double lastWindowOutputFps{0.0};
     } runtimeMetrics;
 
     // Reused for the game-device -> framegen AHB handoff. Async generated

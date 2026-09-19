@@ -1016,20 +1016,22 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const bool cadenceDiscontinuity =
             sourceIntervalMs >= kAdaptiveFlowCadenceDiscontinuityMs;
 
+        const bool adaptiveOutputSampleMatches =
+            metrics.lastWindowOutputFpsValid
+            && metrics.lastWindowAdaptiveFramegen
+            && metrics.lastWindowTargetFps == conf.fpsLimit;
         const bool adaptiveOutputDeficit =
             conf.adaptiveFramegen
             && conf.fpsLimit > 0
-            && this->adaptiveFlowGlobalPressureValid_
-            && this->adaptiveFlowGlobalOutputFps_ > 0.0
-            && this->adaptiveFlowGlobalOutputFps_
+            && adaptiveOutputSampleMatches
+            && metrics.lastWindowOutputFps
                 < static_cast<double>(conf.fpsLimit) * 0.97;
-        const bool fixedOutputDeficit =
-            !conf.adaptiveFramegen
-            && this->adaptiveFlowGlobalPressureValid_
-            && (this->adaptiveFlowGlobalSlowFrameRatio_ >= 0.08
-                || (budgetValid
-                    && this->adaptiveFlowGlobalFrameTimeP95Ms_
-                        > budgetMs * 1.25));
+
+        // Fixed LSFG has no output target. Do not reinterpret GameNative's
+        // source/compositor-domain slow-frame telemetry as an LSFG output
+        // deficit. Fixed mode can still downscale Flow from local LSFG budget
+        // pressure or explicit synthetic-drop pressure.
+        const bool fixedOutputDeficit = false;
         const bool outputDeficit =
             adaptiveOutputDeficit || fixedOutputDeficit;
 
@@ -1298,6 +1300,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const double sourceFps = sourceCount / elapsedSeconds;
             const double generatedFps = generatedCount / elapsedSeconds;
             const double outputFps = (sourceCount + generatedCount) / elapsedSeconds;
+            metrics.lastWindowOutputFps = outputFps;
+            metrics.lastWindowOutputFpsValid = sourceCount > 0.0;
+            metrics.lastWindowAdaptiveFramegen = conf.adaptiveFramegen;
+            metrics.lastWindowTargetFps = conf.fpsLimit;
             const double cycleAvgMs = sourceCount > 0.0 ? metrics.windowCycleMs / sourceCount : 0.0;
             const double handoffAvgMs = sourceCount > 0.0 ? metrics.windowHandoffMs / sourceCount : 0.0;
             const double dispatchAvgMs = sourceCount > 0.0 ? metrics.windowDispatchMs / sourceCount : 0.0;
@@ -1449,6 +1455,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->adaptiveFlowGlobalGpuUsagePercent_
                       << " adaptive_flow_global_output_fps="
                       << this->adaptiveFlowGlobalOutputFps_
+                      << " adaptive_flow_lsfg_output_valid="
+                      << (metrics.lastWindowOutputFpsValid ? 1 : 0)
+                      << " adaptive_flow_lsfg_output_fps="
+                      << metrics.lastWindowOutputFps
                       << " adaptive_flow_global_p95_ms="
                       << this->adaptiveFlowGlobalFrameTimeP95Ms_
                       << " adaptive_flow_global_slow_ratio="

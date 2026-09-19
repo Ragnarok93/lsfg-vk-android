@@ -453,10 +453,11 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
                     slowIntervalAccumulatorSeconds_
                     / static_cast<double>(slowRateChangeSamples_);
                 resetRateChangeCandidates();
-                resetUnmetDemand();
-                raiseHoldUntilSeconds_ = std::max(
-                    raiseHoldUntilSeconds_,
-                    observedTimeSeconds_ + kPostRateChangeRaiseHoldSeconds);
+                // A confirmed slowdown increases required synthetic density.
+                // Preserve unmet-demand evidence already accumulated while the
+                // source was slowing instead of adding another 750 ms penalty
+                // exactly when demand rises. The causal blame window still
+                // backs off a raise if the extra FG work hurts source cadence.
                 telemetry_.sourceRateSnapped = true;
             } else {
                 smoothedSourceIntervalSeconds_ +=

@@ -91,17 +91,30 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("kGlobalGpuPressurePercent = 96.0", controller)
         self.assertIn("kGlobalGpuRecoveryPercent = 88.0", controller)
 
-    def test_global_pressure_uses_output_deficit_and_late_drop_evidence(self) -> None:
+    def test_global_pressure_uses_lsfg_output_domain_and_late_drop_evidence(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("adaptiveOutputDeficit", source)
-        self.assertIn("fixedOutputDeficit", source)
+        self.assertIn("lastWindowOutputFpsValid", header)
+        self.assertIn("lastWindowAdaptiveFramegen", header)
+        self.assertIn("lastWindowTargetFps", header)
+        self.assertIn("lastWindowOutputFps", header)
+        self.assertIn("adaptiveOutputSampleMatches", source)
+        self.assertIn("metrics.lastWindowOutputFps", source)
+        self.assertIn("const bool fixedOutputDeficit = false", source)
         self.assertIn("metrics.totalGeneratedLateDrops", source)
         self.assertIn("syntheticDropPressure", source)
         self.assertIn(".globalGpuUsagePercent =", source)
         self.assertIn(".globalPressureValid =", source)
         self.assertIn(".outputDeficit = outputDeficit", source)
         self.assertIn(".syntheticDropPressure = syntheticDropPressure", source)
+
+        deficit_start = source.index("const bool adaptiveOutputSampleMatches")
+        deficit_end = source.index("const bool syntheticDropPressure", deficit_start)
+        deficit = source[deficit_start:deficit_end]
+        self.assertNotIn("adaptiveFlowGlobalOutputFps_", deficit)
+        self.assertNotIn("adaptiveFlowGlobalSlowFrameRatio_", deficit)
+        self.assertNotIn("adaptiveFlowGlobalFrameTimeP95Ms_", deficit)
 
     def test_budget_tracks_adaptive_target_or_fixed_output_period(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -213,6 +226,8 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "adaptive_flow_global_pressure_valid=",
             "adaptive_flow_global_gpu_percent=",
             "adaptive_flow_global_output_fps=",
+            "adaptive_flow_lsfg_output_valid=",
+            "adaptive_flow_lsfg_output_fps=",
             "adaptive_flow_global_p95_ms=",
             "adaptive_flow_global_slow_ratio=",
             "adaptive_flow_global_pressure=",

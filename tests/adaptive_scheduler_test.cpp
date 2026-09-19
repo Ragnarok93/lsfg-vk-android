@@ -227,6 +227,30 @@ int main() {
     }
 
     {
+        // A confirmed slowdown must not erase sustained unmet-demand evidence.
+        // At 60 FPS target, a stable ~29 FPS source requires cost level 2.
+        // The old slow-rate snap reset that evidence and added a 750 ms hold,
+        // leaving output below target despite ample admission headroom.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(16ms);
+
+        bool sawSlowSnap = false;
+        bool sawRaise = false;
+        for (int frame = 0; frame < 19; ++frame) {
+            scheduler.plan(34ms);
+            sawSlowSnap = sawSlowSnap
+                || scheduler.telemetry().sourceRateSnapped;
+            sawRaise = sawRaise || scheduler.telemetry().costRaised;
+        }
+
+        assert(sawSlowSnap);
+        assert(sawRaise);
+        assert(scheduler.telemetry().costLimit >= 2);
+        assert(scheduler.telemetry().wantedGeneratedFrames > 1.0);
+    }
+
+    {
         // Regression: generated-frame presentation can produce an alternating
         // short/long source cadence (roughly 20 ms / 50 ms on Xclipse 940).
         // Waiting for three *consecutive* slow samples makes the old estimator
