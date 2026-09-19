@@ -435,6 +435,45 @@ int main() {
     }
 
     {
+        // A failed source-preservation probe must not repeat every ~0.6 s.
+        // Once the cheaper level fails to recover enough cadence and the
+        // original cost is restored, hold that causal experiment for several
+        // seconds before allowing another 2 -> 1 probe.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 48; ++frame)
+            scheduler.plan(40ms);
+        assert(scheduler.telemetry().costLimit >= 2);
+
+        bool backedOff = false;
+        for (int frame = 0; frame < 30 && !backedOff; ++frame) {
+            scheduler.plan(55ms);
+            backedOff = scheduler.telemetry().costBackedOff
+                && scheduler.telemetry().costProbe;
+        }
+        assert(backedOff);
+
+        bool restored = false;
+        for (int frame = 0; frame < 40 && !restored; ++frame) {
+            scheduler.plan(55ms);
+            restored = scheduler.telemetry().costRaised
+                && scheduler.telemetry().costProbe;
+        }
+        assert(restored);
+        const auto restoredCost = scheduler.telemetry().costLimit;
+        assert(restoredCost >= 2);
+
+        bool repeatedProbe = false;
+        for (int frame = 0; frame < 70; ++frame) { // 3.85 s
+            scheduler.plan(55ms);
+            repeatedProbe = repeatedProbe
+                || (scheduler.telemetry().costBackedOff
+                    && scheduler.telemetry().costProbe);
+        }
+        assert(!repeatedProbe);
+        assert(scheduler.telemetry().costLimit == restoredCost);
+    }
+
+    {
         // Source rate by itself is never a reason to disable interpolation.
         // A slow but stable source remains eligible under the same generation
         // semantics as every other cadence.
