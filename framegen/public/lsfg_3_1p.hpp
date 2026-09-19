@@ -96,7 +96,9 @@ namespace LSFG_3_1P {
 
     __attribute__((visibility("default")))
     void presentContextWithCount(int32_t id, int inSem,
-        const std::vector<int>& outSem, size_t activeGenerationCount);
+        const std::vector<int>& outSem, size_t activeGenerationCount,
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType =
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
 
 #ifdef __ANDROID__
     __attribute__((visibility("default")))

@@ -65,6 +65,14 @@ uint64_t monotonicNowNs() {
         + static_cast<uint64_t>(now.tv_nsec);
 }
 
+const char* handoffTypeName(VkExternalSemaphoreHandleTypeFlagBits handleType) {
+    if (handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT)
+        return "sync-fd";
+    if (handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT)
+        return "opaque-fd";
+    return "unknown-fd";
+}
+
 AdaptiveFlowPreset adaptiveFlowPresetFromConfig(const std::string& preset) {
     if (preset == "balanced")
         return AdaptiveFlowPreset::Balanced;
@@ -537,17 +545,27 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     const auto gameGetSemaphoreFd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
         Layer::ovkGetDeviceProcAddr(info.device, "vkGetSemaphoreFdKHR"));
-    this->asyncAhbHandoffEnabled_ =
+    const bool syncFdHandoffSupported =
+        info.androidSyncFdSemaphoreSupported
+        && backendDiagnostics.externalSemaphoreSyncFd;
+    const bool opaqueFdHandoffSupported =
         info.androidOpaqueFdSemaphoreSupported
-        && backendDiagnostics.externalSemaphoreOpaqueFd
-        && gameGetSemaphoreFd != nullptr;
+        && backendDiagnostics.externalSemaphoreOpaqueFd;
+    this->asyncAhbHandoffEnabled_ =
+        gameGetSemaphoreFd != nullptr
+        && (syncFdHandoffSupported || opaqueFdHandoffSupported);
+    this->asyncAhbHandoffHandleType_ = syncFdHandoffSupported
+        ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
+        : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
               << ", mode=" << LSFG::ahbTransportModeName(ahbTransportMode)
               << ", inputCopy=" << (LSFG::ahbInputCopyRequired(ahbTransportMode) ? 1 : 0)
               << ", outputCopy=" << (LSFG::ahbOutputCopyRequired(ahbTransportMode) ? 1 : 0)
               << ", handoff="
-              << (this->asyncAhbHandoffEnabled_ ? "gpu-semaphore" : "host-fence")
+              << (this->asyncAhbHandoffEnabled_
+                    ? handoffTypeName(this->asyncAhbHandoffHandleType_)
+                    : "host-fence")
               << ")\n";
 
 #else
@@ -1204,26 +1222,28 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.preCopySemaphores.at(1).handle(),
     };
 
-    // SourceWarmup and HistoryOnly retain the proven synchronous handoff in
-    // this slice. HistoryOnly is an active-LSFG history-maintenance mode, not a
-    // source-only lifecycle transition. Asynchronous retirement is evaluated
-    // separately under the synchronization safety gate.
+    // SourceWarmup and HistoryOnly retain the proven synchronous handoff.
+    // Generated cycles prefer SYNC_FD because it can carry the source-copy
+    // dependency into framegen without blocking this presentation thread.
     bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
         && generatedFrameCount > 0
         && !warmupSourceHistory;
+    bool asyncSubmissionIssued = false;
     int framegenInputSemaphoreFd = -1;
+
     if (useAsyncHandoff) {
         try {
-            pass.framegenInputSemaphore =
-                Mini::Semaphore(info.device, &framegenInputSemaphoreFd);
+            pass.framegenInputSemaphore = Mini::Semaphore(
+                info.device, this->asyncAhbHandoffHandleType_);
             preCopySignals.emplace_back(pass.framegenInputSemaphore.handle());
         } catch (const std::exception& e) {
             this->asyncAhbHandoffEnabled_ = false;
             useAsyncHandoff = false;
-            framegenInputSemaphoreFd = -1;
             metrics.totalAsyncFallbacks++;
-            std::cerr << "lsfg-vk: Android async AHB handoff disabled after export failure: "
-                      << e.what() << "; falling back to host fence\n";
+            std::cerr << "lsfg-vk: Android async AHB handoff disabled after "
+                      << handoffTypeName(this->asyncAhbHandoffHandleType_)
+                      << " semaphore creation failure: " << e.what()
+                      << "; falling back to host fence\n";
         }
     }
 
@@ -1231,9 +1251,34 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         submitAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
             *this->ahbHandoffFence, this->resetHandoffFences);
-        metrics.windowAsyncHandoffs++;
-        metrics.totalAsyncHandoffs++;
-    } else {
+        asyncSubmissionIssued = true;
+
+        try {
+            // SYNC_FD copy transference requires its signal operation to be
+            // submitted before vkGetSemaphoreFdKHR. OPAQUE_FD is also valid here.
+            framegenInputSemaphoreFd = pass.framegenInputSemaphore.exportFd(
+                info.device, this->asyncAhbHandoffHandleType_);
+            metrics.windowAsyncHandoffs++;
+            metrics.totalAsyncHandoffs++;
+        } catch (const std::exception& e) {
+            // The copy was already submitted. Retire that exact submission
+            // through the existing bounded fence rather than submitting twice.
+            waitForAhbHandoff(
+                info.device, *this->ahbHandoffFence, this->waitHandoffFences);
+            this->asyncAhbHandoffEnabled_ = false;
+            useAsyncHandoff = false;
+            framegenInputSemaphoreFd = -1;
+            metrics.windowSyncHandoffs++;
+            metrics.totalSyncHandoffs++;
+            metrics.totalAsyncFallbacks++;
+            std::cerr << "lsfg-vk: Android async AHB handoff disabled after "
+                      << handoffTypeName(this->asyncAhbHandoffHandleType_)
+                      << " export failure: " << e.what()
+                      << "; current copy retired by host fence\n";
+        }
+    }
+
+    if (!useAsyncHandoff && !asyncSubmissionIssued) {
         submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
             *this->ahbHandoffFence, this->resetHandoffFences,
@@ -1246,7 +1291,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         RuntimeMetrics::Clock::now() - handoffStart).count();
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready mode="
-                  << (useAsyncHandoff ? "gpu-semaphore" : "host-fence") << "\n";
+                  << (useAsyncHandoff
+                        ? handoffTypeName(this->asyncAhbHandoffHandleType_)
+                        : "host-fence")
+                  << "\n";
     }
 
     if (historyOnly) {
@@ -1341,16 +1389,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
                   << (conf.performance ? "performance" : "quality")
                   << " generated=" << generatedFrameCount
-                  << " handoff=" << (useAsyncHandoff ? "gpu-semaphore" : "host-fence")
+                  << " handoff=" << (useAsyncHandoff
+                        ? handoffTypeName(this->asyncAhbHandoffHandleType_)
+                        : "host-fence")
                   << "\n";
     }
     const auto dispatchStart = RuntimeMetrics::Clock::now();
     if (conf.performance)
         LSFG_3_1P::presentContextWithCount(
-            *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, generatedFrameCount);
+            *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems,
+            generatedFrameCount, this->asyncAhbHandoffHandleType_);
     else
         LSFG_3_1::presentContextWithCount(
-            *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, generatedFrameCount);
+            *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems,
+            generatedFrameCount, this->asyncAhbHandoffHandleType_);
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)

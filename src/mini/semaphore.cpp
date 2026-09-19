@@ -49,44 +49,56 @@ Semaphore::Semaphore(VkDevice device) {
     this->semaphore = ownSemaphore(device, semaphoreHandle);
 }
 
-Semaphore::Semaphore(VkDevice device, int* fd) {
+Semaphore::Semaphore(
+        VkDevice device, VkExternalSemaphoreHandleTypeFlagBits handleType) {
+    const VkExportSemaphoreCreateInfo exportInfo{
+        .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+        .handleTypes = handleType,
+    };
+    const VkSemaphoreCreateInfo desc{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &exportInfo,
+    };
+    VkSemaphore semaphoreHandle{};
+    const auto res = Layer::ovkCreateSemaphore(
+        device, &desc, nullptr, &semaphoreHandle);
+    if (res != VK_SUCCESS || semaphoreHandle == VK_NULL_HANDLE)
+        throw LSFG::vulkan_error(res, "Unable to create exportable semaphore");
+
+    this->semaphore = ownSemaphore(device, semaphoreHandle);
+}
+
+Semaphore::Semaphore(VkDevice device, int* fd)
+    : Semaphore(device, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT) {
     if (fd == nullptr)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
             "Semaphore export fd pointer is null");
+    *fd = this->exportFd(
+        device, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+}
 
-    // Resolve the extension entrypoint from this logical device instead of the
-    // desktop-only cached layer function. On Android the extension is optional:
-    // callers catch failure here and keep the proven host-fence AHB handoff.
+int Semaphore::exportFd(
+        VkDevice device, VkExternalSemaphoreHandleTypeFlagBits handleType) const {
+    if (!this->semaphore)
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
+            "Cannot export an uninitialized semaphore");
+
     const auto getSemaphoreFd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
         Layer::ovkGetDeviceProcAddr(device, "vkGetSemaphoreFdKHR"));
     if (getSemaphoreFd == nullptr)
         throw LSFG::vulkan_error(VK_ERROR_EXTENSION_NOT_PRESENT,
             "External semaphore fd export is unavailable");
 
-    const VkExportSemaphoreCreateInfo exportInfo{
-        .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
-        .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT
-    };
-    const VkSemaphoreCreateInfo desc{
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-        .pNext = &exportInfo
-    };
-    VkSemaphore semaphoreHandle{};
-    auto res = Layer::ovkCreateSemaphore(device, &desc, nullptr, &semaphoreHandle);
-    if (res != VK_SUCCESS || semaphoreHandle == VK_NULL_HANDLE)
-        throw LSFG::vulkan_error(res, "Unable to create exportable semaphore");
-
     const VkSemaphoreGetFdInfoKHR fdInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
-        .semaphore = semaphoreHandle,
-        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT
+        .semaphore = this->handle(),
+        .handleType = handleType,
     };
-    *fd = -1;
-    res = getSemaphoreFd(device, &fdInfo, fd);
-    if (res != VK_SUCCESS || *fd < 0) {
-        Layer::ovkDestroySemaphore(device, semaphoreHandle, nullptr);
+    int fd = -1;
+    const auto res = getSemaphoreFd(device, &fdInfo, &fd);
+    const bool completedSyncFd =
+        handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT && fd == -1;
+    if (res != VK_SUCCESS || (fd < 0 && !completedSyncFd))
         throw LSFG::vulkan_error(res, "Unable to export semaphore to fd");
-    }
-
-    this->semaphore = ownSemaphore(device, semaphoreHandle);
+    return fd;
 }

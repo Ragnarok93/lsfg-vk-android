@@ -134,7 +134,8 @@ void LSFG_3_1::presentContext(int32_t id, int inSem, const std::vector<int>& out
 }
 
 void LSFG_3_1::presentContextWithCount(int32_t id, int inSem,
-        const std::vector<int>& outSem, size_t activeGenerationCount) {
+        const std::vector<int>& outSem, size_t activeGenerationCount,
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType) {
     const std::scoped_lock lock(runtimeMutex);
     if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
@@ -145,7 +146,8 @@ void LSFG_3_1::presentContextWithCount(int32_t id, int inSem,
     if (it == contexts.end())
         throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
 
-    it->second.present(*device, inSem, outSem, activeGenerationCount);
+    it->second.present(
+        *device, inSem, outSem, activeGenerationCount, inSemHandleType);
 }
 
 void LSFG_3_1::deleteContext(int32_t id) {

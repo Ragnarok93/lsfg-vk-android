@@ -39,21 +39,24 @@ Semaphore::Semaphore(const Core::Device& device, std::optional<uint32_t> initial
     );
 }
 
-Semaphore::Semaphore(const Core::Device& device, int fd) {
-    if (fd < 0)
+Semaphore::Semaphore(const Core::Device& device, int fd)
+    : Semaphore(device, fd, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT) {}
+
+Semaphore::Semaphore(const Core::Device& device, int fd,
+        VkExternalSemaphoreHandleTypeFlagBits handleType) {
+    const bool syncFd =
+        handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+    if (fd < 0 && !syncFd)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
             "Invalid semaphore fd");
 
-    // Imported OPAQUE_FD semaphores do not need to be exportable from the
-    // framegen device. Keeping this object import-only avoids requesting more
-    // external-semaphore capability than the actual cross-device wait needs.
     const VkSemaphoreCreateInfo desc{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
     VkSemaphore semaphoreHandle{};
     auto res = vkCreateSemaphore(device.handle(), &desc, nullptr, &semaphoreHandle);
     if (res != VK_SUCCESS || semaphoreHandle == VK_NULL_HANDLE) {
-        ::close(fd);
+        if (fd >= 0) ::close(fd);
         throw LSFG::vulkan_error(res, "Unable to create imported semaphore");
     }
 
@@ -61,7 +64,7 @@ Semaphore::Semaphore(const Core::Device& device, int fd) {
         vkGetDeviceProcAddr(device.handle(), "vkImportSemaphoreFdKHR"));
     if (importSemaphoreFd == nullptr) {
         vkDestroySemaphore(device.handle(), semaphoreHandle, nullptr);
-        ::close(fd);
+        if (fd >= 0) ::close(fd);
         throw LSFG::vulkan_error(VK_ERROR_EXTENSION_NOT_PRESENT,
             "External semaphore fd import is unavailable");
     }
@@ -69,19 +72,17 @@ Semaphore::Semaphore(const Core::Device& device, int fd) {
     const VkImportSemaphoreFdInfoKHR importInfo{
         .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
         .semaphore = semaphoreHandle,
-        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
-        .fd = fd
+        .flags = syncFd ? VK_SEMAPHORE_IMPORT_TEMPORARY_BIT : 0U,
+        .handleType = handleType,
+        .fd = fd,
     };
     res = importSemaphoreFd(device.handle(), &importInfo);
     if (res != VK_SUCCESS) {
-        // Vulkan only takes ownership of an OPAQUE_FD after a successful import.
-        // Close it here on failure so an optional async handoff cannot leak FDs.
         vkDestroySemaphore(device.handle(), semaphoreHandle, nullptr);
-        ::close(fd);
+        if (fd >= 0) ::close(fd);
         throw LSFG::vulkan_error(res, "Unable to import semaphore from fd");
     }
 
-    // Successful import transfers ownership of fd to Vulkan.
     this->isTimeline = false;
     this->semaphore = std::shared_ptr<VkSemaphore>(
         new VkSemaphore(semaphoreHandle),

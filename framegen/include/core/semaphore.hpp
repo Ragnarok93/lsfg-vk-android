@@ -38,6 +38,8 @@ namespace LSFG::Core {
         /// @throws LSFG::vulkan_error if object creation fails.
         ///
         Semaphore(const Core::Device& device, int fd);
+        Semaphore(const Core::Device& device, int fd,
+            VkExternalSemaphoreHandleTypeFlagBits handleType);
 
         ///
         /// Signal the semaphore to a specific value.

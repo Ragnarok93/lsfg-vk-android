@@ -21,23 +21,52 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             self.assertIn("pass < outSem.size()", source, relative)
             self.assertIn("outSem.at(pass) >= 0", source, relative)
 
-    def test_opaque_fd_import_has_explicit_failure_ownership(self) -> None:
-        """OPAQUE_FD import must consume the fd on success and close it on pre-import failure."""
+    def test_external_fd_import_preserves_handle_specific_transfer_semantics(self) -> None:
+        """OPAQUE_FD stays permanent; SYNC_FD uses the required temporary import."""
         source = (ROOT / "framegen/src/core/semaphore.cpp").read_text(encoding="utf-8")
 
         for marker in (
             "VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
+            "VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT",
             "vkImportSemaphoreFdKHR",
             "::close(fd);",
-            "Successful import transfers ownership of fd to Vulkan.",
+            ".handleType = handleType",
+            "VK_SEMAPHORE_IMPORT_TEMPORARY_BIT",
         ):
             self.assertIn(marker, source)
 
-        self.assertNotIn(
-            "VK_SEMAPHORE_IMPORT_TEMPORARY_BIT",
+        self.assertIn(
+            "syncFd ? VK_SEMAPHORE_IMPORT_TEMPORARY_BIT : 0U",
             source,
-            "OPAQUE_FD imports are permanent payload imports, not temporary SYNC_FD imports",
         )
+
+    def test_sync_fd_input_handoff_exports_after_signal_submission(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(encoding="utf-8")
+
+        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", hooks)
+        self.assertIn("androidSyncFdSemaphoreSupported", hooks)
+        self.assertIn("externalSemaphoreSyncFd", backend)
+
+        selection = wrapper.index("syncFdHandoffSupported")
+        submit = wrapper.index("submitAhbHandoff(", selection)
+        export_fd = wrapper.index(".exportFd(", submit)
+        dispatch = wrapper.index("presentContextWithCount(", export_fd)
+        self.assertLess(submit, export_fd)
+        self.assertLess(export_fd, dispatch)
+        self.assertIn("handoffTypeName", wrapper)
+
+    def test_completed_sync_fd_minus_one_is_still_imported(self) -> None:
+        for relative in (
+            "framegen/v3.1_src/context.cpp",
+            "framegen/v3.1p_src/context.cpp",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("const bool hasInputSemaphore", source)
+            self.assertIn("inSem == -1", source)
+            self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", source)
+            self.assertIn("if (!hasInputSemaphore) waits.clear();", source)
 
     def test_restored_build_does_not_compose_experimental_sync_stacks(self) -> None:
         """Experimental zero-history/nonblocking stacks remain archival, not production composition."""

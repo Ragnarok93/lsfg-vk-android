@@ -123,7 +123,8 @@ namespace {
     }
 
 #ifdef __ANDROID__
-    bool supportsOpaqueFdSemaphore(VkPhysicalDevice physicalDevice) {
+    bool supportsFdSemaphore(VkPhysicalDevice physicalDevice,
+            VkExternalSemaphoreHandleTypeFlagBits handleType) {
         if (!supportsDeviceExtension(
                 physicalDevice, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
             return false;
@@ -143,7 +144,7 @@ namespace {
 
         const VkPhysicalDeviceExternalSemaphoreInfo info{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
-            .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+            .handleType = handleType,
         };
         VkExternalSemaphoreProperties properties{
             .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
@@ -154,9 +155,9 @@ namespace {
             VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT
             | VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
         return (properties.externalSemaphoreFeatures & required) == required
-            && (properties.compatibleHandleTypes
-                & VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT) != 0;
+            && (properties.compatibleHandleTypes & handleType) != 0;
     }
+
 #endif
 
     VkResult myvkCreateInstance(
@@ -215,8 +216,11 @@ namespace {
         std::vector<const char*> requestedExtensions{
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
         };
-        const bool opaqueFdSemaphoreSupported = supportsOpaqueFdSemaphore(physicalDevice);
-        if (opaqueFdSemaphoreSupported)
+        const bool opaqueFdSemaphoreSupported = supportsFdSemaphore(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+        const bool syncFdSemaphoreSupported = supportsFdSemaphore(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+        if (opaqueFdSemaphoreSupported || syncFdSemaphoreSupported)
             requestedExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
         const bool displayTimingSupported = supportsDeviceExtension(
             physicalDevice, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
@@ -230,6 +234,7 @@ namespace {
         );
         std::cerr << "lsfg-vk: init stage=android-sync-capability opaqueFdSemaphore="
                   << (opaqueFdSemaphoreSupported ? 1 : 0)
+                  << " syncFdSemaphore=" << (syncFdSemaphoreSupported ? 1 : 0)
                   << " fallback=host-fence\n";
         std::cerr << "lsfg-vk: init stage=android-display-timing capability="
                   << (displayTimingSupported ? 1 : 0) << "\n";
@@ -264,12 +269,16 @@ namespace {
 #ifdef __ANDROID__
         const bool androidAhbSupported = supportsDeviceExtension(physicalDevice,
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
-        const bool androidOpaqueFdSemaphoreSupported = supportsOpaqueFdSemaphore(physicalDevice);
+        const bool androidOpaqueFdSemaphoreSupported = supportsFdSemaphore(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+        const bool androidSyncFdSemaphoreSupported = supportsFdSemaphore(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
         const bool androidDisplayTimingSupported = supportsDeviceExtension(
             physicalDevice, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
 #else
         const bool androidAhbSupported = true;
         const bool androidOpaqueFdSemaphoreSupported = false;
+        const bool androidSyncFdSemaphoreSupported = false;
         const bool androidDisplayTimingSupported = false;
 #endif
         auto getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
@@ -291,6 +300,7 @@ namespace {
             .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
             .androidAhbSupported = androidAhbSupported,
             .androidOpaqueFdSemaphoreSupported = androidOpaqueFdSemaphoreSupported,
+            .androidSyncFdSemaphoreSupported = androidSyncFdSemaphoreSupported,
             .androidDisplayTimingSupported = androidDisplayTimingSupported,
         });
         return VK_SUCCESS;

@@ -80,7 +80,9 @@ namespace LSFG_3_1 {
         ///
         void present(Vulkan& vk,
             int inSem, const std::vector<int>& outSem,
-            size_t activeGenerationCount);
+            size_t activeGenerationCount,
+            VkExternalSemaphoreHandleTypeFlagBits inSemHandleType =
+                VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
 
         [[nodiscard]] bool waitForLastPresent(Vulkan& vk, uint64_t timeoutNs);
 

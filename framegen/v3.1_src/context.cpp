@@ -274,7 +274,8 @@ Context::Context(Vulkan& vk,
 
 void Context::present(Vulkan& vk,
         int inSem, const std::vector<int>& outSem,
-        size_t activeGenerationCount) {
+        size_t activeGenerationCount,
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType) {
     const size_t generationCount = std::min(activeGenerationCount, vk.generationCount);
     auto& data = this->data.at(this->frameIdx % 8);
 
@@ -289,7 +290,12 @@ void Context::present(Vulkan& vk,
         !this->adaptiveFlowScales_.empty() && this->pendingFlowGraphIndex_.has_value();
 #endif
 
-    if (inSem >= 0) data.inSemaphore = Core::Semaphore(vk.device, inSem);
+    const bool hasInputSemaphore =
+        inSem >= 0
+        || (inSem == -1
+            && inSemHandleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+    if (hasInputSemaphore)
+        data.inSemaphore = Core::Semaphore(vk.device, inSem, inSemHandleType);
 
     data.cmdBuffer1 = Core::CommandBuffer(vk.device, vk.commandPool);
     data.cmdBuffer1.begin();
@@ -412,7 +418,7 @@ void Context::present(Vulkan& vk,
 #endif
     data.cmdBuffer1.end();
     std::vector<Core::Semaphore> waits = { data.inSemaphore };
-    if (inSem < 0) waits.clear();
+    if (!hasInputSemaphore) waits.clear();
 
     if (generationCount == 0) {
         data.preprocessingFence.reset(vk.device);

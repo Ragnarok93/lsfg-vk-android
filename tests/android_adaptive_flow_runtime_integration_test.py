@@ -72,7 +72,11 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
 
         # Shadow mode must not alter the dispatch count or source timing.
         self.assertIn(
-            "*this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems, generatedFrameCount",
+            "*this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems",
+            source,
+        )
+        self.assertIn(
+            "generatedFrameCount, this->asyncAhbHandoffHandleType_",
             source,
         )
         self.assertNotIn("deadlineRejectedGeneratedFrameCount", source)

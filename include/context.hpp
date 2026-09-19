@@ -166,10 +166,11 @@ private:
     bool framegenInFlight_{false};
     bool framegenOutputEligible_{false};
 
-    // Optional fast path only. If either logical device cannot share an
-    // OPAQUE_FD semaphore, or an export fails at runtime, this is disabled for
-    // the life of the context and the established synchronous fence path wins.
+    // Optional fast path only. Prefer one-shot SYNC_FD on Android, retain
+    // OPAQUE_FD compatibility, and fall back to the established host fence.
     bool asyncAhbHandoffEnabled_{false};
+    VkExternalSemaphoreHandleTypeFlagBits asyncAhbHandoffHandleType_{
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT};
     struct RuntimeMetrics {
         using Clock = std::chrono::steady_clock;
 

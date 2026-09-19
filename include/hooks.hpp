@@ -18,9 +18,10 @@ namespace Hooks {
         bool identityValid{false};
         std::pair<uint32_t, VkQueue> queue; // graphics family
         bool androidAhbSupported{true};
-        // Optional Android optimization. False preserves the established
-        // synchronous AHB fence handoff with no change in presentation behavior.
+        // Optional Android cross-device semaphore transports. False for both
+        // preserves the established synchronous AHB fence handoff.
         bool androidOpaqueFdSemaphoreSupported{false};
+        bool androidSyncFdSemaphoreSupported{false};
         // Optional adaptive presentation pacing. When available, generated and
         // source presents carry explicit target times instead of relying on
         // MAILBOX queue submission cadence to approximate display cadence.
