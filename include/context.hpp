@@ -37,6 +37,14 @@ struct AdaptiveFlowRuntimeSnapshot {
     double totalLsfgMs{0.0};
     double budgetMs{0.0};
     size_t generationCount{0};
+    bool globalPressureValid{false};
+    double globalGpuUsagePercent{0.0};
+    double globalOutputFps{0.0};
+    double globalFrameTimeP95Ms{0.0};
+    double globalSlowFrameRatio{0.0};
+    bool globalPressure{false};
+    bool outputDeficit{false};
+    bool syntheticDropPressure{false};
     const char* reason{"none"};
 };
 #endif
@@ -98,6 +106,14 @@ public:
             .totalLsfgMs = adaptiveFlowTotalLsfgMs_,
             .budgetMs = adaptiveFlowBudgetMs_,
             .generationCount = adaptiveFlowGenerationCount_,
+            .globalPressureValid = adaptiveFlowGlobalPressureValid_,
+            .globalGpuUsagePercent = adaptiveFlowGlobalGpuUsagePercent_,
+            .globalOutputFps = adaptiveFlowGlobalOutputFps_,
+            .globalFrameTimeP95Ms = adaptiveFlowGlobalFrameTimeP95Ms_,
+            .globalSlowFrameRatio = adaptiveFlowGlobalSlowFrameRatio_,
+            .globalPressure = telemetry.globalPressure,
+            .outputDeficit = telemetry.outputDeficit,
+            .syntheticDropPressure = adaptiveFlowSyntheticDropPressure_,
             .reason = AdaptiveFlowController::reasonName(adaptiveFlowReason_),
         };
     }
@@ -139,6 +155,24 @@ private:
     double adaptiveFlowBudgetMs_{0.0};
     size_t adaptiveFlowGenerationCount_{0};
     AdaptiveFlowDecisionReason adaptiveFlowReason_{AdaptiveFlowDecisionReason::None};
+
+    // Whole-device pressure is sampled by GameNative at 500 ms and published
+    // out-of-band from conf.toml so pressure updates never rebuild the LSFG
+    // context. Generated-work timing is retained across history-only cycles:
+    // those cycles may confirm pressure, but can never prove recovery headroom.
+    std::chrono::steady_clock::time_point adaptiveFlowNextPressureRead_{};
+    bool adaptiveFlowGlobalPressureValid_{false};
+    double adaptiveFlowGlobalGpuUsagePercent_{0.0};
+    double adaptiveFlowGlobalOutputFps_{0.0};
+    double adaptiveFlowGlobalFrameTimeP95Ms_{0.0};
+    double adaptiveFlowGlobalSlowFrameRatio_{0.0};
+    bool adaptiveFlowGeneratedTimingValid_{false};
+    double adaptiveFlowRetainedMipmapsMs_{0.0};
+    double adaptiveFlowRetainedWorkMs_{0.0};
+    double adaptiveFlowRetainedTotalLsfgMs_{0.0};
+    size_t adaptiveFlowRetainedGenerationCount_{0};
+    uint64_t adaptiveFlowLastObservedLateDrops_{0};
+    bool adaptiveFlowSyntheticDropPressure_{false};
 
     DeadlineAdmissionPredictor deadlineAdmissionPredictor_;
     DeadlineAdmissionDecision deadlineBatchDecision_{};
