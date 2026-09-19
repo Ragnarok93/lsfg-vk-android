@@ -394,13 +394,13 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->adaptiveFlowPreset_ = adaptiveFlowPresetFromConfig(conf.adaptiveFlowPreset);
     this->adaptiveFlowController_.configure(
         conf.adaptiveFlowScale, this->adaptiveFlowPreset_);
-    this->adaptiveDisplayTimingEnabled_ =
-        info.androidDisplayTimingSupported
-        && conf.adaptiveFramegen;
+    // Restore the known-good Android WSI contract first. Display-timing hints
+    // were introduced together with the Adaptive FIFO override and are kept
+    // dormant until their pacing behavior can be validated independently.
+    this->adaptiveDisplayTimingEnabled_ = false;
     std::cerr << "lsfg-vk: adaptive-present-pacing"
-              << " fifo=" << (conf.adaptiveFramegen ? 1 : 0)
-              << " display_timing="
-              << (this->adaptiveDisplayTimingEnabled_ ? 1 : 0)
+              << " fifo_override=0"
+              << " display_timing=0"
               << " adaptive_fg=" << (conf.adaptiveFramegen ? 1 : 0)
               << " adaptive_flow=" << (conf.adaptiveFlowScale ? 1 : 0)
               << '\n';

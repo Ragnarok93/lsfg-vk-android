@@ -209,14 +209,12 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         pacing_start = hooks.index("bool adaptivePresentationPacing")
         pacing_end = hooks.index("bool requiresSwapchainRecreation", pacing_start)
         pacing = hooks[pacing_start:pacing_end]
-        self.assertIn("conf.adaptiveFramegen", pacing)
+        self.assertIn("return false;", pacing)
+        self.assertNotIn("conf.adaptiveFramegen", pacing)
         self.assertNotIn("conf.adaptiveFlowScale", pacing)
 
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn(
-            "info.androidDisplayTimingSupported\n        && conf.adaptiveFramegen",
-            context,
-        )
+        self.assertIn("adaptiveDisplayTimingEnabled_ = false", context)
         admission_start = context.index("Active deadline admission")
         admission_end = context.index(
             "if (this->currentSourceTimeline_.valid)", admission_start

@@ -150,29 +150,44 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("adaptiveFlowRuntimeSnapshot()", hooks)
 
 
-    def test_adaptive_presentation_uses_display_timing_with_fifo_fallback(self) -> None:
-        hooks_h = (ROOT / "include/hooks.hpp").read_text(encoding="utf-8")
+    def test_adaptive_framegen_preserves_configured_present_mode(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        context_h = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        # Adaptive delivery must not rely on MAILBOX accepting a burst of
-        # generated/source presents. Prefer the Android display-timing extension
-        # when available and retain FIFO ordering as the capability fallback.
-        self.assertIn("VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME", hooks)
-        self.assertIn("androidDisplayTimingSupported", hooks_h)
-        self.assertIn("adaptivePresentationPacing", hooks)
-        self.assertIn("VK_PRESENT_MODE_FIFO_KHR", hooks)
-        self.assertIn("VkPresentTimesInfoGOOGLE", context)
-        self.assertIn("desiredPresentTime", context)
-        self.assertIn("adaptivePresentPeriodNs", context_h)
+        pacing_start = hooks.index("bool adaptivePresentationPacing")
+        pacing_end = hooks.index("bool requiresSwapchainRecreation", pacing_start)
+        pacing = hooks[pacing_start:pacing_end]
+        self.assertIn("return false;", pacing)
 
-        # Entering/leaving either adaptive governor changes the presentation
-        # contract and therefore must recreate the swapchain.
-        self.assertIn(
-            "adaptivePresentationPacing(previous) != adaptivePresentationPacing(next)",
-            hooks,
+        create_start = hooks.index("const auto configuredPresentMode")
+        create_end = hooks.index(
+            'std::cerr << "lsfg-vk: init stage=swapchain-downstream-create-begin',
+            create_start,
         )
+        create_block = hooks[create_start:create_end]
+        self.assertIn(
+            "const auto configuredPresentMode = Config::activeConf.e_present;",
+            create_block,
+        )
+        self.assertNotIn(
+            "configuredPresentMode = adaptivePacing",
+            create_block,
+        )
+        self.assertNotIn(
+            "VK_PRESENT_MODE_FIFO_KHR);",
+            create_block,
+        )
+
+        desired_start = hooks.index("const VkPresentModeKHR desiredPresentMode")
+        desired_end = hooks.index("if (configuredPresent != desiredPresentMode)", desired_start)
+        desired_block = hooks[desired_start:desired_end]
+        self.assertIn("desiredPresentMode = conf.e_present", desired_block)
+        self.assertNotIn("adaptivePresentationPacing(conf)", desired_block)
+
+        # Keep display-timing capability detection available, but do not let it
+        # alter the restored known-good WSI pacing contract.
+        self.assertIn("adaptiveDisplayTimingEnabled_ = false", context)
+        self.assertIn("fifo_override=0", context)
 
 
 if __name__ == "__main__":

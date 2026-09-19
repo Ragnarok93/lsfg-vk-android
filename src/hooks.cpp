@@ -58,13 +58,11 @@ namespace {
     }
 
     bool adaptivePresentationPacing(const Config::Configuration& conf) {
-#ifdef __ANDROID__
-        return conf.targeted && conf.enable && conf.multiplier > 1
-            && conf.adaptiveFramegen;
-#else
+        // Adaptive FG historically ran smoothly with the same WSI present-mode
+        // selection as Fixed FG. Do not change the swapchain contract merely
+        // because generation density is adaptive.
         (void)conf;
         return false;
-#endif
     }
 
     bool requiresSwapchainRecreation(
@@ -81,10 +79,7 @@ namespace {
             const bool fixedFlowScaleChanged =
                 !previous.adaptiveFlowScale && !next.adaptiveFlowScale
                 && previous.flowScale != next.flowScale;
-            const bool adaptivePresentationModeChanged =
-                adaptivePresentationPacing(previous) != adaptivePresentationPacing(next);
             return previous.dll != next.dll
-                || adaptivePresentationModeChanged
                 || adaptiveFlowModeChanged
                 || adaptiveFlowPresetChanged
                 || fixedFlowScaleChanged
@@ -713,27 +708,18 @@ namespace {
 
         createInfo.imageUsage |= requiredTransferUsage;
 
-        const bool adaptivePacing = adaptivePresentationPacing(activeConf);
-        const auto configuredPresentMode = adaptivePacing
-            ? VK_PRESENT_MODE_FIFO_KHR
-            : Config::activeConf.e_present;
+        const auto configuredPresentMode = Config::activeConf.e_present;
         const bool recreatingExistingSwapchain = pCreateInfo->oldSwapchain != VK_NULL_HANDLE;
-        // Preserve the established hot-recreate contract first, then
-        // apply the adaptive-only FIFO override. Fixed/Fixed therefore retains
-        // the application's recreation behavior byte-for-byte at this seam.
+        // Adaptive and Fixed FG share the same WSI contract. This restores the
+        // proven MAILBOX-capable path instead of forcing Adaptive onto FIFO.
         createInfo.presentMode = recreatingExistingSwapchain
             ? pCreateInfo->presentMode
             : choosePresentMode(
                 deviceInfo.physicalDevice, pCreateInfo->surface,
                 pCreateInfo->presentMode, configuredPresentMode);
-        if (adaptivePacing) {
-            createInfo.presentMode = choosePresentMode(
-                deviceInfo.physicalDevice, pCreateInfo->surface,
-                pCreateInfo->presentMode, VK_PRESENT_MODE_FIFO_KHR);
-        }
         if (recreatingExistingSwapchain) {
             std::cerr << "lsfg-vk: init stage=swapchain-hot-recreate-present-mode"
-                      << " adaptivePacing=" << (adaptivePacing ? 1 : 0)
+                      << " adaptivePacing=0"
                       << " gameMode=" << pCreateInfo->presentMode
                       << " configuredMode=" << configuredPresentMode
                       << " effectiveMode=" << createInfo.presentMode << "\n";
@@ -963,10 +949,7 @@ namespace {
         }
         #pragma clang diagnostic pop
 
-        const VkPresentModeKHR desiredPresentMode =
-            adaptivePresentationPacing(conf)
-                ? VK_PRESENT_MODE_FIFO_KHR
-                : conf.e_present;
+        const VkPresentModeKHR desiredPresentMode = conf.e_present;
         if (configuredPresent != desiredPresentMode) {
             Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             return VK_ERROR_OUT_OF_DATE_KHR;
