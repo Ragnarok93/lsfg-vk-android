@@ -1063,8 +1063,11 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
                     sourcePreservationOriginalCost_, maxGeneratedFrames_);
                 probeAfterBackoff_ = false;
                 lastCostChangeTimeSeconds_ = observedTimeSeconds_;
-                raiseHoldUntilSeconds_ =
-                    observedTimeSeconds_ + kSuccessfulProbeHoldSeconds;
+                // The cheaper probe failed to improve source cadence, so it
+                // exonerated generated work. Hold only the *downward* probe to
+                // avoid repeating the same experiment; do not block normal
+                // unmet-demand promotion toward the requested target.
+                raiseHoldUntilSeconds_ = observedTimeSeconds_;
                 sourcePreservationProbeHoldUntilSeconds_ =
                     observedTimeSeconds_ + kSourcePreservationRetryHoldSeconds;
                 establishedSourceFps_ = recoveredSourceFps;
