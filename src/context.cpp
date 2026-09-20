@@ -1325,7 +1325,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         if (adaptiveTelemetry.sourceRateSnapped || adaptiveTelemetry.costRaised
                 || adaptiveTelemetry.costBackedOff || adaptiveTelemetry.costProbe
-                || adaptiveTelemetry.discontinuityReset) {
+                || adaptiveTelemetry.discontinuityReset
+                || adaptiveTelemetry.warmStartReason
+                    != AdaptiveWarmStartReason::None) {
             std::cerr << "lsfg-vk: adaptive-event"
                       << " runtime_session_id=" << this->runtimeSessionId_
                       << " config_revision=" << this->configRevision_
@@ -1340,6 +1342,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (adaptiveTelemetry.capacityPromoted ? 1 : 0)
                       << " safe_generation_hint="
                       << adaptiveTelemetry.safeGenerationHint
+                      << " proven_cost_limit=" << adaptiveTelemetry.provenCostLimit
+                      << " backoff_reason="
+                      << adaptiveCostBackoffReasonName(adaptiveTelemetry.costBackoffReason)
+                      << " warm_start_reason="
+                      << adaptiveWarmStartReasonName(adaptiveTelemetry.warmStartReason)
+                      << " robust_source_fps=" << adaptiveTelemetry.robustSourceFps
+                      << " raise_baseline_fps=" << adaptiveTelemetry.raiseBaselineSourceFps
+                      << " drop_evidence_s=" << adaptiveTelemetry.raiseDropEvidenceSeconds
+                      << " stable_cadence_s=" << adaptiveTelemetry.stableCadenceSeconds
+                      << " recovery_baseline_fps=" << adaptiveTelemetry.recoveryBaselineSourceFps
+                      << " recovery_threshold_fps=" << adaptiveTelemetry.recoveryThresholdSourceFps
+                      << " source_preservation_active="
+                      << (adaptiveTelemetry.sourcePreservationActive ? 1 : 0)
                       << " cost_backoff=" << (adaptiveTelemetry.costBackedOff ? 1 : 0)
                       << " cost_probe=" << (adaptiveTelemetry.costProbe ? 1 : 0)
                       << " discontinuity=" << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
@@ -1351,8 +1366,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "runtime_session_id=%llu config_revision=%llu "
                 "source_fps=%.3f smoothed_source_fps=%.3f wanted_generated=%.3f "
                 "cost_limit=%zu final_generated=%zu rate_snap=%d cost_raise=%d "
-                "capacity_promoted=%d safe_generation_hint=%zu "
-                "cost_backoff=%d cost_probe=%d discontinuity=%d",
+                "capacity_promoted=%d safe_generation_hint=%zu proven_cost_limit=%zu "
+                "backoff_reason=%s warm_start_reason=%s robust_source_fps=%.3f "
+                "raise_baseline_fps=%.3f drop_evidence_s=%.3f stable_cadence_s=%.3f "
+                "recovery_baseline_fps=%.3f recovery_threshold_fps=%.3f "
+                "source_preservation_active=%d cost_backoff=%d cost_probe=%d discontinuity=%d",
                 static_cast<unsigned long long>(this->runtimeSessionId_),
                 static_cast<unsigned long long>(this->configRevision_),
                 adaptiveTelemetry.sourceFps,
@@ -1364,6 +1382,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 adaptiveTelemetry.costRaised ? 1 : 0,
                 adaptiveTelemetry.capacityPromoted ? 1 : 0,
                 adaptiveTelemetry.safeGenerationHint,
+                adaptiveTelemetry.provenCostLimit,
+                adaptiveCostBackoffReasonName(adaptiveTelemetry.costBackoffReason),
+                adaptiveWarmStartReasonName(adaptiveTelemetry.warmStartReason),
+                adaptiveTelemetry.robustSourceFps,
+                adaptiveTelemetry.raiseBaselineSourceFps,
+                adaptiveTelemetry.raiseDropEvidenceSeconds,
+                adaptiveTelemetry.stableCadenceSeconds,
+                adaptiveTelemetry.recoveryBaselineSourceFps,
+                adaptiveTelemetry.recoveryThresholdSourceFps,
+                adaptiveTelemetry.sourcePreservationActive ? 1 : 0,
                 adaptiveTelemetry.costBackedOff ? 1 : 0,
                 adaptiveTelemetry.costProbe ? 1 : 0,
                 adaptiveTelemetry.discontinuityReset ? 1 : 0);
@@ -1566,6 +1594,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->generatedPresentationCapacityTracker_.telemetry().generationCap
                       << " presentation_duty="
                       << this->generatedPresentationCapacityTracker_.telemetry().singleFrameDuty
+                      << " presentation_evidence="
+                      << this->generatedPresentationCapacityTracker_.telemetry().rejectionEvidence
                       << " wsi_reject_ratio="
                       << this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio
                       << " cycle_avg_ms=" << cycleAvgMs
@@ -1630,6 +1660,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
                       << " adaptive_cost_limit=" << adaptiveTelemetry.costLimit
+                      << " adaptive_proven_cost_limit=" << adaptiveTelemetry.provenCostLimit
+                      << " adaptive_backoff_reason="
+                      << adaptiveCostBackoffReasonName(adaptiveTelemetry.costBackoffReason)
+                      << " adaptive_warm_start_reason="
+                      << adaptiveWarmStartReasonName(adaptiveTelemetry.warmStartReason)
+                      << " adaptive_robust_source_fps=" << adaptiveTelemetry.robustSourceFps
+                      << " adaptive_raise_baseline_fps=" << adaptiveTelemetry.raiseBaselineSourceFps
+                      << " adaptive_drop_evidence_s=" << adaptiveTelemetry.raiseDropEvidenceSeconds
+                      << " adaptive_stable_cadence_s=" << adaptiveTelemetry.stableCadenceSeconds
+                      << " adaptive_recovery_baseline_fps=" << adaptiveTelemetry.recoveryBaselineSourceFps
+                      << " adaptive_recovery_threshold_fps=" << adaptiveTelemetry.recoveryThresholdSourceFps
+                      << " adaptive_source_preservation_active="
+                      << (adaptiveTelemetry.sourcePreservationActive ? 1 : 0)
                       << " adaptive_final_generated=" << adaptiveTelemetry.generatedFrames
                       << " adaptive_fractional_phase=" << adaptiveTelemetry.fractionalPhase
                       << " adaptive_synthetic_opportunities="
