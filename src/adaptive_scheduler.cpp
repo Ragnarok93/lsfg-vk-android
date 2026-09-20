@@ -935,10 +935,15 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             kRaiseBackoffEvidenceStepMaxSeconds);
         pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
 
+        const bool capacityCorroboratesRaise =
+            safeGenerationHintValid_ && safeGenerationHint_ >= costLimit_;
+        const double causalDropRatio = capacityCorroboratesRaise
+            ? kCapacitySupportedSourceDropRatio
+            : kSourceDropRatio;
         const bool sourceDropped = pendingRaiseBaselineFps_ > 0.0
-            && sourceFps < pendingRaiseBaselineFps_ * kSourceDropRatio
+            && sourceFps < pendingRaiseBaselineFps_ * causalDropRatio
             && telemetry_.sourceFps
-                < pendingRaiseBaselineFps_ * kSourceDropRatio;
+                < pendingRaiseBaselineFps_ * causalDropRatio;
         if (sinceRaise >= kRaiseBackoffSettleSeconds) {
             if (sourceDropped) {
                 pendingRaiseSourceDropEvidenceSeconds_ +=
