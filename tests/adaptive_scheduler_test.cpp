@@ -336,11 +336,12 @@ int main() {
         // generation ceiling that already survived causal validation. After
         // warmup the scheduler should resume that proven ceiling immediately.
         AdaptiveFrameScheduler scheduler(120, 3);
-        for (int frame = 0; frame < 60; ++frame) {
+        for (int frame = 0; frame < 120; ++frame) {
             scheduler.setSafeGenerationHint(3, true);
             scheduler.plan(33ms);
         }
         assert(scheduler.telemetry().costLimit == 3);
+        assert(scheduler.telemetry().provenCostLimit == 3);
 
         assert(scheduler.plan(1s) == 0);
         assert(scheduler.telemetry().discontinuityReset);
