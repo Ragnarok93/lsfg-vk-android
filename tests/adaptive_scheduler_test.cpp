@@ -617,6 +617,78 @@ int main() {
     }
 
     {
+        // The high-density source budget is anchored to the trusted natural
+        // source cadence; a sequence of individually-small losses must not
+        // ratchet that baseline downward and effectively compound the 20%
+        // allowance. Once cumulative loss exceeds the budget, protection must
+        // still trigger.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 120; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+        }
+        const double baseline = scheduler.telemetry().establishedSourceFps;
+        assert(baseline > 28.0);
+
+        // Each plateau is less than a 10% step from the prior one, but the
+        // cumulative loss from the trusted baseline eventually exceeds 20%.
+        for (int frame = 0; frame < 40; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(37ms);
+        }
+        for (int frame = 0; frame < 40; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(40ms);
+        }
+        assert(scheduler.telemetry().establishedSourceFps
+            >= baseline * 0.98);
+
+        bool protectedDown = false;
+        for (int frame = 0; frame < 45 && !protectedDown; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(43ms);
+            protectedDown = scheduler.telemetry().costBackedOff
+                && scheduler.telemetry().costProbe;
+        }
+        assert(protectedDown);
+    }
+
+    {
+        // If a lower generated-frame level restores source cadence back inside
+        // the accepted budget, retain it even when the absolute gain versus the
+        // degraded probe baseline is less than the generic 8% material-gain
+        // threshold.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 120; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+        }
+        assert(scheduler.telemetry().costLimit == 3);
+
+        bool probedLower = false;
+        for (int frame = 0; frame < 45 && !probedLower; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(43ms); // just beyond the 20% budget
+            probedLower = scheduler.telemetry().costBackedOff
+                && scheduler.telemetry().costProbe
+                && scheduler.telemetry().costLimit == 2;
+        }
+        assert(probedLower);
+
+        bool revertedHigher = false;
+        for (int frame = 0; frame < 35; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(42ms); // ~81% of baseline; <8% gain, but in budget
+            revertedHigher = revertedHigher
+                || (scheduler.telemetry().costRaised
+                    && scheduler.telemetry().costProbe
+                    && scheduler.telemetry().costLimit == 3);
+        }
+        assert(!revertedHigher);
+        assert(scheduler.telemetry().costLimit == 2);
+    }
+
+    {
         // Natural source-rate changes must not strand Adaptive below required
         // generation density. If a lower-cost preservation probe fails to
         // recover source cadence, that exonerates generated work: rebase to the
