@@ -66,6 +66,26 @@ struct SourceTimelineSample {
     bool valid{false};
 };
 
+/// Resolve the source-owned admission deadline for the current source cycle.
+/// A normal valid deadline is returned unchanged. If an ordinary timing rebase
+/// left that deadline behind the admission point, establish one fresh future
+/// source interval instead of permanently classifying every synthetic
+/// opportunity as already late.
+[[nodiscard]] uint64_t sourceOwnedAdmissionDeadlineNs(
+    const SourceTimelineSample& sample, uint64_t admissionNowNs);
+
+/// Cold-start admission policy for Adaptive FG. An uninitialized GPU-cost
+/// predictor may conservatively admit one generated frame when enough source
+/// slack exists. After a bounded number of starved opportunities, a smaller
+/// positive-slack probe is allowed so the predictor cannot deadlock waiting for
+/// a generated-work sample that admission itself prevents.
+[[nodiscard]] std::size_t adaptiveAdmissionBootstrapGeneratedCount(
+    std::size_t plannedGeneratedFrames,
+    bool predictorInitialized,
+    double remainingSourceSlackMs,
+    double sourceIntervalMs,
+    unsigned starvedOpportunities);
+
 /// Maintains a presentation epoch driven only by real/source arrivals.
 ///
 /// The timeline deliberately has no generated-present API: generated work may
@@ -152,23 +172,68 @@ private:
     double deliveryReserveMs_{0.0};
 };
 
+enum class GeneratedPresentationCapChangeReason {
+    None,
+    RejectionProbe,
+    ProfitabilityKeepLower,
+    ProfitabilityRestoreHigher,
+    RecoveryEvidenceRaise,
+    TargetDeficitProbeSuccess,
+    TargetDeficitProbeRejected,
+    SubOneDutyLower,
+    SubOneDutyRecover,
+};
+
+const char* generatedPresentationCapChangeReasonName(
+    GeneratedPresentationCapChangeReason reason);
+
+struct GeneratedPresentationCapacityContext {
+    bool outputDeficit{false};
+    bool deadlineCapacityValid{false};
+    std::size_t safeGenerationHint{};
+    std::size_t schedulerCostLimit{};
+    std::size_t provenCostLimit{};
+    double sourceCadenceRatio{1.0};
+    double sourceBudgetMinRatio{1.0};
+};
+
 struct GeneratedPresentationCapacityTelemetry {
     std::size_t generationCap{};
     double singleFrameDuty{1.0};
     double wsiRejectionRatio{};
     unsigned rejectionEvidence{};
+    double recoveryEvidence{};
+    uint64_t attemptedGeneratedFrames{};
+    uint64_t acceptedGeneratedFrames{};
+    double deliveredEfficiency{};
+    double acceptedFramesEwma{};
+    GeneratedPresentationCapChangeReason lastChangeReason{
+        GeneratedPresentationCapChangeReason::None};
+    bool lastChangeOutputDeficit{false};
+    bool upwardProbePending{false};
     bool pressure{false};
     bool lowered{false};
     bool raised{false};
 };
 
 /// Learns downstream swapchain capacity independently from GPU generation
-/// capacity. It never blocks on WSI and never changes source pacing.
+/// capacity. A lower cap is a provisional throughput experiment rather than a
+/// permanent reaction to raw rejection count. Target deficit and proven compute
+/// capacity can trigger bounded upward presentation probes. This class never
+/// changes scheduler/proven-cost state or source pacing.
 class GeneratedPresentationCapacityTracker {
 public:
     void configure(std::size_t maxGeneratedFrames);
     [[nodiscard]] std::size_t limit(std::size_t requested);
+    [[nodiscard]] std::size_t limit(
+        std::size_t requested,
+        const GeneratedPresentationCapacityContext& context);
     void observe(std::size_t attempted, std::size_t wsiRejected);
+    void observe(
+        std::size_t attempted,
+        std::size_t accepted,
+        std::size_t wsiRejected,
+        const GeneratedPresentationCapacityContext& context);
     void reset();
 
     [[nodiscard]] const GeneratedPresentationCapacityTelemetry& telemetry() const {
@@ -178,9 +243,25 @@ public:
 private:
     std::size_t maxGeneratedFrames_{};
     unsigned rejectionEvidence_{};
-    unsigned cleanSamples_{};
+    double recoveryEvidence_{};
     double singleFramePhase_{};
     bool hasObservation_{false};
+    double acceptedFramesEwma_{};
+    double efficiencyEwma_{};
+
+    bool provisionalLowerActive_{false};
+    std::size_t provisionalPreviousCap_{};
+    unsigned provisionalSamples_{};
+    double provisionalAcceptedSum_{};
+    double provisionalEfficiencySum_{};
+    double provisionalBaselineAccepted_{};
+    double provisionalBaselineEfficiency_{};
+    double provisionalBaselineSourceRatio_{1.0};
+
+    bool upwardProbePending_{false};
+    bool upwardProbeInFlight_{false};
+    std::size_t upwardProbeAttempted_{};
+
     GeneratedPresentationCapacityTelemetry telemetry_{};
 };
 

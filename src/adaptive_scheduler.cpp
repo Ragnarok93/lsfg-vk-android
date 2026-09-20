@@ -51,6 +51,50 @@ constexpr double kSourcePreservationGainRatio = 1.08;
 constexpr double kSourcePreservationRetryHoldSeconds = 5.0;
 } // namespace
 
+uint64_t sourceOwnedAdmissionDeadlineNs(
+        const SourceTimelineSample& sample, uint64_t admissionNowNs) {
+    if (!sample.valid || admissionNowNs == 0)
+        return 0;
+    if (sample.sourceDesiredTimeNs > admissionNowNs)
+        return sample.sourceDesiredTimeNs;
+    if (!sample.rebased || sample.intervalNs == 0)
+        return sample.sourceDesiredTimeNs;
+
+    // The source timeline owns this rebase. Generated work is only granted one
+    // fresh source interval and cannot extend it or create catch-up debt.
+    if (admissionNowNs
+            > std::numeric_limits<uint64_t>::max() - sample.intervalNs)
+        return std::numeric_limits<uint64_t>::max();
+    return admissionNowNs + sample.intervalNs;
+}
+
+std::size_t adaptiveAdmissionBootstrapGeneratedCount(
+        std::size_t plannedGeneratedFrames,
+        bool predictorInitialized,
+        double remainingSourceSlackMs,
+        double sourceIntervalMs,
+        unsigned starvedOpportunities) {
+    if (plannedGeneratedFrames == 0)
+        return 0;
+    if (predictorInitialized)
+        return plannedGeneratedFrames;
+    if (!(remainingSourceSlackMs > 0.0) || !(sourceIntervalMs > 0.0))
+        return 0;
+
+    constexpr double kBootstrapSlackFloorMs = 1.5;
+    constexpr double kForcedProbeSlackFloorMs = 0.75;
+    constexpr double kBootstrapSlackRatio = 0.15;
+    constexpr unsigned kBootstrapStarvationOpportunityLimit = 4;
+    const double ordinaryProbeSlackMs = std::max(
+        kBootstrapSlackFloorMs,
+        sourceIntervalMs * kBootstrapSlackRatio);
+    const bool ordinaryProbe = remainingSourceSlackMs >= ordinaryProbeSlackMs;
+    const bool starvationProbe =
+        starvedOpportunities >= kBootstrapStarvationOpportunityLimit
+        && remainingSourceSlackMs >= kForcedProbeSlackFloorMs;
+    return ordinaryProbe || starvationProbe ? 1U : 0U;
+}
+
 const char* adaptiveCostBackoffReasonName(AdaptiveCostBackoffReason reason) {
     switch (reason) {
         case AdaptiveCostBackoffReason::RaiseCausalSourceDrop:
@@ -320,13 +364,21 @@ void DeadlineAdmissionPredictor::reset() {
 }
 
 namespace {
-constexpr unsigned kWsiEvidenceThreshold = 4;
+constexpr unsigned kWsiEvidenceThreshold = 5;
 constexpr unsigned kWsiEvidenceIncrement = 2;
 constexpr unsigned kWsiEvidenceDecay = 1;
-constexpr unsigned kWsiDutyRecoverySamples = 16;
-constexpr unsigned kWsiCapRecoverySamples = 24;
 constexpr double kWsiPressureRatio = 0.20;
-constexpr double kWsiRecoveryRatio = 0.08;
+constexpr double kWsiSevereSingleFramePressureRatio = 0.50;
+constexpr double kWsiAcceptanceAlpha = 0.25;
+constexpr double kWsiRecoveryGoodEfficiency = 0.80;
+constexpr double kWsiRecoveryEvidenceIncrement = 1.0;
+constexpr double kWsiRecoveryEvidenceRejectDecay = 0.25;
+constexpr double kWsiRecoveryProbeThreshold = 8.0;
+constexpr double kWsiDeficitProbeThreshold = 2.5;
+constexpr unsigned kWsiProvisionalEvaluationSamples = 6;
+constexpr double kWsiEfficiencyImprovement = 0.08;
+constexpr double kWsiSourceImprovement = 0.03;
+constexpr double kWsiThroughputPreserveRatio = 0.95;
 constexpr std::array<double, 4> kSingleFrameDuties{
     1.0, 0.75, 0.50, 0.25,
 };
@@ -348,6 +400,31 @@ double nextHigherDuty(double duty) {
 }
 } // namespace
 
+const char* generatedPresentationCapChangeReasonName(
+        GeneratedPresentationCapChangeReason reason) {
+    switch (reason) {
+        case GeneratedPresentationCapChangeReason::RejectionProbe:
+            return "rejection_probe";
+        case GeneratedPresentationCapChangeReason::ProfitabilityKeepLower:
+            return "profitability_keep_lower";
+        case GeneratedPresentationCapChangeReason::ProfitabilityRestoreHigher:
+            return "profitability_restore_higher";
+        case GeneratedPresentationCapChangeReason::RecoveryEvidenceRaise:
+            return "recovery_evidence_raise";
+        case GeneratedPresentationCapChangeReason::TargetDeficitProbeSuccess:
+            return "target_deficit_probe_success";
+        case GeneratedPresentationCapChangeReason::TargetDeficitProbeRejected:
+            return "target_deficit_probe_rejected";
+        case GeneratedPresentationCapChangeReason::SubOneDutyLower:
+            return "sub_one_duty_lower";
+        case GeneratedPresentationCapChangeReason::SubOneDutyRecover:
+            return "sub_one_duty_recover";
+        case GeneratedPresentationCapChangeReason::None:
+        default:
+            return "none";
+    }
+}
+
 void GeneratedPresentationCapacityTracker::configure(
         std::size_t maxGeneratedFrames) {
     if (maxGeneratedFrames_ == maxGeneratedFrames)
@@ -355,9 +432,22 @@ void GeneratedPresentationCapacityTracker::configure(
 
     maxGeneratedFrames_ = maxGeneratedFrames;
     rejectionEvidence_ = 0;
-    cleanSamples_ = 0;
+    recoveryEvidence_ = 0.0;
     singleFramePhase_ = 0.0;
     hasObservation_ = false;
+    acceptedFramesEwma_ = 0.0;
+    efficiencyEwma_ = 0.0;
+    provisionalLowerActive_ = false;
+    provisionalPreviousCap_ = 0;
+    provisionalSamples_ = 0;
+    provisionalAcceptedSum_ = 0.0;
+    provisionalEfficiencySum_ = 0.0;
+    provisionalBaselineAccepted_ = 0.0;
+    provisionalBaselineEfficiency_ = 0.0;
+    provisionalBaselineSourceRatio_ = 1.0;
+    upwardProbePending_ = false;
+    upwardProbeInFlight_ = false;
+    upwardProbeAttempted_ = 0;
     telemetry_ = {};
     telemetry_.generationCap = maxGeneratedFrames_;
     telemetry_.singleFrameDuty = 1.0;
@@ -365,13 +455,48 @@ void GeneratedPresentationCapacityTracker::configure(
 
 std::size_t GeneratedPresentationCapacityTracker::limit(
         std::size_t requested) {
-    const std::size_t capped = std::min(requested, telemetry_.generationCap);
+    return limit(requested, GeneratedPresentationCapacityContext{});
+}
+
+std::size_t GeneratedPresentationCapacityTracker::limit(
+        std::size_t requested,
+        const GeneratedPresentationCapacityContext& context) {
+    if (requested == 0 || maxGeneratedFrames_ == 0)
+        return 0;
+
+    const bool sourceInsideBudget =
+        context.sourceCadenceRatio + 1e-6 >= context.sourceBudgetMinRatio;
+    const bool provenHigherCapacity =
+        context.deadlineCapacityValid
+        && context.safeGenerationHint > telemetry_.generationCap
+        && context.schedulerCostLimit > telemetry_.generationCap
+        && context.provenCostLimit > telemetry_.generationCap;
+    const bool deficitProbeEligible =
+        context.outputDeficit && sourceInsideBudget && provenHigherCapacity;
+    const bool genericRecoveryProbe =
+        recoveryEvidence_ >= kWsiRecoveryProbeThreshold
+        && efficiencyEwma_ >= kWsiRecoveryGoodEfficiency
+        && telemetry_.generationCap < maxGeneratedFrames_;
+    if (!provisionalLowerActive_
+            && telemetry_.generationCap < maxGeneratedFrames_
+            && (upwardProbePending_
+                || genericRecoveryProbe
+                || (deficitProbeEligible
+                    && recoveryEvidence_ >= kWsiDeficitProbeThreshold))) {
+        upwardProbeInFlight_ = true;
+        upwardProbePending_ = false;
+        upwardProbeAttempted_ = std::min(
+            requested, telemetry_.generationCap + 1);
+        if (upwardProbeAttempted_ > telemetry_.generationCap)
+            return upwardProbeAttempted_;
+        upwardProbeInFlight_ = false;
+    }
+
+    const std::size_t capped =
+        std::min(requested, telemetry_.generationCap);
     if (capped != 1 || telemetry_.singleFrameDuty >= 0.999)
         return capped;
 
-    // Once downstream capacity is below one synthetic frame per real source
-    // cycle, turn the integer cap into a deterministic fractional duty cycle.
-    // Suppressed slots are consumed here and never become scheduler debt.
     singleFramePhase_ += telemetry_.singleFrameDuty;
     if (singleFramePhase_ + 1e-9 < 1.0)
         return 0;
@@ -382,77 +507,235 @@ std::size_t GeneratedPresentationCapacityTracker::limit(
 
 void GeneratedPresentationCapacityTracker::observe(
         std::size_t attempted, std::size_t wsiRejected) {
+    const std::size_t rejected = std::min(wsiRejected, attempted);
+    const std::size_t accepted = attempted - rejected;
+    observe(
+        attempted,
+        accepted,
+        rejected,
+        GeneratedPresentationCapacityContext{});
+}
+
+void GeneratedPresentationCapacityTracker::observe(
+        std::size_t attempted,
+        std::size_t accepted,
+        std::size_t wsiRejected,
+        const GeneratedPresentationCapacityContext& context) {
     telemetry_.lowered = false;
     telemetry_.raised = false;
+    telemetry_.lastChangeReason = GeneratedPresentationCapChangeReason::None;
 
     if (attempted == 0 || maxGeneratedFrames_ == 0)
         return;
 
     const std::size_t rejected = std::min(wsiRejected, attempted);
-    const double sample =
+    accepted = std::min(accepted, attempted - rejected + accepted);
+    accepted = std::min(accepted, attempted);
+    const double efficiency =
+        static_cast<double>(accepted) / static_cast<double>(attempted);
+    const double rejectionSample =
         static_cast<double>(rejected) / static_cast<double>(attempted);
+
     constexpr double kRejectionAlpha = 0.25;
     telemetry_.wsiRejectionRatio = hasObservation_
         ? telemetry_.wsiRejectionRatio
-            + kRejectionAlpha * (sample - telemetry_.wsiRejectionRatio)
-        : sample;
+            + kRejectionAlpha
+                * (rejectionSample - telemetry_.wsiRejectionRatio)
+        : rejectionSample;
+    if (!hasObservation_) {
+        acceptedFramesEwma_ = static_cast<double>(accepted);
+        efficiencyEwma_ = efficiency;
+    } else {
+        acceptedFramesEwma_ +=
+            kWsiAcceptanceAlpha
+                * (static_cast<double>(accepted) - acceptedFramesEwma_);
+        efficiencyEwma_ +=
+            kWsiAcceptanceAlpha * (efficiency - efficiencyEwma_);
+    }
     hasObservation_ = true;
+
+    telemetry_.attemptedGeneratedFrames += attempted;
+    telemetry_.acceptedGeneratedFrames += accepted;
+    telemetry_.deliveredEfficiency = efficiencyEwma_;
+    telemetry_.acceptedFramesEwma = acceptedFramesEwma_;
 
     if (rejected > 0) {
         rejectionEvidence_ = std::min(
             rejectionEvidence_ + kWsiEvidenceIncrement,
-            kWsiEvidenceThreshold * 2);
-        cleanSamples_ = 0;
+            kWsiEvidenceThreshold * 3);
+        recoveryEvidence_ = std::max(
+            0.0, recoveryEvidence_ - kWsiRecoveryEvidenceRejectDecay);
     } else {
         rejectionEvidence_ = rejectionEvidence_ > kWsiEvidenceDecay
             ? rejectionEvidence_ - kWsiEvidenceDecay
             : 0;
-        ++cleanSamples_;
+        if (efficiency >= kWsiRecoveryGoodEfficiency)
+            recoveryEvidence_ += kWsiRecoveryEvidenceIncrement;
     }
 
-    if (rejectionEvidence_ >= kWsiEvidenceThreshold
-            && telemetry_.wsiRejectionRatio >= kWsiPressureRatio) {
-        if (telemetry_.generationCap > 1) {
-            --telemetry_.generationCap;
-            telemetry_.lowered = true;
-            rejectionEvidence_ = telemetry_.generationCap == 1
-                ? kWsiEvidenceThreshold - kWsiEvidenceIncrement
-                : 1U;
-            singleFramePhase_ = 0.0;
-        } else if (telemetry_.generationCap == 1
-                && telemetry_.singleFrameDuty
-                    > kSingleFrameDuties.back() + 1e-6) {
-            telemetry_.singleFrameDuty =
-                nextLowerDuty(telemetry_.singleFrameDuty);
-            telemetry_.lowered = true;
+    const bool sourceInsideBudget =
+        context.sourceCadenceRatio + 1e-6 >= context.sourceBudgetMinRatio;
+    const bool provenHigherCapacity =
+        context.deadlineCapacityValid
+        && context.safeGenerationHint > telemetry_.generationCap
+        && context.schedulerCostLimit > telemetry_.generationCap
+        && context.provenCostLimit > telemetry_.generationCap;
+    if (context.outputDeficit && sourceInsideBudget && provenHigherCapacity)
+        recoveryEvidence_ += 0.75;
+
+    if (upwardProbeInFlight_) {
+        const bool deliveredExtra =
+            accepted > telemetry_.generationCap;
+        if (deliveredExtra) {
+            ++telemetry_.generationCap;
+            telemetry_.generationCap = std::min(
+                telemetry_.generationCap, maxGeneratedFrames_);
+            telemetry_.singleFrameDuty = 1.0;
+            telemetry_.raised = true;
+            telemetry_.lastChangeReason =
+                context.outputDeficit
+                    ? GeneratedPresentationCapChangeReason::TargetDeficitProbeSuccess
+                    : GeneratedPresentationCapChangeReason::RecoveryEvidenceRaise;
+            telemetry_.lastChangeOutputDeficit = context.outputDeficit;
+            recoveryEvidence_ = 0.0;
             rejectionEvidence_ = 0;
-            cleanSamples_ = 0;
             singleFramePhase_ = 0.0;
+        } else {
+            telemetry_.lastChangeReason =
+                GeneratedPresentationCapChangeReason::TargetDeficitProbeRejected;
+            telemetry_.lastChangeOutputDeficit = context.outputDeficit;
+            recoveryEvidence_ = std::max(0.0, recoveryEvidence_ - 1.0);
+        }
+        upwardProbeInFlight_ = false;
+        upwardProbeAttempted_ = 0;
+    }
+
+    if (provisionalLowerActive_) {
+        ++provisionalSamples_;
+        provisionalAcceptedSum_ += static_cast<double>(accepted);
+        provisionalEfficiencySum_ += efficiency;
+        if (provisionalSamples_ >= kWsiProvisionalEvaluationSamples) {
+            const double lowerAccepted =
+                provisionalAcceptedSum_
+                / static_cast<double>(provisionalSamples_);
+            const double lowerEfficiency =
+                provisionalEfficiencySum_
+                / static_cast<double>(provisionalSamples_);
+            const bool sourceImproved =
+                context.sourceCadenceRatio
+                    >= provisionalBaselineSourceRatio_
+                        + kWsiSourceImprovement;
+            const bool efficiencyImproved =
+                lowerEfficiency
+                    >= provisionalBaselineEfficiency_
+                        + kWsiEfficiencyImprovement;
+            const bool throughputPreserved =
+                provisionalBaselineAccepted_ <= 0.0
+                || lowerAccepted
+                    >= provisionalBaselineAccepted_
+                        * kWsiThroughputPreserveRatio;
+
+            if (!sourceImproved
+                    && context.outputDeficit
+                    && (!efficiencyImproved || !throughputPreserved)) {
+                telemetry_.generationCap = std::min(
+                    provisionalPreviousCap_, maxGeneratedFrames_);
+                telemetry_.raised = true;
+                telemetry_.lastChangeReason =
+                    GeneratedPresentationCapChangeReason::ProfitabilityRestoreHigher;
+                telemetry_.lastChangeOutputDeficit = true;
+                recoveryEvidence_ = 0.0;
+            } else {
+                telemetry_.lastChangeReason =
+                    GeneratedPresentationCapChangeReason::ProfitabilityKeepLower;
+                telemetry_.lastChangeOutputDeficit = context.outputDeficit;
+            }
+            provisionalLowerActive_ = false;
+            provisionalSamples_ = 0;
+            provisionalAcceptedSum_ = 0.0;
+            provisionalEfficiencySum_ = 0.0;
         }
     }
 
-    if (rejected == 0
-            && telemetry_.wsiRejectionRatio <= kWsiRecoveryRatio) {
-        if (telemetry_.singleFrameDuty < 0.999
-                && cleanSamples_ >= kWsiDutyRecoverySamples) {
-            telemetry_.singleFrameDuty =
-                nextHigherDuty(telemetry_.singleFrameDuty);
-            telemetry_.raised = true;
-            cleanSamples_ = 0;
-            singleFramePhase_ = 0.0;
-        } else if (telemetry_.singleFrameDuty >= 0.999
-                && telemetry_.generationCap < maxGeneratedFrames_
-                && cleanSamples_ >= kWsiCapRecoverySamples) {
+    const bool canLowerIntegerCap =
+        !provisionalLowerActive_
+        && telemetry_.generationCap > 1
+        && rejectionEvidence_ >= kWsiEvidenceThreshold
+        && telemetry_.wsiRejectionRatio >= kWsiPressureRatio;
+    if (canLowerIntegerCap) {
+        provisionalLowerActive_ = true;
+        provisionalPreviousCap_ = telemetry_.generationCap;
+        provisionalBaselineAccepted_ = acceptedFramesEwma_;
+        provisionalBaselineEfficiency_ = efficiencyEwma_;
+        provisionalBaselineSourceRatio_ = context.sourceCadenceRatio;
+        provisionalSamples_ = 0;
+        provisionalAcceptedSum_ = 0.0;
+        provisionalEfficiencySum_ = 0.0;
+        --telemetry_.generationCap;
+        telemetry_.lowered = true;
+        telemetry_.lastChangeReason =
+            GeneratedPresentationCapChangeReason::RejectionProbe;
+        telemetry_.lastChangeOutputDeficit = context.outputDeficit;
+        rejectionEvidence_ = 1;
+        singleFramePhase_ = 0.0;
+    } else if (!provisionalLowerActive_
+            && telemetry_.generationCap == 1
+            && rejectionEvidence_ >= kWsiEvidenceThreshold
+            && telemetry_.wsiRejectionRatio
+                >= kWsiSevereSingleFramePressureRatio
+            && telemetry_.singleFrameDuty
+                > kSingleFrameDuties.back() + 1e-6) {
+        telemetry_.singleFrameDuty =
+            nextLowerDuty(telemetry_.singleFrameDuty);
+        telemetry_.lowered = true;
+        telemetry_.lastChangeReason =
+            GeneratedPresentationCapChangeReason::SubOneDutyLower;
+        telemetry_.lastChangeOutputDeficit = context.outputDeficit;
+        rejectionEvidence_ = 0;
+        recoveryEvidence_ = 0.0;
+        singleFramePhase_ = 0.0;
+    }
+
+    if (telemetry_.singleFrameDuty < 0.999
+            && recoveryEvidence_ >= kWsiRecoveryProbeThreshold) {
+        telemetry_.singleFrameDuty =
+            nextHigherDuty(telemetry_.singleFrameDuty);
+        telemetry_.raised = true;
+        telemetry_.lastChangeReason =
+            GeneratedPresentationCapChangeReason::SubOneDutyRecover;
+        telemetry_.lastChangeOutputDeficit = context.outputDeficit;
+        recoveryEvidence_ = 0.0;
+        singleFramePhase_ = 0.0;
+    } else if (!provisionalLowerActive_
+            && telemetry_.generationCap < maxGeneratedFrames_
+            && recoveryEvidence_ >= kWsiRecoveryProbeThreshold) {
+        // Without a target-deficit context, retain compatibility with callers
+        // that provide clean accepted observations directly. Runtime Adaptive
+        // mode instead consumes this as a bounded upward probe in limit().
+        if (!context.outputDeficit && !context.deadlineCapacityValid) {
             ++telemetry_.generationCap;
             telemetry_.raised = true;
-            cleanSamples_ = 0;
+            telemetry_.lastChangeReason =
+                GeneratedPresentationCapChangeReason::RecoveryEvidenceRaise;
+            telemetry_.lastChangeOutputDeficit = false;
+            recoveryEvidence_ = 0.0;
+        } else {
+            upwardProbePending_ = true;
         }
+    } else if (context.outputDeficit
+            && sourceInsideBudget
+            && provenHigherCapacity
+            && recoveryEvidence_ >= kWsiDeficitProbeThreshold) {
+        upwardProbePending_ = true;
     }
 
     telemetry_.rejectionEvidence = rejectionEvidence_;
+    telemetry_.recoveryEvidence = recoveryEvidence_;
+    telemetry_.upwardProbePending = upwardProbePending_;
     telemetry_.pressure =
         rejected > 0
         || telemetry_.wsiRejectionRatio >= 0.10
+        || provisionalLowerActive_
         || telemetry_.generationCap < maxGeneratedFrames_
         || telemetry_.singleFrameDuty < 0.999;
 }
@@ -627,7 +910,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.configWarmStart = false;
     telemetry_.capacityPromoted = false;
     telemetry_.warmStartReason = AdaptiveWarmStartReason::None;
-    telemetry_.costBackoffReason = lastBackoffReason_;
+    telemetry_.costBackoffReason = AdaptiveCostBackoffReason::None;
     telemetry_.safeGenerationHintValid = safeGenerationHintValid_;
     telemetry_.safeGenerationHint = safeGenerationHint_;
     telemetry_.provenCostLimit = provenCostLimit_;
@@ -735,7 +1018,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     updateCostLimit(wantedGenerated);
     telemetry_.costLimit = costLimit_;
     telemetry_.provenCostLimit = provenCostLimit_;
-    telemetry_.costBackoffReason = lastBackoffReason_;
+    telemetry_.costBackoffReason = AdaptiveCostBackoffReason::None;
     telemetry_.raiseBaselineSourceFps = pendingRaiseBaselineFps_;
     telemetry_.raiseDropEvidenceSeconds =
         pendingRaiseSourceDropEvidenceSeconds_;
@@ -998,6 +1281,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             provenCostLimit_ = std::min(provenCostLimit_, costLimit_);
             lastBackoffReason_ =
                 AdaptiveCostBackoffReason::RaiseCausalSourceDrop;
+            telemetry_.costBackoffReason = lastBackoffReason_;
             backoffRecoverySinceSeconds_ = observedTimeSeconds_;
             backoffRecoveryFpsSum_ = 0.0;
             backoffRecoverySamples_ = 0;
@@ -1150,6 +1434,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             lastCostChangeTimeSeconds_ = observedTimeSeconds_;
             lastBackoffReason_ =
                 AdaptiveCostBackoffReason::SourcePreservationProbe;
+            telemetry_.costBackoffReason = lastBackoffReason_;
             resetUnmetDemand();
             telemetry_.costBackedOff = true;
             telemetry_.costProbe = true;
