@@ -852,8 +852,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (sourceTimelineDiscontinuity) {
         this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
-        this->deadlineAdmissionPredictor_.reset();
-        this->generatedPresentationCapacityTracker_.reset();
+        // A cadence rebase invalidates source-history interpolation state, not
+        // the measured GPU cost model or downstream WSI capacity. Preserve
+        // those learned domains so a hitch cannot force a temporary 2x-style
+        // relearn before 3x/4x Adaptive work becomes eligible again.
         this->lsfgOutputCadenceTracker_.reset();
         this->lsfgOutputCadenceTracker_.configure(
             conf.adaptiveFramegen && conf.fpsLimit > 0,
@@ -871,7 +873,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 && sourceInterval.count() > 0) {
             this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
             this->requiresSourceHistoryWarmup_ = true;
-            this->deadlineAdmissionPredictor_.reset();
+            // Preserve GPU/presentation capacity learning across an ordinary
+            // source-timeline rebase for the same runtime/context.
             this->lastDispatchedGeneratedFrameCount_ = 0;
         }
         if (this->currentSourceTimeline_.valid) {
