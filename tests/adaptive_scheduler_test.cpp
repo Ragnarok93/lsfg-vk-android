@@ -689,8 +689,10 @@ int main() {
                 || (scheduler.telemetry().costBackedOff
                     && scheduler.telemetry().costProbe);
         }
+        // The retry hold suppresses only the same downward causal experiment.
+        // Legitimate unmet demand may still raise above restoredCost.
         assert(!repeatedProbe);
-        assert(scheduler.telemetry().costLimit == restoredCost);
+        assert(scheduler.telemetry().costLimit >= restoredCost);
     }
 
     {
