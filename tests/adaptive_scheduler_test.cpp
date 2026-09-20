@@ -583,10 +583,9 @@ int main() {
     }
 
     {
-        // Protected-source invariant: generated work is subordinate to the real
-        // source timeline. If removing one generated level causally restores
-        // the established source cadence, keep the cheaper level even when the
-        // resulting aggregate output misses a high target by more than 5%.
+        // Beyond the accepted 20% high-density source-loss budget, a lower
+        // generated-frame level that materially restores the real source is
+        // retained even when the resulting output remains below a high target.
         AdaptiveFrameScheduler scheduler(120, 3);
         for (int frame = 0; frame < 120; ++frame) {
             scheduler.setSafeGenerationHint(3, true);
@@ -598,7 +597,7 @@ int main() {
         bool probedLower = false;
         for (int frame = 0; frame < 40 && !probedLower; ++frame) {
             scheduler.setSafeGenerationHint(3, true);
-            scheduler.plan(42ms); // sustained source loss at the proven level
+            scheduler.plan(43ms); // sustained >20% source loss at 4x
             probedLower = scheduler.telemetry().costBackedOff
                 && scheduler.telemetry().costProbe;
         }
