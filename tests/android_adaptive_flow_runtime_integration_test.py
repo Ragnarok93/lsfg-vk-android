@@ -257,6 +257,36 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         ):
             self.assertIn(field, reset)
 
+    def test_source_cadence_rebase_preserves_gpu_and_wsi_capacity_learning(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        start = source.index("if (sourceTimelineDiscontinuity) {")
+        end = source.index("} else {", start)
+        discontinuity = source[start:end]
+        self.assertNotIn("deadlineAdmissionPredictor_.reset()", discontinuity)
+        self.assertNotIn(
+            "generatedPresentationCapacityTracker_.reset()",
+            discontinuity,
+        )
+
+        rebase_start = source.index(
+            "if (hadValidSourceTimeline",
+            end,
+        )
+        rebase_end = source.index(
+            "if (this->currentSourceTimeline_.valid)",
+            rebase_start,
+        )
+        rebase = source[rebase_start:rebase_end]
+        self.assertNotIn("deadlineAdmissionPredictor_.reset()", rebase)
+
+        # True runtime/lifecycle bypass still clears downstream learned state.
+        bypass = source[source.index("void LsContext::enterSourceOnlyBypass()"):]
+        self.assertIn(
+            "generatedPresentationCapacityTracker_.reset()",
+            bypass,
+        )
+
     def test_wsi_unavailability_does_not_poison_deadline_predictor(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
