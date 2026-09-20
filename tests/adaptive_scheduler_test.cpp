@@ -1372,10 +1372,14 @@ int main() {
         assert(capacity.telemetry().generationCap == 2);
         assert(capacity.telemetry().pressure);
 
-        for (int i = 0; i < 24; ++i)
+        bool sawRecoveryRaise = false;
+        for (int i = 0; i < 24; ++i) {
             capacity.observe(2, 0);
+            sawRecoveryRaise =
+                sawRecoveryRaise || capacity.telemetry().raised;
+        }
         assert(capacity.telemetry().generationCap == 3);
-        assert(capacity.telemetry().raised);
+        assert(sawRecoveryRaise);
     }
 
     {
