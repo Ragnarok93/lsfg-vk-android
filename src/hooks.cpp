@@ -454,6 +454,14 @@ namespace {
                 << adaptiveFlow.globalSlowFrameRatio << '\n'
                 << "adaptive_flow_global_pressure="
                 << (adaptiveFlow.globalPressure ? 1 : 0) << '\n'
+                << "adaptive_flow_compute_pressure="
+                << (adaptiveFlow.computePressure ? 1 : 0) << '\n'
+                << "adaptive_flow_wsi_pressure="
+                << (adaptiveFlow.wsiPressure ? 1 : 0) << '\n'
+                << "adaptive_flow_wsi_loss_rate="
+                << adaptiveFlow.wsiLossRate << '\n'
+                << "adaptive_flow_presentation_cap="
+                << adaptiveFlow.presentationGenerationCap << '\n'
                 << "adaptive_flow_output_deficit="
                 << (adaptiveFlow.outputDeficit ? 1 : 0) << '\n'
                 << "adaptive_flow_synthetic_drop_pressure="

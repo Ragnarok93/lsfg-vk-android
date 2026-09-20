@@ -62,7 +62,8 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("adaptiveFlowGlobalGpuUsagePercent_", header)
         self.assertIn("adaptiveFlowGeneratedTimingValid_", header)
         self.assertIn("adaptiveFlowRetainedTotalLsfgMs_", header)
-        self.assertIn("adaptiveFlowLastObservedLateDrops_", header)
+        self.assertIn("adaptiveFlowLastObservedComputeDrops_", header)
+        self.assertIn("adaptiveFlowLastObservedWsiDrops_", header)
 
         # Whole-device pressure is evidence only. It must not touch the source
         # timeline, sleep the present thread, or cause a configuration reload.
@@ -303,6 +304,10 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "adaptive_flow_global_p95_ms=",
             "adaptive_flow_global_slow_ratio=",
             "adaptive_flow_global_pressure=",
+            "adaptive_flow_compute_pressure=",
+            "adaptive_flow_wsi_pressure=",
+            "adaptive_flow_wsi_loss_rate=",
+            "adaptive_flow_presentation_cap=",
             "adaptive_flow_output_deficit=",
             "adaptive_flow_synthetic_drop_pressure=",
             "adaptive_flow_reason=",

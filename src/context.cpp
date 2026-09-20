@@ -1619,6 +1619,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (this->adaptiveFlowComputePressure_ ? 1 : 0)
                       << " adaptive_flow_wsi_pressure="
                       << (this->adaptiveFlowWsiPressure_ ? 1 : 0)
+                      << " adaptive_flow_wsi_loss_rate="
+                      << this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio
+                      << " adaptive_flow_presentation_cap="
+                      << this->generatedPresentationCapacityTracker_.telemetry().generationCap
+                      << " adaptive_flow_synthetic_drop_pressure="
+                      << ((this->adaptiveFlowComputePressure_
+                          || this->adaptiveFlowWsiPressure_) ? 1 : 0)
                       << " adaptive_flow_reason="
                       << AdaptiveFlowController::reasonName(this->adaptiveFlowReason_)
                       << " adaptive_present_timing="
