@@ -199,6 +199,8 @@ int main() {
             controller.telemetry().reason
                 == AdaptiveFlowDecisionReason::SustainedGlobalPressure
             || controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::EvaluatingDownstep
+            || controller.telemetry().reason
                 == AdaptiveFlowDecisionReason::Cooldown);
     }
 
