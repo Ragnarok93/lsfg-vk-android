@@ -889,18 +889,25 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
             establishedSourceFps_ = robustSourceFps;
             establishedSourceCoverageSeconds_ = evidenceSeconds;
         } else {
-            const bool materialDrop =
-                robustSourceFps < establishedSourceFps_ * kSourceDropRatio;
-            if (costLimit_ <= 1 || !materialDrop) {
+            // At high generated-frame density the established source cadence is
+            // the protection reference, not another adaptive signal. Never
+            // ratchet it downward in small steps while 3x/4x work is active;
+            // otherwise several individually-acceptable drops can compound into
+            // a much larger real-source loss. Natural slowdowns are rebased
+            // only after a lower-cost causal probe fails to recover cadence.
+            if (costLimit_ <= 1) {
                 const double alpha = robustSourceFps >= establishedSourceFps_
                     ? 0.15
-                    : (costLimit_ <= 1 ? 0.08 : 0.03);
+                    : 0.08;
                 establishedSourceFps_ +=
                     alpha * (robustSourceFps - establishedSourceFps_);
-                establishedSourceCoverageSeconds_ = std::min(
-                    kEstablishedBaselineMaxCoverageSeconds,
-                    establishedSourceCoverageSeconds_ + evidenceSeconds);
+            } else if (robustSourceFps > establishedSourceFps_) {
+                establishedSourceFps_ +=
+                    0.15 * (robustSourceFps - establishedSourceFps_);
             }
+            establishedSourceCoverageSeconds_ = std::min(
+                kEstablishedBaselineMaxCoverageSeconds,
+                establishedSourceCoverageSeconds_ + evidenceSeconds);
         }
     }
 
@@ -1042,10 +1049,21 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             // cadence estimate. Averaging the whole probe again would include
             // the intentional recovery ramp and understate the lower level.
             const double recoveredSourceFps = sourceFps;
-            const bool sourceRecovered = sourcePreservationBaselineFps_ > 0.0
+            const double lowerLevelAcceptedRatio =
+                costLimit_ >= 2
+                    ? kHighDensitySourceDropRatio
+                    : kSourceDropRatio;
+            const bool recoveredInsideBudget =
+                establishedSourceFps_ > 0.0
+                && recoveredSourceFps
+                    >= establishedSourceFps_ * lowerLevelAcceptedRatio;
+            const bool materiallyRecovered =
+                sourcePreservationBaselineFps_ > 0.0
                 && recoveredSourceFps
                     >= sourcePreservationBaselineFps_
                         * kSourcePreservationGainRatio;
+            const bool sourceRecovered =
+                recoveredInsideBudget || materiallyRecovered;
 
             sourcePreservationProbeActive_ = false;
             sourcePreservationProbeFpsSum_ = 0.0;
