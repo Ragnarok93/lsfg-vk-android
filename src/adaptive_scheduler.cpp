@@ -834,7 +834,9 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
 
         const bool sourceDropped = pendingRaiseBaselineFps_ > 0.0
-            && sourceFps < pendingRaiseBaselineFps_ * kSourceDropRatio;
+            && sourceFps < pendingRaiseBaselineFps_ * kSourceDropRatio
+            && telemetry_.sourceFps
+                < pendingRaiseBaselineFps_ * kSourceDropRatio;
         if (sinceRaise >= kRaiseBackoffSettleSeconds) {
             if (sourceDropped) {
                 pendingRaiseSourceDropEvidenceSeconds_ +=
