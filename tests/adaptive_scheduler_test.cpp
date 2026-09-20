@@ -783,6 +783,31 @@ int main() {
     }
 
     {
+        // #386 capacity-evidence regression: a predictor that continues to
+        // certify the promoted level is contradictory evidence against blaming
+        // a modest source-rate dip on generated work. Preserve that level
+        // unless the source loss is materially deeper; severe collapse still
+        // remains eligible for causal backoff.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        bool promoted = false;
+        for (int frame = 0; frame < 20 && !promoted; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(33ms);
+            promoted = scheduler.telemetry().costLimit >= 2;
+        }
+        assert(promoted);
+
+        bool backedOff = false;
+        for (int frame = 0; frame < 18; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(40ms);
+            backedOff = backedOff || scheduler.telemetry().costBackedOff;
+        }
+        assert(!backedOff);
+        assert(scheduler.telemetry().costLimit == 2);
+    }
+
+    {
         // Build #385 regression: post-promotion source settling must be judged
         // over elapsed time, not a handful of source samples. Roughly 0.3 s of
         // temporary slow cadence is insufficient to blame the newly promoted
