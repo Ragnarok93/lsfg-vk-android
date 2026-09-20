@@ -36,6 +36,7 @@ constexpr double kPostRateChangeRaiseHoldSeconds = 0.750;
 constexpr double kProbeIntervalSeconds = 1.000;
 constexpr double kBlameWindowSeconds = 1.250;
 constexpr double kSourceDropRatio = 0.90;
+constexpr double kHighDensitySourceDropRatio = 0.80;
 constexpr double kRecoveryRatio = 0.97;
 constexpr double kSuccessfulProbeHoldSeconds = 5.0;
 
@@ -43,11 +44,9 @@ constexpr double kSuccessfulProbeHoldSeconds = 5.0;
 // output near the requested target, test one cheaper level before adding work.
 // The probe is retained only when it materially recovers source cadence without
 // materially reducing aggregate source+generated throughput.
-constexpr double kSourcePreservationOutputRatio = 0.95;
 constexpr double kSourcePreservationConfirmSeconds = 0.60;
 constexpr double kSourcePreservationProbeSeconds = 0.60;
 constexpr double kSourcePreservationGainRatio = 1.08;
-constexpr double kSourcePreservationKeepOutputRatio = 0.95;
 constexpr double kSourcePreservationRetryHoldSeconds = 5.0;
 } // namespace
 
@@ -945,10 +944,14 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         // Keep the same material source-drop threshold; when the predictor says
         // the level still fits, require more sustained causal evidence before
         // attributing the source loss to generated work.
+        const double acceptedSourceRatio =
+            costLimit_ >= 2
+                ? kHighDensitySourceDropRatio
+                : kSourceDropRatio;
         const bool sourceDropped = pendingRaiseBaselineFps_ > 0.0
-            && sourceFps < pendingRaiseBaselineFps_ * kSourceDropRatio
+            && sourceFps < pendingRaiseBaselineFps_ * acceptedSourceRatio
             && telemetry_.sourceFps
-                < pendingRaiseBaselineFps_ * kSourceDropRatio;
+                < pendingRaiseBaselineFps_ * acceptedSourceRatio;
         const double backoffEvidenceRequired = capacityCorroboratesRaise
             ? kCapacityCorroboratedBackoffEvidenceSeconds
             : kRaiseBackoffEvidenceSeconds;
@@ -1024,32 +1027,16 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             // cadence estimate. Averaging the whole probe again would include
             // the intentional recovery ramp and understate the lower level.
             const double recoveredSourceFps = sourceFps;
-            const double originalOutputFps = sourcePreservationBaselineFps_
-                * static_cast<double>(sourcePreservationOriginalCost_ + 1);
-            const double probedOutputFps = recoveredSourceFps
-                * static_cast<double>(costLimit_ + 1);
             const bool sourceRecovered = sourcePreservationBaselineFps_ > 0.0
                 && recoveredSourceFps
-                    >= sourcePreservationBaselineFps_ * kSourcePreservationGainRatio;
-            const bool throughputPreserved = originalOutputFps <= 0.0
-                || probedOutputFps
-                    >= originalOutputFps * kSourcePreservationKeepOutputRatio;
-            const bool targetNearlyMet = targetFps_ > 0
-                && probedOutputFps
-                    >= static_cast<double>(targetFps_) * kSourcePreservationOutputRatio;
-            const bool sourceTimelineRestored =
-                establishedSourceFps_ > 0.0
-                && recoveredSourceFps
-                    >= establishedSourceFps_ * kRecoveryRatio;
+                    >= sourcePreservationBaselineFps_
+                        * kSourcePreservationGainRatio;
 
             sourcePreservationProbeActive_ = false;
             sourcePreservationProbeFpsSum_ = 0.0;
             sourcePreservationProbeSamples_ = 0;
 
-            if (sourceRecovered
-                    && (sourceTimelineRestored
-                        || throughputPreserved
-                        || targetNearlyMet)) {
+            if (sourceRecovered) {
                 provenCostLimit_ = std::min(provenCostLimit_, costLimit_);
                 establishedSourceFps_ = recoveredSourceFps;
                 establishedSourceCoverageSeconds_ =
@@ -1085,12 +1072,16 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
     const bool establishedBaselineReady =
         establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds
         && establishedSourceFps_ > 0.0;
+    const double acceptedSourceRatio =
+        costLimit_ >= 2
+            ? kHighDensitySourceDropRatio
+            : kSourceDropRatio;
     const bool sourceDegradedAtCurrentCost =
         costLimit_ > 1
         && establishedBaselineReady
-        && sourceFps < establishedSourceFps_ * kSourceDropRatio
+        && sourceFps < establishedSourceFps_ * acceptedSourceRatio
         && telemetry_.sourceFps
-            < establishedSourceFps_ * kSourceDropRatio;
+            < establishedSourceFps_ * acceptedSourceRatio;
 
     if (sourceDegradedAtCurrentCost
             && observedTimeSeconds_ >= sourcePreservationProbeHoldUntilSeconds_) {
