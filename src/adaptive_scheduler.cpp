@@ -1037,12 +1037,19 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             const bool targetNearlyMet = targetFps_ > 0
                 && probedOutputFps
                     >= static_cast<double>(targetFps_) * kSourcePreservationOutputRatio;
+            const bool sourceTimelineRestored =
+                establishedSourceFps_ > 0.0
+                && recoveredSourceFps
+                    >= establishedSourceFps_ * kRecoveryRatio;
 
             sourcePreservationProbeActive_ = false;
             sourcePreservationProbeFpsSum_ = 0.0;
             sourcePreservationProbeSamples_ = 0;
 
-            if (sourceRecovered && (throughputPreserved || targetNearlyMet)) {
+            if (sourceRecovered
+                    && (sourceTimelineRestored
+                        || throughputPreserved
+                        || targetNearlyMet)) {
                 provenCostLimit_ = std::min(provenCostLimit_, costLimit_);
                 establishedSourceFps_ = recoveredSourceFps;
                 establishedSourceCoverageSeconds_ =
