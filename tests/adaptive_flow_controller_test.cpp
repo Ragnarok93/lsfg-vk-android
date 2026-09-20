@@ -271,6 +271,22 @@ int main() {
     }
 
     {
+        // A missing timing sample must not leave the previous pressure values
+        // visible as if they described the current cycle.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        controller.observe(sample(16.0, 18.0, 12.0, true, true));
+        assert(controller.telemetry().pressureRatio > 1.0);
+
+        auto invalid = sample(0.0, 0.0, 0.0);
+        invalid.valid = false;
+        controller.observe(invalid);
+        assert(near(controller.telemetry().pressureRatio, 0.0));
+        assert(near(controller.telemetry().flowBudgetRatio, 0.0));
+        assert(!controller.telemetry().computePressure);
+        assert(!controller.telemetry().wsiPressure);
+    }
+
+    {
         // A WSI/global-pressure downstep is provisional. No measurable benefit
         // restores the previous quality state and applies a longer hold.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);

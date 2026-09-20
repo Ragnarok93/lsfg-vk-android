@@ -805,6 +805,30 @@ int main() {
     }
 
     {
+        // A target deficit must not preserve a higher presentation capacity
+        // when the source timeline is already materially late. The source
+        // evidence gate is what keeps an overdue real frame from being used to
+        // justify more synthetic work.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(1);
+        GeneratedPresentationCapacityContext lateSource{
+            .outputDeficit = true,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .sourceInsideBudget = true,
+            .sourceDeadlineErrorNs = 9'000'000,
+            .higherCapacityProven = true,
+        };
+        for (int i = 0; i < 40; ++i) {
+            const auto attempted = capacity.limit(1, lateSource);
+            if (attempted > 0)
+                capacity.observe(attempted, 0, attempted, lateSource);
+        }
+        assert(capacity.telemetry().singleFrameDuty < 0.999);
+    }
+
+    {
         // Rolling LSFG output reacts inside a sub-second window and requires
         // sustained evidence both to declare deficit and to prove recovery.
         LsfgOutputCadenceTracker cadence;

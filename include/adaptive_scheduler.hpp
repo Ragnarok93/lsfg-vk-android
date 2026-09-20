@@ -142,6 +142,7 @@ struct GeneratedPresentationCapacityContext {
     std::size_t safeGenerationHint{};
     std::size_t schedulerCostLimit{};
     bool sourceInsideBudget{false};
+    int64_t sourceDeadlineErrorNs{};
     bool higherCapacityProven{false};
 };
 

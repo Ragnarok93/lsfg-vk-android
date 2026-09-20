@@ -143,13 +143,20 @@ double adaptiveFlowFrameBudgetMs(
         const Config::Configuration& conf,
         std::chrono::nanoseconds sourceInterval,
         size_t generatedFrameCount) {
-    if (conf.adaptiveFramegen && conf.fpsLimit > 0)
-        return 1000.0 / static_cast<double>(conf.fpsLimit);
-
     const double sourceIntervalMs =
         std::chrono::duration<double, std::milli>(sourceInterval).count();
     if (!(sourceIntervalMs > 0.0) || !std::isfinite(sourceIntervalMs))
         return 0.0;
+
+    // Adaptive Flow timing is a complete LSFG batch measurement. Its fallback
+    // budget is therefore the whole source-owned interval, not one output
+    // period or one synthetic slot. A deadline decision supplies a tighter
+    // batch budget when one is available at the call site.
+    if (conf.adaptiveFramegen)
+        return sourceIntervalMs;
+
+    if (conf.fpsLimit > 0)
+        return 1000.0 / static_cast<double>(conf.fpsLimit);
     return sourceIntervalMs / static_cast<double>(generatedFrameCount + 1);
 }
 
@@ -774,6 +781,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     } else if (this->runtimeConfigSignature_ != currentConfigSignature) {
         this->runtimeConfigSignature_ = currentConfigSignature;
         this->configRevision_ = nextRuntimeConfigRevision();
+        this->advanceAdaptiveFlowTimingEpoch();
     }
 
     auto& metrics = this->runtimeMetrics;
@@ -851,6 +859,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         conf.adaptiveFramegen && adaptiveTelemetry.discontinuityReset;
 
     if (sourceTimelineDiscontinuity) {
+        this->advanceAdaptiveFlowTimingEpoch();
         this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
         this->deadlineAdmissionPredictor_.reset();
@@ -870,6 +879,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (hadValidSourceTimeline
                 && !this->currentSourceTimeline_.valid
                 && sourceInterval.count() > 0) {
+            this->advanceAdaptiveFlowTimingEpoch();
             this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
             this->requiresSourceHistoryWarmup_ = true;
             this->deadlineAdmissionPredictor_.reset();
@@ -1033,12 +1043,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && conf.fpsLimit > 0
         && outputCadenceForPresentation.valid
         && outputCadenceForPresentation.deficitConfirmed;
+    const uint64_t sourceDeadlineSlackNs = std::max<uint64_t>(
+        1'000'000ULL, this->currentSourceTimeline_.intervalNs / 8ULL);
     const bool sourceInsidePresentationBudget =
         conf.adaptiveFramegen
         && this->currentSourceTimeline_.valid
         && sourceInterval.count() > 0
         && !sourceTimelineDiscontinuity
-        && !sourceHistoryWarmupActive;
+        && !sourceHistoryWarmupActive
+        && this->currentSourceTimeline_.sourceDeadlineErrorNs
+            <= static_cast<int64_t>(sourceDeadlineSlackNs);
     const auto& currentPresentationCapacity =
         this->generatedPresentationCapacityTracker_.telemetry();
     const bool higherPresentationCapacityProven =
@@ -1050,6 +1064,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .safeGenerationHint = safeGenerationHint,
         .schedulerCostLimit = adaptiveTelemetry.costLimit,
         .sourceInsideBudget = sourceInsidePresentationBudget,
+        .sourceDeadlineErrorNs =
+            this->currentSourceTimeline_.sourceDeadlineErrorNs,
         .higherCapacityProven = higherPresentationCapacityProven,
     };
 
@@ -1076,6 +1092,41 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // interval; rejected opportunities are consumed and never become catch-up debt.
     interpolationGenerationCount = generatedFrameCount;
 
+    // Flow GPU timestamps cover the complete submitted batch. Keep the budget
+    // and predictor value attached to that exact batch instead of comparing a
+    // delayed sample with the next source cycle's one-slot period.
+    if (conf.adaptiveFramegen && generatedFrameCount > 0
+            && this->deadlineBatchDecision_.valid) {
+        const auto finalBatchDecision = this->deadlineAdmissionPredictor_.predict(
+            generatedFrameCount,
+            this->deadlineBatchDecision_.usableBudgetMs);
+        if (finalBatchDecision.valid)
+            this->deadlineBatchDecision_ = finalBatchDecision;
+    }
+    const double adaptiveFlowBatchBudgetMs = [&]() {
+        if (conf.adaptiveFramegen
+                && generatedFrameCount > 0
+                && this->deadlineBatchDecision_.valid
+                && this->deadlineBatchDecision_.effectiveUsableBudgetMs > 0.0) {
+            return this->deadlineBatchDecision_.effectiveUsableBudgetMs;
+        }
+        return adaptiveFlowFrameBudgetMs(
+            conf, sourceInterval, generatedFrameCount);
+    }();
+    const auto nextAdaptiveFlowBatch = [&]() {
+        ++this->adaptiveFlowNextBatchId_;
+        if (this->adaptiveFlowNextBatchId_ == 0)
+            this->adaptiveFlowNextBatchId_ = 1;
+        return LSFG::AdaptiveFlowBatchMetadata{
+            .sessionEpoch = this->adaptiveFlowTimingEpoch_,
+            .batchId = this->adaptiveFlowNextBatchId_,
+            .frameBudgetMs = adaptiveFlowBatchBudgetMs,
+            .predictedTotalLsfgMs =
+                this->deadlineBatchDecision_.valid
+                    ? this->deadlineBatchDecision_.predictedTotalLsfgMs
+                    : 0.0,
+        };
+    };
     if (this->currentSourceTimeline_.valid) {
         const size_t timingGenerationCount =
             generatedFrameCount > 0 ? interpolationGenerationCount : 0;
@@ -1104,7 +1155,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const LSFG::AdaptiveFlowGpuTiming timing = conf.performance
             ? LSFG_3_1P::getContextGpuTiming(*this->lsfgCtxId)
             : LSFG_3_1::getContextGpuTiming(*this->lsfgCtxId);
-        const bool timingUsable = timing.valid && !timing.transitionActive;
+        const bool timingSessionMatches =
+            timing.valid
+            && timing.sessionEpoch == this->adaptiveFlowTimingEpoch_
+            && timing.batchId > 0;
+        const bool timingFresh = timingSessionMatches
+            && timing.batchId > this->adaptiveFlowLastObservedBatchId_;
+        if (timingFresh)
+            this->adaptiveFlowLastObservedBatchId_ = timing.batchId;
+        const bool timingUsable = timingFresh && !timing.transitionActive;
         const bool generatedWorkSample =
             timingUsable && timing.generationCount > 0;
 
@@ -1113,12 +1172,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->adaptiveFlowRetainedMipmapsMs_ = timing.mipmapsMs;
             this->adaptiveFlowRetainedWorkMs_ = timing.opticalFlowMs;
             this->adaptiveFlowRetainedTotalLsfgMs_ = timing.totalLsfgMs;
+            this->adaptiveFlowRetainedBudgetMs_ = timing.frameBudgetMs;
             this->adaptiveFlowRetainedGenerationCount_ = timing.generationCount;
 
-            if (this->deadlineBatchDecision_.valid) {
+            if (timing.predictedTotalLsfgMs > 0.0
+                    && std::isfinite(timing.predictedTotalLsfgMs)) {
                 metrics.windowDeadlinePredictionAbsErrorMs += std::abs(
                     timing.totalLsfgMs
-                    - this->deadlineBatchDecision_.predictedTotalLsfgMs);
+                    - timing.predictedTotalLsfgMs);
                 ++metrics.windowDeadlinePredictionSamples;
             }
             this->deadlineAdmissionPredictor_.observe(
@@ -1151,11 +1212,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 pressure.valid ? pressure.slowFrameRatio : 0.0;
         }
 
-        const double budgetMs = adaptiveFlowFrameBudgetMs(
-            conf, sourceInterval, generatedFrameCount);
         const bool schedulerTransition =
             conf.adaptiveFramegen && adaptiveLsfgTransition(adaptiveTelemetry);
-        const bool budgetValid = budgetMs > 0.0 && std::isfinite(budgetMs);
         constexpr double kAdaptiveFlowCadenceDiscontinuityMs = 250.0;
         const double sourceIntervalMs =
             std::chrono::duration<double, std::milli>(sourceInterval).count();
@@ -1204,16 +1262,26 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             ? timing.totalLsfgMs : this->adaptiveFlowRetainedTotalLsfgMs_;
         const size_t observationGenerationCount = generatedWorkSample
             ? timing.generationCount : this->adaptiveFlowRetainedGenerationCount_;
+        const double observationBudgetMs = generatedWorkSample
+            && timing.frameBudgetMs > 0.0
+            && std::isfinite(timing.frameBudgetMs)
+            ? timing.frameBudgetMs
+            : (this->adaptiveFlowRetainedBudgetMs_ > 0.0
+                && std::isfinite(this->adaptiveFlowRetainedBudgetMs_)
+                ? this->adaptiveFlowRetainedBudgetMs_
+                : adaptiveFlowBatchBudgetMs);
+        const bool observationBudgetValid =
+            observationBudgetMs > 0.0 && std::isfinite(observationBudgetMs);
 
         AdaptiveFlowObservation observation{
             .elapsed = sourceInterval,
-            .frameBudgetMs = budgetMs,
+            .frameBudgetMs = observationBudgetMs,
             .totalLsfgMs = observationTotalMs,
             .flowMs = observationFlowMs,
             .mipmapsMs = observationMipmapsMs,
             .generationCount = observationGenerationCount,
-            .deadlineMissed = generatedWorkSample && budgetValid
-                && timing.totalLsfgMs > budgetMs,
+            .deadlineMissed = generatedWorkSample && observationBudgetValid
+                && timing.totalLsfgMs > observationBudgetMs,
             .computeDeadlinePressure = computeDropPressure,
             .wsiPresentationPressure = wsiPresentationPressure,
             .wsiLossRate = presentationCapacity.wsiRejectionRatio,
@@ -1231,7 +1299,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .syntheticDropPressure = false,
             .generatedWorkSample = generatedWorkSample,
             .schedulerTransition = schedulerTransition,
-            .valid = budgetValid
+            .valid = observationBudgetValid
                 && !cadenceDiscontinuity
                 && sourceInterval.count() > 0
                 && retainedTimingUsable,
@@ -1323,7 +1391,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             retainedTimingUsable ? observationFlowMs : 0.0;
         this->adaptiveFlowTotalLsfgMs_ =
             retainedTimingUsable ? observationTotalMs : 0.0;
-        this->adaptiveFlowBudgetMs_ = budgetMs;
+        this->adaptiveFlowBudgetMs_ = observationBudgetMs;
         this->adaptiveFlowGenerationCount_ =
             retainedTimingUsable ? observationGenerationCount : 0;
         this->adaptiveFlowReason_ = flowTelemetry.reason;
@@ -2067,6 +2135,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     if (historyOnly) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
+        const auto adaptiveFlowBatch = nextAdaptiveFlowBatch();
         // Zero-generation cadence still refreshes mipmaps/alpha history, but it
         // must not stall the real source. On the normal SYNC_FD path framegen
         // exports one batch-complete dependency after preprocessing and AHB
@@ -2080,10 +2149,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             historySync = conf.performance
                 ? LSFG_3_1P::presentContextWithCountExportSyncFd(
                     *this->lsfgCtxId, framegenInputSemaphoreFd, 0,
-                    this->asyncAhbHandoffHandleType_)
+                    this->asyncAhbHandoffHandleType_, 0, adaptiveFlowBatch)
                 : LSFG_3_1::presentContextWithCountExportSyncFd(
                     *this->lsfgCtxId, framegenInputSemaphoreFd, 0,
-                    this->asyncAhbHandoffHandleType_);
+                    this->asyncAhbHandoffHandleType_, 0, adaptiveFlowBatch);
 
             for (const int fd : historySync.outputReadyFds)
                 if (fd >= 0) ::close(fd);
@@ -2125,7 +2194,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     noOutSems, 0,
                     useAsyncHandoff
                         ? this->asyncAhbHandoffHandleType_
-                        : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+                        : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+                    0, adaptiveFlowBatch);
             else
                 LSFG_3_1::presentContextWithCount(
                     *this->lsfgCtxId,
@@ -2133,7 +2203,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     noOutSems, 0,
                     useAsyncHandoff
                         ? this->asyncAhbHandoffHandleType_
-                        : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+                        : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+                    0, adaptiveFlowBatch);
         }
 
         if (historyRequiresHostCompletionWait) {
@@ -2226,6 +2297,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
 
     this->lastDispatchedGeneratedFrameCount_ = generatedFrameCount;
+    const auto adaptiveFlowBatch = nextAdaptiveFlowBatch();
 
     // 2. Tell framegen to generate intermediary frames. The normal Android
     //    path exports output-ready and batch-complete SYNC_FDs after submission,
@@ -2248,21 +2320,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             ? LSFG_3_1P::presentContextWithCountExportSyncFd(
                 *this->lsfgCtxId, framegenInputSemaphoreFd,
                 generatedFrameCount, this->asyncAhbHandoffHandleType_,
-                interpolationGenerationCount)
+                interpolationGenerationCount, adaptiveFlowBatch)
             : LSFG_3_1::presentContextWithCountExportSyncFd(
                 *this->lsfgCtxId, framegenInputSemaphoreFd,
                 generatedFrameCount, this->asyncAhbHandoffHandleType_,
-                interpolationGenerationCount);
+                interpolationGenerationCount, adaptiveFlowBatch);
     } else if (conf.performance) {
         LSFG_3_1P::presentContextWithCount(
             *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems,
             generatedFrameCount, this->asyncAhbHandoffHandleType_,
-                interpolationGenerationCount);
+                interpolationGenerationCount, adaptiveFlowBatch);
     } else {
         LSFG_3_1::presentContextWithCount(
             *this->lsfgCtxId, framegenInputSemaphoreFd, noOutSems,
             generatedFrameCount, this->asyncAhbHandoffHandleType_,
-                interpolationGenerationCount);
+                interpolationGenerationCount, adaptiveFlowBatch);
     }
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
@@ -2654,9 +2726,40 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 }
 
 #ifdef __ANDROID__
+void LsContext::advanceAdaptiveFlowTimingEpoch() {
+    ++this->adaptiveFlowTimingEpoch_;
+    if (this->adaptiveFlowTimingEpoch_ == 0)
+        this->adaptiveFlowTimingEpoch_ = 1;
+    this->adaptiveFlowNextBatchId_ = 0;
+    this->adaptiveFlowLastObservedBatchId_ = 0;
+    this->adaptiveFlowGeneratedTimingValid_ = false;
+    this->adaptiveFlowRetainedMipmapsMs_ = 0.0;
+    this->adaptiveFlowRetainedWorkMs_ = 0.0;
+    this->adaptiveFlowRetainedTotalLsfgMs_ = 0.0;
+    this->adaptiveFlowRetainedBudgetMs_ = 0.0;
+    this->adaptiveFlowRetainedGenerationCount_ = 0;
+    this->adaptiveFlowTimingValid_ = false;
+    this->adaptiveFlowMipmapsMs_ = 0.0;
+    this->adaptiveFlowWorkMs_ = 0.0;
+    this->adaptiveFlowTotalLsfgMs_ = 0.0;
+    this->adaptiveFlowBudgetMs_ = 0.0;
+    this->adaptiveFlowGenerationCount_ = 0;
+}
+
 void LsContext::enterSourceOnlyBypass() {
+    this->advanceAdaptiveFlowTimingEpoch();
+    this->adaptiveScheduler_.reset();
+    this->deadlineAdmissionPredictor_.reset();
+    this->adaptiveFlowController_.reset();
     this->sourceTimeline_.reset();
     this->currentSourceTimeline_ = {};
+    this->deadlineBatchDecision_ = {};
+    this->adaptiveFlowNextPressureRead_ = {};
+    this->adaptiveFlowGlobalPressureValid_ = false;
+    this->adaptiveFlowGlobalGpuUsagePercent_ = 0.0;
+    this->adaptiveFlowGlobalOutputFps_ = 0.0;
+    this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
+    this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
     this->lastGeneratedFrameCount_ = 0;
     this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ = true;
@@ -2671,5 +2774,15 @@ void LsContext::enterSourceOnlyBypass() {
         this->runtimeMetrics.totalGeneratedWsiDrops;
     this->adaptiveFlowComputePressure_ = false;
     this->adaptiveFlowWsiPressure_ = false;
+    this->adaptiveFlowRequestedScale_ =
+        this->adaptiveFlowController_.currentScale();
+    this->adaptiveFlowActiveScale_ =
+        this->adaptiveFlowController_.currentScale();
+    this->adaptiveFlowWarmupRemaining_ = 0;
+    this->adaptiveFlowTransitionPending_ = false;
+    this->adaptiveFlowReason_ = adaptiveFlowController_.telemetry().reason;
+    this->runtimeMetrics.hasLastSourcePresent = false;
+    this->runtimeMetrics.lastSourcePresent = {};
+    this->adaptivePresentPeriodNs_ = 0;
 }
 #endif

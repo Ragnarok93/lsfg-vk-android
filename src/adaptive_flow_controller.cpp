@@ -92,6 +92,14 @@ void AdaptiveFlowController::reset() {
 float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation) {
     telemetry_.changed = false;
     telemetry_.estimatedNextTotalMs = 0.0;
+    telemetry_.pressureRatio = 0.0;
+    telemetry_.flowBudgetRatio = 0.0;
+    telemetry_.globalGpuUsagePercent = 0.0;
+    telemetry_.globalPressure = false;
+    telemetry_.computePressure = false;
+    telemetry_.wsiPressure = false;
+    telemetry_.outputDeficit = false;
+    telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
 
     if (!enabled_) {
         telemetry_.reason = AdaptiveFlowDecisionReason::Disabled;
@@ -115,6 +123,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         if (downstepEvaluationActive_)
             downstepEvaluationStartedSeconds_ += evidenceSeconds;
         resetEvidence();
+        telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
         telemetry_.reason = AdaptiveFlowDecisionReason::InvalidTelemetry;
         return telemetry_.currentScale;
     }

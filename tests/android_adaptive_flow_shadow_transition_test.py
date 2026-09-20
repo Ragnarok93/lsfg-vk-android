@@ -121,6 +121,12 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             record_start = source.index("void Context::recordAdaptiveFlowGpuTiming")
             record_end = source.index("LSFG::AdaptiveFlowGpuTiming Context::gpuTiming", record_start)
             record = source[record_start:record_end]
+            self.assertIn("renderData.adaptiveFlowBatch.sessionEpoch", record,
+                          context_source.as_posix())
+            self.assertIn("renderData.adaptiveFlowBatch.batchId", record,
+                          context_source.as_posix())
+            self.assertIn("lastAdaptiveFlowGpuTiming_.valid = false", record,
+                          context_source.as_posix())
             self.assertNotIn(
                 "this->adaptiveFlowScales_.empty()",
                 record,

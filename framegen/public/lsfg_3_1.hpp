@@ -114,14 +114,16 @@ namespace LSFG_3_1 {
         const std::vector<int>& outSem, size_t activeGenerationCount,
         VkExternalSemaphoreHandleTypeFlagBits inSemHandleType =
             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
-        size_t interpolationGenerationCount = 0);
+        size_t interpolationGenerationCount = 0,
+        const LSFG::AdaptiveFlowBatchMetadata& adaptiveFlowBatch = {});
 
 #ifdef __ANDROID__
     __attribute__((visibility("default")))
     LSFG::AndroidFrameSyncFds presentContextWithCountExportSyncFd(
         int32_t id, int inSem, size_t activeGenerationCount,
         VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
-        size_t interpolationGenerationCount = 0);
+        size_t interpolationGenerationCount = 0,
+        const LSFG::AdaptiveFlowBatchMetadata& adaptiveFlowBatch = {});
 #endif
 
 #ifdef __ANDROID__

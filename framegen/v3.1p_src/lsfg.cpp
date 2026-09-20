@@ -136,7 +136,8 @@ void LSFG_3_1P::presentContext(int32_t id, int inSem, const std::vector<int>& ou
 void LSFG_3_1P::presentContextWithCount(int32_t id, int inSem,
         const std::vector<int>& outSem, size_t activeGenerationCount,
         VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
-        size_t interpolationGenerationCount) {
+        size_t interpolationGenerationCount,
+        const LSFG::AdaptiveFlowBatchMetadata& adaptiveFlowBatch) {
     const std::scoped_lock lock(runtimeMutex);
     if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
@@ -154,14 +155,15 @@ void LSFG_3_1P::presentContextWithCount(int32_t id, int inSem,
 
     it->second.present(
         *device, inSem, outSem, activeGenerationCount, inSemHandleType,
-        false, interpolationGenerationCount);
+        false, interpolationGenerationCount, adaptiveFlowBatch);
 }
 
 #ifdef __ANDROID__
 LSFG::AndroidFrameSyncFds LSFG_3_1P::presentContextWithCountExportSyncFd(
         int32_t id, int inSem, size_t activeGenerationCount,
         VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
-        size_t interpolationGenerationCount) {
+        size_t interpolationGenerationCount,
+        const LSFG::AdaptiveFlowBatchMetadata& adaptiveFlowBatch) {
     const std::scoped_lock lock(runtimeMutex);
     if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
@@ -180,7 +182,7 @@ LSFG::AndroidFrameSyncFds LSFG_3_1P::presentContextWithCountExportSyncFd(
     const std::vector<int> noImportedOutputs;
     return it->second.present(
         *device, inSem, noImportedOutputs, activeGenerationCount,
-        inSemHandleType, true, interpolationGenerationCount);
+        inSemHandleType, true, interpolationGenerationCount, adaptiveFlowBatch);
 }
 #endif
 

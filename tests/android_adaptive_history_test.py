@@ -202,6 +202,11 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         self.assertIn("sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames", bypass)
         self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
         self.assertIn("previousSourceCopySignalValid_ = false", bypass)
+        self.assertIn("adaptiveScheduler_.reset()", bypass)
+        self.assertIn("deadlineAdmissionPredictor_.reset()", bypass)
+        self.assertIn("adaptiveFlowController_.reset()", bypass)
+        self.assertIn("runtimeMetrics.hasLastSourcePresent = false", bypass)
+        self.assertIn("advanceAdaptiveFlowTimingEpoch()", bypass)
 
 
 if __name__ == "__main__":

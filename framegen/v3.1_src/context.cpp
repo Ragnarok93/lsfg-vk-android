@@ -277,7 +277,8 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         size_t activeGenerationCount,
         VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
         bool exportAndroidSyncFdOutputs,
-        size_t interpolationGenerationCount) {
+        size_t interpolationGenerationCount,
+        const LSFG::AdaptiveFlowBatchMetadata& adaptiveFlowBatch) {
     LSFG::AndroidFrameSyncFds exportedSync{};
 
 #ifdef __ANDROID__
@@ -336,6 +337,7 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
 #ifdef __ANDROID__
     data.adaptiveFlowTransitionCycle =
         !this->adaptiveFlowScales_.empty() && this->pendingFlowGraphIndex_.has_value();
+    data.adaptiveFlowBatch = adaptiveFlowBatch;
 #endif
 
     const bool hasInputSemaphore =
@@ -1017,27 +1019,41 @@ void Context::dispatchAdaptiveFlowPreprocess(
 
 void Context::recordAdaptiveFlowGpuTiming(
         Vulkan& vk, RenderData& renderData) {
-    if (!renderData.adaptiveFlowTimingQueryPool.supported())
+    if (renderData.generationCount == 0)
         return;
+
+    if (!renderData.adaptiveFlowTimingQueryPool.supported()) {
+        this->lastAdaptiveFlowGpuTiming_.valid = false;
+        return;
+    }
 
     const auto durations =
         renderData.adaptiveFlowTimingQueryPool.durationsMs(vk.device);
-    if (durations.size() != 3)
+    if (durations.size() != 3) {
+        this->lastAdaptiveFlowGpuTiming_.valid = false;
         return;
+    }
 
     const double mipmapsMs = durations.at(0);
     const double opticalFlowMs = durations.at(0) + durations.at(1);
     const double totalLsfgMs =
         durations.at(0) + durations.at(1) + durations.at(2);
     if (!std::isfinite(mipmapsMs) || !std::isfinite(opticalFlowMs)
-            || !std::isfinite(totalLsfgMs))
+            || !std::isfinite(totalLsfgMs)) {
+        this->lastAdaptiveFlowGpuTiming_.valid = false;
         return;
+    }
 
     this->lastAdaptiveFlowGpuTiming_ = LSFG::AdaptiveFlowGpuTiming{
         .mipmapsMs = mipmapsMs,
         .opticalFlowMs = opticalFlowMs,
         .totalLsfgMs = totalLsfgMs,
         .generationCount = renderData.generationCount,
+        .sessionEpoch = renderData.adaptiveFlowBatch.sessionEpoch,
+        .batchId = renderData.adaptiveFlowBatch.batchId,
+        .frameBudgetMs = renderData.adaptiveFlowBatch.frameBudgetMs,
+        .predictedTotalLsfgMs =
+            renderData.adaptiveFlowBatch.predictedTotalLsfgMs,
         .transitionActive = renderData.adaptiveFlowTransitionCycle,
         .valid = true,
     };

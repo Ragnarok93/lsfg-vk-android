@@ -308,10 +308,12 @@ double nextHigherDuty(double duty) {
 bool higherCapacityIsProven(
         const GeneratedPresentationCapacityContext& context,
         std::size_t currentCap) {
+    constexpr int64_t kMaximumSourceDeadlineEvidenceNs = 8'000'000;
     return context.deadlineCapacityValid
         && context.safeGenerationHint > currentCap
         && context.schedulerCostLimit > currentCap
         && context.sourceInsideBudget
+        && context.sourceDeadlineErrorNs <= kMaximumSourceDeadlineEvidenceNs
         && context.higherCapacityProven;
 }
 } // namespace

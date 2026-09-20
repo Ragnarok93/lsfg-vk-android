@@ -169,6 +169,9 @@ public:
     LsContext& operator=(LsContext&&) = default;
     ~LsContext() = default;
 private:
+#ifdef __ANDROID__
+    void advanceAdaptiveFlowTimingEpoch();
+#endif
     VkSwapchainKHR swapchain;
     std::vector<VkImage> swapchainImages;
     VkExtent2D extent;
@@ -218,7 +221,11 @@ private:
     double adaptiveFlowRetainedMipmapsMs_{0.0};
     double adaptiveFlowRetainedWorkMs_{0.0};
     double adaptiveFlowRetainedTotalLsfgMs_{0.0};
+    double adaptiveFlowRetainedBudgetMs_{0.0};
     size_t adaptiveFlowRetainedGenerationCount_{0};
+    uint64_t adaptiveFlowTimingEpoch_{1};
+    uint64_t adaptiveFlowNextBatchId_{0};
+    uint64_t adaptiveFlowLastObservedBatchId_{0};
     uint64_t adaptiveFlowLastObservedComputeDrops_{0};
     uint64_t adaptiveFlowLastObservedWsiDrops_{0};
     bool adaptiveFlowComputePressure_{false};

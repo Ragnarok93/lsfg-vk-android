@@ -80,7 +80,8 @@ namespace LSFG_3_1P {
             VkExternalSemaphoreHandleTypeFlagBits inSemHandleType =
                 VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
             bool exportAndroidSyncFdOutputs = false,
-            size_t interpolationGenerationCount = 0);
+            size_t interpolationGenerationCount = 0,
+            const LSFG::AdaptiveFlowBatchMetadata& adaptiveFlowBatch = {});
 
         [[nodiscard]] bool waitForLastPresent(Vulkan& vk, uint64_t timeoutNs);
 
@@ -114,6 +115,7 @@ namespace LSFG_3_1P {
 #ifdef __ANDROID__
             Core::TimestampQueryPool adaptiveFlowTimingQueryPool;
             bool adaptiveFlowTransitionCycle{false};
+            LSFG::AdaptiveFlowBatchMetadata adaptiveFlowBatch{};
 #endif
 
             Core::CommandBuffer cmdBuffer1;

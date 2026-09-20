@@ -28,7 +28,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
 
         self.assertIn("getContextGpuTiming", source)
         self.assertIn("AdaptiveFlowObservation observation", source)
-        self.assertIn("timing.valid && !timing.transitionActive", source)
+        self.assertIn("timingSessionMatches", source)
+        self.assertIn("timingFresh", source)
+        self.assertIn("timing.transitionActive", source)
         self.assertIn("requestContextFlowScale", source)
         self.assertIn("getContextFlowScaleState", source)
         self.assertIn("updateAdaptiveFlowGovernor();", source)
@@ -153,6 +155,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
     def test_budget_tracks_adaptive_target_or_fixed_output_period(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn("1000.0 / static_cast<double>(conf.fpsLimit)", source)
+        self.assertIn("if (conf.adaptiveFramegen)\n        return sourceIntervalMs;", source)
         self.assertIn(
             "sourceIntervalMs / static_cast<double>(generatedFrameCount + 1)",
             source,
@@ -250,6 +253,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "safeGenerationHint",
             "schedulerCostLimit",
             "sourceInsideBudget",
+            "sourceDeadlineErrorNs",
             "higherCapacityProven",
             "ProfitabilityRestoreHigher",
             "TargetDeficitProbeSuccess",
@@ -273,6 +277,21 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "            presentationCapacityContext)",
             source,
         )
+
+    def test_flow_timing_is_batch_matched_and_stale_samples_are_rejected(self) -> None:
+        backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(
+            encoding="utf-8"
+        )
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("AdaptiveFlowBatchMetadata", backend)
+        self.assertIn("sessionEpoch", backend)
+        self.assertIn("batchId", backend)
+        self.assertIn("predictedTotalLsfgMs", backend)
+        self.assertIn("adaptiveFlowTimingEpoch_", context)
+        self.assertIn("timing.batchId > this->adaptiveFlowLastObservedBatchId_", context)
+        self.assertIn("timing.frameBudgetMs", context)
+        self.assertIn("timing.predictedTotalLsfgMs", context)
+        self.assertIn("adaptiveFlowBatchBudgetMs", context)
 
         # Presentation pressure can evaluate delivery capacity, but must not
         # become a source-FPS or long-term Adaptive generation backoff path.

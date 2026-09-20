@@ -28,11 +28,25 @@ struct AdaptiveFlowContextState {
     bool transitionPending{false};
 };
 
+// Metadata attached by the layer to one submitted frame-generation batch.
+// Keeping this next to the GPU result makes asynchronous timing samples
+// attributable without adding a CPU/GPU synchronization point.
+struct AdaptiveFlowBatchMetadata {
+    uint64_t sessionEpoch{0};
+    uint64_t batchId{0};
+    double frameBudgetMs{0.0};
+    double predictedTotalLsfgMs{0.0};
+};
+
 struct AdaptiveFlowGpuTiming {
     double mipmapsMs{0.0};
     double opticalFlowMs{0.0};
     double totalLsfgMs{0.0};
     size_t generationCount{0};
+    uint64_t sessionEpoch{0};
+    uint64_t batchId{0};
+    double frameBudgetMs{0.0};
+    double predictedTotalLsfgMs{0.0};
     bool transitionActive{false};
     bool valid{false};
 };
