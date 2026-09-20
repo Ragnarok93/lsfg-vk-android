@@ -95,6 +95,31 @@ std::size_t adaptiveAdmissionBootstrapGeneratedCount(
     return ordinaryProbe || starvationProbe ? 1U : 0U;
 }
 
+std::size_t adaptiveDeficitCompensatedGeneratedCount(
+        std::size_t plannedGeneratedFrames,
+        std::size_t maxGeneratedFrames,
+        bool outputDeficit,
+        bool deadlineCapacityValid,
+        std::size_t safeGenerationHint,
+        std::size_t provenCostLimit,
+        double sourceCadenceRatio,
+        double sourceBudgetMinRatio) {
+    if (!outputDeficit
+            || plannedGeneratedFrames >= maxGeneratedFrames
+            || !deadlineCapacityValid
+            || sourceCadenceRatio + 1e-6 < sourceBudgetMinRatio) {
+        return plannedGeneratedFrames;
+    }
+
+    const std::size_t nextCount = plannedGeneratedFrames + 1;
+    if (safeGenerationHint < nextCount
+            || provenCostLimit < nextCount) {
+        return plannedGeneratedFrames;
+    }
+
+    return std::min(nextCount, maxGeneratedFrames);
+}
+
 const char* adaptiveCostBackoffReasonName(AdaptiveCostBackoffReason reason) {
     switch (reason) {
         case AdaptiveCostBackoffReason::RaiseCausalSourceDrop:
