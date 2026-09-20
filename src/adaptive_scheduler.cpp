@@ -16,6 +16,11 @@ constexpr double kRaiseBackoffEvidenceSeconds = 0.12;
 constexpr double kRaiseBackoffEvidenceDecay = 1.5;
 constexpr double kRaiseBackoffEvidenceStepMaxSeconds = 0.10;
 constexpr double kCapacityCadenceDeviationRatio = 0.20;
+constexpr double kEstablishedBaselineMinSeconds = 0.35;
+constexpr double kEstablishedBaselineMaxCoverageSeconds = 2.0;
+constexpr double kBackoffRebaselineSeconds = 0.45;
+constexpr double kBackoffRetrySourceRatio = 0.95;
+constexpr double kCapacitySupportedSourceDropRatio = 0.82;
 // Treat a single interval as a suspend/stall discontinuity only when it is an
 // extreme outlier relative to an already-established source cadence. An
 // absolute FPS threshold would incorrectly disable generation for legitimately
@@ -45,6 +50,30 @@ constexpr double kSourcePreservationGainRatio = 1.08;
 constexpr double kSourcePreservationKeepOutputRatio = 0.95;
 constexpr double kSourcePreservationRetryHoldSeconds = 5.0;
 } // namespace
+
+const char* adaptiveCostBackoffReasonName(AdaptiveCostBackoffReason reason) {
+    switch (reason) {
+        case AdaptiveCostBackoffReason::RaiseCausalSourceDrop:
+            return "raise_causal_source_drop";
+        case AdaptiveCostBackoffReason::SourcePreservationProbe:
+            return "source_preservation_probe";
+        case AdaptiveCostBackoffReason::None:
+        default:
+            return "none";
+    }
+}
+
+const char* adaptiveWarmStartReasonName(AdaptiveWarmStartReason reason) {
+    switch (reason) {
+        case AdaptiveWarmStartReason::Config:
+            return "config";
+        case AdaptiveWarmStartReason::Discontinuity:
+            return "discontinuity";
+        case AdaptiveWarmStartReason::None:
+        default:
+            return "none";
+    }
+}
 
 SourceTimelineSample SourceProtectedTimeline::observe(
         uint64_t sourceArrivalTimeNs,
@@ -386,7 +415,8 @@ void GeneratedPresentationCapacityTracker::observe(
         if (telemetry_.generationCap > 1) {
             --telemetry_.generationCap;
             telemetry_.lowered = true;
-            rejectionEvidence_ = 0;
+            rejectionEvidence_ =
+                kWsiEvidenceThreshold - kWsiEvidenceIncrement;
             singleFramePhase_ = 0.0;
         } else if (telemetry_.generationCap == 1
                 && telemetry_.singleFrameDuty
@@ -418,6 +448,7 @@ void GeneratedPresentationCapacityTracker::observe(
         }
     }
 
+    telemetry_.rejectionEvidence = rejectionEvidence_;
     telemetry_.pressure =
         rejected > 0
         || telemetry_.wsiRejectionRatio >= 0.10
@@ -561,7 +592,7 @@ void AdaptiveFrameScheduler::configure(
     const bool wasActive = targetFps_ != 0 && maxGeneratedFrames_ != 0;
     targetFps_ = targetFps;
     maxGeneratedFrames_ = maxGeneratedFrames;
-    resetRuntimeState();
+    resetRuntimeState(true);
 
     // A Quick Menu target/multiplier change is an explicit user request, not a
     // scene-rate inference. If this scheduler was already running, remember
@@ -591,8 +622,19 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.discontinuityReset = false;
     telemetry_.configWarmStart = false;
     telemetry_.capacityPromoted = false;
+    telemetry_.warmStartReason = AdaptiveWarmStartReason::None;
+    telemetry_.costBackoffReason = lastBackoffReason_;
     telemetry_.safeGenerationHintValid = safeGenerationHintValid_;
     telemetry_.safeGenerationHint = safeGenerationHint_;
+    telemetry_.provenCostLimit = provenCostLimit_;
+    telemetry_.raiseBaselineSourceFps = pendingRaiseBaselineFps_;
+    telemetry_.raiseDropEvidenceSeconds =
+        pendingRaiseSourceDropEvidenceSeconds_;
+    telemetry_.stableCadenceSeconds = stableCadenceSeconds_;
+    telemetry_.recoveryBaselineSourceFps = backoffRecoveryBaselineFps_;
+    telemetry_.recoveryThresholdSourceFps =
+        backoffRecoveryBaselineFps_ * kBackoffRetrySourceRatio;
+    telemetry_.sourcePreservationActive = sourcePreservationProbeActive_;
     telemetry_.generatedFrames = 0;
     telemetry_.wantedGeneratedFrames = 0.0;
     telemetry_.fractionalPhase = fractionalOpportunityPhase_;
@@ -615,11 +657,15 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     if (lastTrustedSourceIntervalSeconds_ > 0.0
             && intervalSeconds
                 > lastTrustedSourceIntervalSeconds_ * kDiscontinuityRatio) {
-        const bool preserveWarmStart = reconfigureWarmStartPending_;
-        resetRuntimeState();
+        const bool preserveConfigWarmStart = reconfigureWarmStartPending_;
+        const bool preserveProvenWarmStart =
+            !preserveConfigWarmStart && provenCostLimit_ > 1;
+        resetRuntimeState(true);
         lastTrustedSourceIntervalSeconds_ = 0.0;
-        reconfigureWarmStartPending_ = preserveWarmStart;
+        reconfigureWarmStartPending_ = preserveConfigWarmStart;
+        discontinuityWarmStartPending_ = preserveProvenWarmStart;
         telemetry_.discontinuityReset = true;
+        telemetry_.provenCostLimit = provenCostLimit_;
         return 0;
     }
 
@@ -637,23 +683,26 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         static_cast<double>(maxGeneratedFrames_));
     telemetry_.wantedGeneratedFrames = wantedGenerated;
 
+    const auto requiredCost = static_cast<std::size_t>(std::clamp(
+        std::ceil(wantedGenerated - 1e-6),
+        1.0,
+        static_cast<double>(maxGeneratedFrames_)));
+    const bool establishedBaselineReady =
+        establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds
+        && establishedSourceFps_ > 0.0;
+
     if (reconfigureWarmStartPending_) {
-        // The first trustworthy post-resume interval is the earliest point at
-        // which the new target can be translated into an actual interpolation
-        // cost. Seed to that bounded requirement instead of spending 0.6 s per
-        // level re-climbing from cost 1. Treat the seed like a normal confirmed
-        // raise so the existing blame window immediately backs off if the extra
-        // work materially reduces source FPS.
-        const auto requiredCost = static_cast<std::size_t>(std::clamp(
-            std::ceil(wantedGenerated - 1e-6),
-            1.0,
-            static_cast<double>(maxGeneratedFrames_)));
-        costLimit_ = std::max(costLimit_, requiredCost);
-        if (costLimit_ > 1) {
+        const std::size_t provenSeed = std::min(
+            { provenCostLimit_, requiredCost, maxGeneratedFrames_ });
+        const std::size_t requestedSeed = establishedBaselineReady
+            ? requiredCost
+            : std::max<std::size_t>(1, provenSeed);
+        costLimit_ = std::max(costLimit_, requestedSeed);
+        if (costLimit_ > provenCostLimit_ && establishedBaselineReady) {
             pendingCostRaise_ = true;
             pendingRaiseWasProbe_ = false;
             probeAfterBackoff_ = false;
-            pendingRaiseBaselineFps_ = telemetry_.smoothedSourceFps;
+            pendingRaiseBaselineFps_ = establishedSourceFps_;
             pendingRaiseTimeSeconds_ = observedTimeSeconds_;
             pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
             pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
@@ -662,10 +711,28 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         resetUnmetDemand();
         reconfigureWarmStartPending_ = false;
         telemetry_.configWarmStart = true;
+        telemetry_.warmStartReason = AdaptiveWarmStartReason::Config;
+    } else if (discontinuityWarmStartPending_) {
+        const std::size_t resumeCost = std::min(
+            { provenCostLimit_, requiredCost, maxGeneratedFrames_ });
+        costLimit_ = std::max<std::size_t>(1, resumeCost);
+        discontinuityWarmStartPending_ = false;
+        resetUnmetDemand();
+        telemetry_.warmStartReason = AdaptiveWarmStartReason::Discontinuity;
     }
 
     updateCostLimit(wantedGenerated);
     telemetry_.costLimit = costLimit_;
+    telemetry_.provenCostLimit = provenCostLimit_;
+    telemetry_.costBackoffReason = lastBackoffReason_;
+    telemetry_.raiseBaselineSourceFps = pendingRaiseBaselineFps_;
+    telemetry_.raiseDropEvidenceSeconds =
+        pendingRaiseSourceDropEvidenceSeconds_;
+    telemetry_.stableCadenceSeconds = stableCadenceSeconds_;
+    telemetry_.recoveryBaselineSourceFps = backoffRecoveryBaselineFps_;
+    telemetry_.recoveryThresholdSourceFps =
+        backoffRecoveryBaselineFps_ * kBackoffRetrySourceRatio;
+    telemetry_.sourcePreservationActive = sourcePreservationProbeActive_;
 
     // Drive synthetic opportunities from elapsed source time rather than
     // repeatedly fractionalizing the smoothed source-rate estimate. Every real
@@ -780,10 +847,44 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
             recentMax - recentMin
                 <= robustInterval * kCapacityCadenceDeviationRatio;
     }
-    if (cadenceStableThisSample)
+    if (cadenceStableThisSample) {
         ++stableCadenceSamples_;
-    else
+        stableCadenceSeconds_ += std::min(intervalSeconds, 0.10);
+    } else {
         stableCadenceSamples_ = 0;
+        stableCadenceSeconds_ = 0.0;
+    }
+
+    const double robustSourceFps = robustInterval > 0.0
+        ? 1.0 / robustInterval
+        : 0.0;
+    telemetry_.robustSourceFps = robustSourceFps;
+
+    const bool baselineMeasurementClean =
+        cadenceStableThisSample
+        && robustSourceFps > 0.0
+        && !pendingCostRaise_
+        && !sourcePreservationProbeActive_;
+    if (baselineMeasurementClean) {
+        const double evidenceSeconds = std::min(intervalSeconds, 0.10);
+        if (!(establishedSourceFps_ > 0.0)) {
+            establishedSourceFps_ = robustSourceFps;
+            establishedSourceCoverageSeconds_ = evidenceSeconds;
+        } else {
+            const bool materialDrop =
+                robustSourceFps < establishedSourceFps_ * kSourceDropRatio;
+            if (costLimit_ <= 1 || !materialDrop) {
+                const double alpha = robustSourceFps >= establishedSourceFps_
+                    ? 0.15
+                    : (costLimit_ <= 1 ? 0.08 : 0.03);
+                establishedSourceFps_ +=
+                    alpha * (robustSourceFps - establishedSourceFps_);
+                establishedSourceCoverageSeconds_ = std::min(
+                    kEstablishedBaselineMaxCoverageSeconds,
+                    establishedSourceCoverageSeconds_ + evidenceSeconds);
+            }
+        }
+    }
 
     if (!hasSmoothedInterval_) {
         smoothedSourceIntervalSeconds_ = robustInterval;
