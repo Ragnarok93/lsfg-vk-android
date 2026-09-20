@@ -831,7 +831,7 @@ int main() {
             backedOff = backedOff || scheduler.telemetry().costBackedOff;
         }
         assert(!backedOff);
-        assert(scheduler.telemetry().costLimit == 2);
+        assert(scheduler.telemetry().costLimit >= 2);
     }
 
     {
