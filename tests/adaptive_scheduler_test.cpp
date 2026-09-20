@@ -1371,6 +1371,101 @@ int main() {
     }
 
     {
+        // Deficit compensation is opportunistic, not scheduler debt. One extra
+        // replacement opportunity is allowed only when delivered output is
+        // below target and both source/capacity evidence say it is safe.
+        assert(adaptiveDeficitCompensatedGeneratedCount(
+            2, 3, true, true, 3, 3, 1.0, 0.8) == 3);
+        assert(adaptiveDeficitCompensatedGeneratedCount(
+            2, 3, false, true, 3, 3, 1.0, 0.8) == 2);
+        assert(adaptiveDeficitCompensatedGeneratedCount(
+            2, 3, true, true, 2, 3, 1.0, 0.8) == 2);
+        assert(adaptiveDeficitCompensatedGeneratedCount(
+            2, 3, true, true, 3, 3, 0.79, 0.8) == 2);
+        assert(adaptiveDeficitCompensatedGeneratedCount(
+            3, 3, true, true, 3, 3, 1.0, 0.8) == 3);
+    }
+
+    {
+        // Exact pre-device comparison: if a stable source can reach the target
+        // with fixed 2x, Adaptive targeting that same output must bootstrap one
+        // generated frame per source cycle even before predictor history exists.
+        std::size_t deliveredGenerated = 0;
+        unsigned starved = 0;
+        for (int frame = 0; frame < 60; ++frame) {
+            const auto planned = adaptiveDeficitCompensatedGeneratedCount(
+                1, 3, true, false, 0, 1, 1.0, 0.9);
+            const auto admitted = adaptiveAdmissionBootstrapGeneratedCount(
+                planned, false, 8.0, 16.666667, starved);
+            deliveredGenerated += admitted;
+            if (admitted == 0)
+                ++starved;
+            else
+                starved = 0;
+        }
+        const std::size_t deliveredOutputFrames = 60 + deliveredGenerated;
+        assert(deliveredOutputFrames >= 118);
+    }
+
+    {
+        // Source~30 / target90 under intermittent WSI: proven 4x capacity may
+        // supply one replacement opportunity while target delivery is short.
+        // Accepted throughput, not raw reject count, is the success criterion.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        GeneratedPresentationCapacityContext context{
+            .outputDeficit = true,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .provenCostLimit = 3,
+            .sourceCadenceRatio = 1.0,
+            .sourceBudgetMinRatio = 0.8,
+        };
+        std::size_t acceptedGenerated = 0;
+        for (int sourceFrame = 0; sourceFrame < 30; ++sourceFrame) {
+            const auto requested = adaptiveDeficitCompensatedGeneratedCount(
+                2, 3, true, true, 3, 3, 1.0, 0.8);
+            const auto attempted = capacity.limit(requested, context);
+            const std::size_t rejected =
+                attempted >= 3 && sourceFrame % 4 == 0 ? 1U : 0U;
+            const std::size_t accepted = attempted - rejected;
+            acceptedGenerated += accepted;
+            capacity.observe(attempted, accepted, rejected, context);
+        }
+        assert(30 + acceptedGenerated >= 87); // >=96% of target90.
+    }
+
+    {
+        // Source~30 / target120 at the 4x ceiling cannot replace beyond three
+        // generated frames, but intermittent minority WSI loss must not cause a
+        // persistent 3 -> 2 -> 1 collapse. Delivered throughput must remain
+        // materially closer to target than a permanent lower cap.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        GeneratedPresentationCapacityContext context{
+            .outputDeficit = true,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .provenCostLimit = 3,
+            .sourceCadenceRatio = 1.0,
+            .sourceBudgetMinRatio = 0.8,
+        };
+        std::size_t acceptedGenerated = 0;
+        for (int sourceFrame = 0; sourceFrame < 30; ++sourceFrame) {
+            const auto attempted = capacity.limit(3, context);
+            const std::size_t rejected =
+                attempted == 3 && sourceFrame % 5 == 0 ? 1U : 0U;
+            const std::size_t accepted = attempted - rejected;
+            acceptedGenerated += accepted;
+            capacity.observe(attempted, accepted, rejected, context);
+        }
+        assert(30 + acceptedGenerated >= 108); // >=90% of target120.
+        assert(capacity.telemetry().generationCap >= 2);
+    }
+
+    {
         // WSI capacity is independent of scheduler cost. Sustained rejection
         // lowers one presentation level; recovery requires a much longer clean
         // run and never blocks or pre-acquires a swapchain image.
