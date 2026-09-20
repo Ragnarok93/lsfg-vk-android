@@ -395,9 +395,10 @@ int main() {
     }
 
     {
-        // The warm start must remain fail-safe: if the newly seeded load causes
-        // a prompt source-rate regression, the existing blame window must back
-        // it off rather than pinning the user-selected target at an unsafe cost.
+        // An explicit target change is authoritative. Warm-start the density
+        // required by the new target and do not undo it because the source
+        // cadence subsequently falls; downstream admission remains responsible
+        // for suppressing work that cannot actually be delivered.
         AdaptiveFrameScheduler scheduler(45, 3);
         for (int frame = 0; frame < 12; ++frame)
             scheduler.plan(40ms);
@@ -406,13 +407,11 @@ int main() {
         scheduler.plan(40ms);
         assert(scheduler.telemetry().configWarmStart);
         assert(scheduler.telemetry().costLimit == 3);
-        bool backedOff = false;
-        for (int frame = 0; frame < 6 && !backedOff; ++frame) {
+        for (int frame = 0; frame < 12; ++frame) {
             scheduler.plan(80ms);
-            backedOff = scheduler.telemetry().costBackedOff;
+            assert(!scheduler.telemetry().costBackedOff);
         }
-        assert(backedOff);
-        assert(scheduler.telemetry().costLimit == 2);
+        assert(scheduler.telemetry().costLimit == 3);
     }
 
     {
