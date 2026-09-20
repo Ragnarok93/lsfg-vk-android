@@ -342,6 +342,26 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("adaptiveFlowRuntimeSnapshot()", hooks)
 
 
+    def test_adaptive_scheduler_causal_diagnostics_are_exported(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        for field in (
+            "adaptive_backoff_reason=",
+            "adaptive_warm_start_reason=",
+            "adaptive_robust_source_fps=",
+            "adaptive_raise_baseline_fps=",
+            "adaptive_drop_evidence_s=",
+            "adaptive_stable_cadence_s=",
+            "adaptive_recovery_baseline_fps=",
+            "adaptive_recovery_threshold_fps=",
+            "adaptive_source_preservation_active=",
+            "adaptive_proven_cost_limit=",
+            "presentation_evidence=",
+        ):
+            self.assertIn(field, source)
+
+        self.assertIn("adaptiveCostBackoffReasonName", source)
+        self.assertIn("adaptiveWarmStartReasonName", source)
+
     def test_adaptive_framegen_preserves_configured_present_mode(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
