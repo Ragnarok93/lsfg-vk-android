@@ -3,7 +3,7 @@ name: Adaptive Flow controller validation
 on:
   push:
     branches:
-      - "feature/adaptive-flow-scale-*"
+      - "feature/adaptive-flow-*"
   workflow_dispatch:
 
 concurrency:
