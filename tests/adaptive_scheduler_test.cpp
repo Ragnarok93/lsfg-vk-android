@@ -549,18 +549,19 @@ int main() {
         // fractional lattice, but unchanged source cadence plus a safe hint of
         // three must not collapse the generation ceiling from 3 to 1/2.
         AdaptiveFrameScheduler scheduler(90, 3);
-        for (int frame = 0; frame < 70; ++frame) {
+        for (int frame = 0; frame < 120; ++frame) {
             scheduler.setSafeGenerationHint(3, true);
-            scheduler.plan(33ms);
+            scheduler.plan(34ms);
         }
         assert(scheduler.telemetry().costLimit == 3);
+        assert(scheduler.telemetry().provenCostLimit == 3);
 
         scheduler.configure(95, 3);
         assert(scheduler.plan(1s) == 0);
         bool backedOff = false;
         for (int frame = 0; frame < 45; ++frame) {
             scheduler.setSafeGenerationHint(3, true);
-            scheduler.plan(33ms);
+            scheduler.plan(34ms);
             backedOff = backedOff || scheduler.telemetry().costBackedOff;
         }
         assert(!backedOff);
