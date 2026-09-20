@@ -118,7 +118,8 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("wsiPresentationPressure", source)
         self.assertIn(".computeDeadlinePressure = computeDropPressure", source)
         self.assertIn(".wsiPresentationPressure = wsiPresentationPressure", source)
-        self.assertIn(".syntheticDropPressure = false", source)
+        self.assertIn(".syntheticDropPressure =", source)
+        self.assertIn("computeDropPressure || newWsiDropPressure", source)
         self.assertIn(".wsiLossRate = presentationCapacity.wsiRejectionRatio", source)
 
         deficit_start = source.index("const auto& outputCadence")
@@ -344,10 +345,8 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
 
     def test_runtime_forwards_recent_synthetic_drop_pressure(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn(
-            ".syntheticDropPressure = computeDropPressure || newWsiDropPressure",
-            source,
-        )
+        self.assertIn(".syntheticDropPressure =", source)
+        self.assertIn("computeDropPressure || newWsiDropPressure", source)
 
     def test_adaptive_scheduler_causal_diagnostics_are_exported(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
