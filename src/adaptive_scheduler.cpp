@@ -635,15 +635,17 @@ void GeneratedPresentationCapacityTracker::observe(
                     >= provisionalBaselineAccepted_
                         * kWsiThroughputPreserveRatio;
 
-            if (!sourceImproved
-                    && context.outputDeficit
-                    && (!efficiencyImproved || !throughputPreserved)) {
+            const bool lowerCapUnprofitable =
+                !sourceImproved
+                && (!throughputPreserved
+                    || (context.outputDeficit && !efficiencyImproved));
+            if (lowerCapUnprofitable) {
                 telemetry_.generationCap = std::min(
                     provisionalPreviousCap_, maxGeneratedFrames_);
                 telemetry_.raised = true;
                 telemetry_.lastChangeReason =
                     GeneratedPresentationCapChangeReason::ProfitabilityRestoreHigher;
-                telemetry_.lastChangeOutputDeficit = true;
+                telemetry_.lastChangeOutputDeficit = context.outputDeficit;
                 recoveryEvidence_ = 0.0;
             } else {
                 telemetry_.lastChangeReason =
