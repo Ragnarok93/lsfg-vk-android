@@ -1290,10 +1290,14 @@ int main() {
                 context);
         }
 
-        // Force enough pressure to make the provisional lower-cap experiment.
-        for (int i = 0; i < 12 && capacity.telemetry().generationCap == 3; ++i) {
+        // Force enough intermittent pressure to make the provisional
+        // lower-cap experiment while the higher density still delivers more
+        // than two generated frames per batch on average.
+        for (int i = 0; i < 18 && capacity.telemetry().generationCap == 3; ++i) {
             const auto attempted = capacity.limit(3, context);
-            const std::size_t accepted = std::min<std::size_t>(2, attempted);
+            const std::size_t accepted = std::min<std::size_t>(
+                (i % 3 == 2) ? 3 : 2,
+                attempted);
             capacity.observe(
                 attempted,
                 accepted,
