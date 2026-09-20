@@ -162,10 +162,11 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             ),
             3,
         )
-        self.assertGreaterEqual(
-            source.count("deadlineAdmissionPredictor_.reset()"),
-            2,
-        )
+        # Ordinary source-cadence discontinuities rebuild interpolation
+        # history but preserve learned GPU admission / WSI capacity. A true
+        # context recreation constructs fresh tracker objects instead.
+        self.assertNotIn("deadlineAdmissionPredictor_.reset()", source)
+        self.assertNotIn("generatedPresentationCapacityTracker_.reset()", source)
 
     def test_zero_generation_history_uses_async_dependency_chain(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
