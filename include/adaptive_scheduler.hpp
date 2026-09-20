@@ -47,6 +47,9 @@ struct AdaptiveSchedulerTelemetry {
     double stableCadenceSeconds{};
     double recoveryBaselineSourceFps{};
     double recoveryThresholdSourceFps{};
+    double establishedSourceFps{};
+    double sourceCadenceRatio{1.0};
+    double sourceBudgetMinRatio{1.0};
     bool sourcePreservationActive{false};
     double fractionalPhase{};
     double opportunityIntervalSeconds{};

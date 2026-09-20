@@ -1357,6 +1357,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " stable_cadence_s=" << adaptiveTelemetry.stableCadenceSeconds
                       << " recovery_baseline_fps=" << adaptiveTelemetry.recoveryBaselineSourceFps
                       << " recovery_threshold_fps=" << adaptiveTelemetry.recoveryThresholdSourceFps
+                      << " established_source_fps=" << adaptiveTelemetry.establishedSourceFps
+                      << " source_cadence_ratio=" << adaptiveTelemetry.sourceCadenceRatio
+                      << " source_budget_min_ratio=" << adaptiveTelemetry.sourceBudgetMinRatio
                       << " source_preservation_active="
                       << (adaptiveTelemetry.sourcePreservationActive ? 1 : 0)
                       << " cost_backoff=" << (adaptiveTelemetry.costBackedOff ? 1 : 0)
@@ -1374,7 +1377,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "backoff_reason=%s warm_start_reason=%s robust_source_fps=%.3f "
                 "raise_baseline_fps=%.3f drop_evidence_s=%.3f stable_cadence_s=%.3f "
                 "recovery_baseline_fps=%.3f recovery_threshold_fps=%.3f "
-                "source_preservation_active=%d cost_backoff=%d cost_probe=%d discontinuity=%d",
+                "established_source_fps=%.3f source_cadence_ratio=%.3f "
+                "source_budget_min_ratio=%.3f source_preservation_active=%d "
+                "cost_backoff=%d cost_probe=%d discontinuity=%d",
                 static_cast<unsigned long long>(this->runtimeSessionId_),
                 static_cast<unsigned long long>(this->configRevision_),
                 adaptiveTelemetry.sourceFps,
@@ -1395,6 +1400,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 adaptiveTelemetry.stableCadenceSeconds,
                 adaptiveTelemetry.recoveryBaselineSourceFps,
                 adaptiveTelemetry.recoveryThresholdSourceFps,
+                adaptiveTelemetry.establishedSourceFps,
+                adaptiveTelemetry.sourceCadenceRatio,
+                adaptiveTelemetry.sourceBudgetMinRatio,
                 adaptiveTelemetry.sourcePreservationActive ? 1 : 0,
                 adaptiveTelemetry.costBackedOff ? 1 : 0,
                 adaptiveTelemetry.costProbe ? 1 : 0,
@@ -1675,6 +1683,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_stable_cadence_s=" << adaptiveTelemetry.stableCadenceSeconds
                       << " adaptive_recovery_baseline_fps=" << adaptiveTelemetry.recoveryBaselineSourceFps
                       << " adaptive_recovery_threshold_fps=" << adaptiveTelemetry.recoveryThresholdSourceFps
+                      << " adaptive_established_source_fps=" << adaptiveTelemetry.establishedSourceFps
+                      << " adaptive_source_cadence_ratio=" << adaptiveTelemetry.sourceCadenceRatio
+                      << " adaptive_source_budget_min_ratio=" << adaptiveTelemetry.sourceBudgetMinRatio
                       << " adaptive_source_preservation_active="
                       << (adaptiveTelemetry.sourcePreservationActive ? 1 : 0)
                       << " adaptive_final_generated=" << adaptiveTelemetry.generatedFrames

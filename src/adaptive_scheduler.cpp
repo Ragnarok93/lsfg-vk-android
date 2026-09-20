@@ -638,6 +638,13 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.recoveryBaselineSourceFps = backoffRecoveryBaselineFps_;
     telemetry_.recoveryThresholdSourceFps =
         backoffRecoveryBaselineFps_ * kBackoffRetrySourceRatio;
+    telemetry_.establishedSourceFps = establishedSourceFps_;
+    telemetry_.sourceCadenceRatio = establishedSourceFps_ > 0.0
+        ? telemetry_.smoothedSourceFps / establishedSourceFps_
+        : 1.0;
+    telemetry_.sourceBudgetMinRatio = costLimit_ >= 2
+        ? kHighDensitySourceDropRatio
+        : kSourceDropRatio;
     telemetry_.sourcePreservationActive = sourcePreservationProbeActive_;
     telemetry_.generatedFrames = 0;
     telemetry_.wantedGeneratedFrames = 0.0;
@@ -736,6 +743,13 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.recoveryBaselineSourceFps = backoffRecoveryBaselineFps_;
     telemetry_.recoveryThresholdSourceFps =
         backoffRecoveryBaselineFps_ * kBackoffRetrySourceRatio;
+    telemetry_.establishedSourceFps = establishedSourceFps_;
+    telemetry_.sourceCadenceRatio = establishedSourceFps_ > 0.0
+        ? telemetry_.smoothedSourceFps / establishedSourceFps_
+        : 1.0;
+    telemetry_.sourceBudgetMinRatio = costLimit_ >= 2
+        ? kHighDensitySourceDropRatio
+        : kSourceDropRatio;
     telemetry_.sourcePreservationActive = sourcePreservationProbeActive_;
 
     // Drive synthetic opportunities from elapsed source time rather than
