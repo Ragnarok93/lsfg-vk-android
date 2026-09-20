@@ -482,7 +482,7 @@ std::size_t GeneratedPresentationCapacityTracker::limit(
         && context.schedulerCostLimit > telemetry_.generationCap
         && context.provenCostLimit > telemetry_.generationCap;
     const bool deficitProbeEligible =
-        context.outputDeficit && sourceInsideBudget && provenHigherCapacity;
+        context.outputDeficit && provenHigherCapacity;
     const bool genericRecoveryProbe =
         recoveryEvidence_ >= kWsiRecoveryProbeThreshold
         && efficiencyEwma_ >= kWsiRecoveryGoodEfficiency
@@ -581,8 +581,6 @@ void GeneratedPresentationCapacityTracker::observe(
             recoveryEvidence_ += kWsiRecoveryEvidenceIncrement;
     }
 
-    const bool sourceInsideBudget =
-        context.sourceCadenceRatio + 1e-6 >= context.sourceBudgetMinRatio;
     const bool provenHigherCapacity =
         context.deadlineCapacityValid
         && context.safeGenerationHint > telemetry_.generationCap
@@ -931,8 +929,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         pendingRaiseSourceDropEvidenceSeconds_;
     telemetry_.stableCadenceSeconds = stableCadenceSeconds_;
     telemetry_.recoveryBaselineSourceFps = backoffRecoveryBaselineFps_;
-    telemetry_.recoveryThresholdSourceFps =
-        backoffRecoveryBaselineFps_ * kBackoffRetrySourceRatio;
+    telemetry_.recoveryThresholdSourceFps = 0.0;
     telemetry_.establishedSourceFps = establishedSourceFps_;
     telemetry_.sourceCadenceRatio = establishedSourceFps_ > 0.0
         ? telemetry_.smoothedSourceFps / establishedSourceFps_
