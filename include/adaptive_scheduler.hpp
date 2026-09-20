@@ -6,8 +6,24 @@
 #include <cstdint>
 #include <limits>
 
+enum class AdaptiveCostBackoffReason {
+    None,
+    RaiseCausalSourceDrop,
+    SourcePreservationProbe,
+};
+
+enum class AdaptiveWarmStartReason {
+    None,
+    Config,
+    Discontinuity,
+};
+
+const char* adaptiveCostBackoffReasonName(AdaptiveCostBackoffReason reason);
+const char* adaptiveWarmStartReasonName(AdaptiveWarmStartReason reason);
+
 struct AdaptiveSchedulerTelemetry {
     double sourceFps{};
+    double robustSourceFps{};
     double smoothedSourceFps{};
     double wantedGeneratedFrames{};
     std::size_t costLimit{};
@@ -19,8 +35,19 @@ struct AdaptiveSchedulerTelemetry {
     bool discontinuityReset{false};
     bool configWarmStart{false};
     bool capacityPromoted{false};
+    AdaptiveCostBackoffReason costBackoffReason{
+        AdaptiveCostBackoffReason::None};
+    AdaptiveWarmStartReason warmStartReason{
+        AdaptiveWarmStartReason::None};
     bool safeGenerationHintValid{false};
     std::size_t safeGenerationHint{};
+    std::size_t provenCostLimit{};
+    double raiseBaselineSourceFps{};
+    double raiseDropEvidenceSeconds{};
+    double stableCadenceSeconds{};
+    double recoveryBaselineSourceFps{};
+    double recoveryThresholdSourceFps{};
+    bool sourcePreservationActive{false};
     double fractionalPhase{};
     double opportunityIntervalSeconds{};
     std::size_t syntheticOpportunitiesCreated{};
@@ -126,6 +153,7 @@ struct GeneratedPresentationCapacityTelemetry {
     std::size_t generationCap{};
     double singleFrameDuty{1.0};
     double wsiRejectionRatio{};
+    unsigned rejectionEvidence{};
     bool pressure{false};
     bool lowered{false};
     bool raised{false};
@@ -227,7 +255,7 @@ public:
     [[nodiscard]] const AdaptiveSchedulerTelemetry& telemetry() const { return telemetry_; }
 
 private:
-    void resetRuntimeState();
+    void resetRuntimeState(bool preserveLearnedState = false);
     void resetSourceCadenceWindow();
     void resetUnmetDemand();
     void updateSourceRate(double intervalSeconds);
@@ -245,6 +273,11 @@ private:
     // config write from a true first-start/lifecycle reset.
     bool runtimeCadenceEstablished_{false};
     bool reconfigureWarmStartPending_{false};
+    bool discontinuityWarmStartPending_{false};
+
+    double establishedSourceFps_{};
+    double establishedSourceCoverageSeconds_{};
+    std::size_t provenCostLimit_{};
 
     // Robust cadence estimation uses only recent trusted real-source intervals.
     // Individual present bursts/hitches cannot hard-snap the scheduler state.
@@ -257,6 +290,7 @@ private:
     bool safeGenerationHintValid_{false};
     unsigned capacityRaiseSamples_{};
     unsigned stableCadenceSamples_{};
+    double stableCadenceSeconds_{};
     double pendingRaiseSourceDropEvidenceSeconds_{};
     double pendingRaiseLastEvaluationTimeSeconds_{};
 
@@ -269,6 +303,8 @@ private:
     double pendingRaiseTimeSeconds_{};
     double lastCostChangeTimeSeconds_{-1.0};
     double lastBackoffTimeSeconds_{-1.0};
+    AdaptiveCostBackoffReason lastBackoffReason_{
+        AdaptiveCostBackoffReason::None};
     double successfulProbeHoldUntilSeconds_{};
     double raiseHoldUntilSeconds_{};
 
@@ -279,6 +315,12 @@ private:
     double unmetDemandSinceSeconds_{-1.0};
     double unmetSourceFpsSum_{};
     std::size_t unmetSourceFpsSamples_{};
+
+    double backoffRecoverySinceSeconds_{-1.0};
+    double backoffRecoveryFpsSum_{};
+    std::size_t backoffRecoverySamples_{};
+    double backoffRecoveryBaselineFps_{};
+    bool backoffRecoveryReady_{false};
 
     // Once an established generation level stops preserving useful source
     // cadence, temporarily try one cheaper level. The lower level is retained
