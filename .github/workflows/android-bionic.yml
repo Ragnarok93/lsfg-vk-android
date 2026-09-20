@@ -46,6 +46,8 @@ jobs:
           python3 tests/android_runtime_stability_test.py
           python3 tests/android_suspend_timeout_guard_test.py
           python3 tests/android_adaptive_history_test.py
+          python3 tests/android_adaptive_flow_runtime_integration_test.py
+          python3 tests/android_adaptive_flow_shadow_transition_test.py
           python3 tests/android_restored_baseline_build_policy_test.py
           python3 tests/android_batch_optimization_test.py
           python3 tests/android_candidate_b4_beta4_predicate_test.py
@@ -65,6 +67,12 @@ jobs:
             framegen/tests/capabilities_test.cpp \
             -o /tmp/lsfg-capabilities-test
           /tmp/lsfg-capabilities-test
+          g++ -std=c++20 -Wall -Wextra -Werror \
+            -Iinclude \
+            src/adaptive_flow_controller.cpp \
+            tests/adaptive_flow_controller_test.cpp \
+            -o /tmp/lsfg-adaptive-flow-controller-test
+          /tmp/lsfg-adaptive-flow-controller-test
           g++ -std=c++20 -Wall -Wextra -Werror \
             -Iinclude \
             src/adaptive_scheduler.cpp \
