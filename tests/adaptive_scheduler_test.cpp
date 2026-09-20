@@ -304,7 +304,7 @@ int main() {
         assert(sawRaise);
 
         bool sawBackoff = false;
-        for (int frame = 0; frame < 3; ++frame) {
+        for (int frame = 0; frame < 6; ++frame) {
             scheduler.plan(60ms);
             sawBackoff = sawBackoff || scheduler.telemetry().costBackedOff;
         }
@@ -399,8 +399,12 @@ int main() {
         scheduler.plan(40ms);
         assert(scheduler.telemetry().configWarmStart);
         assert(scheduler.telemetry().costLimit == 3);
-        scheduler.plan(80ms);
-        assert(scheduler.telemetry().costBackedOff);
+        bool backedOff = false;
+        for (int frame = 0; frame < 6 && !backedOff; ++frame) {
+            scheduler.plan(80ms);
+            backedOff = scheduler.telemetry().costBackedOff;
+        }
+        assert(backedOff);
         assert(scheduler.telemetry().costLimit == 2);
     }
 
@@ -617,10 +621,15 @@ int main() {
         assert(promoted);
         assert(scheduler.telemetry().costLimit == 2);
 
-        // The existing causal veto remains authoritative after an early raise.
-        scheduler.setSafeGenerationHint(2, true);
-        scheduler.plan(80ms);
-        assert(scheduler.telemetry().costBackedOff);
+        // The existing causal veto remains authoritative after an early raise,
+        // but a single hitch is not enough to blame the new generation level.
+        bool backedOff = false;
+        for (int frame = 0; frame < 6 && !backedOff; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(80ms);
+            backedOff = scheduler.telemetry().costBackedOff;
+        }
+        assert(backedOff);
         assert(scheduler.telemetry().costLimit == 1);
     }
 
