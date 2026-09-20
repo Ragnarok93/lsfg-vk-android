@@ -655,6 +655,139 @@ int main() {
     }
 
     {
+        // Source protection is allowed to step down more than one generation
+        // level when each reduction materially restores real/source cadence.
+        // Do not revert to a higher synthetic density merely because aggregate
+        // interpolated output falls farther below an aspirational target.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 120; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+        }
+        assert(scheduler.telemetry().costLimit == 3);
+
+        bool probedTwo = false;
+        for (int frame = 0; frame < 45 && !probedTwo; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(50ms);
+            probedTwo = scheduler.telemetry().costBackedOff
+                && scheduler.telemetry().costProbe
+                && scheduler.telemetry().costLimit == 2;
+        }
+        assert(probedTwo);
+
+        bool revertedThree = false;
+        bool acceptedTwo = false;
+        for (int frame = 0; frame < 35; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(43ms);
+            revertedThree = revertedThree
+                || (scheduler.telemetry().costRaised
+                    && scheduler.telemetry().costProbe
+                    && scheduler.telemetry().costLimit == 3);
+            acceptedTwo = acceptedTwo
+                || (scheduler.telemetry().costProbe
+                    && !scheduler.telemetry().costBackedOff
+                    && scheduler.telemetry().costLimit == 2);
+        }
+        assert(!revertedThree);
+        assert(scheduler.telemetry().costLimit == 2);
+
+        bool probedOne = false;
+        for (int frame = 0; frame < 60 && !probedOne; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(43ms);
+            probedOne = scheduler.telemetry().costBackedOff
+                && scheduler.telemetry().costProbe
+                && scheduler.telemetry().costLimit == 1;
+        }
+        assert(probedOne);
+
+        bool restoredAboveOne = false;
+        for (int frame = 0; frame < 35; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+            restoredAboveOne = restoredAboveOne
+                || (scheduler.telemetry().costRaised
+                    && scheduler.telemetry().costProbe);
+        }
+        assert(!restoredAboveOne);
+        assert(scheduler.telemetry().costLimit == 1);
+    }
+
+    {
+        // Floor protection: if even one generated frame per source cycle causes
+        // a sustained >10% real-source regression, Adaptive must be able to
+        // schedule below one generated frame per source cycle. The suppressed
+        // opportunities are consumed (no debt), and quality may recover only
+        // after the protected source cadence proves stable again.
+        AdaptiveFrameScheduler scheduler(60, 1);
+        std::size_t dispatched = 0;
+        for (int frame = 0; frame < 70; ++frame) {
+            scheduler.setPreviousDispatchedGeneratedCount(dispatched);
+            dispatched = scheduler.plan(40ms);
+        }
+        assert(scheduler.telemetry().sourceProtectionDuty >= 0.999);
+
+        bool loweredDuty = false;
+        for (int frame = 0; frame < 45 && !loweredDuty; ++frame) {
+            scheduler.setPreviousDispatchedGeneratedCount(dispatched);
+            dispatched = scheduler.plan(60ms);
+            loweredDuty = scheduler.telemetry().sourceProtectionDuty < 0.999;
+        }
+        assert(loweredDuty);
+
+        bool sawSuppressedOpportunity = false;
+        for (int frame = 0; frame < 35; ++frame) {
+            scheduler.setPreviousDispatchedGeneratedCount(dispatched);
+            dispatched = scheduler.plan(40ms);
+            sawSuppressedOpportunity =
+                sawSuppressedOpportunity || dispatched == 0;
+        }
+        assert(sawSuppressedOpportunity);
+        assert(scheduler.telemetry().sourceProtectionDuty < 0.999);
+
+        bool recoveredDuty = false;
+        for (int frame = 0; frame < 140 && !recoveredDuty; ++frame) {
+            scheduler.setPreviousDispatchedGeneratedCount(dispatched);
+            dispatched = scheduler.plan(40ms);
+            recoveredDuty =
+                scheduler.telemetry().sourceProtectionDuty >= 0.999;
+        }
+        assert(recoveredDuty);
+    }
+
+    {
+        // A natural scene slowdown at the cost-1 floor must not be mistaken for
+        // permanent generated-work pressure. If a sub-one duty probe does not
+        // recover source cadence, restore full duty and rebase to the new
+        // natural source operating point.
+        AdaptiveFrameScheduler scheduler(60, 1);
+        std::size_t dispatched = 0;
+        for (int frame = 0; frame < 70; ++frame) {
+            scheduler.setPreviousDispatchedGeneratedCount(dispatched);
+            dispatched = scheduler.plan(40ms);
+        }
+
+        bool loweredDuty = false;
+        for (int frame = 0; frame < 45 && !loweredDuty; ++frame) {
+            scheduler.setPreviousDispatchedGeneratedCount(dispatched);
+            dispatched = scheduler.plan(60ms);
+            loweredDuty = scheduler.telemetry().sourceProtectionDuty < 0.999;
+        }
+        assert(loweredDuty);
+
+        bool restoredFullDuty = false;
+        for (int frame = 0; frame < 50 && !restoredFullDuty; ++frame) {
+            scheduler.setPreviousDispatchedGeneratedCount(dispatched);
+            dispatched = scheduler.plan(60ms);
+            restoredFullDuty =
+                scheduler.telemetry().sourceProtectionDuty >= 0.999;
+        }
+        assert(restoredFullDuty);
+    }
+
+    {
         // A failed source-preservation probe must not repeat every ~0.6 s.
         // Once the cheaper level fails to recover enough cadence and the
         // original cost is restored, hold that causal experiment for several
