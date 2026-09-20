@@ -719,9 +719,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     auto& metrics = this->runtimeMetrics;
     const auto cycleStart = RuntimeMetrics::Clock::now();
     bool excludeCurrentCycleFromTimingMetrics = false;
+    const size_t maxAdaptiveGeneratedFrames =
+        conf.multiplier > 1 ? static_cast<size_t>(conf.multiplier - 1) : 0;
     this->adaptiveScheduler_.configure(
         conf.adaptiveFramegen ? conf.fpsLimit : 0,
-        conf.multiplier > 1 ? static_cast<size_t>(conf.multiplier - 1) : 0);
+        maxAdaptiveGeneratedFrames);
+    this->generatedPresentationCapacityTracker_.configure(
+        conf.adaptiveFramegen ? maxAdaptiveGeneratedFrames : 0);
+    this->lsfgOutputCadenceTracker_.configure(
+        conf.adaptiveFramegen && conf.fpsLimit > 0,
+        conf.adaptiveFramegen ? conf.fpsLimit : 0);
     std::chrono::nanoseconds sourceInterval{};
     constexpr double kRuntimeTimingDiscontinuityMs = 250.0;
     if (metrics.hasLastSourcePresent) {
@@ -740,6 +747,34 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     metrics.hasLastSourcePresent = true;
     const size_t requestedFixedGeneratedFrameCount =
         static_cast<size_t>(conf.multiplier - 1);
+
+    // Capacity feedback is advisory and comes from the previous measured GPU
+    // cost/timeline. It may accelerate one scheduler level only after repeated
+    // safe evidence; per-cycle deadline admission remains authoritative.
+    double capacityIntervalMs = 0.0;
+    if (conf.adaptiveFramegen && this->currentSourceTimeline_.valid
+            && this->currentSourceTimeline_.intervalNs > 0) {
+        capacityIntervalMs =
+            static_cast<double>(this->currentSourceTimeline_.intervalNs)
+            / 1'000'000.0;
+    } else if (conf.adaptiveFramegen && sourceInterval.count() > 0) {
+        const double observedIntervalMs =
+            std::chrono::duration<double, std::milli>(sourceInterval).count();
+        if (observedIntervalMs < kRuntimeTimingDiscontinuityMs)
+            capacityIntervalMs = observedIntervalMs;
+    }
+    const bool safeGenerationHintValid =
+        conf.adaptiveFramegen
+        && maxAdaptiveGeneratedFrames > 0
+        && capacityIntervalMs > 0.0
+        && this->deadlineAdmissionPredictor_.hasEstimate();
+    this->adaptiveScheduler_.setSafeGenerationHint(
+        safeGenerationHintValid
+            ? this->deadlineAdmissionPredictor_.safeGenerationHint(
+                maxAdaptiveGeneratedFrames, capacityIntervalMs)
+            : 0,
+        safeGenerationHintValid);
+
     const size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
         : requestedFixedGeneratedFrameCount;
@@ -758,6 +793,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
         this->deadlineAdmissionPredictor_.reset();
+        this->generatedPresentationCapacityTracker_.reset();
+        this->lsfgOutputCadenceTracker_.reset();
+        this->lsfgOutputCadenceTracker_.configure(
+            conf.adaptiveFramegen && conf.fpsLimit > 0,
+            conf.adaptiveFramegen ? conf.fpsLimit : 0);
         this->lastDispatchedGeneratedFrameCount_ = 0;
         this->sourceTimeline_.reset();
         this->currentSourceTimeline_ = {};
@@ -925,9 +965,27 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    // Admission is complete before any framegen dispatch. Re-space the
-    // surviving batch evenly across the protected source interval; rejected
-    // opportunities are consumed and never become catch-up debt.
+    // WSI capacity is a separate downstream constraint from GPU generation
+    // capacity. Apply its learned cap before expensive framegen dispatch; a
+    // suppressed slot is consumed and never repaid. Fixed mode is untouched.
+    if (conf.adaptiveFramegen && generatedFrameCount > 0) {
+        const size_t presentationCappedGeneratedFrameCount =
+            this->generatedPresentationCapacityTracker_.limit(
+                generatedFrameCount);
+        if (presentationCappedGeneratedFrameCount < generatedFrameCount) {
+            const size_t cappedGeneratedFrames =
+                generatedFrameCount - presentationCappedGeneratedFrameCount;
+            metrics.windowGeneratedPresentationCapDrops +=
+                cappedGeneratedFrames;
+            metrics.totalGeneratedPresentationCapDrops +=
+                cappedGeneratedFrames;
+            generatedFrameCount = presentationCappedGeneratedFrameCount;
+        }
+    }
+
+    // Admission and presentation-cap limiting are complete before any framegen
+    // dispatch. Re-space the surviving batch evenly across the protected source
+    // interval; rejected opportunities are consumed and never become catch-up debt.
     interpolationGenerationCount = generatedFrameCount;
 
     if (this->currentSourceTimeline_.valid) {
@@ -1016,31 +1074,36 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const bool cadenceDiscontinuity =
             sourceIntervalMs >= kAdaptiveFlowCadenceDiscontinuityMs;
 
-        const bool adaptiveOutputSampleMatches =
-            metrics.lastWindowOutputFpsValid
-            && metrics.lastWindowAdaptiveFramegen
-            && metrics.lastWindowTargetFps == conf.fpsLimit;
-        const bool adaptiveOutputDeficit =
+        const auto& outputCadence =
+            this->lsfgOutputCadenceTracker_.snapshot();
+        const bool outputDeficit =
             conf.adaptiveFramegen
             && conf.fpsLimit > 0
-            && adaptiveOutputSampleMatches
-            && metrics.lastWindowOutputFps
-                < static_cast<double>(conf.fpsLimit) * 0.97;
+            && outputCadence.valid
+            && outputCadence.deficitConfirmed;
 
-        // Fixed LSFG has no output target. Do not reinterpret GameNative's
-        // source/compositor-domain slow-frame telemetry as an LSFG output
-        // deficit. Fixed mode can still downscale Flow from local LSFG budget
-        // pressure or explicit synthetic-drop pressure.
-        const bool fixedOutputDeficit = false;
-        const bool outputDeficit =
-            adaptiveOutputDeficit || fixedOutputDeficit;
+        // Keep compute/deadline pressure and downstream WSI pressure separate.
+        // A WSI rejection never trains the deadline predictor and only becomes
+        // a Flow actuator when the controller also sees global GPU pressure and
+        // enough scale-sensitive Flow work to plausibly help.
+        const uint64_t computeDropTotal =
+            metrics.totalAdmissionRejects
+            + metrics.totalGeneratedDeadlineDrops;
+        const bool computeDropPressure =
+            computeDropTotal > this->adaptiveFlowLastObservedComputeDrops_;
+        this->adaptiveFlowLastObservedComputeDrops_ = computeDropTotal;
 
-        const bool syntheticDropPressure =
-            metrics.totalGeneratedLateDrops
-                > this->adaptiveFlowLastObservedLateDrops_;
-        this->adaptiveFlowLastObservedLateDrops_ =
-            metrics.totalGeneratedLateDrops;
-        this->adaptiveFlowSyntheticDropPressure_ = syntheticDropPressure;
+        const bool newWsiDropPressure =
+            metrics.totalGeneratedWsiDrops
+                > this->adaptiveFlowLastObservedWsiDrops_;
+        this->adaptiveFlowLastObservedWsiDrops_ =
+            metrics.totalGeneratedWsiDrops;
+        const auto& presentationCapacity =
+            this->generatedPresentationCapacityTracker_.telemetry();
+        const bool wsiPresentationPressure =
+            newWsiDropPressure || presentationCapacity.pressure;
+        this->adaptiveFlowComputePressure_ = computeDropPressure;
+        this->adaptiveFlowWsiPressure_ = wsiPresentationPressure;
 
         const bool retainedTimingUsable =
             this->adaptiveFlowGeneratedTimingValid_
@@ -1063,12 +1126,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .generationCount = observationGenerationCount,
             .deadlineMissed = generatedWorkSample && budgetValid
                 && timing.totalLsfgMs > budgetMs,
+            .computeDeadlinePressure = computeDropPressure,
+            .wsiPresentationPressure = wsiPresentationPressure,
+            .wsiLossRate = presentationCapacity.wsiRejectionRatio,
+            .sourceFps = adaptiveTelemetry.smoothedSourceFps,
+            .outputFps = outputCadence.outputFps,
+            .outputCadenceValid = outputCadence.valid,
+            .outputTargeted = outputCadence.targeted,
+            .outputTargetSatisfied =
+                outputCadence.targetSatisfiedConfirmed,
             .globalGpuUsagePercent =
                 this->adaptiveFlowGlobalGpuUsagePercent_,
             .globalPressureValid =
                 this->adaptiveFlowGlobalPressureValid_,
             .outputDeficit = outputDeficit,
-            .syntheticDropPressure = syntheticDropPressure,
+            .syntheticDropPressure = false,
             .generatedWorkSample = generatedWorkSample,
             .schedulerTransition = schedulerTransition,
             .valid = budgetValid
@@ -1107,10 +1179,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << observation.globalGpuUsagePercent
                       << " global_pressure_valid="
                       << (observation.globalPressureValid ? 1 : 0)
+                      << " output_fps=" << observation.outputFps
                       << " output_deficit="
                       << (observation.outputDeficit ? 1 : 0)
-                      << " synthetic_drop_pressure="
-                      << (observation.syntheticDropPressure ? 1 : 0)
+                      << " output_satisfied="
+                      << (observation.outputTargetSatisfied ? 1 : 0)
+                      << " compute_pressure="
+                      << (observation.computeDeadlinePressure ? 1 : 0)
+                      << " wsi_pressure="
+                      << (observation.wsiPresentationPressure ? 1 : 0)
+                      << " wsi_loss_rate=" << observation.wsiLossRate
                       << '\n';
 #ifdef __ANDROID__
             __android_log_print(
@@ -1118,7 +1196,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "LSFG_FLOW",
                 "previous=%.3f requested=%.3f reason=%s flow_ms=%.3f lsfg_ms=%.3f "
                 "budget_ms=%.3f generation_count=%zu gpu=%.1f pressure_valid=%d "
-                "output_deficit=%d synthetic_drop_pressure=%d",
+                "output_fps=%.3f output_deficit=%d output_satisfied=%d "
+                "compute_pressure=%d wsi_pressure=%d wsi_loss_rate=%.3f",
                 static_cast<double>(previousScale),
                 static_cast<double>(selectedScale),
                 AdaptiveFlowController::reasonName(flowTelemetry.reason),
@@ -1128,8 +1207,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 observation.generationCount,
                 observation.globalGpuUsagePercent,
                 observation.globalPressureValid ? 1 : 0,
+                observation.outputFps,
                 observation.outputDeficit ? 1 : 0,
-                observation.syntheticDropPressure ? 1 : 0);
+                observation.outputTargetSatisfied ? 1 : 0,
+                observation.computeDeadlinePressure ? 1 : 0,
+                observation.wsiPresentationPressure ? 1 : 0,
+                observation.wsiLossRate);
 #endif
         }
 
@@ -1186,6 +1269,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " final_generated=" << adaptiveTelemetry.generatedFrames
                       << " rate_snap=" << (adaptiveTelemetry.sourceRateSnapped ? 1 : 0)
                       << " cost_raise=" << (adaptiveTelemetry.costRaised ? 1 : 0)
+                      << " capacity_promoted="
+                      << (adaptiveTelemetry.capacityPromoted ? 1 : 0)
+                      << " safe_generation_hint="
+                      << adaptiveTelemetry.safeGenerationHint
                       << " cost_backoff=" << (adaptiveTelemetry.costBackedOff ? 1 : 0)
                       << " cost_probe=" << (adaptiveTelemetry.costProbe ? 1 : 0)
                       << " discontinuity=" << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
@@ -1196,6 +1283,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "LSFG_EVENT",
                 "source_fps=%.3f smoothed_source_fps=%.3f wanted_generated=%.3f "
                 "cost_limit=%zu final_generated=%zu rate_snap=%d cost_raise=%d "
+                "capacity_promoted=%d safe_generation_hint=%zu "
                 "cost_backoff=%d cost_probe=%d discontinuity=%d",
                 adaptiveTelemetry.sourceFps,
                 adaptiveTelemetry.smoothedSourceFps,
@@ -1204,6 +1292,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 adaptiveTelemetry.generatedFrames,
                 adaptiveTelemetry.sourceRateSnapped ? 1 : 0,
                 adaptiveTelemetry.costRaised ? 1 : 0,
+                adaptiveTelemetry.capacityPromoted ? 1 : 0,
+                adaptiveTelemetry.safeGenerationHint,
                 adaptiveTelemetry.costBackedOff ? 1 : 0,
                 adaptiveTelemetry.costProbe ? 1 : 0,
                 adaptiveTelemetry.discontinuityReset ? 1 : 0);
@@ -1294,6 +1384,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowAdmissionRejects = 0;
             metrics.windowGeneratedDeadlineDrops = 0;
             metrics.windowGeneratedWsiDrops = 0;
+            metrics.windowGeneratedPresentationCapDrops = 0;
             metrics.windowSourcePresentFailures = 0;
             metrics.windowGeneratedPresentFailures = 0;
             metrics.windowAdaptiveZeroGenerationCycles = 0;
@@ -1327,6 +1418,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowCycleMs += cycleMs;
             if (cycleMs > metrics.windowCycleMaxMs)
                 metrics.windowCycleMaxMs = cycleMs;
+        }
+
+        // Control feedback uses a fresh rolling LSFG presentation cadence, not
+        // the previous completed one-second metrics window. A pause while this
+        // present call is in flight clears stale evidence rather than creating
+        // a false output deficit.
+        if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
+            this->lsfgOutputCadenceTracker_.observe(
+                std::chrono::milliseconds(250), 0, 0);
+        } else if (sourceInterval.count() > 0) {
+            this->lsfgOutputCadenceTracker_.observe(
+                sourceInterval, 1, this->lastGeneratedFrameCount_);
         }
 
         const double elapsedSeconds = std::chrono::duration<double>(
@@ -1383,6 +1486,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << metrics.totalGeneratedDeadlineDrops
                       << " generated_wsi_drops=" << metrics.windowGeneratedWsiDrops
                       << " generated_wsi_drops_total=" << metrics.totalGeneratedWsiDrops
+                      << " presentation_cap_drops="
+                      << metrics.windowGeneratedPresentationCapDrops
+                      << " presentation_cap_drops_total="
+                      << metrics.totalGeneratedPresentationCapDrops
+                      << " presentation_cap="
+                      << this->generatedPresentationCapacityTracker_.telemetry().generationCap
+                      << " wsi_reject_ratio="
+                      << this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio
                       << " cycle_avg_ms=" << cycleAvgMs
                       << " cycle_max_ms=" << metrics.windowCycleMaxMs
                       << " ahb_handoff_avg_ms=" << handoffAvgMs
@@ -1493,9 +1604,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_flow_global_output_fps="
                       << this->adaptiveFlowGlobalOutputFps_
                       << " adaptive_flow_lsfg_output_valid="
-                      << (metrics.lastWindowOutputFpsValid ? 1 : 0)
+                      << (this->lsfgOutputCadenceTracker_.snapshot().valid ? 1 : 0)
                       << " adaptive_flow_lsfg_output_fps="
-                      << metrics.lastWindowOutputFps
+                      << this->lsfgOutputCadenceTracker_.snapshot().outputFps
                       << " adaptive_flow_global_p95_ms="
                       << this->adaptiveFlowGlobalFrameTimeP95Ms_
                       << " adaptive_flow_global_slow_ratio="
@@ -1504,8 +1615,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (this->adaptiveFlowController_.telemetry().globalPressure ? 1 : 0)
                       << " adaptive_flow_output_deficit="
                       << (this->adaptiveFlowController_.telemetry().outputDeficit ? 1 : 0)
-                      << " adaptive_flow_synthetic_drop_pressure="
-                      << (this->adaptiveFlowSyntheticDropPressure_ ? 1 : 0)
+                      << " adaptive_flow_compute_pressure="
+                      << (this->adaptiveFlowComputePressure_ ? 1 : 0)
+                      << " adaptive_flow_wsi_pressure="
+                      << (this->adaptiveFlowWsiPressure_ ? 1 : 0)
                       << " adaptive_flow_reason="
                       << AdaptiveFlowController::reasonName(this->adaptiveFlowReason_)
                       << " adaptive_present_timing="
@@ -1523,7 +1636,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ANDROID_LOG_INFO,
                 "LSFG_METRICS",
                 "source_fps=%.3f generated_fps=%.3f output_fps=%.3f "
-                "late=%llu admission=%llu deadline=%llu wsi=%llu "
+                "late=%llu admission=%llu deadline=%llu wsi=%llu cap_drop=%llu "
+                "presentation_cap=%zu wsi_reject_ratio=%.3f "
                 "cycle_avg_ms=%.3f cycle_max_ms=%.3f handoff_ms=%.3f dispatch_ms=%.3f "
                 "wait_ms=%.3f source_interval_ms=%.3f source_interval_max_ms=%.3f "
                 "deadline_error_ms=%.3f rebases=%llu planned=%zu admitted=%zu "
@@ -1538,6 +1652,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 static_cast<unsigned long long>(metrics.windowAdmissionRejects),
                 static_cast<unsigned long long>(metrics.windowGeneratedDeadlineDrops),
                 static_cast<unsigned long long>(metrics.windowGeneratedWsiDrops),
+                static_cast<unsigned long long>(
+                    metrics.windowGeneratedPresentationCapDrops),
+                this->generatedPresentationCapacityTracker_.telemetry().generationCap,
+                this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio,
                 cycleAvgMs,
                 metrics.windowCycleMaxMs,
                 handoffAvgMs,
@@ -1558,7 +1676,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 static_cast<unsigned long long>(metrics.windowAdaptiveZeroGenerationCycles),
                 static_cast<double>(this->adaptiveFlowActiveScale_),
                 this->adaptiveFlowGlobalGpuUsagePercent_,
-                metrics.lastWindowOutputFps,
+                this->lsfgOutputCadenceTracker_.snapshot().outputFps,
                 this->adaptiveFlowController_.telemetry().outputDeficit ? 1 : 0,
                 AdaptiveFlowController::reasonName(this->adaptiveFlowReason_),
                 conf.multiplier,
@@ -1573,6 +1691,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowAdmissionRejects = 0;
             metrics.windowGeneratedDeadlineDrops = 0;
             metrics.windowGeneratedWsiDrops = 0;
+            metrics.windowGeneratedPresentationCapDrops = 0;
             metrics.windowSourcePresentFailures = 0;
             metrics.windowGeneratedPresentFailures = 0;
             metrics.windowAdaptiveZeroGenerationCycles = 0;
@@ -2075,6 +2194,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // the remaining synthetic opportunities so the real source present can be
     // queued without generated-frame backpressure.
     size_t queuedGeneratedFrameCount = 0;
+    size_t generatedWsiRejectedFrameCount = 0;
+    bool generatedWsiObservationEligible = true;
     for (size_t i = 0; i < generatedFrameCount; i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         const double syntheticFraction =
@@ -2092,6 +2213,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 / 1'000'000.0;
             this->deadlineAdmissionPredictor_.observeDeliveryMiss(
                 deliveryLatenessMs);
+            generatedWsiObservationEligible = false;
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
             metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
@@ -2117,6 +2239,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // deadline. Keep the deadline predictor trained only on actual
             // submit-to-deadline lateness.
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
+            generatedWsiRejectedFrameCount = droppedGeneratedFrames;
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
             metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
             metrics.windowGeneratedWsiDrops += droppedGeneratedFrames;
@@ -2195,6 +2318,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    if (conf.adaptiveFramegen
+            && generatedFrameCount > 0
+            && generatedWsiObservationEligible) {
+        this->generatedPresentationCapacityTracker_.observe(
+            generatedFrameCount, generatedWsiRejectedFrameCount);
+    }
     if (generatedFrameCount > 0
             && queuedGeneratedFrameCount == generatedFrameCount) {
         this->deadlineAdmissionPredictor_.observeDeliverySuccess();
@@ -2351,5 +2480,14 @@ void LsContext::enterSourceOnlyBypass() {
     this->requiresSourceHistoryWarmup_ = true;
     this->lastDispatchedGeneratedFrameCount_ = 0;
     this->previousSourceCopySignalValid_ = false;
+    this->generatedPresentationCapacityTracker_.reset();
+    this->lsfgOutputCadenceTracker_.reset();
+    this->adaptiveFlowLastObservedComputeDrops_ =
+        this->runtimeMetrics.totalAdmissionRejects
+        + this->runtimeMetrics.totalGeneratedDeadlineDrops;
+    this->adaptiveFlowLastObservedWsiDrops_ =
+        this->runtimeMetrics.totalGeneratedWsiDrops;
+    this->adaptiveFlowComputePressure_ = false;
+    this->adaptiveFlowWsiPressure_ = false;
 }
 #endif

@@ -101,30 +101,30 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("kGlobalGpuPressurePercent = 96.0", controller)
         self.assertIn("kGlobalGpuRecoveryPercent = 88.0", controller)
 
-    def test_global_pressure_uses_lsfg_output_domain_and_late_drop_evidence(self) -> None:
+    def test_flow_control_uses_rolling_lsfg_output_and_split_pressure_domains(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("lastWindowOutputFpsValid", header)
-        self.assertIn("lastWindowAdaptiveFramegen", header)
-        self.assertIn("lastWindowTargetFps", header)
-        self.assertIn("lastWindowOutputFps", header)
-        self.assertIn("adaptiveOutputSampleMatches", source)
-        self.assertIn("metrics.lastWindowOutputFps", source)
-        self.assertIn("const bool fixedOutputDeficit = false", source)
-        self.assertIn("metrics.totalGeneratedLateDrops", source)
-        self.assertIn("syntheticDropPressure", source)
-        self.assertIn(".globalGpuUsagePercent =", source)
-        self.assertIn(".globalPressureValid =", source)
-        self.assertIn(".outputDeficit = outputDeficit", source)
-        self.assertIn(".syntheticDropPressure = syntheticDropPressure", source)
+        self.assertIn("LsfgOutputCadenceTracker lsfgOutputCadenceTracker_", header)
+        self.assertIn("Previous completed one-second LSFG metrics window", header)
+        self.assertIn("const auto& outputCadence", source)
+        self.assertIn("outputCadence.deficitConfirmed", source)
+        self.assertNotIn("adaptiveOutputSampleMatches", source)
 
-        deficit_start = source.index("const bool adaptiveOutputSampleMatches")
-        deficit_end = source.index("const bool syntheticDropPressure", deficit_start)
+        self.assertIn("adaptiveFlowLastObservedComputeDrops_", header)
+        self.assertIn("adaptiveFlowLastObservedWsiDrops_", header)
+        self.assertIn("computeDropPressure", source)
+        self.assertIn("wsiPresentationPressure", source)
+        self.assertIn(".computeDeadlinePressure = computeDropPressure", source)
+        self.assertIn(".wsiPresentationPressure = wsiPresentationPressure", source)
+        self.assertIn(".syntheticDropPressure = false", source)
+        self.assertIn(".wsiLossRate = presentationCapacity.wsiRejectionRatio", source)
+
+        deficit_start = source.index("const auto& outputCadence")
+        deficit_end = source.index("const bool retainedTimingUsable", deficit_start)
         deficit = source[deficit_start:deficit_end]
         self.assertNotIn("adaptiveFlowGlobalOutputFps_", deficit)
-        self.assertNotIn("adaptiveFlowGlobalSlowFrameRatio_", deficit)
-        self.assertNotIn("adaptiveFlowGlobalFrameTimeP95Ms_", deficit)
+        self.assertNotIn("metrics.lastWindowOutputFps", deficit)
 
     def test_budget_tracks_adaptive_target_or_fixed_output_period(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -199,6 +199,25 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertNotIn("fractionalOpportunityPhase_", admission)
 
 
+    def test_capacity_hint_and_presentation_cap_are_pre_dispatch(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("GeneratedPresentationCapacityTracker", header)
+        self.assertIn("setSafeGenerationHint", source)
+        self.assertIn("safeGenerationHint(", source)
+        self.assertIn("generatedPresentationCapacityTracker_.limit", source)
+        cap_start = source.index("WSI capacity is a separate downstream constraint")
+        dispatch_start = source.index("runtime stage=framegen-dispatch-begin")
+        self.assertLess(cap_start, dispatch_start)
+        self.assertIn("windowGeneratedPresentationCapDrops", source)
+
+    def test_rolling_output_tracker_updates_per_completed_source_cycle(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("lsfgOutputCadenceTracker_.observe", source)
+        self.assertIn("sourceInterval, 1, this->lastGeneratedFrameCount_", source)
+        self.assertIn("std::chrono::milliseconds(250), 0, 0", source)
+
     def test_drop_metrics_are_true_per_window_counters(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
@@ -210,6 +229,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "metrics.windowAdmissionRejects = 0",
             "metrics.windowGeneratedDeadlineDrops = 0",
             "metrics.windowGeneratedWsiDrops = 0",
+            "metrics.windowGeneratedPresentationCapDrops = 0",
         ):
             self.assertIn(field, reset)
 
@@ -220,10 +240,19 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         wsi_end = source.index("if (res != VK_SUCCESS", wsi_start)
         wsi_drop = source[wsi_start:wsi_end]
         self.assertIn("windowGeneratedWsiDrops", wsi_drop)
+        self.assertIn("generatedWsiRejectedFrameCount", wsi_drop)
         self.assertNotIn(
             "deadlineAdmissionPredictor_.observeDeliveryMiss",
             wsi_drop,
         )
+
+        self.assertIn(
+            "ovkAcquireNextImageKHR(info.device, this->swapchain, 0",
+            source,
+        )
+        dispatch_start = source.index("runtime stage=framegen-dispatch-begin")
+        acquire_start = source.index("ovkAcquireNextImageKHR", dispatch_start)
+        self.assertGreater(acquire_start, dispatch_start)
 
         deadline_start = source.index("runtime stage=generated-deadline-drop")
         deadline_prefix = source[max(0, deadline_start - 900):deadline_start]

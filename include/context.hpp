@@ -45,6 +45,10 @@ struct AdaptiveFlowRuntimeSnapshot {
     double globalFrameTimeP95Ms{0.0};
     double globalSlowFrameRatio{0.0};
     bool globalPressure{false};
+    bool computePressure{false};
+    bool wsiPressure{false};
+    double wsiLossRate{0.0};
+    size_t presentationGenerationCap{0};
     bool outputDeficit{false};
     bool syntheticDropPressure{false};
     const char* reason{"none"};
@@ -93,6 +97,9 @@ public:
 
     [[nodiscard]] AdaptiveFlowRuntimeSnapshot adaptiveFlowRuntimeSnapshot() const {
         const auto& telemetry = adaptiveFlowController_.telemetry();
+        const auto& outputCadence = lsfgOutputCadenceTracker_.snapshot();
+        const auto& presentationCapacity =
+            generatedPresentationCapacityTracker_.telemetry();
         return AdaptiveFlowRuntimeSnapshot{
             .enabled = adaptiveFlowController_.enabled(),
             .preset = AdaptiveFlowController::presetName(adaptiveFlowPreset_),
@@ -111,13 +118,18 @@ public:
             .globalPressureValid = adaptiveFlowGlobalPressureValid_,
             .globalGpuUsagePercent = adaptiveFlowGlobalGpuUsagePercent_,
             .globalOutputFps = adaptiveFlowGlobalOutputFps_,
-            .lsfgOutputValid = runtimeMetrics.lastWindowOutputFpsValid,
-            .lsfgOutputFps = runtimeMetrics.lastWindowOutputFps,
+            .lsfgOutputValid = outputCadence.valid,
+            .lsfgOutputFps = outputCadence.outputFps,
             .globalFrameTimeP95Ms = adaptiveFlowGlobalFrameTimeP95Ms_,
             .globalSlowFrameRatio = adaptiveFlowGlobalSlowFrameRatio_,
             .globalPressure = telemetry.globalPressure,
+            .computePressure = adaptiveFlowComputePressure_,
+            .wsiPressure = adaptiveFlowWsiPressure_,
+            .wsiLossRate = presentationCapacity.wsiRejectionRatio,
+            .presentationGenerationCap = presentationCapacity.generationCap,
             .outputDeficit = telemetry.outputDeficit,
-            .syntheticDropPressure = adaptiveFlowSyntheticDropPressure_,
+            .syntheticDropPressure =
+                adaptiveFlowComputePressure_ || adaptiveFlowWsiPressure_,
             .reason = AdaptiveFlowController::reasonName(adaptiveFlowReason_),
         };
     }
@@ -175,10 +187,14 @@ private:
     double adaptiveFlowRetainedWorkMs_{0.0};
     double adaptiveFlowRetainedTotalLsfgMs_{0.0};
     size_t adaptiveFlowRetainedGenerationCount_{0};
-    uint64_t adaptiveFlowLastObservedLateDrops_{0};
-    bool adaptiveFlowSyntheticDropPressure_{false};
+    uint64_t adaptiveFlowLastObservedComputeDrops_{0};
+    uint64_t adaptiveFlowLastObservedWsiDrops_{0};
+    bool adaptiveFlowComputePressure_{false};
+    bool adaptiveFlowWsiPressure_{false};
 
     DeadlineAdmissionPredictor deadlineAdmissionPredictor_;
+    GeneratedPresentationCapacityTracker generatedPresentationCapacityTracker_;
+    LsfgOutputCadenceTracker lsfgOutputCadenceTracker_;
     DeadlineAdmissionDecision deadlineBatchDecision_{};
 
     // Adaptive presentation pacing. VK_GOOGLE_display_timing is optional; the
@@ -254,6 +270,8 @@ private:
         uint64_t totalGeneratedDeadlineDrops{0};
         uint64_t windowGeneratedWsiDrops{0};
         uint64_t totalGeneratedWsiDrops{0};
+        uint64_t windowGeneratedPresentationCapDrops{0};
+        uint64_t totalGeneratedPresentationCapDrops{0};
         uint64_t windowDeadlineShadowOpportunities{0};
         uint64_t windowDeadlineShadowWouldAdmit{0};
         uint64_t windowDeadlineShadowWouldReject{0};
@@ -276,10 +294,9 @@ private:
         uint64_t windowSourceDeadlineSamples{0};
         uint64_t windowSourceTimelineRebases{0};
 
-        // Previous completed LSFG metrics window. Adaptive Flow uses this
-        // source+generated output domain for target-deficit decisions; the
-        // GameNative sidecar FPS is a different measurement domain and remains
-        // diagnostic-only.
+        // Previous completed one-second LSFG metrics window. It is retained
+        // for diagnostics only; Adaptive Flow control uses the shorter rolling
+        // LsfgOutputCadenceTracker instead.
         bool lastWindowOutputFpsValid{false};
         bool lastWindowAdaptiveFramegen{false};
         uint32_t lastWindowTargetFps{0};
