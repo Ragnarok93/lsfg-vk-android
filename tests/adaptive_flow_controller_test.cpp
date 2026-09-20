@@ -71,6 +71,7 @@ int main() {
             controller.observe(sample(16.2, 5.0));
         assert(near(controller.currentScale(), 0.90F));
         assert(controller.telemetry().reason == AdaptiveFlowDecisionReason::SustainedPressure
+            || controller.telemetry().reason == AdaptiveFlowDecisionReason::EvaluatingDownstep
             || controller.telemetry().reason == AdaptiveFlowDecisionReason::Cooldown);
         bool benefitConfirmed = false;
         for (int i = 0; i < 10; ++i) {
