@@ -38,7 +38,8 @@ constexpr double kBlameWindowSeconds = 1.250;
 constexpr double kSourceDropRatio = 0.90;
 constexpr double kHighDensitySourceDropRatio = 0.80;
 constexpr double kRecoveryRatio = 0.97;
-constexpr double kSuccessfulProbeHoldSeconds = 5.0;
+constexpr double kSuccessfulRaiseProbeHoldSeconds = 0.75;
+constexpr double kProtectedLowerLevelHoldSeconds = 5.0;
 
 // If an already-established interpolation cost can no longer keep aggregate
 // output near the requested target, test one cheaper level before adding work.
@@ -1000,7 +1001,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             pendingRaiseWasProbe_ = false;
             if (completedProbe)
                 successfulProbeHoldUntilSeconds_ =
-                    observedTimeSeconds_ + kSuccessfulProbeHoldSeconds;
+                    observedTimeSeconds_ + kSuccessfulRaiseProbeHoldSeconds;
         }
     }
 
@@ -1048,7 +1049,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
                     kEstablishedBaselineMinSeconds);
                 probeAfterBackoff_ = false;
                 successfulProbeHoldUntilSeconds_ =
-                    observedTimeSeconds_ + kSuccessfulProbeHoldSeconds;
+                    observedTimeSeconds_ + kProtectedLowerLevelHoldSeconds;
                 telemetry_.costProbe = true;
             } else {
                 costLimit_ = std::min(
