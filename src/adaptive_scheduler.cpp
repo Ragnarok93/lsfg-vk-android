@@ -10,6 +10,9 @@ constexpr double kCadenceTargetMinRatio = 0.75;
 constexpr double kCadenceTargetMaxRatio = 1.30;
 constexpr double kOpportunityIntervalMaxRatio = 1.50;
 constexpr unsigned kCapacityRaiseSamplesRequired = 4;
+constexpr unsigned kCapacityCadenceSamplesRequired = 4;
+constexpr unsigned kRaiseBackoffSamplesRequired = 3;
+constexpr double kCapacityCadenceDeviationRatio = 0.20;
 // Treat a single interval as a suspend/stall discontinuity only when it is an
 // extreme outlier relative to an already-established source cadence. An
 // absolute FPS threshold would incorrectly disable generation for legitimately
@@ -681,6 +684,16 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
         std::min(recentSourceIntervalCount_ + 1, kSourceCadenceWindow);
 
     const double robustInterval = robustSourceIntervalSeconds();
+    const bool cadenceStableThisSample =
+        recentSourceIntervalCount_ >= 5
+        && robustInterval > 0.0
+        && std::abs(intervalSeconds - robustInterval)
+            <= robustInterval * kCapacityCadenceDeviationRatio;
+    if (cadenceStableThisSample)
+        ++stableCadenceSamples_;
+    else
+        stableCadenceSamples_ = 0;
+
     if (!hasSmoothedInterval_) {
         smoothedSourceIntervalSeconds_ = robustInterval;
         hasSmoothedInterval_ = robustInterval > 0.0;
@@ -715,18 +728,25 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
 
     const double sourceFps = telemetry_.smoothedSourceFps;
 
-    // First evaluate a generation level that was already raised. A confirmed
-    // source-rate collapse inside the blame window is a stronger signal than a
-    // new demand calculation and should back off immediately.
+    // First evaluate a generation level that was already raised. The causal
+    // veto is intentionally sustained: one estimator dip immediately after a
+    // promotion is not enough to blame generated work.
     if (pendingCostRaise_) {
         const double sinceRaise = observedTimeSeconds_ - pendingRaiseTimeSeconds_;
         const bool sourceDropped = pendingRaiseBaselineFps_ > 0.0
             && sourceFps < pendingRaiseBaselineFps_ * kSourceDropRatio;
+        if (sourceDropped)
+            ++pendingRaiseSourceDropSamples_;
+        else
+            pendingRaiseSourceDropSamples_ = 0;
 
-        if (sinceRaise <= kBlameWindowSeconds && sourceDropped) {
+        if (sinceRaise <= kBlameWindowSeconds
+                && pendingRaiseSourceDropSamples_
+                    >= kRaiseBackoffSamplesRequired) {
             if (costLimit_ > 1)
                 costLimit_--;
             pendingCostRaise_ = false;
+            pendingRaiseSourceDropSamples_ = 0;
             probeAfterBackoff_ = true;
             pendingRaiseWasProbe_ = false;
             lastBackoffTimeSeconds_ = observedTimeSeconds_;
@@ -738,6 +758,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         if (sinceRaise >= kBlameWindowSeconds) {
             const bool completedProbe = pendingRaiseWasProbe_;
             pendingCostRaise_ = false;
+            pendingRaiseSourceDropSamples_ = 0;
             pendingRaiseWasProbe_ = false;
             if (completedProbe)
                 successfulProbeHoldUntilSeconds_ =
@@ -887,7 +908,8 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         capacityRaiseSamples_ = 0;
     const bool capacityPromotionReady =
         !probeAfterBackoff_
-        && capacityRaiseSamples_ >= kCapacityRaiseSamplesRequired;
+        && capacityRaiseSamples_ >= kCapacityRaiseSamplesRequired
+        && stableCadenceSamples_ >= kCapacityCadenceSamplesRequired;
 
     if (!capacityPromotionReady
             && observedTimeSeconds_ - unmetDemandSinceSeconds_
@@ -919,6 +941,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         probeAfterBackoff_ = false;
         pendingRaiseBaselineFps_ = baselineSourceFps;
         pendingRaiseTimeSeconds_ = observedTimeSeconds_;
+        pendingRaiseSourceDropSamples_ = 0;
         lastCostChangeTimeSeconds_ = observedTimeSeconds_;
         resetUnmetDemand();
         telemetry_.costRaised = true;
@@ -932,6 +955,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
     telemetry_.capacityPromoted = capacityPromotionReady;
     pendingRaiseBaselineFps_ = baselineSourceFps;
     pendingRaiseTimeSeconds_ = observedTimeSeconds_;
+    pendingRaiseSourceDropSamples_ = 0;
     lastCostChangeTimeSeconds_ = observedTimeSeconds_;
     resetUnmetDemand();
     telemetry_.costRaised = true;
@@ -945,6 +969,8 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
     resetSourceCadenceWindow();
     safeGenerationHint_ = 0;
     safeGenerationHintValid_ = false;
+    stableCadenceSamples_ = 0;
+    pendingRaiseSourceDropSamples_ = 0;
     observedTimeSeconds_ = 0.0;
     costLimit_ = maxGeneratedFrames_ == 0 ? 0 : 1;
     pendingCostRaise_ = false;

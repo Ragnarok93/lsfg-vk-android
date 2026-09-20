@@ -254,6 +254,8 @@ private:
     std::size_t safeGenerationHint_{};
     bool safeGenerationHintValid_{false};
     unsigned capacityRaiseSamples_{};
+    unsigned stableCadenceSamples_{};
+    unsigned pendingRaiseSourceDropSamples_{};
 
     double observedTimeSeconds_{};
     std::size_t costLimit_{};
