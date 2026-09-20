@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -17,7 +18,11 @@ struct AdaptiveSchedulerTelemetry {
     bool costProbe{false};
     bool discontinuityReset{false};
     bool configWarmStart{false};
+    bool capacityPromoted{false};
+    bool safeGenerationHintValid{false};
+    std::size_t safeGenerationHint{};
     double fractionalPhase{};
+    double opportunityIntervalSeconds{};
     std::size_t syntheticOpportunitiesCreated{};
 };
 
@@ -93,6 +98,12 @@ public:
     void observeDeliverySuccess();
     [[nodiscard]] DeadlineAdmissionDecision predict(
         std::size_t generationCount, double usableBudgetMs) const;
+    /// Return the largest generated-frame count whose evenly-spaced prefix
+    /// deadlines fit inside one predicted source interval. This is a capacity
+    /// hint only; per-cycle admission remains authoritative.
+    [[nodiscard]] std::size_t safeGenerationHint(
+        std::size_t maxGenerationCount, double sourceIntervalMs) const;
+    [[nodiscard]] bool hasEstimate() const { return hasEstimate_; }
     void reset();
 
 private:
@@ -109,6 +120,80 @@ private:
     double opticalFlowMs_{0.0};
     double perGeneratedMs_{0.0};
     double deliveryReserveMs_{0.0};
+};
+
+struct GeneratedPresentationCapacityTelemetry {
+    std::size_t generationCap{};
+    double wsiRejectionRatio{};
+    bool pressure{false};
+    bool lowered{false};
+    bool raised{false};
+};
+
+/// Learns downstream swapchain capacity independently from GPU generation
+/// capacity. It never blocks on WSI and never changes source pacing.
+class GeneratedPresentationCapacityTracker {
+public:
+    void configure(std::size_t maxGeneratedFrames);
+    [[nodiscard]] std::size_t limit(std::size_t requested) const;
+    void observe(std::size_t attempted, std::size_t wsiRejected);
+    void reset();
+
+    [[nodiscard]] const GeneratedPresentationCapacityTelemetry& telemetry() const {
+        return telemetry_;
+    }
+
+private:
+    std::size_t maxGeneratedFrames_{};
+    unsigned rejectSamples_{};
+    unsigned cleanSamples_{};
+    bool hasObservation_{false};
+    GeneratedPresentationCapacityTelemetry telemetry_{};
+};
+
+struct LsfgOutputCadenceSnapshot {
+    bool valid{false};
+    bool targeted{false};
+    double outputFps{};
+    double coverageSeconds{};
+    bool deficitConfirmed{false};
+    bool targetSatisfiedConfirmed{false};
+};
+
+/// Allocation-free rolling output estimator for the LSFG source+generated
+/// presentation domain. The one-second RuntimeMetrics window remains logging
+/// only; control decisions use this shorter, fresher window.
+class LsfgOutputCadenceTracker {
+public:
+    void configure(bool targeted, uint32_t targetFps);
+    void observe(
+        std::chrono::nanoseconds elapsed,
+        std::size_t sourceFrames,
+        std::size_t generatedFrames);
+    void reset();
+
+    [[nodiscard]] const LsfgOutputCadenceSnapshot& snapshot() const {
+        return snapshot_;
+    }
+
+private:
+    struct Sample {
+        double seconds{};
+        std::size_t frames{};
+    };
+
+    void clearWindow();
+    void rebuildSnapshot(double evidenceSeconds);
+
+    static constexpr std::size_t kSampleCapacity = 128;
+    std::array<Sample, kSampleCapacity> samples_{};
+    std::size_t sampleCount_{};
+    std::size_t nextSample_{};
+    bool targeted_{false};
+    uint32_t targetFps_{};
+    double deficitSeconds_{};
+    double satisfiedSeconds_{};
+    LsfgOutputCadenceSnapshot snapshot_{};
 };
 
 class AdaptiveFrameScheduler {
@@ -128,6 +213,11 @@ public:
     /// sleeps and never modifies source pacing.
     std::size_t plan(std::chrono::nanoseconds sourceInterval);
 
+    /// Supply a predictor-derived capacity hint for the next generation level.
+    /// Invalid hints disable the early-promotion path without affecting the
+    /// ordinary sustained-demand governor.
+    void setSafeGenerationHint(std::size_t hint, bool valid);
+
     void reset();
 
     [[nodiscard]] uint32_t targetFps() const { return targetFps_; }
@@ -136,9 +226,10 @@ public:
 
 private:
     void resetRuntimeState();
-    void resetRateChangeCandidates();
+    void resetSourceCadenceWindow();
     void resetUnmetDemand();
     void updateSourceRate(double intervalSeconds);
+    [[nodiscard]] double robustSourceIntervalSeconds() const;
     void updateCostLimit(double wantedGeneratedFrames);
 
     uint32_t targetFps_{};
@@ -153,15 +244,16 @@ private:
     bool runtimeCadenceEstablished_{false};
     bool reconfigureWarmStartPending_{false};
 
-    // Source-rate decreases need to be recognized quickly so a heavier scene
-    // can receive more generation. Apparent source-rate increases are held to
-    // a stricter confirmation threshold because Android/WSI present bursts can
-    // contain several very short intervals without representing sustainable
-    // game throughput.
-    unsigned slowRateChangeSamples_{};
-    unsigned fastRateChangeSamples_{};
-    double slowIntervalAccumulatorSeconds_{};
-    double fastIntervalAccumulatorSeconds_{};
+    // Robust cadence estimation uses only recent trusted real-source intervals.
+    // Individual present bursts/hitches cannot hard-snap the scheduler state.
+    static constexpr std::size_t kSourceCadenceWindow = 9;
+    std::array<double, kSourceCadenceWindow> recentSourceIntervals_{};
+    std::size_t recentSourceIntervalCount_{};
+    std::size_t recentSourceIntervalCursor_{};
+
+    std::size_t safeGenerationHint_{};
+    bool safeGenerationHintValid_{false};
+    unsigned capacityRaiseSamples_{};
 
     double observedTimeSeconds_{};
     std::size_t costLimit_{};

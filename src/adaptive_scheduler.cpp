@@ -4,11 +4,12 @@
 #include <cmath>
 
 namespace {
-constexpr double kIntervalSmoothing = 0.15;
-constexpr double kSlowIntervalHigh = 1.40;
-constexpr double kFastIntervalLow = 0.70;
-constexpr unsigned kSlowSamplesRequired = 3;
-constexpr unsigned kFastSamplesRequired = 6;
+constexpr double kSlowdownCadenceAlpha = 0.45;
+constexpr double kSpeedupCadenceAlpha = 0.30;
+constexpr double kCadenceTargetMinRatio = 0.75;
+constexpr double kCadenceTargetMaxRatio = 1.30;
+constexpr double kOpportunityIntervalMaxRatio = 1.50;
+constexpr unsigned kCapacityRaiseSamplesRequired = 4;
 // Treat a single interval as a suspend/stall discontinuity only when it is an
 // extreme outlier relative to an already-established source cadence. An
 // absolute FPS threshold would incorrectly disable generation for legitimately
@@ -246,12 +247,218 @@ DeadlineAdmissionDecision DeadlineAdmissionPredictor::predict(
     return decision;
 }
 
+std::size_t DeadlineAdmissionPredictor::safeGenerationHint(
+        std::size_t maxGenerationCount, double sourceIntervalMs) const {
+    if (!hasEstimate_
+            || maxGenerationCount == 0
+            || !(sourceIntervalMs > 0.0)
+            || !std::isfinite(sourceIntervalMs)) {
+        return 0;
+    }
+
+    // Capacity promotion is intentionally conservative. A candidate is safe
+    // only when every prefix fits the evenly-spaced slot it would actually own.
+    for (std::size_t candidate = maxGenerationCount; candidate > 0; --candidate) {
+        bool fits = true;
+        for (std::size_t slot = 0; slot < candidate; ++slot) {
+            const double slotBudgetMs = sourceIntervalMs
+                * static_cast<double>(slot + 1)
+                / static_cast<double>(candidate + 1);
+            const auto decision = predict(slot + 1, slotBudgetMs);
+            if (!decision.valid || !decision.wouldAdmit) {
+                fits = false;
+                break;
+            }
+        }
+        if (fits)
+            return candidate;
+    }
+    return 0;
+}
+
 void DeadlineAdmissionPredictor::reset() {
     hasEstimate_ = false;
     mipmapsMs_ = 0.0;
     opticalFlowMs_ = 0.0;
     perGeneratedMs_ = 0.0;
     deliveryReserveMs_ = 0.0;
+}
+
+void GeneratedPresentationCapacityTracker::configure(
+        std::size_t maxGeneratedFrames) {
+    if (maxGeneratedFrames_ == maxGeneratedFrames)
+        return;
+
+    maxGeneratedFrames_ = maxGeneratedFrames;
+    rejectSamples_ = 0;
+    cleanSamples_ = 0;
+    hasObservation_ = false;
+    telemetry_ = {};
+    telemetry_.generationCap = maxGeneratedFrames_;
+}
+
+std::size_t GeneratedPresentationCapacityTracker::limit(
+        std::size_t requested) const {
+    return std::min(requested, telemetry_.generationCap);
+}
+
+void GeneratedPresentationCapacityTracker::observe(
+        std::size_t attempted, std::size_t wsiRejected) {
+    telemetry_.lowered = false;
+    telemetry_.raised = false;
+
+    if (attempted == 0 || maxGeneratedFrames_ == 0)
+        return;
+
+    const std::size_t rejected = std::min(wsiRejected, attempted);
+    const double sample =
+        static_cast<double>(rejected) / static_cast<double>(attempted);
+    constexpr double kRejectionAlpha = 0.25;
+    telemetry_.wsiRejectionRatio = hasObservation_
+        ? telemetry_.wsiRejectionRatio
+            + kRejectionAlpha * (sample - telemetry_.wsiRejectionRatio)
+        : sample;
+    hasObservation_ = true;
+
+    if (rejected > 0) {
+        ++rejectSamples_;
+        cleanSamples_ = 0;
+        if (rejectSamples_ >= 3
+                && telemetry_.wsiRejectionRatio >= 0.20
+                && telemetry_.generationCap > 1) {
+            --telemetry_.generationCap;
+            telemetry_.lowered = true;
+            rejectSamples_ = 0;
+        }
+    } else {
+        rejectSamples_ = 0;
+        ++cleanSamples_;
+        if (cleanSamples_ >= 24
+                && telemetry_.wsiRejectionRatio <= 0.08
+                && telemetry_.generationCap < maxGeneratedFrames_) {
+            ++telemetry_.generationCap;
+            telemetry_.raised = true;
+            cleanSamples_ = 0;
+        }
+    }
+
+    telemetry_.pressure =
+        rejected > 0 || telemetry_.wsiRejectionRatio >= 0.10;
+}
+
+void GeneratedPresentationCapacityTracker::reset() {
+    const auto configuredMax = maxGeneratedFrames_;
+    maxGeneratedFrames_ = std::numeric_limits<std::size_t>::max();
+    configure(configuredMax);
+}
+
+void LsfgOutputCadenceTracker::configure(bool targeted, uint32_t targetFps) {
+    if (targeted_ == targeted && targetFps_ == targetFps)
+        return;
+    reset();
+    targeted_ = targeted;
+    targetFps_ = targetFps;
+    snapshot_.targeted = targeted_;
+    if (!targeted_)
+        snapshot_.targetSatisfiedConfirmed = true;
+}
+
+void LsfgOutputCadenceTracker::clearWindow() {
+    sampleCount_ = 0;
+    nextSample_ = 0;
+    deficitSeconds_ = 0.0;
+    satisfiedSeconds_ = 0.0;
+    snapshot_ = {};
+    snapshot_.targeted = targeted_;
+    if (!targeted_)
+        snapshot_.targetSatisfiedConfirmed = true;
+}
+
+void LsfgOutputCadenceTracker::rebuildSnapshot(double evidenceSeconds) {
+    constexpr double kWindowSeconds = 0.40;
+    constexpr double kMinimumCoverageSeconds = 0.25;
+    constexpr double kDeficitConfirmSeconds = 0.30;
+    constexpr double kSatisfiedConfirmSeconds = 0.50;
+    constexpr double kDeficitRatio = 0.97;
+    constexpr double kSatisfiedRatio = 0.985;
+
+    double seconds = 0.0;
+    std::size_t frames = 0;
+    for (std::size_t offset = 0;
+            offset < sampleCount_ && seconds < kWindowSeconds;
+            ++offset) {
+        const std::size_t index =
+            (nextSample_ + kSampleCapacity - 1 - offset) % kSampleCapacity;
+        seconds += samples_[index].seconds;
+        frames += samples_[index].frames;
+    }
+
+    snapshot_.targeted = targeted_;
+    snapshot_.coverageSeconds = seconds;
+    snapshot_.valid =
+        seconds >= kMinimumCoverageSeconds && frames > 0;
+    snapshot_.outputFps = snapshot_.valid
+        ? static_cast<double>(frames) / seconds
+        : 0.0;
+
+    if (!targeted_) {
+        snapshot_.deficitConfirmed = false;
+        snapshot_.targetSatisfiedConfirmed = true;
+        return;
+    }
+    if (!snapshot_.valid || targetFps_ == 0) {
+        snapshot_.deficitConfirmed = false;
+        snapshot_.targetSatisfiedConfirmed = false;
+        return;
+    }
+
+    const double target = static_cast<double>(targetFps_);
+    if (snapshot_.outputFps < target * kDeficitRatio) {
+        deficitSeconds_ += evidenceSeconds;
+        satisfiedSeconds_ = 0.0;
+    } else if (snapshot_.outputFps >= target * kSatisfiedRatio) {
+        satisfiedSeconds_ += evidenceSeconds;
+        deficitSeconds_ = 0.0;
+    } else {
+        deficitSeconds_ = 0.0;
+        satisfiedSeconds_ = 0.0;
+    }
+
+    snapshot_.deficitConfirmed =
+        deficitSeconds_ >= kDeficitConfirmSeconds;
+    snapshot_.targetSatisfiedConfirmed =
+        satisfiedSeconds_ >= kSatisfiedConfirmSeconds;
+}
+
+void LsfgOutputCadenceTracker::observe(
+        std::chrono::nanoseconds elapsed,
+        std::size_t sourceFrames,
+        std::size_t generatedFrames) {
+    const double seconds = std::chrono::duration<double>(elapsed).count();
+    if (!(seconds > 0.0) || !std::isfinite(seconds))
+        return;
+
+    // Treat a suspend/menu pause as stale evidence, not as a giant low-output
+    // sample. The runtime's cadence-relative discontinuity logic remains the
+    // source of truth for scheduler resets.
+    if (seconds >= 0.250) {
+        clearWindow();
+        return;
+    }
+
+    samples_[nextSample_] = Sample{
+        .seconds = seconds,
+        .frames = sourceFrames + generatedFrames,
+    };
+    nextSample_ = (nextSample_ + 1) % kSampleCapacity;
+    sampleCount_ = std::min(sampleCount_ + 1, kSampleCapacity);
+    rebuildSnapshot(std::min(seconds, 0.050));
+}
+
+void LsfgOutputCadenceTracker::reset() {
+    targeted_ = false;
+    targetFps_ = 0;
+    clearWindow();
 }
 
 AdaptiveFrameScheduler::AdaptiveFrameScheduler(
@@ -289,6 +496,14 @@ void AdaptiveFrameScheduler::configure(
         && maxGeneratedFrames_ != 0;
 }
 
+void AdaptiveFrameScheduler::setSafeGenerationHint(
+        std::size_t hint, bool valid) {
+    safeGenerationHintValid_ = valid;
+    safeGenerationHint_ = valid
+        ? std::min(hint, maxGeneratedFrames_)
+        : 0;
+}
+
 std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval) {
     telemetry_.sourceRateSnapped = false;
     telemetry_.costRaised = false;
@@ -296,6 +511,9 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.costProbe = false;
     telemetry_.discontinuityReset = false;
     telemetry_.configWarmStart = false;
+    telemetry_.capacityPromoted = false;
+    telemetry_.safeGenerationHintValid = safeGenerationHintValid_;
+    telemetry_.safeGenerationHint = safeGenerationHint_;
     telemetry_.generatedFrames = 0;
     telemetry_.wantedGeneratedFrames = 0.0;
     telemetry_.fractionalPhase = fractionalOpportunityPhase_;
@@ -377,8 +595,15 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     // This behaves like a time-domain error diffuser: long source intervals get
     // interpolation immediately, short intervals get less, and rejected/capped
     // whole opportunities are consumed now instead of becoming catch-up debt.
+    // A single source hitch may consume elapsed wall time but it may not mint a
+    // burst of synthetic target slots. Bound opportunity creation to the robust
+    // predicted cadence and deliberately discard the excess elapsed time.
+    const double opportunityIntervalSeconds = std::min(
+        intervalSeconds,
+        smoothedSourceIntervalSeconds_ * kOpportunityIntervalMaxRatio);
+    telemetry_.opportunityIntervalSeconds = opportunityIntervalSeconds;
     const double intervalOutputDemand =
-        static_cast<double>(targetFps_) * intervalSeconds;
+        static_cast<double>(targetFps_) * opportunityIntervalSeconds;
     fractionalOpportunityPhase_ = std::max(
         0.0,
         fractionalOpportunityPhase_ + intervalOutputDemand - 1.0);
@@ -406,94 +631,70 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     return opportunities;
 }
 
-void AdaptiveFrameScheduler::resetRateChangeCandidates() {
-    slowRateChangeSamples_ = 0;
-    fastRateChangeSamples_ = 0;
-    slowIntervalAccumulatorSeconds_ = 0.0;
-    fastIntervalAccumulatorSeconds_ = 0.0;
+void AdaptiveFrameScheduler::resetSourceCadenceWindow() {
+    recentSourceIntervals_.fill(0.0);
+    recentSourceIntervalCount_ = 0;
+    recentSourceIntervalCursor_ = 0;
 }
 
 void AdaptiveFrameScheduler::resetUnmetDemand() {
     unmetDemandSinceSeconds_ = -1.0;
     unmetSourceFpsSum_ = 0.0;
     unmetSourceFpsSamples_ = 0;
+    capacityRaiseSamples_ = 0;
+}
+
+double AdaptiveFrameScheduler::robustSourceIntervalSeconds() const {
+    if (recentSourceIntervalCount_ == 0)
+        return 0.0;
+
+    std::array<double, kSourceCadenceWindow> sorted{};
+    for (std::size_t i = 0; i < recentSourceIntervalCount_; ++i)
+        sorted[i] = recentSourceIntervals_[i];
+    std::sort(
+        sorted.begin(),
+        sorted.begin() + static_cast<std::ptrdiff_t>(recentSourceIntervalCount_));
+
+    std::size_t begin = 0;
+    std::size_t end = recentSourceIntervalCount_;
+    if (recentSourceIntervalCount_ >= 7) {
+        // One high and one low outlier are discarded. This is enough to absorb
+        // isolated Android/WSI bursts and 80-100 ms source hitches without
+        // hiding a sustained cadence transition.
+        begin = 1;
+        end -= 1;
+    }
+
+    double sum = 0.0;
+    for (std::size_t i = begin; i < end; ++i)
+        sum += sorted[i];
+    return sum / static_cast<double>(end - begin);
 }
 
 void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
     telemetry_.sourceFps = 1.0 / intervalSeconds;
 
+    recentSourceIntervals_[recentSourceIntervalCursor_] = intervalSeconds;
+    recentSourceIntervalCursor_ =
+        (recentSourceIntervalCursor_ + 1) % kSourceCadenceWindow;
+    recentSourceIntervalCount_ =
+        std::min(recentSourceIntervalCount_ + 1, kSourceCadenceWindow);
+
+    const double robustInterval = robustSourceIntervalSeconds();
     if (!hasSmoothedInterval_) {
-        smoothedSourceIntervalSeconds_ = intervalSeconds;
-        hasSmoothedInterval_ = true;
-        resetRateChangeCandidates();
-    } else {
-        // Classify against the estimate that existed before observing this
-        // sample. Every valid source interval still contributes to the EMA;
-        // the confirmation counters below control only hard baseline snaps.
-        // This is important for alternating cadences such as 20/50 ms, where
-        // waiting for three consecutive slow samples would otherwise discard
-        // every long interval and substantially overestimate source FPS.
-        const double previousSmoothedInterval = smoothedSourceIntervalSeconds_;
-        const bool slowerCadence =
-            intervalSeconds > previousSmoothedInterval * kSlowIntervalHigh;
-        const bool fasterCadence =
-            intervalSeconds < previousSmoothedInterval * kFastIntervalLow;
-
-        if (slowerCadence) {
-            // A heavier scene needs a prompt response. Three consistent slower
-            // samples still trigger a hard snap, but provisional slow samples
-            // now influence the EMA so mixed cadences cannot hide them.
-            slowRateChangeSamples_++;
-            slowIntervalAccumulatorSeconds_ += intervalSeconds;
-            fastRateChangeSamples_ = 0;
-            fastIntervalAccumulatorSeconds_ = 0.0;
-
-            if (slowRateChangeSamples_ >= kSlowSamplesRequired) {
-                smoothedSourceIntervalSeconds_ =
-                    slowIntervalAccumulatorSeconds_
-                    / static_cast<double>(slowRateChangeSamples_);
-                resetRateChangeCandidates();
-                // A confirmed slowdown increases required synthetic density.
-                // Preserve unmet-demand evidence already accumulated while the
-                // source was slowing instead of adding another 750 ms penalty
-                // exactly when demand rises. The causal blame window still
-                // backs off a raise if the extra FG work hurts source cadence.
-                telemetry_.sourceRateSnapped = true;
-            } else {
-                smoothedSourceIntervalSeconds_ +=
-                    kIntervalSmoothing * (intervalSeconds - smoothedSourceIntervalSeconds_);
-            }
-        } else if (fasterCadence) {
-            // Android/WSI can present a handful of frames in a short burst after
-            // a stall or UI transition. Requiring twice as many confirming
-            // samples for a source-rate increase prevents those bursts from
-            // being interpreted as a sustainable 100-300 FPS game cadence.
-            // Provisional fast samples still contribute through the low-alpha
-            // EMA, so legitimate mixed cadence is measured instead of frozen.
-            fastRateChangeSamples_++;
-            fastIntervalAccumulatorSeconds_ += intervalSeconds;
-            slowRateChangeSamples_ = 0;
-            slowIntervalAccumulatorSeconds_ = 0.0;
-
-            if (fastRateChangeSamples_ >= kFastSamplesRequired) {
-                smoothedSourceIntervalSeconds_ =
-                    fastIntervalAccumulatorSeconds_
-                    / static_cast<double>(fastRateChangeSamples_);
-                resetRateChangeCandidates();
-                resetUnmetDemand();
-                raiseHoldUntilSeconds_ = std::max(
-                    raiseHoldUntilSeconds_,
-                    observedTimeSeconds_ + kPostRateChangeRaiseHoldSeconds);
-                telemetry_.sourceRateSnapped = true;
-            } else {
-                smoothedSourceIntervalSeconds_ +=
-                    kIntervalSmoothing * (intervalSeconds - smoothedSourceIntervalSeconds_);
-            }
-        } else {
-            resetRateChangeCandidates();
-            smoothedSourceIntervalSeconds_ +=
-                kIntervalSmoothing * (intervalSeconds - smoothedSourceIntervalSeconds_);
-        }
+        smoothedSourceIntervalSeconds_ = robustInterval;
+        hasSmoothedInterval_ = robustInterval > 0.0;
+    } else if (robustInterval > 0.0) {
+        const double previous = smoothedSourceIntervalSeconds_;
+        const double boundedTarget = std::clamp(
+            robustInterval,
+            previous * kCadenceTargetMinRatio,
+            previous * kCadenceTargetMaxRatio);
+        const double alpha = boundedTarget > previous
+            ? kSlowdownCadenceAlpha
+            : kSpeedupCadenceAlpha;
+        smoothedSourceIntervalSeconds_ +=
+            alpha * (boundedTarget - smoothedSourceIntervalSeconds_);
     }
 
     telemetry_.smoothedSourceFps = smoothedSourceIntervalSeconds_ > 0.0
@@ -664,22 +865,35 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         return;
     }
 
-    // Observe a persistent deficit before adding more GPU work. This replaces
-    // the old 250 ms raise cadence, which could repeatedly climb during short
-    // timing disturbances. The average source rate gathered during this window
-    // becomes the pre-raise causal baseline.
+    // Observe a persistent deficit before adding more GPU work. The ordinary
+    // path retains the conservative time gate; a predictor-derived capacity
+    // hint may promote exactly one level earlier after several consecutive
+    // source cycles prove that the next level fits.
     if (unmetDemandSinceSeconds_ < 0.0) {
         unmetDemandSinceSeconds_ = observedTimeSeconds_;
         unmetSourceFpsSum_ = sourceFps;
         unmetSourceFpsSamples_ = 1;
-        return;
+    } else {
+        unmetSourceFpsSum_ += sourceFps;
+        unmetSourceFpsSamples_++;
     }
 
-    unmetSourceFpsSum_ += sourceFps;
-    unmetSourceFpsSamples_++;
+    const bool capacitySupportsNext =
+        safeGenerationHintValid_
+        && safeGenerationHint_ >= costLimit_ + 1;
+    if (capacitySupportsNext)
+        ++capacityRaiseSamples_;
+    else
+        capacityRaiseSamples_ = 0;
+    const bool capacityPromotionReady =
+        !probeAfterBackoff_
+        && capacityRaiseSamples_ >= kCapacityRaiseSamplesRequired;
 
-    if (observedTimeSeconds_ - unmetDemandSinceSeconds_ < kSustainedDemandSeconds)
+    if (!capacityPromotionReady
+            && observedTimeSeconds_ - unmetDemandSinceSeconds_
+                < kSustainedDemandSeconds) {
         return;
+    }
     if (pendingCostRaise_)
         return;
     if (observedTimeSeconds_ < successfulProbeHoldUntilSeconds_)
@@ -715,6 +929,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
     costLimit_++;
     pendingCostRaise_ = true;
     pendingRaiseWasProbe_ = false;
+    telemetry_.capacityPromoted = capacityPromotionReady;
     pendingRaiseBaselineFps_ = baselineSourceFps;
     pendingRaiseTimeSeconds_ = observedTimeSeconds_;
     lastCostChangeTimeSeconds_ = observedTimeSeconds_;
@@ -727,7 +942,9 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
     smoothedSourceIntervalSeconds_ = 0.0;
     hasSmoothedInterval_ = false;
     reconfigureWarmStartPending_ = false;
-    resetRateChangeCandidates();
+    resetSourceCadenceWindow();
+    safeGenerationHint_ = 0;
+    safeGenerationHintValid_ = false;
     observedTimeSeconds_ = 0.0;
     costLimit_ = maxGeneratedFrames_ == 0 ? 0 : 1;
     pendingCostRaise_ = false;

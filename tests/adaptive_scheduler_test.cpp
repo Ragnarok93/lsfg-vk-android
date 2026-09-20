@@ -191,60 +191,54 @@ int main() {
     }
 
     {
-        // A real sustained increase in source rate must still be recognized;
-        // it just requires stronger confirmation than a slowdown so transient
-        // present bursts cannot zero Adaptive generation.
+        // Sustained faster cadence is recognized through the robust window and
+        // bounded EMA, not a hard snap. Short WSI bursts therefore cannot erase
+        // interpolation demand, while a real transition still converges.
         AdaptiveFrameScheduler scheduler(60, 3);
         for (int frame = 0; frame < 12; ++frame)
             scheduler.plan(33333333ns);
 
-        bool snapped = false;
-        for (int frame = 0; frame < 8; ++frame) {
+        for (int frame = 0; frame < 8; ++frame)
             scheduler.plan(10ms);
-            snapped = snapped || scheduler.telemetry().sourceRateSnapped;
-        }
+        assert(!scheduler.telemetry().sourceRateSnapped);
+        assert(scheduler.telemetry().smoothedSourceFps > 40.0);
+        assert(scheduler.telemetry().smoothedSourceFps < 70.0);
 
-        assert(snapped);
+        for (int frame = 0; frame < 16; ++frame)
+            scheduler.plan(10ms);
         assert(scheduler.telemetry().smoothedSourceFps > 80.0);
     }
 
     {
-        // A genuine slowdown must remain responsive: three consistent slow
-        // intervals should snap the estimate quickly so Adaptive can react to
-        // a heavier scene without several seconds of EMA lag.
+        // Sustained slowdown must remain responsive without allowing one bursty
+        // interval to replace the source baseline.
         AdaptiveFrameScheduler scheduler(60, 3);
         for (int frame = 0; frame < 12; ++frame)
             scheduler.plan(16ms);
 
-        bool snapped = false;
-        for (int frame = 0; frame < 3; ++frame) {
-            scheduler.plan(34ms);
-            snapped = snapped || scheduler.telemetry().sourceRateSnapped;
-        }
+        scheduler.plan(90ms);
+        assert(scheduler.telemetry().smoothedSourceFps > 50.0);
+        assert(scheduler.telemetry().syntheticOpportunitiesCreated <= 1);
 
-        assert(snapped);
+        for (int frame = 0; frame < 8; ++frame)
+            scheduler.plan(34ms);
+        assert(!scheduler.telemetry().sourceRateSnapped);
         assert(scheduler.telemetry().smoothedSourceFps < 35.0);
     }
 
     {
-        // A confirmed slowdown must not erase sustained unmet-demand evidence.
-        // At 60 FPS target, a stable ~29 FPS source requires cost level 2.
-        // The old slow-rate snap reset that evidence and added a 750 ms hold,
-        // leaving output below target despite ample admission headroom.
+        // Robust cadence changes must not erase sustained unmet-demand evidence.
+        // At 60 FPS target, a stable ~29 FPS source still reaches cost level 2.
         AdaptiveFrameScheduler scheduler(60, 3);
         for (int frame = 0; frame < 12; ++frame)
             scheduler.plan(16ms);
 
-        bool sawSlowSnap = false;
         bool sawRaise = false;
-        for (int frame = 0; frame < 22; ++frame) {
+        for (int frame = 0; frame < 24; ++frame) {
             scheduler.plan(34ms);
-            sawSlowSnap = sawSlowSnap
-                || scheduler.telemetry().sourceRateSnapped;
             sawRaise = sawRaise || scheduler.telemetry().costRaised;
         }
 
-        assert(sawSlowSnap);
         assert(sawRaise);
         assert(scheduler.telemetry().costLimit >= 2);
         assert(scheduler.telemetry().wantedGeneratedFrames > 1.0);
@@ -324,16 +318,14 @@ int main() {
         AdaptiveFrameScheduler scheduler(60, 3);
         for (int frame = 0; frame < 8; ++frame)
             scheduler.plan(16ms);
-        bool sawRateSnap = false;
         bool sawBackoff = false;
         bool sawRaise = false;
         for (int frame = 0; frame < 3; ++frame) {
             scheduler.plan(34ms);
-            sawRateSnap = sawRateSnap || scheduler.telemetry().sourceRateSnapped;
             sawBackoff = sawBackoff || scheduler.telemetry().costBackedOff;
             sawRaise = sawRaise || scheduler.telemetry().costRaised;
         }
-        assert(sawRateSnap);
+        assert(!scheduler.telemetry().sourceRateSnapped);
         assert(!sawBackoff);
         assert(!sawRaise);
     }
@@ -613,6 +605,76 @@ int main() {
     }
 
     {
+        // Capacity-informed promotion may advance exactly one level before the
+        // generic 600 ms timer, but only after several consecutive safe hints.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        bool promoted = false;
+        for (int frame = 0; frame < 4; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(40ms);
+            promoted = promoted || scheduler.telemetry().capacityPromoted;
+        }
+        assert(promoted);
+        assert(scheduler.telemetry().costLimit == 2);
+
+        // The existing causal veto remains authoritative after an early raise.
+        scheduler.setSafeGenerationHint(2, true);
+        scheduler.plan(80ms);
+        assert(scheduler.telemetry().costBackedOff);
+        assert(scheduler.telemetry().costLimit == 1);
+    }
+
+    {
+        // A single long-but-not-discontinuous source hitch is consumed without
+        // minting several target slots or catch-up debt.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(16ms);
+        const auto hitch = scheduler.plan(100ms);
+        assert(hitch <= 1);
+        assert(scheduler.telemetry().opportunityIntervalSeconds < 0.030);
+        const auto next = scheduler.plan(16ms);
+        assert(next <= 1);
+    }
+
+    {
+        // WSI capacity is independent of scheduler cost. Sustained rejection
+        // lowers one presentation level; recovery requires a much longer clean
+        // run and never blocks or pre-acquires a swapchain image.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        assert(capacity.limit(3) == 3);
+        for (int i = 0; i < 3; ++i)
+            capacity.observe(2, 1);
+        assert(capacity.telemetry().generationCap == 2);
+        assert(capacity.telemetry().pressure);
+
+        for (int i = 0; i < 24; ++i)
+            capacity.observe(2, 0);
+        assert(capacity.telemetry().generationCap == 3);
+        assert(capacity.telemetry().raised);
+    }
+
+    {
+        // Rolling LSFG output reacts inside a sub-second window and requires
+        // sustained evidence both to declare deficit and to prove recovery.
+        LsfgOutputCadenceTracker cadence;
+        cadence.configure(true, 60);
+        for (int i = 0; i < 20; ++i)
+            cadence.observe(33333333ns, 1, 0);
+        assert(cadence.snapshot().valid);
+        assert(cadence.snapshot().outputFps < 35.0);
+        assert(cadence.snapshot().deficitConfirmed);
+        assert(!cadence.snapshot().targetSatisfiedConfirmed);
+
+        for (int i = 0; i < 24; ++i)
+            cadence.observe(33333333ns, 1, 1);
+        assert(cadence.snapshot().outputFps > 58.0);
+        assert(!cadence.snapshot().deficitConfirmed);
+        assert(cadence.snapshot().targetSatisfiedConfirmed);
+    }
+
+    {
         // Deadline admission predicts from observed GPU cost without source-rate
         // assumptions. The runtime may use this to reject synthetic work, while
         // the predictor itself remains independent of fractional scheduling.
@@ -671,6 +733,10 @@ int main() {
         assert(oneOutput.valid);
         assert(oneOutput.predictedTotalLsfgMs > 7.49);
         assert(oneOutput.predictedTotalLsfgMs < roomy.predictedTotalLsfgMs);
+
+        const auto safeHint = predictor.safeGenerationHint(3, 33.0);
+        assert(safeHint >= 1);
+        assert(safeHint <= 3);
     }
 
 
