@@ -88,7 +88,10 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         # work. Pressure still requires a real generated sample, while recovery
         # may use the retained real generated timing only with fresh global
         # headroom and a met LSFG output target.
-        self.assertIn("const bool localPressure", controller)
+        self.assertIn("const bool computePressure", controller)
+        self.assertIn("observation.computeDeadlinePressure", controller)
+        self.assertIn("const bool wsiFlowPressure", controller)
+        self.assertIn("observation.wsiPresentationPressure", controller)
         self.assertIn("observation.generatedWorkSample", controller)
         self.assertIn("retainedHistoryRecoveryEligible", controller)
         self.assertIn("!observation.generatedWorkSample", controller)
