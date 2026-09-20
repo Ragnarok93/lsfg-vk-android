@@ -13,6 +13,7 @@ constexpr double kPressureRatio = 0.90;
 constexpr double kRecoveryPredictedRatio = 0.82;
 constexpr double kMinimumFlowBudgetRatio = 0.10;
 constexpr double kMinimumPredictedReliefRatio = 0.03;
+constexpr double kMinimumGlobalPressureLsfgBudgetRatio = 0.40;
 constexpr double kDownConfirmSeconds = 0.90;
 constexpr double kGlobalDownConfirmSeconds = 0.50;
 constexpr double kUpConfirmSeconds = 4.0;
@@ -263,8 +264,13 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         // material-contribution gate under local and global pressure so quality
         // is never traded for a few tenths of a millisecond that cannot
         // plausibly recover the requested cadence.
+        const bool globalOnlyPressure = globalPressure && !computePressure;
+        const bool globallyProfitable =
+            !globalOnlyPressure
+            || telemetry_.pressureRatio >= kMinimumGlobalPressureLsfgBudgetRatio;
         if (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
-                || predictedReliefRatio < kMinimumPredictedReliefRatio) {
+                || predictedReliefRatio < kMinimumPredictedReliefRatio
+                || !globallyProfitable) {
             resetEvidence();
             telemetry_.reason = AdaptiveFlowDecisionReason::InsufficientFlowContribution;
             return telemetry_.currentScale;
