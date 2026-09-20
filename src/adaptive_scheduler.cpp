@@ -523,14 +523,12 @@ void GeneratedPresentationCapacityTracker::observe(
         const GeneratedPresentationCapacityContext& context) {
     telemetry_.lowered = false;
     telemetry_.raised = false;
-    telemetry_.lastChangeReason = GeneratedPresentationCapChangeReason::None;
 
     if (attempted == 0 || maxGeneratedFrames_ == 0)
         return;
 
     const std::size_t rejected = std::min(wsiRejected, attempted);
-    accepted = std::min(accepted, attempted - rejected + accepted);
-    accepted = std::min(accepted, attempted);
+    accepted = std::min(accepted, attempted - rejected);
     const double efficiency =
         static_cast<double>(accepted) / static_cast<double>(attempted);
     const double rejectionSample =
@@ -601,9 +599,8 @@ void GeneratedPresentationCapacityTracker::observe(
             rejectionEvidence_ = 0;
             singleFramePhase_ = 0.0;
         } else {
-            telemetry_.lastChangeReason =
-                GeneratedPresentationCapChangeReason::TargetDeficitProbeRejected;
-            telemetry_.lastChangeOutputDeficit = context.outputDeficit;
+            // A failed bounded probe does not change the persistent
+            // last-cap-change reason; it only reduces recovery confidence.
             recoveryEvidence_ = std::max(0.0, recoveryEvidence_ - 1.0);
         }
         upwardProbeInFlight_ = false;
