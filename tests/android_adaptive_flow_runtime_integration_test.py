@@ -342,6 +342,13 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("adaptiveFlowRuntimeSnapshot()", hooks)
 
 
+    def test_runtime_forwards_recent_synthetic_drop_pressure(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn(
+            ".syntheticDropPressure = computeDropPressure || newWsiDropPressure",
+            source,
+        )
+
     def test_adaptive_scheduler_causal_diagnostics_are_exported(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         for field in (
