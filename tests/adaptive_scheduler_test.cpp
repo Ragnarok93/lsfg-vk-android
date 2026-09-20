@@ -695,7 +695,7 @@ int main() {
         bool probedOne = false;
         for (int frame = 0; frame < 60 && !probedOne; ++frame) {
             scheduler.setSafeGenerationHint(3, true);
-            scheduler.plan(43ms);
+            scheduler.plan(56ms); // a second >20% source loss at accepted cost 2
             probedOne = scheduler.telemetry().costBackedOff
                 && scheduler.telemetry().costProbe
                 && scheduler.telemetry().costLimit == 1;
