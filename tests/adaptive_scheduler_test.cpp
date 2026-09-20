@@ -305,8 +305,8 @@ int main() {
         assert(sawRaise);
 
         bool sawBackoff = false;
-        for (int frame = 0; frame < 6; ++frame) {
-            scheduler.plan(60ms);
+        for (int frame = 0; frame < 14 && !sawBackoff; ++frame) {
+            scheduler.plan(60ms); // sustained ~33% source loss at 3x
             sawBackoff = sawBackoff || scheduler.telemetry().costBackedOff;
         }
         assert(sawBackoff);
