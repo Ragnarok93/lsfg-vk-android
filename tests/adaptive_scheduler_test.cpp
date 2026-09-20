@@ -677,9 +677,10 @@ int main() {
 
         bool revertedThree = false;
         bool acceptedTwo = false;
-        for (int frame = 0; frame < 35; ++frame) {
+        bool probedOne = false;
+        for (int frame = 0; frame < 90 && !probedOne; ++frame) {
             scheduler.setSafeGenerationHint(3, true);
-            scheduler.plan(43ms);
+            scheduler.plan(43ms); // recovery, but still just outside 20% budget
             revertedThree = revertedThree
                 || (scheduler.telemetry().costRaised
                     && scheduler.telemetry().costProbe
@@ -688,18 +689,12 @@ int main() {
                 || (scheduler.telemetry().costProbe
                     && !scheduler.telemetry().costBackedOff
                     && scheduler.telemetry().costLimit == 2);
-        }
-        assert(!revertedThree);
-        assert(scheduler.telemetry().costLimit == 2);
-
-        bool probedOne = false;
-        for (int frame = 0; frame < 60 && !probedOne; ++frame) {
-            scheduler.setSafeGenerationHint(3, true);
-            scheduler.plan(56ms); // a second >20% source loss at accepted cost 2
             probedOne = scheduler.telemetry().costBackedOff
                 && scheduler.telemetry().costProbe
                 && scheduler.telemetry().costLimit == 1;
         }
+        assert(!revertedThree);
+        assert(acceptedTwo);
         assert(probedOne);
 
         bool restoredAboveOne = false;
