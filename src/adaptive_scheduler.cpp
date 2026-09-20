@@ -11,16 +11,9 @@ constexpr double kCadenceTargetMaxRatio = 1.30;
 constexpr double kOpportunityIntervalMaxRatio = 1.50;
 constexpr unsigned kCapacityRaiseSamplesRequired = 4;
 constexpr std::size_t kCapacityCadenceWindow = 4;
-constexpr double kRaiseBackoffSettleSeconds = 0.25;
-constexpr double kRaiseBackoffEvidenceSeconds = 0.12;
-constexpr double kRaiseBackoffEvidenceDecay = 1.5;
-constexpr double kRaiseBackoffEvidenceStepMaxSeconds = 0.10;
 constexpr double kCapacityCadenceDeviationRatio = 0.20;
 constexpr double kEstablishedBaselineMinSeconds = 0.35;
 constexpr double kEstablishedBaselineMaxCoverageSeconds = 2.0;
-constexpr double kBackoffRebaselineSeconds = 0.45;
-constexpr double kBackoffRetrySourceRatio = 0.95;
-constexpr double kCapacityCorroboratedBackoffEvidenceSeconds = 0.20;
 // Treat a single interval as a suspend/stall discontinuity only when it is an
 // extreme outlier relative to an already-established source cadence. An
 // absolute FPS threshold would incorrectly disable generation for legitimately
@@ -32,23 +25,7 @@ constexpr uint64_t kSourceTimelineDiscontinuityRatio = 8ULL;
 // unreachable output target. The source-rate estimator is allowed to settle
 // before additional GPU work is introduced.
 constexpr double kSustainedDemandSeconds = 0.600;
-constexpr double kPostRateChangeRaiseHoldSeconds = 0.750;
-constexpr double kProbeIntervalSeconds = 1.000;
-constexpr double kBlameWindowSeconds = 1.250;
-constexpr double kSourceDropRatio = 0.90;
-constexpr double kHighDensitySourceDropRatio = 0.80;
-constexpr double kRecoveryRatio = 0.97;
-constexpr double kSuccessfulRaiseProbeHoldSeconds = 0.75;
-constexpr double kProtectedLowerLevelHoldSeconds = 5.0;
 
-// If an already-established interpolation cost can no longer keep aggregate
-// output near the requested target, test one cheaper level before adding work.
-// The probe is retained only when it materially recovers source cadence without
-// materially reducing aggregate source+generated throughput.
-constexpr double kSourcePreservationConfirmSeconds = 0.60;
-constexpr double kSourcePreservationProbeSeconds = 0.60;
-constexpr double kSourcePreservationGainRatio = 1.08;
-constexpr double kSourcePreservationRetryHoldSeconds = 5.0;
 } // namespace
 
 uint64_t sourceOwnedAdmissionDeadlineNs(
@@ -104,11 +81,12 @@ std::size_t adaptiveDeficitCompensatedGeneratedCount(
         std::size_t provenCostLimit,
         double sourceCadenceRatio,
         double sourceBudgetMinRatio) {
+    (void)sourceCadenceRatio;
+    (void)sourceBudgetMinRatio;
     if (plannedGeneratedFrames == 0
             || !outputDeficit
             || plannedGeneratedFrames >= maxGeneratedFrames
-            || !deadlineCapacityValid
-            || sourceCadenceRatio + 1e-6 < sourceBudgetMinRatio) {
+            || !deadlineCapacityValid) {
         return plannedGeneratedFrames;
     }
 
@@ -498,8 +476,6 @@ std::size_t GeneratedPresentationCapacityTracker::limit(
         upwardProbeAttempted_ = 0;
     }
 
-    const bool sourceInsideBudget =
-        context.sourceCadenceRatio + 1e-6 >= context.sourceBudgetMinRatio;
     const bool provenHigherCapacity =
         context.deadlineCapacityValid
         && context.safeGenerationHint > telemetry_.generationCap
@@ -612,7 +588,7 @@ void GeneratedPresentationCapacityTracker::observe(
         && context.safeGenerationHint > telemetry_.generationCap
         && context.schedulerCostLimit > telemetry_.generationCap
         && context.provenCostLimit > telemetry_.generationCap;
-    if (context.outputDeficit && sourceInsideBudget && provenHigherCapacity)
+    if (context.outputDeficit && provenHigherCapacity)
         recoveryEvidence_ += 0.75;
 
     if (upwardProbeInFlight_) {
@@ -652,10 +628,6 @@ void GeneratedPresentationCapacityTracker::observe(
             const double lowerEfficiency =
                 provisionalEfficiencySum_
                 / static_cast<double>(provisionalSamples_);
-            const bool sourceImproved =
-                context.sourceCadenceRatio
-                    >= provisionalBaselineSourceRatio_
-                        + kWsiSourceImprovement;
             const bool efficiencyImproved =
                 lowerEfficiency
                     >= provisionalBaselineEfficiency_
@@ -669,11 +641,13 @@ void GeneratedPresentationCapacityTracker::observe(
             const bool throughputRegressed =
                 provisionalBaselineAccepted_ > 0.0
                 && lowerAccepted + 1e-6 < provisionalBaselineAccepted_;
+            // While the target is missed, delivered generated throughput is
+            // authoritative. A source-FPS improvement cannot justify keeping a
+            // lower WSI cap that delivers fewer synthetic frames.
             const bool lowerCapUnprofitable =
-                !sourceImproved
-                && (context.outputDeficit
+                context.outputDeficit
                     ? throughputRegressed
-                    : (!throughputPreserved && !efficiencyImproved));
+                    : (!throughputPreserved && !efficiencyImproved);
             if (lowerCapUnprofitable) {
                 telemetry_.generationCap = std::min(
                     provisionalPreviousCap_, maxGeneratedFrames_);
@@ -721,7 +695,6 @@ void GeneratedPresentationCapacityTracker::observe(
             && telemetry_.wsiRejectionRatio
                 >= kWsiSevereSingleFramePressureRatio
             && !(context.outputDeficit
-                && sourceInsideBudget
                 && provenHigherCapacity)
             && telemetry_.singleFrameDuty
                 > kSingleFrameDuties.back() + 1e-6) {
@@ -763,7 +736,6 @@ void GeneratedPresentationCapacityTracker::observe(
             upwardProbePending_ = true;
         }
     } else if (context.outputDeficit
-            && sourceInsideBudget
             && provenHigherCapacity
             && recoveryEvidence_ >= kWsiDeficitProbeThreshold) {
         upwardProbePending_ = true;
@@ -965,10 +937,8 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.sourceCadenceRatio = establishedSourceFps_ > 0.0
         ? telemetry_.smoothedSourceFps / establishedSourceFps_
         : 1.0;
-    telemetry_.sourceBudgetMinRatio = costLimit_ >= 2
-        ? kHighDensitySourceDropRatio
-        : kSourceDropRatio;
-    telemetry_.sourcePreservationActive = sourcePreservationProbeActive_;
+    telemetry_.sourceBudgetMinRatio = 0.0;
+    telemetry_.sourcePreservationActive = false;
     telemetry_.generatedFrames = 0;
     telemetry_.wantedGeneratedFrames = 0.0;
     telemetry_.fractionalPhase = fractionalOpportunityPhase_;
@@ -1021,35 +991,20 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         std::ceil(wantedGenerated - 1e-6),
         1.0,
         static_cast<double>(maxGeneratedFrames_)));
-    const bool establishedBaselineReady =
-        establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds
-        && establishedSourceFps_ > 0.0;
-
     if (reconfigureWarmStartPending_) {
-        const std::size_t provenSeed = std::min(
-            { provenCostLimit_, requiredCost, maxGeneratedFrames_ });
-        const std::size_t requestedSeed = establishedBaselineReady
-            ? requiredCost
-            : std::max<std::size_t>(1, provenSeed);
-        costLimit_ = std::max(costLimit_, requestedSeed);
-        if (costLimit_ > provenCostLimit_ && establishedBaselineReady) {
-            pendingCostRaise_ = true;
-            pendingRaiseWasProbe_ = false;
-            probeAfterBackoff_ = false;
-            pendingRaiseBaselineFps_ = establishedSourceFps_;
-            pendingRaiseTimeSeconds_ = observedTimeSeconds_;
-            pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
-            pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
-            lastCostChangeTimeSeconds_ = observedTimeSeconds_;
-        }
+        costLimit_ = std::max(costLimit_, requiredCost);
+        costLimit_ = std::min(costLimit_, maxGeneratedFrames_);
+        provenCostLimit_ = std::max(provenCostLimit_, costLimit_);
         resetUnmetDemand();
         reconfigureWarmStartPending_ = false;
         telemetry_.configWarmStart = true;
         telemetry_.warmStartReason = AdaptiveWarmStartReason::Config;
     } else if (discontinuityWarmStartPending_) {
         const std::size_t resumeCost = std::min(
-            { provenCostLimit_, requiredCost, maxGeneratedFrames_ });
+            std::max(provenCostLimit_, requiredCost),
+            maxGeneratedFrames_);
         costLimit_ = std::max<std::size_t>(1, resumeCost);
+        provenCostLimit_ = std::max(provenCostLimit_, costLimit_);
         discontinuityWarmStartPending_ = false;
         resetUnmetDemand();
         telemetry_.warmStartReason = AdaptiveWarmStartReason::Discontinuity;
@@ -1071,10 +1026,8 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.sourceCadenceRatio = establishedSourceFps_ > 0.0
         ? telemetry_.smoothedSourceFps / establishedSourceFps_
         : 1.0;
-    telemetry_.sourceBudgetMinRatio = costLimit_ >= 2
-        ? kHighDensitySourceDropRatio
-        : kSourceDropRatio;
-    telemetry_.sourcePreservationActive = sourcePreservationProbeActive_;
+    telemetry_.sourceBudgetMinRatio = 0.0;
+    telemetry_.sourcePreservationActive = false;
 
     // Drive synthetic opportunities from elapsed source time rather than
     // repeatedly fractionalizing the smoothed source-rate estimate. Every real
@@ -1203,32 +1156,18 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
     telemetry_.robustSourceFps = robustSourceFps;
 
     const bool baselineMeasurementClean =
-        cadenceStableThisSample
-        && robustSourceFps > 0.0
-        && !pendingCostRaise_
-        && !sourcePreservationProbeActive_;
+        cadenceStableThisSample && robustSourceFps > 0.0;
     if (baselineMeasurementClean) {
         const double evidenceSeconds = std::min(intervalSeconds, 0.10);
         if (!(establishedSourceFps_ > 0.0)) {
             establishedSourceFps_ = robustSourceFps;
             establishedSourceCoverageSeconds_ = evidenceSeconds;
         } else {
-            // At high generated-frame density the established source cadence is
-            // the protection reference, not another adaptive signal. Never
-            // ratchet it downward in small steps while 3x/4x work is active;
-            // otherwise several individually-acceptable drops can compound into
-            // a much larger real-source loss. Natural slowdowns are rebased
-            // only after a lower-cost causal probe fails to recover cadence.
-            if (costLimit_ <= 1) {
-                const double alpha = robustSourceFps >= establishedSourceFps_
-                    ? 0.15
-                    : 0.08;
-                establishedSourceFps_ +=
-                    alpha * (robustSourceFps - establishedSourceFps_);
-            } else if (robustSourceFps > establishedSourceFps_) {
-                establishedSourceFps_ +=
-                    0.15 * (robustSourceFps - establishedSourceFps_);
-            }
+            const double alpha = robustSourceFps >= establishedSourceFps_
+                ? 0.15
+                : 0.08;
+            establishedSourceFps_ +=
+                alpha * (robustSourceFps - establishedSourceFps_);
             establishedSourceCoverageSeconds_ = std::min(
                 kEstablishedBaselineMaxCoverageSeconds,
                 establishedSourceCoverageSeconds_ + evidenceSeconds);
@@ -1267,247 +1206,21 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         costLimit_ = 1;
     costLimit_ = std::min(costLimit_, maxGeneratedFrames_);
 
-    const double sourceFps = telemetry_.smoothedSourceFps;
+    // Source cadence is an input to target-density estimation and diagnostics,
+    // never a reason to demote generated-frame density. Actual feasibility is
+    // enforced later by deadline admission and downstream WSI capacity.
+    pendingCostRaise_ = false;
+    probeAfterBackoff_ = false;
+    pendingRaiseWasProbe_ = false;
+    pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
+    sourcePreservationProbeActive_ = false;
+    sourcePreservationSinceSeconds_ = -1.0;
+    sourcePreservationFpsSum_ = 0.0;
+    sourcePreservationSamples_ = 0;
+    lastBackoffReason_ = AdaptiveCostBackoffReason::None;
+    telemetry_.costBackoffReason = AdaptiveCostBackoffReason::None;
 
-    // First evaluate a generation level that was already raised. The source
-    // estimator is already robust to individual intervals; the causal veto adds
-    // a second time-domain guard so a few post-promotion samples cannot blame
-    // generated work. Evidence only begins after the estimator has had time to
-    // settle, accumulates by elapsed source time rather than frame count, and
-    // drains when cadence recovers.
-    if (pendingCostRaise_) {
-        const double sinceRaise = observedTimeSeconds_ - pendingRaiseTimeSeconds_;
-        const double evaluationDeltaSeconds = std::clamp(
-            observedTimeSeconds_ - pendingRaiseLastEvaluationTimeSeconds_,
-            0.0,
-            kRaiseBackoffEvidenceStepMaxSeconds);
-        pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
-
-        const bool capacityCorroboratesRaise =
-            safeGenerationHintValid_ && safeGenerationHint_ >= costLimit_;
-        // Predictor capacity is corroborating evidence about LSFG compute
-        // budget, not permission to sacrifice the protected source timeline.
-        // Keep the same material source-drop threshold; when the predictor says
-        // the level still fits, require more sustained causal evidence before
-        // attributing the source loss to generated work.
-        const double acceptedSourceRatio =
-            costLimit_ >= 2
-                ? kHighDensitySourceDropRatio
-                : kSourceDropRatio;
-        const bool sourceDropped = pendingRaiseBaselineFps_ > 0.0
-            && sourceFps < pendingRaiseBaselineFps_ * acceptedSourceRatio
-            && telemetry_.sourceFps
-                < pendingRaiseBaselineFps_ * acceptedSourceRatio;
-        const double backoffEvidenceRequired = capacityCorroboratesRaise
-            ? kCapacityCorroboratedBackoffEvidenceSeconds
-            : kRaiseBackoffEvidenceSeconds;
-        if (sinceRaise >= kRaiseBackoffSettleSeconds) {
-            if (sourceDropped) {
-                pendingRaiseSourceDropEvidenceSeconds_ +=
-                    evaluationDeltaSeconds;
-            } else {
-                pendingRaiseSourceDropEvidenceSeconds_ = std::max(
-                    0.0,
-                    pendingRaiseSourceDropEvidenceSeconds_
-                        - evaluationDeltaSeconds * kRaiseBackoffEvidenceDecay);
-            }
-        }
-
-        if (sinceRaise <= kBlameWindowSeconds
-                && pendingRaiseSourceDropEvidenceSeconds_
-                    >= backoffEvidenceRequired) {
-            if (costLimit_ > 1)
-                costLimit_--;
-            pendingCostRaise_ = false;
-            provenCostLimit_ = std::min(provenCostLimit_, costLimit_);
-            lastBackoffReason_ =
-                AdaptiveCostBackoffReason::RaiseCausalSourceDrop;
-            telemetry_.costBackoffReason = lastBackoffReason_;
-            backoffRecoverySinceSeconds_ = observedTimeSeconds_;
-            backoffRecoveryFpsSum_ = 0.0;
-            backoffRecoverySamples_ = 0;
-            backoffRecoveryBaselineFps_ = 0.0;
-            backoffRecoveryReady_ = false;
-            pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
-            pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
-            probeAfterBackoff_ = true;
-            pendingRaiseWasProbe_ = false;
-            lastBackoffTimeSeconds_ = observedTimeSeconds_;
-            resetUnmetDemand();
-            telemetry_.costBackedOff = true;
-            return;
-        }
-
-        if (sinceRaise >= kBlameWindowSeconds) {
-            const bool completedProbe = pendingRaiseWasProbe_;
-            pendingCostRaise_ = false;
-            provenCostLimit_ = std::max(provenCostLimit_, costLimit_);
-            pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
-            pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
-            pendingRaiseWasProbe_ = false;
-            if (completedProbe)
-                successfulProbeHoldUntilSeconds_ =
-                    observedTimeSeconds_ + kSuccessfulRaiseProbeHoldSeconds;
-        }
-    }
-
-    // A newly raised level is already under a dedicated causal evaluation.
-    // Do not let the longer-term source-preservation governor race that same
-    // experiment and independently downgrade it while the robust estimator is
-    // still settling. Once the blame window completes, the level becomes an
-    // established operating point and source preservation may evaluate it.
-    if (pendingCostRaise_) {
-        sourcePreservationSinceSeconds_ = -1.0;
-        sourcePreservationFpsSum_ = 0.0;
-        sourcePreservationSamples_ = 0;
-        resetUnmetDemand();
-        return;
-    }
-
-    if (sourcePreservationProbeActive_) {
-        sourcePreservationProbeFpsSum_ += sourceFps;
-        sourcePreservationProbeSamples_++;
-
-        if (observedTimeSeconds_ - sourcePreservationProbeStartedSeconds_
-                >= kSourcePreservationProbeSeconds) {
-            // sourceFps is already the scheduler's smoothed, burst-filtered
-            // cadence estimate. Averaging the whole probe again would include
-            // the intentional recovery ramp and understate the lower level.
-            const double recoveredSourceFps = sourceFps;
-            const double lowerLevelAcceptedRatio =
-                costLimit_ >= 2
-                    ? kHighDensitySourceDropRatio
-                    : kSourceDropRatio;
-            const bool recoveredInsideBudget =
-                establishedSourceFps_ > 0.0
-                && recoveredSourceFps
-                    >= establishedSourceFps_ * lowerLevelAcceptedRatio;
-            const bool materiallyRecovered =
-                sourcePreservationBaselineFps_ > 0.0
-                && recoveredSourceFps
-                    >= sourcePreservationBaselineFps_
-                        * kSourcePreservationGainRatio;
-            const bool sourceRecovered =
-                recoveredInsideBudget || materiallyRecovered;
-
-            sourcePreservationProbeActive_ = false;
-            sourcePreservationProbeFpsSum_ = 0.0;
-            sourcePreservationProbeSamples_ = 0;
-
-            if (sourceRecovered) {
-                provenCostLimit_ = std::min(provenCostLimit_, costLimit_);
-                // Keep the original trusted source baseline. A partial causal
-                // recovery validates the cheaper generation level, but must not
-                // compound the accepted 20% high-density source-loss budget.
-                // If the recovered cadence is still outside that budget, the
-                // protection governor may step down again after its hold.
-                establishedSourceCoverageSeconds_ = std::max(
-                    establishedSourceCoverageSeconds_,
-                    kEstablishedBaselineMinSeconds);
-                probeAfterBackoff_ = false;
-                successfulProbeHoldUntilSeconds_ =
-                    observedTimeSeconds_ + kProtectedLowerLevelHoldSeconds;
-                telemetry_.costProbe = true;
-            } else {
-                costLimit_ = std::min(
-                    sourcePreservationOriginalCost_, maxGeneratedFrames_);
-                probeAfterBackoff_ = false;
-                lastCostChangeTimeSeconds_ = observedTimeSeconds_;
-                // The cheaper probe failed to improve source cadence, so it
-                // exonerated generated work. Hold only the *downward* probe to
-                // avoid repeating the same experiment; do not block normal
-                // unmet-demand promotion toward the requested target.
-                raiseHoldUntilSeconds_ = observedTimeSeconds_;
-                sourcePreservationProbeHoldUntilSeconds_ =
-                    observedTimeSeconds_ + kSourcePreservationRetryHoldSeconds;
-                establishedSourceFps_ = recoveredSourceFps;
-                establishedSourceCoverageSeconds_ =
-                    kEstablishedBaselineMinSeconds;
-                telemetry_.costRaised = true;
-                telemetry_.costProbe = true;
-            }
-
-            resetUnmetDemand();
-        }
-        return;
-    }
-
-    const bool establishedBaselineReady =
-        establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds
-        && establishedSourceFps_ > 0.0;
-    const double acceptedSourceRatio =
-        costLimit_ >= 2
-            ? kHighDensitySourceDropRatio
-            : kSourceDropRatio;
-    const bool sourceDegradedAtCurrentCost =
-        costLimit_ > 1
-        && establishedBaselineReady
-        && sourceFps < establishedSourceFps_ * acceptedSourceRatio
-        && telemetry_.sourceFps
-            < establishedSourceFps_ * acceptedSourceRatio;
-
-    if (sourceDegradedAtCurrentCost
-            && observedTimeSeconds_ >= sourcePreservationProbeHoldUntilSeconds_) {
-        if (sourcePreservationSinceSeconds_ < 0.0) {
-            sourcePreservationSinceSeconds_ = observedTimeSeconds_;
-            sourcePreservationFpsSum_ = sourceFps;
-            sourcePreservationSamples_ = 1;
-        } else {
-            sourcePreservationFpsSum_ += sourceFps;
-            sourcePreservationSamples_++;
-        }
-
-        if (observedTimeSeconds_ - sourcePreservationSinceSeconds_
-                >= kSourcePreservationConfirmSeconds) {
-            sourcePreservationOriginalCost_ = costLimit_;
-            sourcePreservationBaselineFps_ = sourcePreservationSamples_ > 0
-                ? sourcePreservationFpsSum_
-                    / static_cast<double>(sourcePreservationSamples_)
-                : sourceFps;
-            costLimit_--;
-            sourcePreservationProbeActive_ = true;
-            sourcePreservationProbeStartedSeconds_ = observedTimeSeconds_;
-            sourcePreservationProbeFpsSum_ = 0.0;
-            sourcePreservationProbeSamples_ = 0;
-            sourcePreservationSinceSeconds_ = -1.0;
-            sourcePreservationFpsSum_ = 0.0;
-            sourcePreservationSamples_ = 0;
-            lastCostChangeTimeSeconds_ = observedTimeSeconds_;
-            lastBackoffReason_ =
-                AdaptiveCostBackoffReason::SourcePreservationProbe;
-            telemetry_.costBackoffReason = lastBackoffReason_;
-            resetUnmetDemand();
-            telemetry_.costBackedOff = true;
-            telemetry_.costProbe = true;
-            return;
-        }
-
-        // Do not let the ordinary unmet-demand path race the protective
-        // measurement by raising generation cost while starvation evidence is
-        // still being confirmed.
-        resetUnmetDemand();
-        return;
-    } else {
-        sourcePreservationSinceSeconds_ = -1.0;
-        sourcePreservationFpsSum_ = 0.0;
-        sourcePreservationSamples_ = 0;
-    }
-
-    if (probeAfterBackoff_) {
-        if (backoffRecoverySinceSeconds_ < 0.0)
-            backoffRecoverySinceSeconds_ = observedTimeSeconds_;
-        backoffRecoveryFpsSum_ += sourceFps;
-        ++backoffRecoverySamples_;
-        if (!backoffRecoveryReady_
-                && observedTimeSeconds_ - backoffRecoverySinceSeconds_
-                    >= kBackoffRebaselineSeconds) {
-            backoffRecoveryBaselineFps_ = backoffRecoverySamples_ > 0
-                ? backoffRecoveryFpsSum_
-                    / static_cast<double>(backoffRecoverySamples_)
-                : sourceFps;
-            backoffRecoveryReady_ = backoffRecoveryBaselineFps_ > 0.0;
-        }
-    }
+    provenCostLimit_ = std::max(provenCostLimit_, costLimit_);
 
     if (costLimit_ >= maxGeneratedFrames_) {
         resetUnmetDemand();
@@ -1519,17 +1232,14 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         return;
     }
 
-    // Observe a persistent deficit before adding more GPU work. The ordinary
-    // path retains the conservative time gate; a predictor-derived capacity
-    // hint may promote exactly one level earlier after several consecutive
-    // source cycles prove that the next level fits.
+    const double sourceFps = telemetry_.smoothedSourceFps;
     if (unmetDemandSinceSeconds_ < 0.0) {
         unmetDemandSinceSeconds_ = observedTimeSeconds_;
         unmetSourceFpsSum_ = sourceFps;
         unmetSourceFpsSamples_ = 1;
     } else {
         unmetSourceFpsSum_ += sourceFps;
-        unmetSourceFpsSamples_++;
+        ++unmetSourceFpsSamples_;
     }
 
     const bool capacitySupportsNext =
@@ -1539,76 +1249,22 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         ++capacityRaiseSamples_;
     else
         capacityRaiseSamples_ = 0;
+
     const bool capacityPromotionReady =
-        !probeAfterBackoff_
-        && capacityRaiseSamples_ >= kCapacityRaiseSamplesRequired
+        capacityRaiseSamples_ >= kCapacityRaiseSamplesRequired
         && stableCadenceSamples_ > 0
-        && stableCadenceSeconds_ >= 0.12
-        && establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds;
+        && stableCadenceSeconds_ >= 0.12;
 
     if (!capacityPromotionReady
             && observedTimeSeconds_ - unmetDemandSinceSeconds_
                 < kSustainedDemandSeconds) {
         return;
     }
-    if (pendingCostRaise_)
-        return;
-    if (observedTimeSeconds_ < successfulProbeHoldUntilSeconds_)
-        return;
-    if (observedTimeSeconds_ < raiseHoldUntilSeconds_)
-        return;
 
-    const double baselineSourceFps =
-        establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds
-            && establishedSourceFps_ > 0.0
-        ? establishedSourceFps_
-        : (unmetSourceFpsSamples_ > 0
-            ? unmetSourceFpsSum_ / static_cast<double>(unmetSourceFpsSamples_)
-            : sourceFps);
-
-    if (probeAfterBackoff_) {
-        if (lastBackoffTimeSeconds_ < 0.0
-                || observedTimeSeconds_ - lastBackoffTimeSeconds_
-                    < kProbeIntervalSeconds)
-            return;
-        if (!backoffRecoveryReady_)
-            return;
-        if (sourceFps
-                < backoffRecoveryBaselineFps_ * kBackoffRetrySourceRatio)
-            return;
-        if (safeGenerationHintValid_
-                && safeGenerationHint_ < costLimit_ + 1)
-            return;
-
-        costLimit_++;
-        pendingCostRaise_ = true;
-        pendingRaiseWasProbe_ = true;
-        probeAfterBackoff_ = false;
-        pendingRaiseBaselineFps_ = backoffRecoveryBaselineFps_ > 0.0
-            ? backoffRecoveryBaselineFps_
-            : baselineSourceFps;
-        backoffRecoverySinceSeconds_ = -1.0;
-        backoffRecoveryFpsSum_ = 0.0;
-        backoffRecoverySamples_ = 0;
-        backoffRecoveryReady_ = false;
-        pendingRaiseTimeSeconds_ = observedTimeSeconds_;
-        pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
-        pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
-        lastCostChangeTimeSeconds_ = observedTimeSeconds_;
-        resetUnmetDemand();
-        telemetry_.costRaised = true;
-        telemetry_.costProbe = true;
-        return;
-    }
-
-    costLimit_++;
-    pendingCostRaise_ = true;
-    pendingRaiseWasProbe_ = false;
+    ++costLimit_;
+    costLimit_ = std::min(costLimit_, maxGeneratedFrames_);
+    provenCostLimit_ = std::max(provenCostLimit_, costLimit_);
     telemetry_.capacityPromoted = capacityPromotionReady;
-    pendingRaiseBaselineFps_ = baselineSourceFps;
-    pendingRaiseTimeSeconds_ = observedTimeSeconds_;
-    pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
-    pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
     lastCostChangeTimeSeconds_ = observedTimeSeconds_;
     resetUnmetDemand();
     telemetry_.costRaised = true;

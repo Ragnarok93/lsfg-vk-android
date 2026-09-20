@@ -48,8 +48,10 @@ struct AdaptiveSchedulerTelemetry {
     double recoveryBaselineSourceFps{};
     double recoveryThresholdSourceFps{};
     double establishedSourceFps{};
+    // Diagnostic-only source cadence fields retained for runtime telemetry.
+    // They must not gate presentation-cap or target-deficit decisions.
     double sourceCadenceRatio{1.0};
-    double sourceBudgetMinRatio{1.0};
+    double sourceBudgetMinRatio{0.0};
     bool sourcePreservationActive{false};
     double fractionalPhase{};
     double opportunityIntervalSeconds{};
@@ -420,9 +422,8 @@ private:
     double backoffRecoveryBaselineFps_{};
     bool backoffRecoveryReady_{false};
 
-    // Once an established generation level stops preserving useful source
-    // cadence, temporarily try one cheaper level. The lower level is retained
-    // only when source FPS recovers enough to preserve aggregate throughput.
+    // Legacy source-preservation state is retained for diagnostic/state-layout
+    // continuity only. Source cadence no longer demotes generation density.
     double sourcePreservationSinceSeconds_{-1.0};
     double sourcePreservationFpsSum_{};
     std::size_t sourcePreservationSamples_{};
