@@ -290,9 +290,10 @@ int main() {
     }
 
     {
-        // If source FPS collapses shortly after a confirmed cost raise,
-        // attribute the correlated drop to framegen and return to the lower
-        // cost ceiling.
+        // Source cadence degradation increases target demand; it must never be
+        // used as a reason to back off a generation ceiling that Adaptive just
+        // proved it needed. Keep pursuing the configured target up to the
+        // user/runtime maximum even when the source slows under load.
         AdaptiveFrameScheduler scheduler(120, 3);
         bool sawRaise = false;
         for (int frame = 0; frame < 24; ++frame) {
@@ -304,12 +305,13 @@ int main() {
         assert(sawRaise);
 
         bool sawBackoff = false;
-        for (int frame = 0; frame < 6; ++frame) {
+        for (int frame = 0; frame < 20; ++frame) {
             scheduler.plan(60ms);
             sawBackoff = sawBackoff || scheduler.telemetry().costBackedOff;
         }
-        assert(sawBackoff);
-        assert(scheduler.telemetry().costLimit == 1);
+        assert(!sawBackoff);
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(scheduler.telemetry().wantedGeneratedFrames >= 2.9);
     }
 
     {
@@ -388,9 +390,9 @@ int main() {
     }
 
     {
-        // The warm start must remain fail-safe: if the newly seeded load causes
-        // a prompt source-rate regression, the existing blame window must back
-        // it off rather than pinning the user-selected target at an unsafe cost.
+        // A warm-started target is authoritative. A later source-rate drop may
+        // increase required interpolation density, but it must not cause the
+        // scheduler to undo the configured target by reducing its cost ceiling.
         AdaptiveFrameScheduler scheduler(45, 3);
         for (int frame = 0; frame < 12; ++frame)
             scheduler.plan(40ms);
@@ -399,13 +401,14 @@ int main() {
         scheduler.plan(40ms);
         assert(scheduler.telemetry().configWarmStart);
         assert(scheduler.telemetry().costLimit == 3);
+
         bool backedOff = false;
-        for (int frame = 0; frame < 6 && !backedOff; ++frame) {
+        for (int frame = 0; frame < 8; ++frame) {
             scheduler.plan(80ms);
-            backedOff = scheduler.telemetry().costBackedOff;
+            backedOff = backedOff || scheduler.telemetry().costBackedOff;
         }
-        assert(backedOff);
-        assert(scheduler.telemetry().costLimit == 2);
+        assert(!backedOff);
+        assert(scheduler.telemetry().costLimit == 3);
     }
 
     {
@@ -436,103 +439,30 @@ int main() {
     }
 
     {
-        // A generation ceiling that was once affordable must not remain pinned
-        // after later GPU contention collapses the real/source cadence. Probe a
-        // lower interpolation cost before adding yet more generated work.
+        // Once Adaptive has established a generation level, later source
+        // degradation must create *more* target demand, never a source-
+        // preservation experiment that lowers generation density. Per-cycle
+        // deadline admission may still skip work that cannot be delivered in
+        // time, but the long-term scheduler ceiling keeps pursuing the target.
         AdaptiveFrameScheduler scheduler(60, 3);
         for (int frame = 0; frame < 48; ++frame)
             scheduler.plan(40ms);
         assert(scheduler.telemetry().costLimit >= 2);
 
+        bool sawProtectiveBackoff = false;
         bool sawProtectiveProbe = false;
-        for (int frame = 0; frame < 30; ++frame) {
-            scheduler.plan(55ms);
-            sawProtectiveProbe = sawProtectiveProbe
-                || (scheduler.telemetry().costBackedOff
-                    && scheduler.telemetry().costProbe);
-            if (sawProtectiveProbe)
-                break;
-        }
-        assert(sawProtectiveProbe);
-        assert(scheduler.telemetry().costLimit == 1);
-
-        // If source cadence recovers enough that the lower-cost operating point
-        // preserves almost the same output throughput, keep the cheaper level.
-        for (int frame = 0; frame < 40; ++frame)
-            scheduler.plan(35ms);
-        assert(scheduler.telemetry().costLimit == 1);
-    }
-
-    {
-        // A source-preservation probe is causal, not a blind downgrade. If
-        // lowering generation cost does not recover source FPS, restore the
-        // previous interpolation level instead of sacrificing output for no gain.
-        AdaptiveFrameScheduler scheduler(60, 3);
-        for (int frame = 0; frame < 48; ++frame)
-            scheduler.plan(40ms);
-        assert(scheduler.telemetry().costLimit >= 2);
-
-        bool sawProtectiveProbe = false;
-        for (int frame = 0; frame < 30; ++frame) {
-            scheduler.plan(55ms);
-            sawProtectiveProbe = sawProtectiveProbe
-                || (scheduler.telemetry().costBackedOff
-                    && scheduler.telemetry().costProbe);
-            if (sawProtectiveProbe)
-                break;
-        }
-        assert(sawProtectiveProbe);
-
-        bool restored = false;
         for (int frame = 0; frame < 40; ++frame) {
             scheduler.plan(55ms);
-            restored = restored
-                || (scheduler.telemetry().costRaised
-                    && scheduler.telemetry().costProbe);
-            if (restored)
-                break;
+            sawProtectiveBackoff =
+                sawProtectiveBackoff || scheduler.telemetry().costBackedOff;
+            sawProtectiveProbe =
+                sawProtectiveProbe || scheduler.telemetry().costProbe;
         }
-        assert(restored);
-        assert(scheduler.telemetry().costLimit >= 2);
-    }
 
-    {
-        // A failed source-preservation probe must not repeat every ~0.6 s.
-        // Once the cheaper level fails to recover enough cadence and the
-        // original cost is restored, hold that causal experiment for several
-        // seconds before allowing another 2 -> 1 probe.
-        AdaptiveFrameScheduler scheduler(60, 3);
-        for (int frame = 0; frame < 48; ++frame)
-            scheduler.plan(40ms);
-        assert(scheduler.telemetry().costLimit >= 2);
-
-        bool backedOff = false;
-        for (int frame = 0; frame < 30 && !backedOff; ++frame) {
-            scheduler.plan(55ms);
-            backedOff = scheduler.telemetry().costBackedOff
-                && scheduler.telemetry().costProbe;
-        }
-        assert(backedOff);
-
-        bool restored = false;
-        for (int frame = 0; frame < 40 && !restored; ++frame) {
-            scheduler.plan(55ms);
-            restored = scheduler.telemetry().costRaised
-                && scheduler.telemetry().costProbe;
-        }
-        assert(restored);
-        const auto restoredCost = scheduler.telemetry().costLimit;
-        assert(restoredCost >= 2);
-
-        bool repeatedProbe = false;
-        for (int frame = 0; frame < 70; ++frame) { // 3.85 s
-            scheduler.plan(55ms);
-            repeatedProbe = repeatedProbe
-                || (scheduler.telemetry().costBackedOff
-                    && scheduler.telemetry().costProbe);
-        }
-        assert(!repeatedProbe);
-        assert(scheduler.telemetry().costLimit == restoredCost);
+        assert(!sawProtectiveBackoff);
+        assert(!sawProtectiveProbe);
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(scheduler.telemetry().wantedGeneratedFrames > 2.0);
     }
 
     {
