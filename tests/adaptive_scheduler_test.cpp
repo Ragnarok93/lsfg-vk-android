@@ -1223,6 +1223,26 @@ int main() {
     }
 
     {
+        // Sub-one WSI throttling must be recoverable. Clean probe attempts
+        // gradually raise duty back to one without requiring a lifecycle reset.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(1);
+        capacity.observe(1, 1);
+        capacity.observe(1, 1);
+        assert(capacity.telemetry().singleFrameDuty < 1.0);
+
+        bool recovered = false;
+        for (int cycle = 0; cycle < 200 && !recovered; ++cycle) {
+            const auto allowed = capacity.limit(1);
+            if (allowed > 0)
+                capacity.observe(1, 0);
+            recovered = capacity.telemetry().singleFrameDuty >= 0.999;
+        }
+        assert(recovered);
+        assert(capacity.telemetry().generationCap == 1);
+    }
+
+    {
         // Rolling LSFG output reacts inside a sub-second window and requires
         // sustained evidence both to declare deficit and to prove recovery.
         LsfgOutputCadenceTracker cadence;
@@ -1304,6 +1324,20 @@ int main() {
         const auto safeHint = predictor.safeGenerationHint(3, 33.0);
         assert(safeHint >= 1);
         assert(safeHint <= 3);
+
+        DeadlineAdmissionPredictor fourXCapacity;
+        fourXCapacity.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 2.0,
+            .opticalFlowMs = 3.0,
+            .totalLsfgMs = 6.0,
+            .generationCount = 3,
+            .valid = true,
+        });
+        assert(fourXCapacity.hasEstimate());
+        assert(fourXCapacity.safeGenerationHint(3, 33.0) == 3);
+        const auto fullFourX = fourXCapacity.predict(3, 24.75);
+        assert(fullFourX.valid);
+        assert(fullFourX.wouldAdmit);
     }
 
 
