@@ -1038,9 +1038,14 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
 
             if (sourceRecovered) {
                 provenCostLimit_ = std::min(provenCostLimit_, costLimit_);
-                establishedSourceFps_ = recoveredSourceFps;
-                establishedSourceCoverageSeconds_ =
-                    kEstablishedBaselineMinSeconds;
+                // Keep the original trusted source baseline. A partial causal
+                // recovery validates the cheaper generation level, but must not
+                // compound the accepted 20% high-density source-loss budget.
+                // If the recovered cadence is still outside that budget, the
+                // protection governor may step down again after its hold.
+                establishedSourceCoverageSeconds_ = std::max(
+                    establishedSourceCoverageSeconds_,
+                    kEstablishedBaselineMinSeconds);
                 probeAfterBackoff_ = false;
                 successfulProbeHoldUntilSeconds_ =
                     observedTimeSeconds_ + kSuccessfulProbeHoldSeconds;
