@@ -1307,9 +1307,12 @@ int main() {
         assert(capacity.telemetry().generationCap <= 2);
 
         context.outputDeficit = true;
-        for (int i = 0; i < 12; ++i) {
+        for (int i = 0; i < 24; ++i) {
             const auto attempted = capacity.limit(3, context);
-            const std::size_t accepted = std::min<std::size_t>(2, attempted);
+            const bool intermittentReject =
+                attempted == 3 && (i % 5 == 0);
+            const std::size_t accepted =
+                attempted - (intermittentReject ? 1U : 0U);
             capacity.observe(
                 attempted,
                 accepted,
