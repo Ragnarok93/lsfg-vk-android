@@ -1479,20 +1479,43 @@ int main() {
         // probes cannot erase all recovery progress indefinitely.
         GeneratedPresentationCapacityTracker capacity;
         capacity.configure(3);
-        for (int i = 0; i < 8 && capacity.telemetry().generationCap > 1; ++i)
-            capacity.observe(3, 2);
+        GeneratedPresentationCapacityContext collapse{};
+        for (int cycle = 0;
+                cycle < 80 && capacity.telemetry().generationCap > 1;
+                ++cycle) {
+            const auto attempted = capacity.limit(3, collapse);
+            if (attempted == 0)
+                continue;
+            // Higher presentation density is genuinely worthless here:
+            // nothing is accepted, so provisional lower caps may be retained.
+            capacity.observe(attempted, 0, attempted, collapse);
+        }
         assert(capacity.telemetry().generationCap == 1);
 
         unsigned attemptedProbes = 0;
         for (int cycle = 0;
                 cycle < 240 && capacity.telemetry().generationCap == 1;
                 ++cycle) {
-            const auto allowed = capacity.limit(3);
+            GeneratedPresentationCapacityContext recovery{
+                .outputDeficit = true,
+                .deadlineCapacityValid = true,
+                .safeGenerationHint = 3,
+                .schedulerCostLimit = 3,
+                .provenCostLimit = 3,
+                .sourceCadenceRatio = 1.0,
+                .sourceBudgetMinRatio = 0.8,
+            };
+            const auto allowed = capacity.limit(3, recovery);
             if (allowed == 0)
                 continue;
             ++attemptedProbes;
             const bool intermittentReject = attemptedProbes % 8 == 0;
-            capacity.observe(allowed, intermittentReject ? 1 : 0);
+            const std::size_t rejected = intermittentReject ? 1U : 0U;
+            capacity.observe(
+                allowed,
+                allowed - std::min(rejected, allowed),
+                rejected,
+                recovery);
         }
         assert(capacity.telemetry().generationCap > 1);
     }
