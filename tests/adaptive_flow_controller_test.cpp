@@ -277,6 +277,37 @@ int main() {
     }
 
     {
+        // A recent synthetic rejection/drop is real pressure even before the
+        // rolling output estimator confirms a deficit, and it must block
+        // quality recovery on that observation.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        bool lowered = false;
+        for (int i = 0; i < 12 && !lowered; ++i) {
+            auto observation = sample(
+                8.0, 3.0, 16.666, false, false,
+                99.0, true, false, true, true);
+            observation.outputTargeted = true;
+            observation.outputCadenceValid = true;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+            lowered = near(controller.currentScale(), 0.90F);
+        }
+        assert(lowered);
+
+        for (int i = 0; i < 60; ++i) {
+            auto observation = sample(
+                5.0, 1.5, 16.666, false, false,
+                70.0, true, false, true, true);
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = true;
+            observation.outputCadenceValid = true;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+        }
+        assert(near(controller.currentScale(), 0.90F));
+    }
+
+    {
         // Retained history timing alone is insufficient when current global
         // headroom is unavailable. Do not upscale from stale timing blindly.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
