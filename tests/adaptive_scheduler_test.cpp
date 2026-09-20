@@ -634,6 +634,67 @@ int main() {
     }
 
     {
+        // Build #383 regression: predictor capacity alone must not early-promote
+        // while the recent real-source cadence is still alternating wildly.
+        // The generic sustained-demand timer remains available, but the fast
+        // capacity path requires a stable cadence window.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        const std::array<std::chrono::milliseconds, 4> unstable{
+            20ms, 60ms, 20ms, 60ms,
+        };
+        bool promoted = false;
+        for (const auto interval : unstable) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(interval);
+            promoted = promoted || scheduler.telemetry().capacityPromoted;
+        }
+        assert(!promoted);
+        assert(scheduler.telemetry().costLimit == 1);
+
+        // Once cadence settles, the same safe hint may still promote one level
+        // early rather than waiting the full generic demand interval.
+        for (int frame = 0; frame < 8 && !promoted; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(40ms);
+            promoted = promoted || scheduler.telemetry().capacityPromoted;
+        }
+        assert(promoted);
+        assert(scheduler.telemetry().costLimit == 2);
+    }
+
+    {
+        // The causal veto after a capacity promotion also needs sustained
+        // degradation. One or two post-raise slow samples are insufficient to
+        // blame frame generation; a continuing regression still backs off.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        bool promoted = false;
+        for (int frame = 0; frame < 8 && !promoted; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(40ms);
+            promoted = promoted || scheduler.telemetry().capacityPromoted;
+        }
+        assert(promoted);
+        assert(scheduler.telemetry().costLimit == 2);
+
+        bool backedOff = false;
+        for (int frame = 0; frame < 2; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(80ms);
+            backedOff = backedOff || scheduler.telemetry().costBackedOff;
+        }
+        assert(!backedOff);
+        assert(scheduler.telemetry().costLimit == 2);
+
+        for (int frame = 0; frame < 6 && !backedOff; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(80ms);
+            backedOff = scheduler.telemetry().costBackedOff;
+        }
+        assert(backedOff);
+        assert(scheduler.telemetry().costLimit == 1);
+    }
+
+    {
         // A single long-but-not-discontinuous source hitch is consumed without
         // minting several target slots or catch-up debt.
         AdaptiveFrameScheduler scheduler(60, 3);
@@ -662,6 +723,45 @@ int main() {
             capacity.observe(2, 0);
         assert(capacity.telemetry().generationCap == 3);
         assert(capacity.telemetry().raised);
+    }
+
+    {
+        // Build #383 regression: intermittent-but-sustained WSI rejection must
+        // accumulate presentation-pressure evidence instead of being erased by
+        // each clean attempt.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(2);
+        for (int i = 0; i < 12; ++i) {
+            assert(capacity.limit(2) >= 1);
+            capacity.observe(2, (i % 2 == 0) ? 1 : 0);
+        }
+        assert(capacity.telemetry().generationCap == 1);
+    }
+
+    {
+        // A cap of one is not enough when WSI cannot accept even one synthetic
+        // frame per source cycle. Sustained rejection at generationCap==1 must
+        // deterministically suppress some single-frame opportunities so the
+        // expensive work is skipped before dispatch, while retaining probe
+        // attempts that can later demonstrate recovery.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(1);
+
+        bool suppressed = false;
+        bool probeObserved = false;
+        for (int i = 0; i < 24; ++i) {
+            const auto allowed = capacity.limit(1);
+            if (allowed == 0) {
+                suppressed = true;
+                continue;
+            }
+            probeObserved = true;
+            capacity.observe(1, 1);
+        }
+
+        assert(suppressed);
+        assert(probeObserved);
+        assert(capacity.telemetry().pressure);
     }
 
     {

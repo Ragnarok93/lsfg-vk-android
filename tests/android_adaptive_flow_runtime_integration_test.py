@@ -143,6 +143,11 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         for tag in ('"LSFG_METRICS"', '"LSFG_EVENT"', '"LSFG_FLOW"'):
             self.assertIn(tag, source)
 
+        # Config epochs must be process-monotonic rather than restarting at
+        # revision 1 whenever a swapchain/context is recreated.
+        self.assertIn("nextRuntimeConfigRevision", source)
+        self.assertNotIn("this->configRevision_ = 1;", source)
+
     def test_budget_tracks_adaptive_target_or_fixed_output_period(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn("1000.0 / static_cast<double>(conf.fpsLimit)", source)
