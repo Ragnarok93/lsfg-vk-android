@@ -165,7 +165,11 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("deadlineBatchDecision_", header)
         self.assertIn("Active deadline admission", source)
         self.assertIn("plannedGeneratedFrameCount", source)
-        self.assertIn("generatedFrameCount = 1", source)
+        self.assertIn(
+            "adaptiveAdmissionBootstrapGeneratedCount(",
+            source,
+        )
+        self.assertIn("bootstrapGeneratedFrameCount", source)
         self.assertIn("sourceHistoryWarmupActive", source)
         self.assertIn("admittedGeneratedFrameCount", source)
         self.assertIn(
