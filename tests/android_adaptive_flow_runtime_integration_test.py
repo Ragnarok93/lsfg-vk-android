@@ -222,6 +222,62 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertNotIn("fractionalOpportunityPhase_", admission)
 
 
+    def test_admission_bootstrap_and_rejection_reason_contracts(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        # Cold Adaptive admission must have an explicit bounded bootstrap path.
+        self.assertIn("adaptiveAdmissionBootstrapGeneratedCount", scheduler_header)
+        self.assertIn("admissionBootstrapStarvedOpportunities_", header)
+        self.assertIn("predictorInitialized", source)
+        self.assertIn("bootstrapGeneratedFrameCount", source)
+
+        # A stale deadline caused by an ordinary timeline rebase is refreshed to
+        # the next source-owned interval instead of permanently rejecting every
+        # synthetic opportunity before the predictor can collect a sample.
+        self.assertIn("sourceOwnedAdmissionDeadlineNs", scheduler_header)
+        self.assertIn("admissionSourceDeadlineNs", source)
+
+        # Admission telemetry distinguishes the control domains that can suppress
+        # generated work and publishes source slack with the rejection.
+        for token in (
+            "source_deadline_expired",
+            "predictor_uninitialized",
+            "predictor_budget_reject",
+            "history_warmup_suppress",
+            "wsi_cap_suppress",
+            "wsi_acquire_reject",
+            "admission_remaining_slack_ms=",
+        ):
+            self.assertIn(token, source)
+
+    def test_wsi_capacity_is_throughput_and_deficit_aware(self) -> None:
+        scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "GeneratedPresentationCapacityContext",
+            "recoveryEvidence",
+            "attemptedGeneratedFrames",
+            "acceptedGeneratedFrames",
+            "lastChangeReason",
+            "lastChangeOutputDeficit",
+        ):
+            self.assertIn(token, scheduler_header)
+
+        # Runtime demand and source-budget state are supplied to the downstream
+        # governor; scheduler/proven-cost state is not mutated by WSI.
+        self.assertIn("presentationCapacityContext", source)
+        self.assertIn("outputCadence.deficitConfirmed", source)
+        self.assertIn("adaptiveTelemetry.provenCostLimit", source)
+        self.assertIn("adaptiveTelemetry.sourceCadenceRatio", source)
+        self.assertIn("adaptiveTelemetry.sourceBudgetMinRatio", source)
+
     def test_capacity_hint_and_presentation_cap_are_pre_dispatch(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
