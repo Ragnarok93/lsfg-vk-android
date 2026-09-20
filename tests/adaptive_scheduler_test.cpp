@@ -1434,23 +1434,20 @@ int main() {
     }
 
     {
-        // Build #386 regression: pressure evidence used to disappear at every
-        // integer cap reduction, so real intermittent WSI pressure could reach
-        // cap==1 yet never enter sub-one duty. Preserve enough pressure evidence
-        // across 3 -> 2 -> 1 that one further rejected single-frame probe can
-        // lower duty before more doomed work is dispatched.
+        // #393 supersedes the old rejection-count policy: minority WSI loss
+        // must not collapse 3 -> 2 -> 1 when attempting three still delivers
+        // two generated frames per source cycle. The governor may test cap 2,
+        // but accepted throughput must keep it from descending to cap 1.
         GeneratedPresentationCapacityTracker capacity;
         capacity.configure(3);
-        capacity.observe(3, 1);
-        capacity.observe(3, 1);
-        assert(capacity.telemetry().generationCap == 2);
-        capacity.observe(2, 1);
-        capacity.observe(2, 1);
-        assert(capacity.telemetry().generationCap == 1);
-        assert(capacity.telemetry().singleFrameDuty == 1.0);
-
-        capacity.observe(1, 1);
-        assert(capacity.telemetry().singleFrameDuty < 1.0);
+        for (int i = 0; i < 60; ++i) {
+            const auto attempted = capacity.limit(3);
+            const std::size_t rejected = attempted >= 3 ? 1 : 0;
+            const std::size_t accepted = attempted - rejected;
+            capacity.observe(attempted, accepted, rejected, {});
+        }
+        assert(capacity.telemetry().generationCap >= 2);
+        assert(capacity.telemetry().acceptedFramesEwma > 1.5);
     }
 
     {
@@ -1458,8 +1455,11 @@ int main() {
         // gradually raise duty back to one without requiring a lifecycle reset.
         GeneratedPresentationCapacityTracker capacity;
         capacity.configure(1);
-        capacity.observe(1, 1);
-        capacity.observe(1, 1);
+        for (int i = 0;
+                i < 8 && capacity.telemetry().singleFrameDuty >= 0.999;
+                ++i) {
+            capacity.observe(1, 1);
+        }
         assert(capacity.telemetry().singleFrameDuty < 1.0);
 
         bool recovered = false;
