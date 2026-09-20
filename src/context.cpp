@@ -1200,7 +1200,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .globalPressureValid =
                 this->adaptiveFlowGlobalPressureValid_,
             .outputDeficit = outputDeficit,
-            .syntheticDropPressure = false,
+            .syntheticDropPressure =
+                computeDropPressure || newWsiDropPressure,
             .generatedWorkSample = generatedWorkSample,
             .schedulerTransition = schedulerTransition,
             .valid = budgetValid
