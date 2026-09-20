@@ -20,6 +20,15 @@ constexpr double kGlobalGpuPressurePercent = 96.0;
 constexpr double kGlobalGpuRecoveryPercent = 88.0;
 constexpr double kTransitionCooldownSeconds = 1.25;
 constexpr double kSchedulerTransitionHoldSeconds = 1.25;
+constexpr double kDownstepEvaluationSeconds = 0.80;
+constexpr double kDownstepNoBenefitHoldSeconds = 4.0;
+constexpr double kMaterialPressureRatioRelief = 0.05;
+constexpr double kMaterialOutputGainRatio = 1.02;
+constexpr double kMaterialSourceGainRatio = 1.03;
+constexpr double kMaterialFlowReliefRatio = 0.88;
+constexpr double kMaterialTotalReliefRatio = 0.95;
+constexpr double kMaterialWsiReliefRatio = 0.75;
+constexpr double kMaterialGlobalGpuReliefPercent = 3.0;
 
 std::span<const float> states(AdaptiveFlowPreset preset) {
     switch (preset) {
@@ -45,6 +54,8 @@ void AdaptiveFlowController::configure(bool enabled, AdaptiveFlowPreset preset) 
     observedSeconds_ = 0.0;
     cooldownUntilSeconds_ = 0.0;
     schedulerHoldUntilSeconds_ = 0.0;
+    downstepEvaluationActive_ = false;
+    downstepBenefitSeen_ = false;
     resetEvidence();
     selectTargetState();
     if (!enabled_)
@@ -69,6 +80,8 @@ void AdaptiveFlowController::reset() {
     observedSeconds_ = 0.0;
     cooldownUntilSeconds_ = 0.0;
     schedulerHoldUntilSeconds_ = 0.0;
+    downstepEvaluationActive_ = false;
+    downstepBenefitSeen_ = false;
     resetEvidence();
     selectTargetState();
     if (!enabled_)
@@ -98,6 +111,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             || observation.flowMs < 0.0
             || !std::isfinite(observation.totalLsfgMs)
             || !std::isfinite(observation.flowMs)) {
+        if (downstepEvaluationActive_)
+            downstepEvaluationStartedSeconds_ += evidenceSeconds;
         resetEvidence();
         telemetry_.reason = AdaptiveFlowDecisionReason::InvalidTelemetry;
         return telemetry_.currentScale;
@@ -108,13 +123,27 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     telemetry_.globalGpuUsagePercent = observation.globalPressureValid
         ? observation.globalGpuUsagePercent : 0.0;
     telemetry_.outputDeficit = observation.outputDeficit;
-    const bool globalPressure =
+    const bool computePressure =
+        observation.generatedWorkSample
+        && (observation.computeDeadlinePressure
+            || observation.deadlineMissed
+            || telemetry_.pressureRatio >= kPressureRatio);
+    const bool wsiPressure = observation.wsiPresentationPressure;
+    const bool globalGpuPressure =
         observation.globalPressureValid
-        && observation.globalGpuUsagePercent >= kGlobalGpuPressurePercent
+        && observation.globalGpuUsagePercent >= kGlobalGpuPressurePercent;
+    const bool globalPressure =
+        globalGpuPressure
         && (observation.outputDeficit || observation.syntheticDropPressure);
+    const bool wsiFlowPressure =
+        wsiPressure && globalGpuPressure && observation.outputDeficit;
+    telemetry_.computePressure = computePressure;
+    telemetry_.wsiPressure = wsiPressure;
     telemetry_.globalPressure = globalPressure;
 
     if (observation.schedulerTransition) {
+        if (downstepEvaluationActive_)
+            downstepEvaluationStartedSeconds_ += evidenceSeconds;
         schedulerHoldUntilSeconds_ = std::max(
             schedulerHoldUntilSeconds_, observedSeconds_ + kSchedulerTransitionHoldSeconds);
         headroomSeconds_ = 0.0;
@@ -127,12 +156,84 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     }
 
     if (observedSeconds_ < schedulerHoldUntilSeconds_) {
+        if (downstepEvaluationActive_)
+            downstepEvaluationStartedSeconds_ += evidenceSeconds;
         headroomSeconds_ = 0.0;
         if (globalPressure)
             pressureSeconds_ += evidenceSeconds;
         else
             pressureSeconds_ = 0.0;
         telemetry_.reason = AdaptiveFlowDecisionReason::SchedulerTransition;
+        return telemetry_.currentScale;
+    }
+
+    if (downstepEvaluationActive_) {
+        const bool outputBenefit =
+            downstepBaselineOutputValid_
+            && observation.outputCadenceValid
+            && observation.outputFps
+                >= downstepBaselineOutputFps_ * kMaterialOutputGainRatio;
+        const bool sourceBenefit =
+            downstepBaselineSourceFps_ > 0.0
+            && observation.sourceFps
+                >= downstepBaselineSourceFps_ * kMaterialSourceGainRatio;
+        const bool computeBenefit =
+            downstepBaselineComputePressure_
+            && observation.generatedWorkSample
+            && (!computePressure
+                || telemetry_.pressureRatio
+                    <= downstepBaselinePressureRatio_
+                        - kMaterialPressureRatioRelief
+                || (observation.flowMs
+                        <= downstepBaselineFlowMs_
+                            * kMaterialFlowReliefRatio
+                    && observation.totalLsfgMs
+                        <= downstepBaselineTotalMs_
+                            * kMaterialTotalReliefRatio));
+        const bool wsiBenefit =
+            downstepBaselineWsiPressure_
+            && downstepBaselineWsiLossRate_ > 0.0
+            && observation.wsiLossRate
+                <= downstepBaselineWsiLossRate_
+                    * kMaterialWsiReliefRatio;
+        const bool globalBenefit =
+            downstepBaselineGlobalPressure_
+            && observation.globalPressureValid
+            && observation.globalGpuUsagePercent
+                <= downstepBaselineGlobalGpuPercent_
+                    - kMaterialGlobalGpuReliefPercent;
+
+        downstepBenefitSeen_ = downstepBenefitSeen_
+            || outputBenefit || sourceBenefit || computeBenefit
+            || wsiBenefit || globalBenefit;
+
+        if (observedSeconds_ - downstepEvaluationStartedSeconds_
+                < kDownstepEvaluationSeconds) {
+            resetEvidence();
+            telemetry_.downstepEvaluationActive = true;
+            telemetry_.reason = AdaptiveFlowDecisionReason::EvaluatingDownstep;
+            return telemetry_.currentScale;
+        }
+
+        downstepEvaluationActive_ = false;
+        telemetry_.downstepEvaluationActive = false;
+        resetEvidence();
+        if (downstepBenefitSeen_) {
+            downstepBenefitSeen_ = false;
+            telemetry_.reason =
+                AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
+            return telemetry_.currentScale;
+        }
+
+        const auto presetStates = states(preset_);
+        telemetry_.stateIndex = std::min(
+            downstepPreviousIndex_, presetStates.size() - 1);
+        telemetry_.currentScale = presetStates[telemetry_.stateIndex];
+        telemetry_.changed = true;
+        telemetry_.reason = AdaptiveFlowDecisionReason::DownstepReverted;
+        cooldownUntilSeconds_ =
+            observedSeconds_ + kDownstepNoBenefitHoldSeconds;
+        downstepBenefitSeen_ = false;
         return telemetry_.currentScale;
     }
 
@@ -147,11 +248,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool canLower = index + 1 < presetStates.size();
     const bool canRaise = index > 0;
 
-    const bool localPressure =
-        observation.generatedWorkSample
-        && (observation.deadlineMissed
-            || telemetry_.pressureRatio >= kPressureRatio);
-    const bool pressure = localPressure || globalPressure;
+    const bool pressure =
+        computePressure || globalPressure || wsiFlowPressure;
 
     if (pressure && canLower) {
         const double currentScale = static_cast<double>(presetStates[index]);
@@ -177,9 +275,27 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         const double downConfirmSeconds = globalPressure
             ? kGlobalDownConfirmSeconds : kDownConfirmSeconds;
         if (pressureSeconds_ >= downConfirmSeconds) {
+            downstepEvaluationActive_ = true;
+            downstepBenefitSeen_ = false;
+            downstepPreviousIndex_ = index;
+            downstepEvaluationStartedSeconds_ = observedSeconds_;
+            downstepBaselinePressureRatio_ = telemetry_.pressureRatio;
+            downstepBaselineFlowMs_ = observation.flowMs;
+            downstepBaselineTotalMs_ = observation.totalLsfgMs;
+            downstepBaselineSourceFps_ = observation.sourceFps;
+            downstepBaselineOutputFps_ = observation.outputFps;
+            downstepBaselineWsiLossRate_ = observation.wsiLossRate;
+            downstepBaselineGlobalGpuPercent_ =
+                observation.globalGpuUsagePercent;
+            downstepBaselineOutputValid_ =
+                observation.outputCadenceValid;
+            downstepBaselineComputePressure_ = computePressure;
+            downstepBaselineWsiPressure_ = wsiPressure;
+            downstepBaselineGlobalPressure_ = globalPressure;
             telemetry_.stateIndex++;
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
             telemetry_.changed = true;
+            telemetry_.downstepEvaluationActive = true;
             telemetry_.reason = globalPressure
                 ? AdaptiveFlowDecisionReason::SustainedGlobalPressure
                 : AdaptiveFlowDecisionReason::SustainedPressure;
@@ -196,6 +312,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool globalRecoveryHeadroom =
         !observation.globalPressureValid
         || observation.globalGpuUsagePercent <= kGlobalGpuRecoveryPercent;
+    const bool outputRecoverySatisfied =
+        !observation.outputTargeted
+        || observation.outputTargetSatisfied;
     const bool retainedHistoryRecoveryEligible =
         !observation.generatedWorkSample
         && observation.globalPressureValid
@@ -209,6 +328,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             && recoveryTimingEligible
             && !observation.outputDeficit
             && !observation.syntheticDropPressure
+            && !wsiPressure
+            && outputRecoverySatisfied
             && globalRecoveryHeadroom) {
         const double currentScale = static_cast<double>(presetStates[index]);
         const double higherScale = static_cast<double>(presetStates[index - 1]);
@@ -267,6 +388,9 @@ const char* AdaptiveFlowController::reasonName(AdaptiveFlowDecisionReason reason
     case AdaptiveFlowDecisionReason::InsufficientFlowContribution: return "insufficient_flow_contribution";
     case AdaptiveFlowDecisionReason::SustainedPressure: return "sustained_gpu_pressure";
     case AdaptiveFlowDecisionReason::SustainedGlobalPressure: return "sustained_global_gpu_pressure";
+    case AdaptiveFlowDecisionReason::EvaluatingDownstep: return "evaluating_downstep";
+    case AdaptiveFlowDecisionReason::DownstepBenefitConfirmed: return "downstep_benefit_confirmed";
+    case AdaptiveFlowDecisionReason::DownstepReverted: return "downstep_reverted_no_benefit";
     case AdaptiveFlowDecisionReason::InsufficientRecoveryHeadroom: return "insufficient_recovery_headroom";
     case AdaptiveFlowDecisionReason::SustainedHeadroom: return "sustained_headroom";
     }

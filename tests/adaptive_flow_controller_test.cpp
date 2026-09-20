@@ -72,8 +72,14 @@ int main() {
         assert(near(controller.currentScale(), 0.90F));
         assert(controller.telemetry().reason == AdaptiveFlowDecisionReason::SustainedPressure
             || controller.telemetry().reason == AdaptiveFlowDecisionReason::Cooldown);
-        for (int i = 0; i < 8; ++i)
-            controller.observe(sample(16.2, 5.0));
+        bool benefitConfirmed = false;
+        for (int i = 0; i < 10; ++i) {
+            controller.observe(sample(13.0, 3.5));
+            benefitConfirmed = benefitConfirmed
+                || controller.telemetry().reason
+                    == AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
+        }
+        assert(benefitConfirmed);
         assert(near(controller.currentScale(), 0.90F));
     }
 
@@ -102,12 +108,20 @@ int main() {
     }
 
     {
-        // Degradation never passes the preset hard floor.
+        // Degradation never passes the preset hard floor, but each downstep
+        // must first prove useful before another downstep is allowed.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Low);
-        for (int step = 0; step < 4; ++step) {
-            for (int i = 0; i < 30; ++i)
+        for (int step = 0; step < 3; ++step) {
+            const float before = controller.currentScale();
+            for (int i = 0; i < 30 && near(controller.currentScale(), before); ++i)
                 controller.observe(sample(16.4, 7.0, 16.666, false, true));
+            assert(!near(controller.currentScale(), before));
+            for (int i = 0; i < 10; ++i)
+                controller.observe(sample(12.0, 4.0));
         }
+        assert(near(controller.currentScale(), 0.25F));
+        for (int i = 0; i < 40; ++i)
+            controller.observe(sample(16.4, 7.0, 16.666, false, true));
         assert(near(controller.currentScale(), 0.25F));
     }
 
@@ -229,6 +243,82 @@ int main() {
     }
 
     {
+        // WSI pressure belongs to the presentation-capacity governor unless
+        // global GPU pressure also makes Flow a plausible actuator.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 30; ++i) {
+            auto observation = sample(
+                8.0, 3.0, 16.666, false, false,
+                82.0, true, true, false, false);
+            observation.wsiPresentationPressure = true;
+            observation.wsiLossRate = 0.35;
+            observation.outputTargeted = true;
+            controller.observe(observation);
+        }
+        assert(near(controller.currentScale(), 1.00F));
+    }
+
+    {
+        // A WSI/global-pressure downstep is provisional. No measurable benefit
+        // restores the previous quality state and applies a longer hold.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        bool lowered = false;
+        for (int i = 0; i < 12 && !lowered; ++i) {
+            auto observation = sample(
+                8.0, 3.0, 16.666, false, false,
+                99.0, true, true, false, false);
+            observation.wsiPresentationPressure = true;
+            observation.wsiLossRate = 0.35;
+            observation.outputTargeted = true;
+            observation.outputCadenceValid = true;
+            observation.outputFps = 54.0;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+            lowered = near(controller.currentScale(), 0.90F);
+        }
+        assert(lowered);
+
+        bool reverted = false;
+        for (int i = 0; i < 12; ++i) {
+            auto observation = sample(
+                8.0, 3.0, 16.666, false, false,
+                99.0, true, true, false, false);
+            observation.wsiPresentationPressure = true;
+            observation.wsiLossRate = 0.35;
+            observation.outputTargeted = true;
+            observation.outputCadenceValid = true;
+            observation.outputFps = 54.0;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+            reverted = reverted
+                || controller.telemetry().reason
+                    == AdaptiveFlowDecisionReason::DownstepReverted;
+        }
+        assert(reverted);
+        assert(near(controller.currentScale(), 1.00F));
+        for (int i = 0; i < 20; ++i)
+            controller.observe(sample(16.2, 5.0));
+        assert(near(controller.currentScale(), 1.00F));
+    }
+
+    {
+        // A compute-limited downstep that relieves LSFG pressure is retained.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 12; ++i)
+            controller.observe(sample(16.2, 5.0));
+        assert(near(controller.currentScale(), 0.90F));
+        bool confirmed = false;
+        for (int i = 0; i < 10; ++i) {
+            controller.observe(sample(12.0, 3.5));
+            confirmed = confirmed
+                || controller.telemetry().reason
+                    == AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
+        }
+        assert(confirmed);
+        assert(near(controller.currentScale(), 0.90F));
+    }
+
+    {
         // Global saturation by itself must not sacrifice Flow quality when the
         // next scale step has too little scale-sensitive work to materially
         // improve the frame budget.
@@ -257,10 +347,18 @@ int main() {
         controller.observe(sample(
             8.0, 3.0, 16.666, true, false,
             99.0, true, true));
-        for (int i = 0; i < 14; ++i) {
+        bool lowered = false;
+        for (int i = 0; i < 14 && !lowered; ++i) {
             controller.observe(sample(
                 8.0, 3.0, 16.666, false, false,
                 99.0, true, true));
+            lowered = near(controller.currentScale(), 0.70F);
+        }
+        assert(lowered);
+        for (int i = 0; i < 10; ++i) {
+            controller.observe(sample(
+                5.5, 1.8, 16.666, false, false,
+                90.0, true, false));
         }
         assert(near(controller.currentScale(), 0.70F));
     }

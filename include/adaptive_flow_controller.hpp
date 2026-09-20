@@ -21,6 +21,9 @@ enum class AdaptiveFlowDecisionReason : uint8_t {
     InsufficientFlowContribution,
     SustainedPressure,
     SustainedGlobalPressure,
+    EvaluatingDownstep,
+    DownstepBenefitConfirmed,
+    DownstepReverted,
     InsufficientRecoveryHeadroom,
     SustainedHeadroom,
 };
@@ -38,6 +41,18 @@ struct AdaptiveFlowObservation {
     double mipmapsMs{};
     std::size_t generationCount{};
     bool deadlineMissed{false};
+    /// Explicit compute/deadline pressure, excluding downstream WSI losses.
+    bool computeDeadlinePressure{false};
+    /// Downstream synthetic presentation pressure. This is never treated as
+    /// compute pressure unless global GPU pressure also makes Flow a plausible
+    /// actuator.
+    bool wsiPresentationPressure{false};
+    double wsiLossRate{};
+    double sourceFps{};
+    double outputFps{};
+    bool outputCadenceValid{false};
+    bool outputTargeted{false};
+    bool outputTargetSatisfied{false};
     /// Whole-device GPU utilization sampled out-of-band by GameNative.
     double globalGpuUsagePercent{};
     /// True when the global GPU sample is fresh and trustworthy.
@@ -65,6 +80,9 @@ struct AdaptiveFlowTelemetry {
     double estimatedNextTotalMs{};
     double globalGpuUsagePercent{};
     bool globalPressure{false};
+    bool computePressure{false};
+    bool wsiPressure{false};
+    bool downstepEvaluationActive{false};
     bool outputDeficit{false};
 };
 
@@ -100,5 +118,22 @@ private:
     double headroomSeconds_{};
     double cooldownUntilSeconds_{};
     double schedulerHoldUntilSeconds_{};
+
+    bool downstepEvaluationActive_{false};
+    bool downstepBenefitSeen_{false};
+    std::size_t downstepPreviousIndex_{};
+    double downstepEvaluationStartedSeconds_{};
+    double downstepBaselinePressureRatio_{};
+    double downstepBaselineFlowMs_{};
+    double downstepBaselineTotalMs_{};
+    double downstepBaselineSourceFps_{};
+    double downstepBaselineOutputFps_{};
+    double downstepBaselineWsiLossRate_{};
+    double downstepBaselineGlobalGpuPercent_{};
+    bool downstepBaselineOutputValid_{false};
+    bool downstepBaselineComputePressure_{false};
+    bool downstepBaselineWsiPressure_{false};
+    bool downstepBaselineGlobalPressure_{false};
+
     AdaptiveFlowTelemetry telemetry_{};
 };
