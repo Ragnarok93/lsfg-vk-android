@@ -1216,6 +1216,151 @@ int main() {
     }
 
     {
+        // Build #393 Run-1 hard regression: a stable source near 60 with a
+        // target near 90 needs fractional <1 generation/source. With no GPU
+        // predictor history yet, synthetic opportunities must bootstrap their
+        // own first cost sample instead of remaining at zero indefinitely.
+        AdaptiveFrameScheduler scheduler(90, 3);
+        std::size_t admittedWithoutPredictor = 0;
+        unsigned starvedOpportunities = 0;
+        for (int frame = 0; frame < 60; ++frame) {
+            const auto planned = scheduler.plan(16666667ns);
+            if (planned == 0)
+                continue;
+            const auto admitted = adaptiveAdmissionBootstrapGeneratedCount(
+                planned,
+                false,
+                6.0,
+                16.666667,
+                starvedOpportunities);
+            admittedWithoutPredictor += admitted;
+            if (admitted == 0)
+                starvedOpportunities += static_cast<unsigned>(planned);
+            else
+                starvedOpportunities = 0;
+        }
+        assert(admittedWithoutPredictor > 10);
+    }
+
+    {
+        // An ordinary source-timeline rebase must not leave admission attached
+        // to an already-expired timestamp. Exactly one new protected source
+        // interval is made available; non-rebased stale deadlines remain late.
+        SourceTimelineSample rebased{
+            .sourceIndex = 5,
+            .intervalNs = 16'000'000,
+            .previousSourceDesiredTimeNs = 84'000'000,
+            .sourceDesiredTimeNs = 100'000'000,
+            .rebased = true,
+            .valid = true,
+        };
+        assert(sourceOwnedAdmissionDeadlineNs(rebased, 105'000'000)
+            == 121'000'000);
+
+        rebased.rebased = false;
+        assert(sourceOwnedAdmissionDeadlineNs(rebased, 105'000'000)
+            == 100'000'000);
+    }
+
+    {
+        // Throughput/profitability regression: lowering 3 -> 2 is provisional.
+        // If the lower cap reduces accepted generated throughput while output is
+        // still below target and source cadence is protected, restore 3 rather
+        // than optimizing only the raw rejection percentage.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        GeneratedPresentationCapacityContext context{
+            .outputDeficit = false,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .provenCostLimit = 3,
+            .sourceCadenceRatio = 1.0,
+            .sourceBudgetMinRatio = 0.8,
+        };
+
+        // Establish ~2.5 accepted frames/batch with intermittent rejection.
+        for (int i = 0; i < 8; ++i) {
+            const auto attempted = capacity.limit(3, context);
+            const std::size_t accepted = (i % 2 == 0) ? 3 : 2;
+            capacity.observe(
+                attempted,
+                std::min(accepted, attempted),
+                attempted > accepted ? attempted - accepted : 0,
+                context);
+        }
+
+        // Force enough pressure to make the provisional lower-cap experiment.
+        for (int i = 0; i < 12 && capacity.telemetry().generationCap == 3; ++i) {
+            const auto attempted = capacity.limit(3, context);
+            const std::size_t accepted = std::min<std::size_t>(2, attempted);
+            capacity.observe(
+                attempted,
+                accepted,
+                attempted - accepted,
+                context);
+        }
+        assert(capacity.telemetry().generationCap <= 2);
+
+        context.outputDeficit = true;
+        for (int i = 0; i < 12; ++i) {
+            const auto attempted = capacity.limit(3, context);
+            const std::size_t accepted = std::min<std::size_t>(2, attempted);
+            capacity.observe(
+                attempted,
+                accepted,
+                attempted - accepted,
+                context);
+        }
+        assert(capacity.telemetry().generationCap == 3);
+        assert(capacity.telemetry().lastChangeReason
+            == GeneratedPresentationCapChangeReason::ProfitabilityRestoreHigher
+            || capacity.telemetry().lastChangeReason
+                == GeneratedPresentationCapChangeReason::TargetDeficitProbeSuccess);
+    }
+
+    {
+        // Target deficit accelerates bounded upward WSI probes. With scheduler
+        // cost 3 proven, source inside its budget, and deadline capacity for 3,
+        // cap 1 must not strand delivered output under light intermittent WSI
+        // loss. Successful extra presentations prove higher capacity.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        GeneratedPresentationCapacityContext pressure{
+            .outputDeficit = false,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .provenCostLimit = 3,
+            .sourceCadenceRatio = 1.0,
+            .sourceBudgetMinRatio = 0.8,
+        };
+        for (int i = 0; i < 20 && capacity.telemetry().generationCap > 1; ++i) {
+            const auto attempted = capacity.limit(3, pressure);
+            capacity.observe(attempted, 0, attempted, pressure);
+        }
+        assert(capacity.telemetry().generationCap == 1);
+
+        GeneratedPresentationCapacityContext deficit = pressure;
+        deficit.outputDeficit = true;
+        std::size_t acceptedTotal = 0;
+        unsigned actualAttempts = 0;
+        for (int cycle = 0; cycle < 80; ++cycle) {
+            const auto attempted = capacity.limit(3, deficit);
+            if (attempted == 0)
+                continue;
+            ++actualAttempts;
+            const bool intermittentLoss = actualAttempts % 9 == 0;
+            const std::size_t rejected = intermittentLoss ? 1 : 0;
+            const std::size_t accepted = attempted - std::min(rejected, attempted);
+            acceptedTotal += accepted;
+            capacity.observe(attempted, accepted, rejected, deficit);
+        }
+        assert(capacity.telemetry().generationCap >= 2);
+        assert(acceptedTotal > 80); // better than a permanent cap-1 ceiling.
+    }
+
+    {
         // WSI capacity is independent of scheduler cost. Sustained rejection
         // lowers one presentation level; recovery requires a much longer clean
         // run and never blocks or pre-acquires a swapchain image.
