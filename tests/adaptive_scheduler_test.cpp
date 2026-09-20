@@ -1315,6 +1315,52 @@ int main() {
     }
 
     {
+        // Build #393 regression: cap-1 recovery must accumulate through low,
+        // intermittent WSI loss. One rejected probe every several accepted
+        // probes cannot erase all recovery progress indefinitely.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        for (int i = 0; i < 8 && capacity.telemetry().generationCap > 1; ++i)
+            capacity.observe(3, 2);
+        assert(capacity.telemetry().generationCap == 1);
+
+        unsigned attemptedProbes = 0;
+        for (int cycle = 0;
+                cycle < 240 && capacity.telemetry().generationCap == 1;
+                ++cycle) {
+            const auto allowed = capacity.limit(3);
+            if (allowed == 0)
+                continue;
+            ++attemptedProbes;
+            const bool intermittentReject = attemptedProbes % 8 == 0;
+            capacity.observe(allowed, intermittentReject ? 1 : 0);
+        }
+        assert(capacity.telemetry().generationCap > 1);
+    }
+
+    {
+        // Backoff reason is event telemetry, not sticky historical state. Once
+        // the backoff event has been emitted, later clean cycles must report
+        // none unless a new backoff occurs.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        bool backedOff = false;
+        for (int frame = 0; frame < 40 && !backedOff; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(frame < 20 ? 40ms : 65ms);
+            backedOff = scheduler.telemetry().costBackedOff;
+        }
+        assert(backedOff);
+        assert(scheduler.telemetry().costBackoffReason
+            != AdaptiveCostBackoffReason::None);
+
+        scheduler.setSafeGenerationHint(1, true);
+        scheduler.plan(40ms);
+        assert(!scheduler.telemetry().costBackedOff);
+        assert(scheduler.telemetry().costBackoffReason
+            == AdaptiveCostBackoffReason::None);
+    }
+
+    {
         // Rolling LSFG output reacts inside a sub-second window and requires
         // sustained evidence both to declare deficit and to prove recovery.
         LsfgOutputCadenceTracker cadence;
