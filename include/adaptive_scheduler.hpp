@@ -257,41 +257,14 @@ private:
     bool safeGenerationHintValid_{false};
     unsigned capacityRaiseSamples_{};
     unsigned stableCadenceSamples_{};
-    unsigned pendingRaiseSourceDropSamples_{};
 
     double observedTimeSeconds_{};
     std::size_t costLimit_{};
-    bool pendingCostRaise_{false};
-    bool probeAfterBackoff_{false};
-    bool pendingRaiseWasProbe_{false};
-    double pendingRaiseBaselineFps_{};
-    double pendingRaiseTimeSeconds_{};
-    double lastCostChangeTimeSeconds_{-1.0};
-    double lastBackoffTimeSeconds_{-1.0};
-    double successfulProbeHoldUntilSeconds_{};
-    double raiseHoldUntilSeconds_{};
 
-    // Raising the generation ceiling requires a sustained output deficit. The
-    // source-rate average collected during that observation period becomes the
-    // pre-raise baseline used to decide whether the additional LSFG work caused
-    // a subsequent source-FPS regression.
+    // Source cadence determines target demand, but never serves as a
+    // generation-count veto. Sustained unmet target demand raises this ceiling
+    // until the configured maximum is reached.
     double unmetDemandSinceSeconds_{-1.0};
-    double unmetSourceFpsSum_{};
-    std::size_t unmetSourceFpsSamples_{};
-
-    // Once an established generation level stops preserving useful source
-    // cadence, temporarily try one cheaper level. The lower level is retained
-    // only when source FPS recovers enough to preserve aggregate throughput.
-    double sourcePreservationSinceSeconds_{-1.0};
-    double sourcePreservationFpsSum_{};
-    std::size_t sourcePreservationSamples_{};
-    bool sourcePreservationProbeActive_{false};
-    std::size_t sourcePreservationOriginalCost_{};
-    double sourcePreservationBaselineFps_{};
-    double sourcePreservationProbeStartedSeconds_{};
-    double sourcePreservationProbeFpsSum_{};
-    std::size_t sourcePreservationProbeSamples_{};
-    double sourcePreservationProbeHoldUntilSeconds_{};
 
     AdaptiveSchedulerTelemetry telemetry_{};
 };
