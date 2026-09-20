@@ -257,7 +257,8 @@ private:
     bool safeGenerationHintValid_{false};
     unsigned capacityRaiseSamples_{};
     unsigned stableCadenceSamples_{};
-    unsigned pendingRaiseSourceDropSamples_{};
+    double pendingRaiseSourceDropEvidenceSeconds_{};
+    double pendingRaiseLastEvaluationTimeSeconds_{};
 
     double observedTimeSeconds_{};
     std::size_t costLimit_{};
