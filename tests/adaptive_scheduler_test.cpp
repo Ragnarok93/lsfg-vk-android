@@ -417,6 +417,62 @@ int main() {
     }
 
     {
+        // Pre-device validation for the real Run-2 configuration pattern.
+        // With a stable source, multiplier=4, and a safe predictor hint of 3,
+        // target changes (including suspend-spanning Quick Menu changes) must
+        // use the minimum required generation density without ever becoming
+        // stranded at cost 1 when the target requires 3 generated frames.
+        AdaptiveFrameScheduler scheduler(45, 3);
+        const std::array<uint32_t, 7> targets{
+            60, 90, 120, 75, 100, 90, 95,
+        };
+
+        for (int frame = 0; frame < 80; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+        }
+
+        for (const auto target : targets) {
+            scheduler.configure(target, 3);
+            assert(scheduler.plan(1s) == 0);
+            bool backedOff = false;
+            for (int frame = 0; frame < 48; ++frame) {
+                scheduler.setSafeGenerationHint(3, true);
+                scheduler.plan(34ms);
+                backedOff = backedOff || scheduler.telemetry().costBackedOff;
+            }
+            assert(!backedOff);
+
+            const double wanted = scheduler.telemetry().wantedGeneratedFrames;
+            const auto required = static_cast<std::size_t>(
+                std::clamp(std::ceil(wanted - 1e-6), 1.0, 3.0));
+            assert(scheduler.telemetry().costLimit >= required);
+            if (required == 3)
+                assert(scheduler.telemetry().provenCostLimit == 3);
+        }
+    }
+
+    {
+        // Disabling Adaptive for fixed operation must not erase a generation
+        // ceiling that was already causally proven. Re-enabling Adaptive in the
+        // same runtime may warm-start to the proven level rather than spend
+        // another multi-second 1 -> 2 -> 3 ramp.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 100; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+        }
+        assert(scheduler.telemetry().provenCostLimit == 3);
+
+        scheduler.configure(0, 3); // Adaptive disabled / fixed mode active.
+        scheduler.configure(120, 3);
+        scheduler.setSafeGenerationHint(3, true);
+        scheduler.plan(34ms);
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(scheduler.telemetry().configWarmStart);
+    }
+
+    {
         // First-time configuration is still a cold start; merely constructing
         // or enabling Adaptive must not bypass the established safety ramp.
         AdaptiveFrameScheduler scheduler;
@@ -783,11 +839,11 @@ int main() {
     }
 
     {
-        // #386 capacity-evidence regression: a predictor that continues to
-        // certify the promoted level is contradictory evidence against blaming
-        // a modest source-rate dip on generated work. Preserve that level
-        // unless the source loss is materially deeper; severe collapse still
-        // remains eligible for causal backoff.
+        // Capacity prediction only proves LSFG work fits the synthetic budget;
+        // it does not prove the game's source workload is unharmed. A small
+        // source fluctuation must not cause a false backoff, but a sustained
+        // >10% source-cadence regression remains actionable even when the
+        // predictor still reports the promoted level as compute-safe.
         AdaptiveFrameScheduler scheduler(120, 3);
         bool promoted = false;
         for (int frame = 0; frame < 20 && !promoted; ++frame) {
@@ -798,13 +854,21 @@ int main() {
         assert(promoted);
 
         bool backedOff = false;
-        for (int frame = 0; frame < 18; ++frame) {
+        for (int frame = 0; frame < 16; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
-            scheduler.plan(40ms);
+            scheduler.plan(35ms);
             backedOff = backedOff || scheduler.telemetry().costBackedOff;
         }
         assert(!backedOff);
         assert(scheduler.telemetry().costLimit == 2);
+
+        for (int frame = 0; frame < 16 && !backedOff; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(40ms);
+            backedOff = backedOff || scheduler.telemetry().costBackedOff;
+        }
+        assert(backedOff);
+        assert(scheduler.telemetry().costLimit == 1);
     }
 
     {
