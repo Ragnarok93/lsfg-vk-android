@@ -551,16 +551,17 @@ int main() {
         assert(promoted);
         assert(scheduler.telemetry().costLimit == 2);
 
-        // The existing causal veto remains authoritative after an early raise,
-        // but a single hitch is not enough to blame the new generation level.
+        // A capacity hint only accelerates promotion; it does not create a
+        // later source-FPS veto. If the source slows, target demand rises and
+        // Adaptive continues toward the configured maximum.
         bool backedOff = false;
-        for (int frame = 0; frame < 6 && !backedOff; ++frame) {
+        for (int frame = 0; frame < 12; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
             scheduler.plan(80ms);
-            backedOff = scheduler.telemetry().costBackedOff;
+            backedOff = backedOff || scheduler.telemetry().costBackedOff;
         }
-        assert(backedOff);
-        assert(scheduler.telemetry().costLimit == 1);
+        assert(!backedOff);
+        assert(scheduler.telemetry().costLimit == 3);
     }
 
     {
@@ -593,9 +594,9 @@ int main() {
     }
 
     {
-        // The causal veto after a capacity promotion also needs sustained
-        // degradation. One or two post-raise slow samples are insufficient to
-        // blame frame generation; a continuing regression still backs off.
+        // Capacity-informed promotion follows the same target-authoritative
+        // policy as the ordinary ramp. Source degradation after promotion may
+        // increase demand, but must never revoke the promoted generation level.
         AdaptiveFrameScheduler scheduler(120, 3);
         bool promoted = false;
         for (int frame = 0; frame < 8 && !promoted; ++frame) {
@@ -615,13 +616,13 @@ int main() {
         assert(!backedOff);
         assert(scheduler.telemetry().costLimit == 2);
 
-        for (int frame = 0; frame < 6 && !backedOff; ++frame) {
+        for (int frame = 0; frame < 8; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
             scheduler.plan(80ms);
-            backedOff = scheduler.telemetry().costBackedOff;
+            backedOff = backedOff || scheduler.telemetry().costBackedOff;
         }
-        assert(backedOff);
-        assert(scheduler.telemetry().costLimit == 1);
+        assert(!backedOff);
+        assert(scheduler.telemetry().costLimit == 3);
     }
 
     {
