@@ -676,7 +676,7 @@ int main() {
         assert(cadence.snapshot().deficitConfirmed);
         assert(!cadence.snapshot().targetSatisfiedConfirmed);
 
-        for (int i = 0; i < 24; ++i)
+        for (int i = 0; i < 36; ++i)
             cadence.observe(33333333ns, 1, 1);
         assert(cadence.snapshot().outputFps > 58.0);
         assert(!cadence.snapshot().deficitConfirmed);
