@@ -331,6 +331,39 @@ int main() {
     }
 
     {
+        // #383 regression: global GPU saturation plus an output deficit is not
+        // enough to justify a Flow downstep when the entire LSFG cycle is far
+        // below its own generation budget. This Low-preset sample deliberately
+        // clears the old flow/budget and predicted-relief gates, matching the
+        // useless 0.55 -> 0.45 trial seen in the logs.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Low);
+        for (int i = 0; i < 30; ++i) {
+            controller.observe(sample(
+                2.9, 0.9, 8.333, false, false,
+                99.0, true, true, false, true));
+        }
+        assert(near(controller.currentScale(), 0.55F));
+        assert(
+            controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::InsufficientFlowContribution);
+    }
+
+    {
+        // Under the same global pressure, Flow remains a valid actuator when
+        // LSFG itself is consuming a material share of its budget and Flow is
+        // a meaningful part of that constrained cycle.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Low);
+        bool lowered = false;
+        for (int i = 0; i < 20 && !lowered; ++i) {
+            controller.observe(sample(
+                7.6, 2.2, 8.333, false, false,
+                99.0, true, true, false, true));
+            lowered = near(controller.currentScale(), 0.45F);
+        }
+        assert(lowered);
+    }
+
+    {
         // Global saturation by itself must not sacrifice Flow quality when the
         // next scale step has too little scale-sensitive work to materially
         // improve the frame budget.
