@@ -1263,7 +1263,11 @@ void AdaptiveFrameScheduler::resetRuntimeState(bool preserveLearnedState) {
         provenCostLimit_ = maxGeneratedFrames_ == 0 ? 0 : 1;
         lastBackoffReason_ = AdaptiveCostBackoffReason::None;
     } else {
-        provenCostLimit_ = std::min(provenCostLimit_, maxGeneratedFrames_);
+        // provenCostLimit_ is historical causal knowledge, not the currently
+        // configured dispatch ceiling. A temporary fixed/lower multiplier may
+        // cap active work, but it must not erase a higher level that was
+        // already proven safe in this runtime. All active uses are separately
+        // bounded by maxGeneratedFrames_.
         if (maxGeneratedFrames_ > 0 && provenCostLimit_ == 0)
             provenCostLimit_ = 1;
     }
