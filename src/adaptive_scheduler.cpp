@@ -1017,7 +1017,8 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     updateCostLimit(wantedGenerated);
     telemetry_.costLimit = costLimit_;
     telemetry_.provenCostLimit = provenCostLimit_;
-    telemetry_.costBackoffReason = AdaptiveCostBackoffReason::None;
+    // costBackoffReason is cleared at the start of plan() and set only by an
+    // actual backoff event inside updateCostLimit(); do not overwrite it here.
     telemetry_.raiseBaselineSourceFps = pendingRaiseBaselineFps_;
     telemetry_.raiseDropEvidenceSeconds =
         pendingRaiseSourceDropEvidenceSeconds_;
