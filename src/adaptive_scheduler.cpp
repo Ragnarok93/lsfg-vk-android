@@ -415,8 +415,9 @@ void GeneratedPresentationCapacityTracker::observe(
         if (telemetry_.generationCap > 1) {
             --telemetry_.generationCap;
             telemetry_.lowered = true;
-            rejectionEvidence_ =
-                kWsiEvidenceThreshold - kWsiEvidenceIncrement;
+            rejectionEvidence_ = telemetry_.generationCap == 1
+                ? kWsiEvidenceThreshold - kWsiEvidenceIncrement
+                : 1U;
             singleFramePhase_ = 0.0;
         } else if (telemetry_.generationCap == 1
                 && telemetry_.singleFrameDuty
