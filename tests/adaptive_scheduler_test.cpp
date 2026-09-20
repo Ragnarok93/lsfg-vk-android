@@ -234,7 +234,7 @@ int main() {
             scheduler.plan(16ms);
 
         bool sawRaise = false;
-        for (int frame = 0; frame < 24; ++frame) {
+        for (int frame = 0; frame < 32; ++frame) {
             scheduler.plan(34ms);
             sawRaise = sawRaise || scheduler.telemetry().costRaised;
         }
