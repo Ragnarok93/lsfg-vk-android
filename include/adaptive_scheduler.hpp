@@ -86,6 +86,20 @@ struct SourceTimelineSample {
     double sourceIntervalMs,
     unsigned starvedOpportunities);
 
+/// Opportunistically request one replacement synthetic opportunity when actual
+/// delivered output is below target. This never changes scheduler fractional
+/// debt: it is bounded by the configured maximum, the proven scheduler ceiling,
+/// the deadline predictor capacity, and the accepted source-cadence budget.
+[[nodiscard]] std::size_t adaptiveDeficitCompensatedGeneratedCount(
+    std::size_t plannedGeneratedFrames,
+    std::size_t maxGeneratedFrames,
+    bool outputDeficit,
+    bool deadlineCapacityValid,
+    std::size_t safeGenerationHint,
+    std::size_t provenCostLimit,
+    double sourceCadenceRatio,
+    double sourceBudgetMinRatio);
+
 /// Maintains a presentation epoch driven only by real/source arrivals.
 ///
 /// The timeline deliberately has no generated-present API: generated work may
