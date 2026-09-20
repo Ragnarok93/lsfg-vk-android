@@ -391,6 +391,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "adaptive_recovery_threshold_fps=",
             "adaptive_source_preservation_active=",
             "adaptive_proven_cost_limit=",
+            "adaptive_established_source_fps=",
+            "adaptive_source_cadence_ratio=",
+            "adaptive_source_budget_min_ratio=",
             "presentation_evidence=",
         ):
             self.assertIn(field, source)
