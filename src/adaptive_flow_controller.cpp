@@ -13,6 +13,12 @@ constexpr double kPressureRatio = 0.90;
 constexpr double kRecoveryPredictedRatio = 0.82;
 constexpr double kMinimumFlowBudgetRatio = 0.10;
 constexpr double kMinimumPredictedReliefRatio = 0.03;
+// Global GPU saturation is only a useful Flow actuator signal when LSFG itself
+// occupies a material part of its generation budget and Flow is a meaningful
+// share of that constrained LSFG cycle. These gates do not apply to explicit
+// local compute/deadline pressure, where LSFG has already proven itself causal.
+constexpr double kMinimumGlobalLsfgBudgetRatio = 0.45;
+constexpr double kMinimumFlowCycleRatio = 0.20;
 constexpr double kDownConfirmSeconds = 0.90;
 constexpr double kGlobalDownConfirmSeconds = 0.50;
 constexpr double kUpConfirmSeconds = 4.0;
@@ -257,14 +263,28 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         const double scaleWorkRatio = (lowerScale * lowerScale) / (currentScale * currentScale);
         const double predictedReliefMs = observation.flowMs * (1.0 - scaleWorkRatio);
         const double predictedReliefRatio = predictedReliefMs / observation.frameBudgetMs;
+        const double flowCycleRatio = observation.totalLsfgMs > 0.0
+            ? observation.flowMs / observation.totalLsfgMs
+            : 0.0;
+        const bool globalOnlyPressure =
+            (globalPressure || wsiFlowPressure) && !computePressure;
+        const bool globalFlowActuatorPlausible =
+            !globalOnlyPressure
+            || (telemetry_.pressureRatio >= kMinimumGlobalLsfgBudgetRatio
+                && flowCycleRatio >= kMinimumFlowCycleRatio);
 
         // Whole-device saturation says the system is under pressure; it does
-        // not prove Flow is large enough to be a useful actuator. Keep the same
-        // material-contribution gate under local and global pressure so quality
-        // is never traded for a few tenths of a millisecond that cannot
-        // plausibly recover the requested cadence.
+        // not prove Flow is a useful actuator. First require material predicted
+        // relief in the frame budget. For global-only pressure, additionally
+        // require LSFG itself to occupy a meaningful share of that budget and
+        // Flow to be a meaningful share of the LSFG cycle. This blocks the
+        // #383-style quality probe where LSFG is already cheap and the game or
+        // presentation path is the real bottleneck. Explicit LSFG
+        // compute/deadline pressure remains authoritative and bypasses only the
+        // global-only plausibility gate.
         if (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
-                || predictedReliefRatio < kMinimumPredictedReliefRatio) {
+                || predictedReliefRatio < kMinimumPredictedReliefRatio
+                || !globalFlowActuatorPlausible) {
             resetEvidence();
             telemetry_.reason = AdaptiveFlowDecisionReason::InsufficientFlowContribution;
             return telemetry_.currentScale;
