@@ -737,14 +737,16 @@ int main() {
         assert(!promoted);
         assert(scheduler.telemetry().costLimit == 1);
 
-        // Once cadence settles, the same safe hint may still promote one level
-        // early rather than waiting the full generic demand interval.
-        for (int frame = 0; frame < 10 && !promoted; ++frame) {
+        // After an unstable period, baseline qualification deliberately
+        // forfeits the early shortcut. Once cadence is stable, the ordinary
+        // sustained-demand path must still converge to the supported level.
+        bool reachedSecondLevel = false;
+        for (int frame = 0; frame < 14 && !reachedSecondLevel; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
             scheduler.plan(40ms);
-            promoted = promoted || scheduler.telemetry().capacityPromoted;
+            reachedSecondLevel = scheduler.telemetry().costLimit >= 2;
         }
-        assert(promoted);
+        assert(reachedSecondLevel);
         assert(scheduler.telemetry().costLimit == 2);
     }
 
