@@ -163,10 +163,28 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             3,
         )
         # Ordinary source-cadence discontinuities rebuild interpolation
-        # history but preserve learned GPU admission / WSI capacity. A true
-        # context recreation constructs fresh tracker objects instead.
-        self.assertNotIn("deadlineAdmissionPredictor_.reset()", source)
-        self.assertNotIn("generatedPresentationCapacityTracker_.reset()", source)
+        # history but preserve learned GPU admission / WSI capacity. Scope the
+        # assertion to those rebase paths: a true source-only/lifecycle bypass
+        # may still reset downstream capacity state deliberately.
+        discontinuity_start = source.index("if (sourceTimelineDiscontinuity)")
+        discontinuity_end = source.index("} else {", discontinuity_start)
+        discontinuity = source[discontinuity_start:discontinuity_end]
+        self.assertNotIn("deadlineAdmissionPredictor_.reset()", discontinuity)
+        self.assertNotIn(
+            "generatedPresentationCapacityTracker_.reset()", discontinuity
+        )
+
+        rebase_start = source.index(
+            "if (hadValidSourceTimeline", discontinuity_end
+        )
+        rebase_end = source.index(
+            "if (this->currentSourceTimeline_.valid)", rebase_start
+        )
+        rebase = source[rebase_start:rebase_end]
+        self.assertNotIn("deadlineAdmissionPredictor_.reset()", rebase)
+        self.assertNotIn(
+            "generatedPresentationCapacityTracker_.reset()", rebase
+        )
 
     def test_zero_generation_history_uses_async_dependency_chain(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
