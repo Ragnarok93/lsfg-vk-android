@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 
 using namespace std::chrono_literals;
