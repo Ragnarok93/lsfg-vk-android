@@ -695,6 +695,39 @@ int main() {
     }
 
     {
+        // Build #385 regression: post-promotion source settling must be judged
+        // over elapsed time, not a handful of source samples. Roughly 0.3 s of
+        // temporary slow cadence is insufficient to blame the newly promoted
+        // generation level, and recovery must clear that transient evidence.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        bool promoted = false;
+        for (int frame = 0; frame < 8 && !promoted; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(40ms);
+            promoted = promoted || scheduler.telemetry().capacityPromoted;
+        }
+        assert(promoted);
+        assert(scheduler.telemetry().costLimit == 2);
+
+        bool backedOff = false;
+        for (int frame = 0; frame < 4; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(80ms);
+            backedOff = backedOff || scheduler.telemetry().costBackedOff;
+        }
+        assert(!backedOff);
+        assert(scheduler.telemetry().costLimit == 2);
+
+        for (int frame = 0; frame < 10; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(40ms);
+            backedOff = backedOff || scheduler.telemetry().costBackedOff;
+        }
+        assert(!backedOff);
+        assert(scheduler.telemetry().costLimit == 2);
+    }
+
+    {
         // A single long-but-not-discontinuous source hitch is consumed without
         // minting several target slots or catch-up debt.
         AdaptiveFrameScheduler scheduler(60, 3);
