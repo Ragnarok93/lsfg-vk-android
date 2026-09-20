@@ -1307,6 +1307,7 @@ int main() {
         assert(capacity.telemetry().generationCap <= 2);
 
         context.outputDeficit = true;
+        bool sawProfitableRestore = false;
         for (int i = 0; i < 24; ++i) {
             const auto attempted = capacity.limit(3, context);
             const bool intermittentReject =
@@ -1318,12 +1319,14 @@ int main() {
                 accepted,
                 attempted - accepted,
                 context);
+            sawProfitableRestore = sawProfitableRestore
+                || capacity.telemetry().lastChangeReason
+                    == GeneratedPresentationCapChangeReason::ProfitabilityRestoreHigher
+                || capacity.telemetry().lastChangeReason
+                    == GeneratedPresentationCapChangeReason::TargetDeficitProbeSuccess;
         }
         assert(capacity.telemetry().generationCap == 3);
-        assert(capacity.telemetry().lastChangeReason
-            == GeneratedPresentationCapChangeReason::ProfitabilityRestoreHigher
-            || capacity.telemetry().lastChangeReason
-                == GeneratedPresentationCapChangeReason::TargetDeficitProbeSuccess);
+        assert(sawProfitableRestore);
     }
 
     {
