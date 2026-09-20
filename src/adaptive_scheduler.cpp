@@ -877,6 +877,19 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         }
     }
 
+    // A newly raised level is already under a dedicated causal evaluation.
+    // Do not let the longer-term source-preservation governor race that same
+    // experiment and independently downgrade it while the robust estimator is
+    // still settling. Once the blame window completes, the level becomes an
+    // established operating point and source preservation may evaluate it.
+    if (pendingCostRaise_) {
+        sourcePreservationSinceSeconds_ = -1.0;
+        sourcePreservationFpsSum_ = 0.0;
+        sourcePreservationSamples_ = 0;
+        resetUnmetDemand();
+        return;
+    }
+
     if (sourcePreservationProbeActive_) {
         sourcePreservationProbeFpsSum_ += sourceFps;
         sourcePreservationProbeSamples_++;
