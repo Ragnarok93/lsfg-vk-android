@@ -10,7 +10,7 @@ constexpr double kCadenceTargetMinRatio = 0.75;
 constexpr double kCadenceTargetMaxRatio = 1.30;
 constexpr double kOpportunityIntervalMaxRatio = 1.50;
 constexpr unsigned kCapacityRaiseSamplesRequired = 4;
-constexpr unsigned kCapacityCadenceSamplesRequired = 4;
+constexpr std::size_t kCapacityCadenceWindow = 4;
 constexpr unsigned kRaiseBackoffSamplesRequired = 3;
 constexpr double kCapacityCadenceDeviationRatio = 0.20;
 // Treat a single interval as a suspend/stall discontinuity only when it is an
@@ -684,11 +684,24 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
         std::min(recentSourceIntervalCount_ + 1, kSourceCadenceWindow);
 
     const double robustInterval = robustSourceIntervalSeconds();
-    const bool cadenceStableThisSample =
-        recentSourceIntervalCount_ >= 5
-        && robustInterval > 0.0
-        && std::abs(intervalSeconds - robustInterval)
-            <= robustInterval * kCapacityCadenceDeviationRatio;
+    bool cadenceStableThisSample = false;
+    if (recentSourceIntervalCount_ >= kCapacityCadenceWindow
+            && robustInterval > 0.0) {
+        double recentMin = std::numeric_limits<double>::max();
+        double recentMax = 0.0;
+        for (std::size_t offset = 0;
+                offset < kCapacityCadenceWindow;
+                ++offset) {
+            const std::size_t index =
+                (recentSourceIntervalCursor_ + kSourceCadenceWindow - 1 - offset)
+                % kSourceCadenceWindow;
+            recentMin = std::min(recentMin, recentSourceIntervals_[index]);
+            recentMax = std::max(recentMax, recentSourceIntervals_[index]);
+        }
+        cadenceStableThisSample =
+            recentMax - recentMin
+                <= robustInterval * kCapacityCadenceDeviationRatio;
+    }
     if (cadenceStableThisSample)
         ++stableCadenceSamples_;
     else
@@ -909,7 +922,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
     const bool capacityPromotionReady =
         !probeAfterBackoff_
         && capacityRaiseSamples_ >= kCapacityRaiseSamplesRequired
-        && stableCadenceSamples_ >= kCapacityCadenceSamplesRequired;
+        && stableCadenceSamples_ > 0;
 
     if (!capacityPromotionReady
             && observedTimeSeconds_ - unmetDemandSinceSeconds_
