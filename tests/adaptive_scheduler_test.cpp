@@ -828,6 +828,48 @@ int main() {
     }
 
     {
+        // A successful upward recovery probe must not impose the long
+        // source-protection hold used after a downward causal backoff. Once
+        // cost 2 has re-proven itself safe and demand still requires cost 3,
+        // Adaptive should resume normal bounded promotion toward 4x.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        bool reachedTwo = false;
+        for (int frame = 0; frame < 40 && !reachedTwo; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(40ms);
+            reachedTwo = scheduler.telemetry().costLimit >= 2;
+        }
+        assert(reachedTwo);
+
+        bool backedOff = false;
+        for (int frame = 0; frame < 20 && !backedOff; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(65ms);
+            backedOff = scheduler.telemetry().costBackedOff;
+        }
+        assert(backedOff);
+        assert(scheduler.telemetry().costLimit == 1);
+
+        bool reprovedTwo = false;
+        for (int frame = 0; frame < 90 && !reprovedTwo; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(40ms);
+            reprovedTwo = scheduler.telemetry().costLimit == 2
+                && !scheduler.telemetry().costBackedOff
+                && scheduler.telemetry().provenCostLimit >= 2;
+        }
+        assert(reprovedTwo);
+
+        bool reachedThree = false;
+        for (int frame = 0; frame < 100 && !reachedThree; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(40ms);
+            reachedThree = scheduler.telemetry().costLimit == 3;
+        }
+        assert(reachedThree);
+    }
+
+    {
         // Direct 4x-dispatch invariant: when the target requires the full
         // configured multiplier, the fractional distributor must emit three
         // generated frames per source cycle after cost 3 is proven. For a
