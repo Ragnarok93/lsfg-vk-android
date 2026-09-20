@@ -287,22 +287,65 @@ void DeadlineAdmissionPredictor::reset() {
     deliveryReserveMs_ = 0.0;
 }
 
+namespace {
+constexpr unsigned kWsiEvidenceThreshold = 4;
+constexpr unsigned kWsiEvidenceIncrement = 2;
+constexpr unsigned kWsiEvidenceDecay = 1;
+constexpr unsigned kWsiDutyRecoverySamples = 16;
+constexpr unsigned kWsiCapRecoverySamples = 24;
+constexpr double kWsiPressureRatio = 0.20;
+constexpr double kWsiRecoveryRatio = 0.08;
+constexpr std::array<double, 4> kSingleFrameDuties{
+    1.0, 0.75, 0.50, 0.25,
+};
+
+double nextLowerDuty(double duty) {
+    for (std::size_t index = 0; index + 1 < kSingleFrameDuties.size(); ++index) {
+        if (duty >= kSingleFrameDuties[index] - 1e-6)
+            return kSingleFrameDuties[index + 1];
+    }
+    return kSingleFrameDuties.back();
+}
+
+double nextHigherDuty(double duty) {
+    for (std::size_t index = kSingleFrameDuties.size() - 1; index > 0; --index) {
+        if (duty <= kSingleFrameDuties[index] + 1e-6)
+            return kSingleFrameDuties[index - 1];
+    }
+    return kSingleFrameDuties.front();
+}
+} // namespace
+
 void GeneratedPresentationCapacityTracker::configure(
         std::size_t maxGeneratedFrames) {
     if (maxGeneratedFrames_ == maxGeneratedFrames)
         return;
 
     maxGeneratedFrames_ = maxGeneratedFrames;
-    rejectSamples_ = 0;
+    rejectionEvidence_ = 0;
     cleanSamples_ = 0;
+    singleFramePhase_ = 0.0;
     hasObservation_ = false;
     telemetry_ = {};
     telemetry_.generationCap = maxGeneratedFrames_;
+    telemetry_.singleFrameDuty = 1.0;
 }
 
 std::size_t GeneratedPresentationCapacityTracker::limit(
-        std::size_t requested) const {
-    return std::min(requested, telemetry_.generationCap);
+        std::size_t requested) {
+    const std::size_t capped = std::min(requested, telemetry_.generationCap);
+    if (capped != 1 || telemetry_.singleFrameDuty >= 0.999)
+        return capped;
+
+    // Once downstream capacity is below one synthetic frame per real source
+    // cycle, turn the integer cap into a deterministic fractional duty cycle.
+    // Suppressed slots are consumed here and never become scheduler debt.
+    singleFramePhase_ += telemetry_.singleFrameDuty;
+    if (singleFramePhase_ + 1e-9 < 1.0)
+        return 0;
+
+    singleFramePhase_ = std::max(0.0, singleFramePhase_ - 1.0);
+    return 1;
 }
 
 void GeneratedPresentationCapacityTracker::observe(
@@ -324,21 +367,48 @@ void GeneratedPresentationCapacityTracker::observe(
     hasObservation_ = true;
 
     if (rejected > 0) {
-        ++rejectSamples_;
+        rejectionEvidence_ = std::min(
+            rejectionEvidence_ + kWsiEvidenceIncrement,
+            kWsiEvidenceThreshold * 2);
         cleanSamples_ = 0;
-        if (rejectSamples_ >= 3
-                && telemetry_.wsiRejectionRatio >= 0.20
-                && telemetry_.generationCap > 1) {
+    } else {
+        rejectionEvidence_ = rejectionEvidence_ > kWsiEvidenceDecay
+            ? rejectionEvidence_ - kWsiEvidenceDecay
+            : 0;
+        ++cleanSamples_;
+    }
+
+    if (rejectionEvidence_ >= kWsiEvidenceThreshold
+            && telemetry_.wsiRejectionRatio >= kWsiPressureRatio) {
+        if (telemetry_.generationCap > 1) {
             --telemetry_.generationCap;
             telemetry_.lowered = true;
-            rejectSamples_ = 0;
+            rejectionEvidence_ = 0;
+            singleFramePhase_ = 0.0;
+        } else if (telemetry_.generationCap == 1
+                && telemetry_.singleFrameDuty
+                    > kSingleFrameDuties.back() + 1e-6) {
+            telemetry_.singleFrameDuty =
+                nextLowerDuty(telemetry_.singleFrameDuty);
+            telemetry_.lowered = true;
+            rejectionEvidence_ = 0;
+            cleanSamples_ = 0;
+            singleFramePhase_ = 0.0;
         }
-    } else {
-        rejectSamples_ = 0;
-        ++cleanSamples_;
-        if (cleanSamples_ >= 24
-                && telemetry_.wsiRejectionRatio <= 0.08
-                && telemetry_.generationCap < maxGeneratedFrames_) {
+    }
+
+    if (rejected == 0
+            && telemetry_.wsiRejectionRatio <= kWsiRecoveryRatio) {
+        if (telemetry_.singleFrameDuty < 0.999
+                && cleanSamples_ >= kWsiDutyRecoverySamples) {
+            telemetry_.singleFrameDuty =
+                nextHigherDuty(telemetry_.singleFrameDuty);
+            telemetry_.raised = true;
+            cleanSamples_ = 0;
+            singleFramePhase_ = 0.0;
+        } else if (telemetry_.singleFrameDuty >= 0.999
+                && telemetry_.generationCap < maxGeneratedFrames_
+                && cleanSamples_ >= kWsiCapRecoverySamples) {
             ++telemetry_.generationCap;
             telemetry_.raised = true;
             cleanSamples_ = 0;
@@ -346,7 +416,10 @@ void GeneratedPresentationCapacityTracker::observe(
     }
 
     telemetry_.pressure =
-        rejected > 0 || telemetry_.wsiRejectionRatio >= 0.10;
+        rejected > 0
+        || telemetry_.wsiRejectionRatio >= 0.10
+        || telemetry_.generationCap < maxGeneratedFrames_
+        || telemetry_.singleFrameDuty < 0.999;
 }
 
 void GeneratedPresentationCapacityTracker::reset() {

@@ -124,6 +124,7 @@ private:
 
 struct GeneratedPresentationCapacityTelemetry {
     std::size_t generationCap{};
+    double singleFrameDuty{1.0};
     double wsiRejectionRatio{};
     bool pressure{false};
     bool lowered{false};
@@ -135,7 +136,7 @@ struct GeneratedPresentationCapacityTelemetry {
 class GeneratedPresentationCapacityTracker {
 public:
     void configure(std::size_t maxGeneratedFrames);
-    [[nodiscard]] std::size_t limit(std::size_t requested) const;
+    [[nodiscard]] std::size_t limit(std::size_t requested);
     void observe(std::size_t attempted, std::size_t wsiRejected);
     void reset();
 
@@ -145,8 +146,9 @@ public:
 
 private:
     std::size_t maxGeneratedFrames_{};
-    unsigned rejectSamples_{};
+    unsigned rejectionEvidence_{};
     unsigned cleanSamples_{};
+    double singleFramePhase_{};
     bool hasObservation_{false};
     GeneratedPresentationCapacityTelemetry telemetry_{};
 };

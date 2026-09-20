@@ -731,7 +731,9 @@ int main() {
         // each clean attempt.
         GeneratedPresentationCapacityTracker capacity;
         capacity.configure(2);
-        for (int i = 0; i < 12; ++i) {
+        for (int i = 0;
+                i < 12 && capacity.telemetry().generationCap > 1;
+                ++i) {
             assert(capacity.limit(2) >= 1);
             capacity.observe(2, (i % 2 == 0) ? 1 : 0);
         }

@@ -1556,6 +1556,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << metrics.totalGeneratedPresentationCapDrops
                       << " presentation_cap="
                       << this->generatedPresentationCapacityTracker_.telemetry().generationCap
+                      << " presentation_duty="
+                      << this->generatedPresentationCapacityTracker_.telemetry().singleFrameDuty
                       << " wsi_reject_ratio="
                       << this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio
                       << " cycle_avg_ms=" << cycleAvgMs
@@ -1687,6 +1689,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio
                       << " adaptive_flow_presentation_cap="
                       << this->generatedPresentationCapacityTracker_.telemetry().generationCap
+                      << " adaptive_flow_presentation_duty="
+                      << this->generatedPresentationCapacityTracker_.telemetry().singleFrameDuty
                       << " adaptive_flow_synthetic_drop_pressure="
                       << ((this->adaptiveFlowComputePressure_
                           || this->adaptiveFlowWsiPressure_) ? 1 : 0)
@@ -1709,7 +1713,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "runtime_session_id=%llu config_revision=%llu "
                 "source_fps=%.3f generated_fps=%.3f output_fps=%.3f "
                 "late=%llu admission=%llu deadline=%llu wsi=%llu cap_drop=%llu "
-                "presentation_cap=%zu wsi_reject_ratio=%.3f "
+                "presentation_cap=%zu presentation_duty=%.3f wsi_reject_ratio=%.3f "
                 "cycle_avg_ms=%.3f cycle_max_ms=%.3f handoff_ms=%.3f dispatch_ms=%.3f "
                 "wait_ms=%.3f source_interval_ms=%.3f source_interval_max_ms=%.3f "
                 "deadline_error_ms=%.3f rebases=%llu planned=%zu admitted=%zu "
@@ -1729,6 +1733,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 static_cast<unsigned long long>(
                     metrics.windowGeneratedPresentationCapDrops),
                 this->generatedPresentationCapacityTracker_.telemetry().generationCap,
+                this->generatedPresentationCapacityTracker_.telemetry().singleFrameDuty,
                 this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio,
                 cycleAvgMs,
                 metrics.windowCycleMaxMs,

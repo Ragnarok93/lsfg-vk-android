@@ -49,6 +49,7 @@ struct AdaptiveFlowRuntimeSnapshot {
     bool wsiPressure{false};
     double wsiLossRate{0.0};
     size_t presentationGenerationCap{0};
+    double presentationDuty{1.0};
     bool outputDeficit{false};
     bool syntheticDropPressure{false};
     const char* reason{"none"};
@@ -127,6 +128,7 @@ public:
             .wsiPressure = adaptiveFlowWsiPressure_,
             .wsiLossRate = presentationCapacity.wsiRejectionRatio,
             .presentationGenerationCap = presentationCapacity.generationCap,
+            .presentationDuty = presentationCapacity.singleFrameDuty,
             .outputDeficit = telemetry.outputDeficit,
             .syntheticDropPressure =
                 adaptiveFlowComputePressure_ || adaptiveFlowWsiPressure_,

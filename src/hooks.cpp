@@ -462,6 +462,8 @@ namespace {
                 << adaptiveFlow.wsiLossRate << '\n'
                 << "adaptive_flow_presentation_cap="
                 << adaptiveFlow.presentationGenerationCap << '\n'
+                << "adaptive_flow_presentation_duty="
+                << adaptiveFlow.presentationDuty << '\n'
                 << "adaptive_flow_output_deficit="
                 << (adaptiveFlow.outputDeficit ? 1 : 0) << '\n'
                 << "adaptive_flow_synthetic_drop_pressure="

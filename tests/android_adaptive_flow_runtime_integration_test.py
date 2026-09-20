@@ -233,6 +233,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         dispatch_start = source.index("runtime stage=framegen-dispatch-begin")
         self.assertLess(cap_start, dispatch_start)
         self.assertIn("windowGeneratedPresentationCapDrops", source)
+        self.assertIn("presentation_duty=", source)
 
     def test_rolling_output_tracker_updates_per_completed_source_cycle(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -329,6 +330,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "adaptive_flow_wsi_pressure=",
             "adaptive_flow_wsi_loss_rate=",
             "adaptive_flow_presentation_cap=",
+            "adaptive_flow_presentation_duty=",
             "adaptive_flow_output_deficit=",
             "adaptive_flow_synthetic_drop_pressure=",
             "adaptive_flow_reason=",
