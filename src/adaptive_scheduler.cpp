@@ -686,8 +686,6 @@ void AdaptiveFrameScheduler::resetSourceCadenceWindow() {
 
 void AdaptiveFrameScheduler::resetUnmetDemand() {
     unmetDemandSinceSeconds_ = -1.0;
-    unmetSourceFpsSum_ = 0.0;
-    unmetSourceFpsSamples_ = 0;
     capacityRaiseSamples_ = 0;
 }
 
@@ -799,14 +797,8 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
     //
     // The safe-generation hint may promote one level early when measured GPU
     // cost proves that level fits, but lack of a hint never vetoes the target.
-    if (unmetDemandSinceSeconds_ < 0.0) {
+    if (unmetDemandSinceSeconds_ < 0.0)
         unmetDemandSinceSeconds_ = observedTimeSeconds_;
-        unmetSourceFpsSum_ = telemetry_.smoothedSourceFps;
-        unmetSourceFpsSamples_ = 1;
-    } else {
-        unmetSourceFpsSum_ += telemetry_.smoothedSourceFps;
-        unmetSourceFpsSamples_++;
-    }
 
     const bool capacitySupportsNext =
         safeGenerationHintValid_
@@ -828,7 +820,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
 
     costLimit_++;
     telemetry_.capacityPromoted = capacityPromotionReady;
-    lastCostChangeTimeSeconds_ = observedTimeSeconds_;
+
     resetUnmetDemand();
     telemetry_.costRaised = true;
 }
@@ -842,19 +834,8 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
     safeGenerationHint_ = 0;
     safeGenerationHintValid_ = false;
     stableCadenceSamples_ = 0;
-    pendingRaiseSourceDropSamples_ = 0;
     observedTimeSeconds_ = 0.0;
     costLimit_ = maxGeneratedFrames_ == 0 ? 0 : 1;
-    pendingCostRaise_ = false;
-    probeAfterBackoff_ = false;
-    pendingRaiseWasProbe_ = false;
-    pendingRaiseBaselineFps_ = 0.0;
-    pendingRaiseTimeSeconds_ = 0.0;
-    lastCostChangeTimeSeconds_ = -1.0;
-    lastBackoffTimeSeconds_ = -1.0;
-    successfulProbeHoldUntilSeconds_ = 0.0;
-    raiseHoldUntilSeconds_ = 0.0;
-    sourcePreservationProbeHoldUntilSeconds_ = 0.0;
     resetUnmetDemand();
     telemetry_ = {};
     telemetry_.costLimit = costLimit_;
