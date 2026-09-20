@@ -618,6 +618,43 @@ int main() {
     }
 
     {
+        // Natural source-rate changes must not strand Adaptive below required
+        // generation density. If a lower-cost preservation probe fails to
+        // recover source cadence, that exonerates generated work: rebase to the
+        // new natural source rate and permit normal demand to reach cost 3
+        // without an unrelated multi-second raise lockout.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 90; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(20ms);
+        }
+        assert(scheduler.telemetry().costLimit >= 2);
+
+        bool sawProtectiveProbe = false;
+        bool restoredOriginal = false;
+        for (int frame = 0; frame < 80 && !restoredOriginal; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms); // scene itself has slowed; cheaper work won't fix it
+            sawProtectiveProbe = sawProtectiveProbe
+                || (scheduler.telemetry().costBackedOff
+                    && scheduler.telemetry().costProbe);
+            restoredOriginal = restoredOriginal
+                || (scheduler.telemetry().costRaised
+                    && scheduler.telemetry().costProbe);
+        }
+        assert(sawProtectiveProbe);
+        assert(restoredOriginal);
+
+        bool reachedThree = scheduler.telemetry().costLimit == 3;
+        for (int frame = 0; frame < 70 && !reachedThree; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+            reachedThree = scheduler.telemetry().costLimit == 3;
+        }
+        assert(reachedThree);
+    }
+
+    {
         // A failed source-preservation probe must not repeat every ~0.6 s.
         // Once the cheaper level fails to recover enough cadence and the
         // original cost is restored, hold that causal experiment for several
