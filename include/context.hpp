@@ -50,6 +50,12 @@ struct AdaptiveFlowRuntimeSnapshot {
     double wsiLossRate{0.0};
     size_t presentationGenerationCap{0};
     double presentationDuty{1.0};
+    double presentationRecoveryEvidence{0.0};
+    uint64_t presentationAttemptedGeneratedFrames{0};
+    uint64_t presentationAcceptedGeneratedFrames{0};
+    double presentationDeliveredEfficiency{0.0};
+    const char* presentationLastChangeReason{"none"};
+    bool presentationLastChangeOutputDeficit{false};
     bool outputDeficit{false};
     bool syntheticDropPressure{false};
     const char* reason{"none"};
@@ -129,6 +135,18 @@ public:
             .wsiLossRate = presentationCapacity.wsiRejectionRatio,
             .presentationGenerationCap = presentationCapacity.generationCap,
             .presentationDuty = presentationCapacity.singleFrameDuty,
+            .presentationRecoveryEvidence = presentationCapacity.recoveryEvidence,
+            .presentationAttemptedGeneratedFrames =
+                presentationCapacity.attemptedGeneratedFrames,
+            .presentationAcceptedGeneratedFrames =
+                presentationCapacity.acceptedGeneratedFrames,
+            .presentationDeliveredEfficiency =
+                presentationCapacity.deliveredEfficiency,
+            .presentationLastChangeReason =
+                generatedPresentationCapChangeReasonName(
+                    presentationCapacity.lastChangeReason),
+            .presentationLastChangeOutputDeficit =
+                presentationCapacity.lastChangeOutputDeficit,
             .outputDeficit = telemetry.outputDeficit,
             .syntheticDropPressure =
                 adaptiveFlowComputePressure_ || adaptiveFlowWsiPressure_,
@@ -200,6 +218,9 @@ private:
     bool adaptiveFlowWsiPressure_{false};
 
     DeadlineAdmissionPredictor deadlineAdmissionPredictor_;
+    unsigned admissionBootstrapStarvedOpportunities_{0};
+    const char* admissionLastRejectReason_{"none"};
+    double admissionRemainingSlackMs_{0.0};
     GeneratedPresentationCapacityTracker generatedPresentationCapacityTracker_;
     LsfgOutputCadenceTracker lsfgOutputCadenceTracker_;
     DeadlineAdmissionDecision deadlineBatchDecision_{};
@@ -273,6 +294,18 @@ private:
         uint64_t totalGeneratedLateDrops{0};
         uint64_t windowAdmissionRejects{0};
         uint64_t totalAdmissionRejects{0};
+        uint64_t windowAdmissionSourceDeadlineExpired{0};
+        uint64_t totalAdmissionSourceDeadlineExpired{0};
+        uint64_t windowAdmissionPredictorUninitialized{0};
+        uint64_t totalAdmissionPredictorUninitialized{0};
+        uint64_t windowAdmissionPredictorBudgetReject{0};
+        uint64_t totalAdmissionPredictorBudgetReject{0};
+        uint64_t windowAdmissionHistoryWarmupSuppress{0};
+        uint64_t totalAdmissionHistoryWarmupSuppress{0};
+        uint64_t windowAdmissionWsiCapSuppress{0};
+        uint64_t totalAdmissionWsiCapSuppress{0};
+        uint64_t windowAdmissionWsiAcquireReject{0};
+        uint64_t totalAdmissionWsiAcquireReject{0};
         uint64_t windowGeneratedDeadlineDrops{0};
         uint64_t totalGeneratedDeadlineDrops{0};
         uint64_t windowGeneratedWsiDrops{0};
