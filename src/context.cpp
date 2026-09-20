@@ -2729,7 +2729,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = adaptivePresentPNext(
             pNext,
-            this->currentSourceTimeline_.sourceDesiredTimeNs,
+            admissionSourceDeadlineNs,
             finalSourcePresentTime,
             finalSourcePresentTimes),
         .waitSemaphoreCount = 1,
