@@ -956,6 +956,14 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             if (costLimit_ > 1)
                 costLimit_--;
             pendingCostRaise_ = false;
+            provenCostLimit_ = std::min(provenCostLimit_, costLimit_);
+            lastBackoffReason_ =
+                AdaptiveCostBackoffReason::RaiseCausalSourceDrop;
+            backoffRecoverySinceSeconds_ = observedTimeSeconds_;
+            backoffRecoveryFpsSum_ = 0.0;
+            backoffRecoverySamples_ = 0;
+            backoffRecoveryBaselineFps_ = 0.0;
+            backoffRecoveryReady_ = false;
             pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
             pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
             probeAfterBackoff_ = true;
@@ -969,6 +977,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         if (sinceRaise >= kBlameWindowSeconds) {
             const bool completedProbe = pendingRaiseWasProbe_;
             pendingCostRaise_ = false;
+            provenCostLimit_ = std::max(provenCostLimit_, costLimit_);
             pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
             pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
             pendingRaiseWasProbe_ = false;
@@ -1020,14 +1029,11 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             sourcePreservationProbeSamples_ = 0;
 
             if (sourceRecovered && (throughputPreserved || targetNearlyMet)) {
-                // Require the cheaper level to recover almost enough source FPS
-                // to satisfy the target before a later upward probe is allowed.
-                pendingRaiseBaselineFps_ = targetFps_ > 0
-                    ? static_cast<double>(targetFps_)
-                        / static_cast<double>(costLimit_ + 1)
-                    : recoveredSourceFps;
-                probeAfterBackoff_ = true;
-                lastBackoffTimeSeconds_ = observedTimeSeconds_;
+                provenCostLimit_ = std::min(provenCostLimit_, costLimit_);
+                establishedSourceFps_ = recoveredSourceFps;
+                establishedSourceCoverageSeconds_ =
+                    kEstablishedBaselineMinSeconds;
+                probeAfterBackoff_ = false;
                 successfulProbeHoldUntilSeconds_ =
                     observedTimeSeconds_ + kSuccessfulProbeHoldSeconds;
                 telemetry_.costProbe = true;
@@ -1040,6 +1046,9 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
                     observedTimeSeconds_ + kSuccessfulProbeHoldSeconds;
                 sourcePreservationProbeHoldUntilSeconds_ =
                     observedTimeSeconds_ + kSourcePreservationRetryHoldSeconds;
+                establishedSourceFps_ = recoveredSourceFps;
+                establishedSourceCoverageSeconds_ =
+                    kEstablishedBaselineMinSeconds;
                 telemetry_.costRaised = true;
                 telemetry_.costProbe = true;
             }
@@ -1049,15 +1058,22 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         return;
     }
 
-    const double projectedOutputFps =
-        sourceFps * static_cast<double>(costLimit_ + 1);
-    const bool sourceStarvedAtCurrentCost =
+    const bool establishedBaselineReady =
+        establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds
+        && establishedSourceFps_ > 0.0;
+    const bool capacitySupportsCurrent =
+        safeGenerationHintValid_ && safeGenerationHint_ >= costLimit_;
+    const double preservationDropRatio = capacitySupportsCurrent
+        ? kCapacitySupportedSourceDropRatio
+        : kSourceDropRatio;
+    const bool sourceDegradedAtCurrentCost =
         costLimit_ > 1
-        && targetFps_ > 0
-        && projectedOutputFps
-            < static_cast<double>(targetFps_) * kSourcePreservationOutputRatio;
+        && establishedBaselineReady
+        && sourceFps < establishedSourceFps_ * preservationDropRatio
+        && telemetry_.sourceFps
+            < establishedSourceFps_ * preservationDropRatio;
 
-    if (sourceStarvedAtCurrentCost
+    if (sourceDegradedAtCurrentCost
             && observedTimeSeconds_ >= sourcePreservationProbeHoldUntilSeconds_) {
         if (sourcePreservationSinceSeconds_ < 0.0) {
             sourcePreservationSinceSeconds_ = observedTimeSeconds_;
@@ -1084,6 +1100,8 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
             sourcePreservationFpsSum_ = 0.0;
             sourcePreservationSamples_ = 0;
             lastCostChangeTimeSeconds_ = observedTimeSeconds_;
+            lastBackoffReason_ =
+                AdaptiveCostBackoffReason::SourcePreservationProbe;
             resetUnmetDemand();
             telemetry_.costBackedOff = true;
             telemetry_.costProbe = true;
@@ -1099,6 +1117,22 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
         sourcePreservationSinceSeconds_ = -1.0;
         sourcePreservationFpsSum_ = 0.0;
         sourcePreservationSamples_ = 0;
+    }
+
+    if (probeAfterBackoff_) {
+        if (backoffRecoverySinceSeconds_ < 0.0)
+            backoffRecoverySinceSeconds_ = observedTimeSeconds_;
+        backoffRecoveryFpsSum_ += sourceFps;
+        ++backoffRecoverySamples_;
+        if (!backoffRecoveryReady_
+                && observedTimeSeconds_ - backoffRecoverySinceSeconds_
+                    >= kBackoffRebaselineSeconds) {
+            backoffRecoveryBaselineFps_ = backoffRecoverySamples_ > 0
+                ? backoffRecoveryFpsSum_
+                    / static_cast<double>(backoffRecoverySamples_)
+                : sourceFps;
+            backoffRecoveryReady_ = backoffRecoveryBaselineFps_ > 0.0;
+        }
     }
 
     if (costLimit_ >= maxGeneratedFrames_) {
@@ -1134,7 +1168,9 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
     const bool capacityPromotionReady =
         !probeAfterBackoff_
         && capacityRaiseSamples_ >= kCapacityRaiseSamplesRequired
-        && stableCadenceSamples_ > 0;
+        && stableCadenceSamples_ > 0
+        && stableCadenceSeconds_ >= 0.12
+        && establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds;
 
     if (!capacityPromotionReady
             && observedTimeSeconds_ - unmetDemandSinceSeconds_
@@ -1148,23 +1184,39 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
     if (observedTimeSeconds_ < raiseHoldUntilSeconds_)
         return;
 
-    const double baselineSourceFps = unmetSourceFpsSamples_ > 0
-        ? unmetSourceFpsSum_ / static_cast<double>(unmetSourceFpsSamples_)
-        : sourceFps;
+    const double baselineSourceFps =
+        establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds
+            && establishedSourceFps_ > 0.0
+        ? establishedSourceFps_
+        : (unmetSourceFpsSamples_ > 0
+            ? unmetSourceFpsSum_ / static_cast<double>(unmetSourceFpsSamples_)
+            : sourceFps);
 
     if (probeAfterBackoff_) {
         if (lastBackoffTimeSeconds_ < 0.0
-                || observedTimeSeconds_ - lastBackoffTimeSeconds_ < kProbeIntervalSeconds)
+                || observedTimeSeconds_ - lastBackoffTimeSeconds_
+                    < kProbeIntervalSeconds)
             return;
-        if (pendingRaiseBaselineFps_ > 0.0
-                && sourceFps < pendingRaiseBaselineFps_ * kRecoveryRatio)
+        if (!backoffRecoveryReady_)
+            return;
+        if (sourceFps
+                < backoffRecoveryBaselineFps_ * kBackoffRetrySourceRatio)
+            return;
+        if (safeGenerationHintValid_
+                && safeGenerationHint_ < costLimit_ + 1)
             return;
 
         costLimit_++;
         pendingCostRaise_ = true;
         pendingRaiseWasProbe_ = true;
         probeAfterBackoff_ = false;
-        pendingRaiseBaselineFps_ = baselineSourceFps;
+        pendingRaiseBaselineFps_ = backoffRecoveryBaselineFps_ > 0.0
+            ? backoffRecoveryBaselineFps_
+            : baselineSourceFps;
+        backoffRecoverySinceSeconds_ = -1.0;
+        backoffRecoveryFpsSum_ = 0.0;
+        backoffRecoverySamples_ = 0;
+        backoffRecoveryReady_ = false;
         pendingRaiseTimeSeconds_ = observedTimeSeconds_;
         pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
         pendingRaiseLastEvaluationTimeSeconds_ = observedTimeSeconds_;
@@ -1188,15 +1240,28 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
     telemetry_.costRaised = true;
 }
 
-void AdaptiveFrameScheduler::resetRuntimeState() {
+void AdaptiveFrameScheduler::resetRuntimeState(bool preserveLearnedState) {
+    if (!preserveLearnedState) {
+        establishedSourceFps_ = 0.0;
+        establishedSourceCoverageSeconds_ = 0.0;
+        provenCostLimit_ = maxGeneratedFrames_ == 0 ? 0 : 1;
+        lastBackoffReason_ = AdaptiveCostBackoffReason::None;
+    } else {
+        provenCostLimit_ = std::min(provenCostLimit_, maxGeneratedFrames_);
+        if (maxGeneratedFrames_ > 0 && provenCostLimit_ == 0)
+            provenCostLimit_ = 1;
+    }
+
     fractionalOpportunityPhase_ = 0.0;
     smoothedSourceIntervalSeconds_ = 0.0;
     hasSmoothedInterval_ = false;
     reconfigureWarmStartPending_ = false;
+    discontinuityWarmStartPending_ = false;
     resetSourceCadenceWindow();
     safeGenerationHint_ = 0;
     safeGenerationHintValid_ = false;
     stableCadenceSamples_ = 0;
+    stableCadenceSeconds_ = 0.0;
     pendingRaiseSourceDropEvidenceSeconds_ = 0.0;
     pendingRaiseLastEvaluationTimeSeconds_ = 0.0;
     observedTimeSeconds_ = 0.0;
@@ -1210,14 +1275,29 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
     lastBackoffTimeSeconds_ = -1.0;
     successfulProbeHoldUntilSeconds_ = 0.0;
     raiseHoldUntilSeconds_ = 0.0;
+    backoffRecoverySinceSeconds_ = -1.0;
+    backoffRecoveryFpsSum_ = 0.0;
+    backoffRecoverySamples_ = 0;
+    backoffRecoveryBaselineFps_ = 0.0;
+    backoffRecoveryReady_ = false;
+    sourcePreservationSinceSeconds_ = -1.0;
+    sourcePreservationFpsSum_ = 0.0;
+    sourcePreservationSamples_ = 0;
+    sourcePreservationProbeActive_ = false;
+    sourcePreservationOriginalCost_ = 0;
+    sourcePreservationBaselineFps_ = 0.0;
+    sourcePreservationProbeStartedSeconds_ = 0.0;
+    sourcePreservationProbeFpsSum_ = 0.0;
+    sourcePreservationProbeSamples_ = 0;
     sourcePreservationProbeHoldUntilSeconds_ = 0.0;
     resetUnmetDemand();
     telemetry_ = {};
     telemetry_.costLimit = costLimit_;
+    telemetry_.provenCostLimit = provenCostLimit_;
 }
 
 void AdaptiveFrameScheduler::reset() {
     runtimeCadenceEstablished_ = false;
     lastTrustedSourceIntervalSeconds_ = 0.0;
-    resetRuntimeState();
+    resetRuntimeState(false);
 }
