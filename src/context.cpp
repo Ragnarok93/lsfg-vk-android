@@ -870,9 +870,31 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     const size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
         : requestedFixedGeneratedFrameCount;
-    size_t generatedFrameCount = plannedGeneratedFrameCount;
-    size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
+
+    const auto& preAdmissionOutputCadence =
+        this->lsfgOutputCadenceTracker_.snapshot();
+    const bool preAdmissionOutputDeficit =
+        conf.adaptiveFramegen
+        && conf.fpsLimit > 0
+        && (preAdmissionOutputCadence.valid
+            ? preAdmissionOutputCadence.deficitConfirmed
+            : adaptiveTelemetry.wantedGeneratedFrames > 0.05);
+    const size_t deficitCompensatedGeneratedFrameCount =
+        conf.adaptiveFramegen
+            ? adaptiveDeficitCompensatedGeneratedCount(
+                plannedGeneratedFrameCount,
+                maxAdaptiveGeneratedFrames,
+                preAdmissionOutputDeficit,
+                safeGenerationHintValid,
+                safeGenerationHint,
+                adaptiveTelemetry.provenCostLimit,
+                adaptiveTelemetry.sourceCadenceRatio,
+                adaptiveTelemetry.sourceBudgetMinRatio)
+            : plannedGeneratedFrameCount;
+    size_t generatedFrameCount = deficitCompensatedGeneratedFrameCount;
+    size_t interpolationGenerationCount =
+        deficitCompensatedGeneratedFrameCount;
 
     const uint64_t sourceArrivalTimeNs = monotonicNowNs();
     // Scheduler discontinuities are cadence-relative. Do not reinterpret a
@@ -1177,14 +1199,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    const auto& presentationOutputCadence =
-        this->lsfgOutputCadenceTracker_.snapshot();
     const bool presentationOutputDeficit =
-        conf.adaptiveFramegen
-        && conf.fpsLimit > 0
-        && (presentationOutputCadence.valid
-            ? presentationOutputCadence.deficitConfirmed
-            : adaptiveTelemetry.wantedGeneratedFrames > 0.05);
+        preAdmissionOutputDeficit;
     const GeneratedPresentationCapacityContext presentationCapacityContext{
         .outputDeficit = presentationOutputDeficit,
         .deadlineCapacityValid = safeGenerationHintValid,
