@@ -1170,6 +1170,29 @@ int main() {
     }
 
     {
+        // Target pursuit is authoritative: source-cadence loss by itself must
+        // never demote a generation level. If the target still requires 4x and
+        // downstream compute capacity continues to allow it, Adaptive remains
+        // at cost 3 even when the source cadence falls substantially.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 120; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+        }
+        assert(scheduler.telemetry().costLimit == 3);
+
+        bool sourceBackoff = false;
+        for (int frame = 0; frame < 60; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(60ms);
+            sourceBackoff = sourceBackoff
+                || scheduler.telemetry().costBackedOff;
+        }
+        assert(!sourceBackoff);
+        assert(scheduler.telemetry().costLimit == 3);
+    }
+
+    {
         // Build #385 regression: post-promotion source settling must be judged
         // over elapsed time, not a handful of source samples. Roughly 0.3 s of
         // temporary slow cadence is insufficient to blame the newly promoted
@@ -1384,6 +1407,48 @@ int main() {
             2, 3, true, true, 3, 3, 0.79, 0.8) == 2);
         assert(adaptiveDeficitCompensatedGeneratedCount(
             3, 3, true, true, 3, 3, 1.0, 0.8) == 3);
+    }
+
+    {
+        // Deficit replacement is independent of source-cadence degradation.
+        // If the target is unmet and both the scheduler and deadline predictor
+        // support the next generated opportunity, source ratio cannot veto it.
+        assert(adaptiveDeficitCompensatedGeneratedCount(
+            2, 3, true, true, 3, 3, 0.20, 0.80) == 3);
+    }
+
+    {
+        // Under target deficit, a provisional WSI cap reduction is judged by
+        // delivered generated throughput, not source-FPS recovery. Improving
+        // source cadence cannot justify keeping a cap that delivers fewer
+        // generated frames while the target is still missed.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        GeneratedPresentationCapacityContext context{
+            .outputDeficit = false,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .provenCostLimit = 3,
+            .sourceCadenceRatio = 0.50,
+            .sourceBudgetMinRatio = 0.80,
+        };
+
+        for (int i = 0; i < 24 && capacity.telemetry().generationCap == 3; ++i) {
+            const auto attempted = capacity.limit(3, context);
+            const std::size_t accepted = attempted > 0 ? attempted - 1 : 0;
+            capacity.observe(attempted, accepted, attempted - accepted, context);
+        }
+        assert(capacity.telemetry().generationCap == 2);
+
+        context.outputDeficit = true;
+        context.sourceCadenceRatio = 0.60; // source improves, still irrelevant.
+        for (int i = 0; i < 4; ++i) {
+            const auto attempted = capacity.limit(3, context);
+            const std::size_t accepted = attempted > 0 ? 1U : 0U;
+            capacity.observe(attempted, accepted, attempted - accepted, context);
+        }
+        assert(capacity.telemetry().generationCap == 3);
     }
 
     {
