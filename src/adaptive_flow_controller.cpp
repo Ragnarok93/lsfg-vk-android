@@ -335,6 +335,22 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool outputRecoverySatisfied =
         !observation.outputTargeted
         || observation.outputTargetSatisfied;
+    // Mirror the downstep profitability rule for quality recovery. Fresh
+    // generated-work timing from a targeted Adaptive workload is authoritative
+    // when the requested output is already satisfied and there is no local
+    // drop/WSI evidence: global GPU saturation alone must not strand Flow at a
+    // lower state. Untargeted/fixed operation and retained history remain
+    // conservative because they cannot prove that restoring Flow quality is
+    // harmless to the current source/output operating point.
+    const bool targetedGeneratedRecovery =
+        observation.generatedWorkSample
+        && observation.outputTargeted
+        && observation.outputTargetSatisfied
+        && !observation.outputDeficit
+        && !observation.syntheticDropPressure
+        && !wsiPressure;
+    const bool globalRecoveryEligible =
+        globalRecoveryHeadroom || targetedGeneratedRecovery;
     const bool retainedHistoryRecoveryEligible =
         !observation.generatedWorkSample
         && observation.globalPressureValid
@@ -350,7 +366,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             && !observation.syntheticDropPressure
             && !wsiPressure
             && outputRecoverySatisfied
-            && globalRecoveryHeadroom) {
+            && globalRecoveryEligible) {
         const double currentScale = static_cast<double>(presetStates[index]);
         const double higherScale = static_cast<double>(presetStates[index - 1]);
         const double addedFlowMs = observation.flowMs
