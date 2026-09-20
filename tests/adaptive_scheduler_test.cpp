@@ -695,10 +695,11 @@ int main() {
 
     {
         // Capacity-informed promotion may advance exactly one level before the
-        // generic 600 ms timer, but only after several consecutive safe hints.
+        // generic 600 ms timer, but only after a time-covered stable source
+        // baseline and consecutive safe hints.
         AdaptiveFrameScheduler scheduler(120, 3);
         bool promoted = false;
-        for (int frame = 0; frame < 4; ++frame) {
+        for (int frame = 0; frame < 14; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
             scheduler.plan(40ms);
             promoted = promoted || scheduler.telemetry().capacityPromoted;
@@ -738,7 +739,7 @@ int main() {
 
         // Once cadence settles, the same safe hint may still promote one level
         // early rather than waiting the full generic demand interval.
-        for (int frame = 0; frame < 8 && !promoted; ++frame) {
+        for (int frame = 0; frame < 10 && !promoted; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
             scheduler.plan(40ms);
             promoted = promoted || scheduler.telemetry().capacityPromoted;
@@ -753,7 +754,7 @@ int main() {
         // blame frame generation; a continuing regression still backs off.
         AdaptiveFrameScheduler scheduler(120, 3);
         bool promoted = false;
-        for (int frame = 0; frame < 8 && !promoted; ++frame) {
+        for (int frame = 0; frame < 14 && !promoted; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
             scheduler.plan(40ms);
             promoted = promoted || scheduler.telemetry().capacityPromoted;
@@ -786,7 +787,7 @@ int main() {
         // generation level, and recovery must clear that transient evidence.
         AdaptiveFrameScheduler scheduler(120, 3);
         bool promoted = false;
-        for (int frame = 0; frame < 8 && !promoted; ++frame) {
+        for (int frame = 0; frame < 14 && !promoted; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
             scheduler.plan(40ms);
             promoted = promoted || scheduler.telemetry().capacityPromoted;
