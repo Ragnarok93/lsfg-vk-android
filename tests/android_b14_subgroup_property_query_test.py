@@ -117,8 +117,10 @@ int main() {
         coreCalls = khrCalls = 0;
         const auto result = b14::querySubgroupProperties(1, validCore, validKhr);
         assert(result.route == b14::SubgroupQueryRoute::Core);
-        assert(coreCalls == 1 && khrCalls == 0);
-        assert(b14::supportsCooperativeMipmaps(result.properties));
+        // B14 is deliberately fail-closed, so the helper also probes the KHR
+        // alias before retaining the complete core metadata.
+        assert(coreCalls == 1 && khrCalls == 1);
+        assert(!b14::supportsCooperativeMipmaps(result.properties));
     }
     {
         coreCalls = khrCalls = 0;
@@ -133,7 +135,7 @@ int main() {
         assert(coreCalls == 1 && khrCalls == 1);
         assert(result.properties.subgroupSize == 64);
         assert(result.properties.quadOperationsInAllStages == VK_TRUE);
-        assert(b14::supportsCooperativeMipmaps(result.properties));
+        assert(!b14::supportsCooperativeMipmaps(result.properties));
     }
     {
         coreCalls = khrCalls = 0;
@@ -157,7 +159,7 @@ int main() {
 
 
 class AndroidB14SubgroupPropertyQueryTest(unittest.TestCase):
-    def test_core_and_khr_routes_preserve_strict_shader_contract(self) -> None:
+    def test_core_and_khr_routes_fail_closed_without_full_subgroup_mapping(self) -> None:
         compiler = shutil.which("g++") or shutil.which("clang++")
         self.assertIsNotNone(compiler)
         with tempfile.TemporaryDirectory() as tmp:

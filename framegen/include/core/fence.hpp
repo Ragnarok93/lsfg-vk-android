@@ -46,6 +46,7 @@ namespace LSFG::Core {
         /// @throws LSFG::vulkan_error if waiting fails.
         ///
         [[nodiscard]] bool wait(const Core::Device& device, uint64_t timeout = UINT64_MAX) const;
+        [[nodiscard]] bool isSignaled(const Core::Device& device) const;
 
         /// Get the Vulkan handle.
         [[nodiscard]] auto handle() const { return *this->fence; }

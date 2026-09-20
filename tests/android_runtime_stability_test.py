@@ -90,6 +90,139 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
                 "Framegen completion and teardown must use bounded context fences rather than an uninterruptible device-wide idle wait",
             )
 
+    def test_generated_wsi_acquire_is_opportunistic_and_source_safe(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        android_start = source.index(
+            "#ifdef __ANDROID__", source.index("VkResult LsContext::present")
+        )
+        desktop_start = source.index("#else", android_start)
+        android_present = source[android_start:desktop_start]
+        generated_start = android_present.index(
+            "// 4. Generated presentation is opportunistic."
+        )
+        source_start = android_present.index(
+            "// 5. Present the real game frame", generated_start
+        )
+        generated = android_present[generated_start:source_start]
+
+        self.assertIn("this->swapchain, 0,", generated)
+        self.assertIn("syntheticAdmissionNowNs >= syntheticDesiredTimeNs", generated)
+        self.assertIn("stage=generated-deadline-drop", generated)
+        self.assertIn("res == VK_NOT_READY || res == VK_TIMEOUT", generated)
+        self.assertIn(
+            "droppedGeneratedFrames = generatedFrameCount - i", generated
+        )
+        self.assertIn("metrics.windowGeneratedLateDrops", generated)
+        self.assertIn("metrics.totalGeneratedLateDrops", generated)
+        self.assertNotIn("runtimeWaitTimeoutNs()", generated)
+
+        source_tail = android_present[source_start:]
+        self.assertIn(
+            "lastPrevPostCopySemaphore = queuedGeneratedFrameCount > 0",
+            source_tail,
+        )
+        self.assertIn(
+            ".pNext = adaptivePresentPNext(\n"
+            "            pNext,",
+            source_tail,
+        )
+        self.assertIn(
+            ".pNext = adaptivePresentPNext(\n"
+            "                nullptr,",
+            generated,
+        )
+        self.assertNotIn("generatedDownstreamPNext", generated)
+        self.assertIn(
+            "this->lastGeneratedFrameCount_ = queuedGeneratedFrameCount",
+            android_present,
+        )
+
+    def test_first_source_initializes_both_ahb_inputs(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        present = source[source.index("VkResult LsContext::present"):]
+        first_copy = present.index("copySwapchainToExternalAhb")
+        duplicate = present.index("if (this->frameIdx == 0)", first_copy)
+        second_copy = present.index("copySwapchainToExternalAhb", duplicate)
+        self.assertLess(first_copy, duplicate)
+        self.assertLess(duplicate, second_copy)
+        self.assertIn("this->frame_1.handle()", present[second_copy:second_copy + 400])
+
+    def test_fixed_and_adaptive_discontinuities_rebuild_history(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("sourceTimelineDiscontinuity", source)
+        self.assertIn("hadValidSourceTimeline", source)
+        self.assertIn(
+            "hadValidSourceTimeline\n"
+            "                && !this->currentSourceTimeline_.valid",
+            source,
+        )
+        self.assertGreaterEqual(
+            source.count(
+                "sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames"
+            ),
+            3,
+        )
+        self.assertGreaterEqual(
+            source.count("deadlineAdmissionPredictor_.reset()"),
+            2,
+        )
+
+    def test_zero_generation_history_uses_async_dependency_chain(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        android_start = source.index(
+            "#ifdef __ANDROID__", source.index("VkResult LsContext::present")
+        )
+        desktop_start = source.index("#else", android_start)
+        android_present = source[android_start:desktop_start]
+
+        self.assertIn(
+            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;",
+            android_present,
+        )
+        history_start = android_present.index("if (historyOnly)")
+        generation_start = android_present.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        history = android_present[history_start:generation_start]
+        self.assertIn("presentContextWithCountExportSyncFd", history)
+        self.assertIn("framegenBatchCompleteValid = true", history)
+        self.assertIn("historyRequiresHostCompletionWait", history)
+        self.assertNotIn("submitAndWaitForAhbHandoff", history)
+
+    def test_fixed_mode_preserves_requested_multiplier_and_adaptive_flow_does_not_own_pacing(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        scheduler = (ROOT / "include/adaptive_scheduler.hpp").read_text(
+            encoding="utf-8"
+        )
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertNotIn("FixedSourceCadenceGovernor", scheduler)
+        self.assertNotIn("fixedSourceCadenceGovernor_", header)
+        self.assertIn(
+            ": requestedFixedGeneratedFrameCount;",
+            source,
+        )
+        self.assertIn("fixed_requested_generated=", source)
+        self.assertNotIn("fixed_generation_limit=", source)
+
+        pacing_start = hooks.index("bool adaptivePresentationPacing")
+        pacing_end = hooks.index("bool requiresSwapchainRecreation", pacing_start)
+        pacing = hooks[pacing_start:pacing_end]
+        self.assertIn("return false;", pacing)
+        self.assertNotIn("conf.adaptiveFramegen", pacing)
+        self.assertNotIn("conf.adaptiveFlowScale", pacing)
+
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("adaptiveDisplayTimingEnabled_ = false", context)
+        admission_start = context.index("Active deadline admission")
+        admission_end = context.index(
+            "if (this->currentSourceTimeline_.valid)", admission_start
+        )
+        admission_guard = context[admission_start:admission_end]
+        self.assertIn("if (conf.adaptiveFramegen", admission_guard)
+
+
     def test_adaptive_path_uses_variable_count_without_owning_source_pacing(self) -> None:
         scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
@@ -105,8 +238,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "adaptiveScheduler_.plan(sourceInterval)",
             "adaptiveScheduler_.telemetry()",
             "presentContextWithCount",
-            "adaptiveZeroGeneration",
-            "stage=adaptive-history-advance",
+            "AndroidFrameCycleMode::HistoryOnly",
+            "stage=history-only",
         ):
             self.assertIn(token, source)
 
@@ -120,6 +253,12 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("kRuntimeTimingDiscontinuityMs = 250.0", source)
         self.assertIn("if (sourceIntervalMs < kRuntimeTimingDiscontinuityMs)", source)
         self.assertIn("bool excludeCurrentCycleFromTimingMetrics = false", source)
+        self.assertIn("cycleMs >= kRuntimeTimingDiscontinuityMs", source)
+        self.assertIn("excludeCurrentCycleFromTimingMetrics = true", source)
+        self.assertIn("runtime-timing-discontinuity", source)
+        self.assertIn("action=reset-window", source)
+        self.assertIn("metrics.windowWaitIdleMs = 0.0", source)
+        self.assertIn("metrics.windowDispatchMs = 0.0", source)
         self.assertIn("if (!excludeCurrentCycleFromTimingMetrics)", source)
 
     def test_framegen_runtime_reconfigures_instead_of_reusing_incompatible_outputs(self) -> None:
@@ -149,36 +288,58 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             self.assertIn("resetRuntime", delete_body)
 
     def test_adaptive_zero_generation_crosses_handoff_and_advances_history(self) -> None:
-        """Fractional zero-generation cadence must update temporal history, not enter Off."""
+        """Fractional zero-generation cadence fills the same temporal history ring."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present_start = source.index("VkResult LsContext::present")
         handoff_start = source.index("submitAndWaitForAhbHandoff", present_start)
-        zero_start = source.index("if (adaptiveZeroGeneration)", handoff_start)
-        warmup_start = source.index("if (warmupSourceHistory)", zero_start)
-        zero_block = source[zero_start:warmup_start]
+        self.assertIn("AndroidFrameCycleMode::HistoryOnly", source)
+        history_start = source.index("if (historyOnly)", handoff_start)
+        generation_start = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        history_block = source[history_start:generation_start]
 
-        self.assertGreater(zero_start, handoff_start)
-        self.assertIn("presentContextWithCount", zero_block)
-        self.assertIn("adaptive-history-advance", zero_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", zero_block)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", zero_block)
+        self.assertGreater(history_start, handoff_start)
+        self.assertIn("presentContextWithCountExportSyncFd", history_block)
+        self.assertIn("--this->sourceHistoryWarmupRemaining_", history_block)
+        self.assertIn("history_warmup_remaining=", history_block)
         self.assertNotIn("source-direct-present", source[present_start:handoff_start])
 
-    def test_generation_resumes_only_after_source_only_history_warmup(self) -> None:
-        """Actual source-only bypass must invalidate history before fixed generation resumes."""
+
+    def test_generation_resumes_only_after_full_source_history_flush(self) -> None:
+        """Startup and bypass flush the contaminated first sample plus all three temporal slots."""
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("requiresSourceHistoryWarmup_", header)
-        self.assertIn("previousSourceCopySignalValid_", header)
-        bypass_start = source.index("void LsContext::enterSourceOnlyBypass")
-        bypass = source[bypass_start:]
+        self.assertIn("kSourceHistoryWarmupFrames = 4", header)
+        beta = (ROOT / "framegen/v3.1_src/shaders/beta.cpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("for (size_t i = 0; i < 3; i++)", beta)
+        self.assertIn("firstDescriptorSet.at(frameCount % 3)", beta)
+        self.assertIn(
+            "sourceHistoryWarmupRemaining_{kSourceHistoryWarmupFrames}",
+            header,
+        )
+        self.assertIn("requiresSourceHistoryWarmup_{true}", header)
+        bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
+        self.assertIn(
+            "sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames",
+            bypass,
+        )
         self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
         self.assertIn("previousSourceCopySignalValid_ = false", bypass)
-        self.assertIn("const bool warmupSourceHistory", source)
-        self.assertIn("if (this->previousSourceCopySignalValid_)", source)
-        self.assertIn("stage=source-history-warmup", source)
-        self.assertIn("return finishSourcePresent", source)
+
+        self.assertIn("const bool sourceHistoryWarmupActive", source)
+        self.assertIn("sourceHistoryWarmupActive\n        ||", source)
+        self.assertIn("--this->sourceHistoryWarmupRemaining_", source)
+        self.assertNotIn("AndroidFrameCycleMode::SourceWarmup", source)
+        self.assertNotIn("stage=source-history-warmup", source)
+        self.assertIn(
+            "if (this->previousSourceCopySignalValid_ && previousPass != nullptr)",
+            source,
+        )
+
 
     def test_context_creation_failure_recreates_original_swapchain(self) -> None:
         """Regression: failed LSFG setup must not leave a modified swapchain contextless."""
@@ -240,6 +401,21 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn('generationActive ? "generating" : "source_only"', hooks)
         self.assertIn("runtime stage=config-reload-soft-toggle", hooks)
         self.assertIn("recreateSwapchain=0", hooks)
+
+    def test_syncfd_source_export_failure_recreates_temporal_context(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("if (asyncExportFailed)")
+        end = source.index("if (historyOnly)", start)
+        recovery = source[start:end]
+
+        self.assertIn("Layer::ovkQueuePresentKHR", recovery)
+        self.assertIn("VK_ERROR_OUT_OF_DATE_KHR", recovery)
+        self.assertIn("pre-copy-syncfd-fail-open-recreate", recovery)
+        self.assertIn("kSourceHistoryWarmupFrames", recovery)
+        self.assertNotIn(
+            'finishSourcePresent(failOpenResult, "pre-copy-syncfd-fail-open")',
+            recovery,
+        )
 
 
 if __name__ == "__main__":

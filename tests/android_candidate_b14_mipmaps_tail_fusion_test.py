@@ -230,7 +230,9 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
 
         patcher_text = PATCHER.read_text(encoding="utf-8")
         subgroup_text = SUBGROUP_HEADER.read_text(encoding="utf-8")
-        self.assertIn("VK_SUBGROUP_FEATURE_BALLOT_BIT", subgroup_text)
+        self.assertIn("return false;", subgroup_text)
+        self.assertIn("SubgroupLocalInvocationId", subgroup_text)
+        self.assertIn("fallback=b13", patcher_text)
         self.assertIn("mipmapsSubgroupBroadcastSupported", patcher_text)
         self.assertIn("enableCooperativeMipmaps", patcher_text)
         self.assertIn("fallback=b13", patcher_text)

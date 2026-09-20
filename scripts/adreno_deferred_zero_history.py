@@ -463,14 +463,18 @@ std::array<size_t, 3> LsContext::orderedRawHistorySlots() const {
         "                           && !this->requiresSourceHistoryWarmup_) ? 1 : 0)\n",
         f"{path}: honest deferred history validity",
     )
-    text = once(
+    # Production now resets the timing window both after normal reporting and
+    # when Android resumes an in-progress present after a long suspend. Candidate
+    # A owns window-scoped deferred-zero counters, so extend both reset sites.
+    text = replace_exact(
         text,
         "            metrics.windowAdaptiveZeroGenerationCycles = 0;\n",
         "            metrics.windowAdaptiveZeroGenerationCycles = 0;\n"
         "            metrics.windowDeferredZeroFrames = 0;\n"
         "            metrics.windowDeferredZeroEntries = 0;\n"
         "            metrics.windowDeferredReprimes = 0;\n",
-        f"{path}: Candidate A metric reset",
+        count=2,
+        label=f"{path}: Candidate A metric reset",
     )
 
     early_marker = "    // 1. Copy every active Adaptive source frame into frame_0/frame_1, even on\n"

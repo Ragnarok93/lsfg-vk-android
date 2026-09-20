@@ -93,12 +93,13 @@ def patch_source(path: Path) -> None:
         f"{path}: re-prime runtime metrics",
     )
 
-    text = once(
+    text = replace_exact(
         text,
         "            metrics.windowDeferredReprimes = 0;\n",
         "            metrics.windowDeferredReprimes = 0;\n"
         "            metrics.windowDeferredReprimeMs = 0.0;\n",
-        f"{path}: re-prime metric reset",
+        count=2,
+        label=f"{path}: re-prime metric reset",
     )
     path.write_text(text, encoding="utf-8")
 

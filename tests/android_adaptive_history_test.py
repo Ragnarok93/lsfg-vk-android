@@ -14,18 +14,37 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         self.assertNotIn("delayUntilNextSourceOutput", source)
         self.assertNotIn("std::this_thread::sleep_for(delay)", source)
 
+        context_header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        self.assertIn(
+            "kSourceHistoryWarmupFrames = 4",
+            context_header,
+            "Startup/discontinuity warmup must replace the initially duplicated or stale motion slot before generation",
+        )
+
         present_start = source.index("VkResult LsContext::present")
         handoff = source.index("submitAndWaitForAhbHandoff", present_start)
-        adaptive_zero = source.index("if (adaptiveZeroGeneration)", handoff)
-        zero_end = source.index("if (warmupSourceHistory)", adaptive_zero)
-        zero_block = source[adaptive_zero:zero_end]
+        self.assertIn("enum class AndroidFrameCycleMode", source)
+        self.assertIn("AndroidFrameCycleMode::HistoryOnly", source)
+        history_only = source.index("if (historyOnly)", handoff)
+        history_end = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_only
+        )
+        history_block = source[history_only:history_end]
 
-        self.assertGreater(adaptive_zero, handoff)
-        self.assertIn("presentContextWithCount", zero_block)
-        self.assertIn("stage=adaptive-history-advance", zero_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", zero_block)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", zero_block)
-        self.assertNotIn("enterSourceOnlyBypass", zero_block)
+        self.assertGreater(history_only, handoff)
+        self.assertIn("presentContextWithCountExportSyncFd", history_block)
+        self.assertIn("framegenBatchCompleteSemaphore", history_block)
+        self.assertIn("historyRequiresHostCompletionWait", history_block)
+        self.assertIn("stage=history-only", history_block)
+        self.assertIn("sourceHistoryWarmupRemaining_ > 0", history_block)
+        self.assertIn("--this->sourceHistoryWarmupRemaining_", history_block)
+        self.assertIn("history_warmup_remaining=", history_block)
+        timeout_start = history_block.index("if (!historyReady)")
+        timeout_recovery = history_block[timeout_start:]
+        self.assertIn("kSourceHistoryWarmupFrames", timeout_recovery)
+        self.assertIn("requiresSourceHistoryWarmup_ = true", timeout_recovery)
+        self.assertIn("history-completion-timeout", timeout_recovery)
+        self.assertNotIn("enterSourceOnlyBypass", history_block)
 
     def test_framegen_zero_generation_refreshes_temporal_preprocessing(self) -> None:
         backend_sources = (
@@ -41,7 +60,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
 
         for source_path in backend_sources:
             source = source_path.read_text(encoding="utf-8")
-            present_start = source.index("void Context::present")
+            present_start = source.index("Context::present(")
             wait_start = source.index("bool Context::waitForLastPresent", present_start)
             present = source[present_start:wait_start]
 
@@ -61,6 +80,10 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
             self.assertLess(alpha, beta_guard)
             self.assertLess(beta_guard, beta)
             self.assertLess(beta, zero_finish)
+            self.assertIn("exportZeroHistorySync", zero_block)
+            self.assertIn("data.batchCompleteSemaphore", zero_block)
+            self.assertIn("exportedSync.gpuDependenciesExported = true", zero_block)
+            self.assertIn("data.shouldWait = true", zero_block)
             self.assertIn("preprocessingFence.wait", zero_block)
             self.assertIn("framegenWaitTimeoutNs()", zero_block)
             self.assertIn("this->frameIdx++", zero_block)
@@ -87,7 +110,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         for header_path, source_path in backend_pairs:
             header = header_path.read_text(encoding="utf-8")
             source = source_path.read_text(encoding="utf-8")
-            present_start = source.index("void Context::present")
+            present_start = source.index("Context::present(")
             wait_start = source.index("bool Context::waitForLastPresent", present_start)
             present = source[present_start:wait_start]
             zero_start = present.index("if (generationCount == 0)")
@@ -108,6 +131,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
             )
             self.assertIn("data.preprocessingFence", zero_block, source_path.as_posix())
             self.assertIn("data.preprocessingFence.wait", zero_block, source_path.as_posix())
+            self.assertIn("exportZeroHistorySync", zero_block, source_path.as_posix())
 
     def test_generated_passes_reuse_completion_fences(self) -> None:
         backend_sources = (
@@ -117,7 +141,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
 
         for source_path in backend_sources:
             source = source_path.read_text(encoding="utf-8")
-            present_start = source.index("void Context::present")
+            present_start = source.index("Context::present(")
             wait_start = source.index("bool Context::waitForLastPresent", present_start)
             present = source[present_start:wait_start]
             pass_start = present.index("for (size_t pass = 0; pass < generationCount; pass++)")
@@ -147,7 +171,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
 
         for source_path in backend_sources:
             source = source_path.read_text(encoding="utf-8")
-            present_start = source.index("void Context::present")
+            present_start = source.index("Context::present(")
             wait_start = source.index("bool Context::waitForLastPresent", present_start)
             present = source[present_start:wait_start]
 
@@ -175,6 +199,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
     def test_source_only_bypass_remains_lifecycle_reset(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
+        self.assertIn("sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames", bypass)
         self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
         self.assertIn("previousSourceCopySignalValid_ = false", bypass)
 

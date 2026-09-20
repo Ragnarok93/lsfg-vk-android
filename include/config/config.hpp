@@ -22,8 +22,13 @@ namespace Config {
 
         /// The frame generation muliplier
         size_t multiplier{2};
-        /// The internal flow scale factor
+        /// Fixed Flow Scale selected by the user. This remains independent from
+        /// the runtime-selected Adaptive Flow state.
         float flowScale{1.0F};
+        /// Allow the LSFG runtime to select a bounded Flow Scale state.
+        bool adaptiveFlowScale{false};
+        /// quality, balanced, or low. The preset owns the adaptive target/floor.
+        std::string adaptiveFlowPreset{"quality"};
         /// Whether performance mode is enabled
         bool performance{false};
         /// Whether HDR is enabled

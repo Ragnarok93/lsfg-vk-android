@@ -13,6 +13,12 @@ namespace Mini {
         Semaphore() = default;
         explicit Semaphore(VkDevice device);
         Semaphore(VkDevice device, int* fd);
+        Semaphore(VkDevice device, VkExternalSemaphoreHandleTypeFlagBits handleType);
+        Semaphore(VkDevice device, int fd,
+            VkExternalSemaphoreHandleTypeFlagBits handleType);
+
+        [[nodiscard]] int exportFd(
+            VkDevice device, VkExternalSemaphoreHandleTypeFlagBits handleType) const;
 
         [[nodiscard]] VkSemaphore handle() const {
             return this->semaphore ? *this->semaphore : VK_NULL_HANDLE;

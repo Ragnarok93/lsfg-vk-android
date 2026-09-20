@@ -35,7 +35,7 @@ class AndroidSuspendTimeoutGuardTest(unittest.TestCase):
 
         wait_block = source[
             source.index("const auto waitIdleStart"):
-            source.index("// 4. Copy generated frames")
+            source.index("// 4. Generated presentation is opportunistic.")
         ]
         self.assertNotIn("sleep_for", wait_block)
         self.assertNotIn("delayUntilNextSourceOutput", source)

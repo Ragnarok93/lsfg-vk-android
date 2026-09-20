@@ -1,92 +1,31 @@
 #!/usr/bin/env python3
-"""Compose retained Android runtime transforms for production builds."""
+"""Apply only retained, source-compatible Android capability diagnostics.
+
+The restored Adaptive Flow Scale baseline intentionally does not compose the
+DeferredZero, async-zero-history, transport-overlap, SYNC_FD handoff, or
+nonblocking-generated experimental stacks at build time. Individual mechanisms
+must be promoted into source explicitly, with focused tests, before production
+builds are allowed to use them.
+"""
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
 from adreno_evidence_capabilities import (
     patch_backend_header,
     patch_device_source,
     patch_hooks_header,
     patch_hooks_source,
 )
-from adreno_evidence_common import replace_exact
-from adreno_syncfd_handoff import apply as apply_syncfd_handoff
-from adreno_async_zero_history import apply as apply_async_zero_history
-from adreno_async_zero_history_hardening import apply as apply_async_zero_history_hardening
-from adreno_slot_aware_zero_history import apply as apply_slot_aware_zero_history
-from adreno_transport_release_overlap import apply as apply_transport_release_overlap
-from adreno_deferred_zero_history_build import apply as apply_deferred_zero_history
-from adreno_deferred_zero_reprime_sync import apply as apply_deferred_zero_reprime_sync
-from adreno_deferred_zero_reprime_guard import apply as apply_deferred_zero_reprime_guard
-from adreno_deferred_zero_history_finalize import apply as apply_deferred_zero_history_finalize
-from adreno_deferred_zero_safe_reprime import apply as apply_deferred_zero_safe_reprime
-from adreno_deferred_zero_exit_persistence import apply as apply_deferred_zero_exit_persistence
-
-def normalize_sync_fd_import_initializer(path: Path) -> None:
-    """Keep the validation transform valid under Android NDK C++20 rules."""
-    text = path.read_text(encoding="utf-8")
-    invalid = '''        const VkImportSemaphoreFdInfoKHR importInfo{
-            .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
-            .flags = handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
-                ? VK_SEMAPHORE_IMPORT_TEMPORARY_BIT : 0,
-            .semaphore = semaphoreHandle,
-            .handleType = handleType,
-            .fd = fd,
-        };
-'''
-    if invalid not in text:
-        return
-    corrected = '''        const VkImportSemaphoreFdInfoKHR importInfo{
-            .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
-            .semaphore = semaphoreHandle,
-            .flags = handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
-                ? static_cast<VkSemaphoreImportFlags>(VK_SEMAPHORE_IMPORT_TEMPORARY_BIT)
-                : VkSemaphoreImportFlags{0},
-            .handleType = handleType,
-            .fd = fd,
-        };
-'''
-    text = replace_exact(
-        text,
-        invalid,
-        corrected,
-        count=1,
-        label=f"{path}: C++20-valid SYNC_FD import initializer",
-    )
-    path.write_text(text, encoding="utf-8")
 
 
 def apply_runtime(root: Path) -> None:
-    """Apply retained Android runtime behavior without GPU/compiler profilers."""
+    """Apply diagnostic-only capability probing to the restored source."""
     patch_backend_header(root / "framegen/public/lsfg_backend.hpp")
     patch_device_source(root / "framegen/src/core/device.cpp")
     patch_hooks_header(root / "include/hooks.hpp")
     patch_hooks_source(root / "src/hooks.cpp")
-
-    mini_semaphore_header = root / "include/mini/semaphore.hpp"
-    if "int exportFd(" not in mini_semaphore_header.read_text(encoding="utf-8"):
-        apply_syncfd_handoff(root)
-    normalize_sync_fd_import_initializer(root / "framegen/src/core/semaphore.cpp")
-    apply_async_zero_history(root)
-    apply_async_zero_history_hardening(root)
-    apply_slot_aware_zero_history(root)
-    apply_transport_release_overlap(root)
-
-    # Synthetic evidence-bundle fixtures intentionally contain only the files
-    # touched by that test. Full Android builds always contain Mini::Image and
-    # therefore always apply Candidate A here.
-    if (root / "include/mini/image.hpp").exists():
-        apply_deferred_zero_history(root)
-        apply_deferred_zero_reprime_sync(root)
-        apply_deferred_zero_reprime_guard(root)
-        apply_deferred_zero_history_finalize(root)
-        # Final Candidate A lifecycle transform: remove the crash-prone retained
-        # raw-history replay and rebuild framegen history across live presents.
-        apply_deferred_zero_safe_reprime(root)
-        # Preserve the validated live re-prime, but only wake it when scheduler
-        # generation requests are dense enough to amortize the three-frame cost.
-        apply_deferred_zero_exit_persistence(root)
 
 
 def main() -> None:

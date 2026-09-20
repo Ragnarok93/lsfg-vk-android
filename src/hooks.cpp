@@ -57,14 +57,32 @@ namespace {
         return conf.multiplier;
     }
 
+    bool adaptivePresentationPacing(const Config::Configuration& conf) {
+        // Adaptive FG historically ran smoothly with the same WSI present-mode
+        // selection as Fixed FG. Do not change the swapchain contract merely
+        // because generation density is adaptive.
+        (void)conf;
+        return false;
+    }
+
     bool requiresSwapchainRecreation(
             const Config::Configuration& previous,
             const Config::Configuration& next) {
 #ifdef __ANDROID__
         const bool residentTarget = previous.targeted && next.targeted;
         if (residentTarget) {
+            const bool adaptiveFlowModeChanged =
+                previous.adaptiveFlowScale != next.adaptiveFlowScale;
+            const bool adaptiveFlowPresetChanged =
+                previous.adaptiveFlowScale && next.adaptiveFlowScale
+                && previous.adaptiveFlowPreset != next.adaptiveFlowPreset;
+            const bool fixedFlowScaleChanged =
+                !previous.adaptiveFlowScale && !next.adaptiveFlowScale
+                && previous.flowScale != next.flowScale;
             return previous.dll != next.dll
-                || previous.flowScale != next.flowScale
+                || adaptiveFlowModeChanged
+                || adaptiveFlowPresetChanged
+                || fixedFlowScaleChanged
                 || previous.performance != next.performance
                 || previous.hdr != next.hdr
                 || previous.e_present != next.e_present;
@@ -100,7 +118,8 @@ namespace {
     }
 
 #ifdef __ANDROID__
-    bool supportsOpaqueFdSemaphore(VkPhysicalDevice physicalDevice) {
+    bool supportsFdSemaphore(VkPhysicalDevice physicalDevice,
+            VkExternalSemaphoreHandleTypeFlagBits handleType) {
         if (!supportsDeviceExtension(
                 physicalDevice, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
             return false;
@@ -120,7 +139,7 @@ namespace {
 
         const VkPhysicalDeviceExternalSemaphoreInfo info{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
-            .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+            .handleType = handleType,
         };
         VkExternalSemaphoreProperties properties{
             .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
@@ -131,9 +150,9 @@ namespace {
             VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT
             | VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
         return (properties.externalSemaphoreFeatures & required) == required
-            && (properties.compatibleHandleTypes
-                & VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT) != 0;
+            && (properties.compatibleHandleTypes & handleType) != 0;
     }
+
 #endif
 
     VkResult myvkCreateInstance(
@@ -192,9 +211,16 @@ namespace {
         std::vector<const char*> requestedExtensions{
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
         };
-        const bool opaqueFdSemaphoreSupported = supportsOpaqueFdSemaphore(physicalDevice);
-        if (opaqueFdSemaphoreSupported)
+        const bool opaqueFdSemaphoreSupported = supportsFdSemaphore(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+        const bool syncFdSemaphoreSupported = supportsFdSemaphore(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+        if (opaqueFdSemaphoreSupported || syncFdSemaphoreSupported)
             requestedExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+        const bool displayTimingSupported = supportsDeviceExtension(
+            physicalDevice, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+        if (displayTimingSupported)
+            requestedExtensions.push_back(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
 
         auto extensions = Utils::addExtensions(
             pCreateInfo->ppEnabledExtensionNames,
@@ -203,7 +229,10 @@ namespace {
         );
         std::cerr << "lsfg-vk: init stage=android-sync-capability opaqueFdSemaphore="
                   << (opaqueFdSemaphoreSupported ? 1 : 0)
+                  << " syncFdSemaphore=" << (syncFdSemaphoreSupported ? 1 : 0)
                   << " fallback=host-fence\n";
+        std::cerr << "lsfg-vk: init stage=android-display-timing capability="
+                  << (displayTimingSupported ? 1 : 0) << "\n";
 #else
         auto extensions = Utils::addExtensions(
             pCreateInfo->ppEnabledExtensionNames,
@@ -235,10 +264,17 @@ namespace {
 #ifdef __ANDROID__
         const bool androidAhbSupported = supportsDeviceExtension(physicalDevice,
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
-        const bool androidOpaqueFdSemaphoreSupported = supportsOpaqueFdSemaphore(physicalDevice);
+        const bool androidOpaqueFdSemaphoreSupported = supportsFdSemaphore(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+        const bool androidSyncFdSemaphoreSupported = supportsFdSemaphore(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+        const bool androidDisplayTimingSupported = supportsDeviceExtension(
+            physicalDevice, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
 #else
         const bool androidAhbSupported = true;
         const bool androidOpaqueFdSemaphoreSupported = false;
+        const bool androidSyncFdSemaphoreSupported = false;
+        const bool androidDisplayTimingSupported = false;
 #endif
         auto getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
             Layer::ovkGetInstanceProcAddr(layerInstance, "vkGetPhysicalDeviceProperties2"));
@@ -259,6 +295,8 @@ namespace {
             .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
             .androidAhbSupported = androidAhbSupported,
             .androidOpaqueFdSemaphoreSupported = androidOpaqueFdSemaphoreSupported,
+            .androidSyncFdSemaphoreSupported = androidSyncFdSemaphoreSupported,
+            .androidDisplayTimingSupported = androidDisplayTimingSupported,
         });
         return VK_SUCCESS;
     }
@@ -355,7 +393,8 @@ namespace {
             bool generationInitialized, bool generatedPresented, bool degraded,
             double outputFps, double sourceFps, double generatedFps,
             const RuntimeOutputStats& stats, int multiplier, bool performance,
-            bool adaptive, uint32_t targetFps) {
+            bool adaptive, uint32_t targetFps,
+            const AdaptiveFlowRuntimeSnapshot& adaptiveFlow) {
         if (configFile.empty())
             return;
 
@@ -384,7 +423,52 @@ namespace {
                 << "multiplier=" << multiplier << '\n'
                 << "adaptive=" << (adaptive ? 1 : 0) << '\n'
                 << "target_fps=" << targetFps << '\n'
-                << "performance=" << (performance ? 1 : 0) << '\n';
+                << "performance=" << (performance ? 1 : 0) << '\n'
+                << "adaptive_flow_enabled=" << (adaptiveFlow.enabled ? 1 : 0) << '\n'
+                << "adaptive_flow_preset=" << adaptiveFlow.preset << '\n'
+                << "adaptive_flow_target=" << adaptiveFlow.targetScale << '\n'
+                << "adaptive_flow_minimum=" << adaptiveFlow.minimumScale << '\n'
+                << "adaptive_flow_requested=" << adaptiveFlow.requestedScale << '\n'
+                << "adaptive_flow_active=" << adaptiveFlow.activeScale << '\n'
+                << "adaptive_flow_transition=" << (adaptiveFlow.transitionPending ? 1 : 0) << '\n'
+                << "adaptive_flow_warmup_remaining=" << adaptiveFlow.warmupRemaining << '\n'
+                << "adaptive_flow_timing_valid=" << (adaptiveFlow.timingValid ? 1 : 0) << '\n'
+                << "adaptive_flow_mipmaps_ms=" << adaptiveFlow.mipmapsMs << '\n'
+                << "adaptive_flow_work_ms=" << adaptiveFlow.flowMs << '\n'
+                << "adaptive_flow_lsfg_ms=" << adaptiveFlow.totalLsfgMs << '\n'
+                << "adaptive_flow_budget_ms=" << adaptiveFlow.budgetMs << '\n'
+                << "adaptive_flow_generation_count=" << adaptiveFlow.generationCount << '\n'
+                << "adaptive_flow_global_pressure_valid="
+                << (adaptiveFlow.globalPressureValid ? 1 : 0) << '\n'
+                << "adaptive_flow_global_gpu_percent="
+                << adaptiveFlow.globalGpuUsagePercent << '\n'
+                << "adaptive_flow_global_output_fps="
+                << adaptiveFlow.globalOutputFps << '\n'
+                << "adaptive_flow_lsfg_output_valid="
+                << (adaptiveFlow.lsfgOutputValid ? 1 : 0) << '\n'
+                << "adaptive_flow_lsfg_output_fps="
+                << adaptiveFlow.lsfgOutputFps << '\n'
+                << "adaptive_flow_global_p95_ms="
+                << adaptiveFlow.globalFrameTimeP95Ms << '\n'
+                << "adaptive_flow_global_slow_ratio="
+                << adaptiveFlow.globalSlowFrameRatio << '\n'
+                << "adaptive_flow_global_pressure="
+                << (adaptiveFlow.globalPressure ? 1 : 0) << '\n'
+                << "adaptive_flow_compute_pressure="
+                << (adaptiveFlow.computePressure ? 1 : 0) << '\n'
+                << "adaptive_flow_wsi_pressure="
+                << (adaptiveFlow.wsiPressure ? 1 : 0) << '\n'
+                << "adaptive_flow_wsi_loss_rate="
+                << adaptiveFlow.wsiLossRate << '\n'
+                << "adaptive_flow_presentation_cap="
+                << adaptiveFlow.presentationGenerationCap << '\n'
+                << "adaptive_flow_presentation_duty="
+                << adaptiveFlow.presentationDuty << '\n'
+                << "adaptive_flow_output_deficit="
+                << (adaptiveFlow.outputDeficit ? 1 : 0) << '\n'
+                << "adaptive_flow_synthetic_drop_pressure="
+                << (adaptiveFlow.syntheticDropPressure ? 1 : 0) << '\n'
+                << "adaptive_flow_reason=" << adaptiveFlow.reason << '\n';
             out.close();
             if (!out)
                 throw std::runtime_error("failed to flush temporary stats file");
@@ -408,7 +492,7 @@ namespace {
     }
 
     void recordSuccessfulOutputCycle(VkSwapchainKHR swapchain,
-            const std::string& configFile, uint64_t generated,
+            const LsContext& context, const std::string& configFile, uint64_t generated,
             int multiplier, bool performance, bool adaptive, uint32_t targetFps) {
         auto& stats = runtimeOutputStats[swapchain];
         stats.windowSourceFrames++;
@@ -427,12 +511,13 @@ namespace {
         const double outputFps = sourceFps + generatedFps;
         const bool generationActive = multiplier > 1;
         const bool generatedPresented = generationActive && stats.totalGeneratedFrames > 0;
+        const auto adaptiveFlow = context.adaptiveFlowRuntimeSnapshot();
         writeRuntimeStatsFile(configFile,
             generationActive ? "generating" : "source_only",
             generationActive, generationActive, true, !generationActive, true,
             generatedPresented, false,
             outputFps, sourceFps, generatedFps, stats, multiplier, performance,
-            adaptive, targetFps);
+            adaptive, targetFps, adaptiveFlow);
 
         stats.windowStart = now;
         stats.windowSourceFrames = 0;
@@ -655,6 +740,8 @@ namespace {
 
         const auto configuredPresentMode = Config::activeConf.e_present;
         const bool recreatingExistingSwapchain = pCreateInfo->oldSwapchain != VK_NULL_HANDLE;
+        // Adaptive and Fixed FG share the same WSI contract. This restores the
+        // proven MAILBOX-capable path instead of forcing Adaptive onto FIFO.
         createInfo.presentMode = recreatingExistingSwapchain
             ? pCreateInfo->presentMode
             : choosePresentMode(
@@ -662,8 +749,10 @@ namespace {
                 pCreateInfo->presentMode, configuredPresentMode);
         if (recreatingExistingSwapchain) {
             std::cerr << "lsfg-vk: init stage=swapchain-hot-recreate-present-mode"
-                         " preservingGameMode=" << pCreateInfo->presentMode
-                      << " configuredMode=" << configuredPresentMode << "\n";
+                      << " adaptivePacing=0"
+                      << " gameMode=" << pCreateInfo->presentMode
+                      << " configuredMode=" << configuredPresentMode
+                      << " effectiveMode=" << createInfo.presentMode << "\n";
         }
 
         std::cerr << "lsfg-vk: init stage=swapchain-downstream-create-begin images="
@@ -812,6 +901,11 @@ namespace {
                               << Config::activeConf.multiplier
                               << " adaptive=" << (Config::activeConf.adaptiveFramegen ? 1 : 0)
                               << " targetFps=" << Config::activeConf.fpsLimit
+                              << " adaptiveFlow="
+                              << (Config::activeConf.adaptiveFlowScale ? 1 : 0)
+                              << " adaptiveFlowPreset="
+                              << Config::activeConf.adaptiveFlowPreset
+                              << " fixedFlowScale=" << Config::activeConf.flowScale
                               << " presentMode=" << Config::activeConf.e_present
                               << " enabled=" << (Config::activeConf.enable ? 1 : 0)
                               << " recreateSwapchain=" << (recreateSwapchain ? 1 : 0)
@@ -853,8 +947,9 @@ namespace {
 
         auto it3 = swapchains.find(*pPresentInfo->pSwapchains);
         if (it3 == swapchains.end()) {
-            Utils::logLimitN("swapMap", 5,
-                "Swapchain context not found in map");
+            // A missing LSFG wrapper is expected for disabled/degraded
+            // pass-through swapchains. Creation already logs the reason, so do
+            // not add repeated work or noise on every present.
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
         }
         auto& swapchain = it3->second;
@@ -884,7 +979,8 @@ namespace {
         }
         #pragma clang diagnostic pop
 
-        if (configuredPresent != conf.e_present) {
+        const VkPresentModeKHR desiredPresentMode = conf.e_present;
+        if (configuredPresent != desiredPresentMode) {
             Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
@@ -895,7 +991,7 @@ namespace {
             const auto res = Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
                 recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
-                    conf.config_file, 0, 1, conf.performance,
+                    swapchain, conf.config_file, 0, 1, conf.performance,
                     conf.adaptiveFramegen, conf.fpsLimit);
                 Utils::resetLimitN("swapPresent");
             } else {
@@ -920,7 +1016,7 @@ namespace {
 
 #ifdef __ANDROID__
             recordSuccessfulOutputCycle(*pPresentInfo->pSwapchains,
-                conf.config_file, swapchain.lastGeneratedFrameCount(),
+                swapchain, conf.config_file, swapchain.lastGeneratedFrameCount(),
                 conf.multiplier, conf.performance,
                 conf.adaptiveFramegen, conf.fpsLimit);
 #endif

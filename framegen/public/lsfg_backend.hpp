@@ -6,7 +6,9 @@
 
 #include <array>
 #include <cstdint>
+#include <cstddef>
 #include <string>
+#include <vector>
 
 namespace LSFG {
 
@@ -17,6 +19,29 @@ struct DeviceIdentity {
     [[nodiscard]] bool operator==(const DeviceIdentity& other) const noexcept {
         return deviceUUID == other.deviceUUID && driverUUID == other.driverUUID;
     }
+};
+
+struct AdaptiveFlowContextState {
+    float requestedScale{0.0f};
+    float activeScale{0.0f};
+    uint32_t warmupRemaining{0};
+    bool transitionPending{false};
+};
+
+struct AdaptiveFlowGpuTiming {
+    double mipmapsMs{0.0};
+    double opticalFlowMs{0.0};
+    double totalLsfgMs{0.0};
+    size_t generationCount{0};
+    bool transitionActive{false};
+    bool valid{false};
+};
+
+struct AndroidFrameSyncFds {
+    std::vector<int> outputReadyFds;
+    int batchCompleteFd{-1};
+    bool gpuDependenciesExported{false};
+    bool hostWaitFallback{false};
 };
 
 struct BackendDiagnostics {
@@ -39,6 +64,7 @@ struct BackendDiagnostics {
     // uses this solely as an optional GPU-to-GPU AHB handoff optimization; the
     // established host-fence path remains the fallback when it is unavailable.
     bool externalSemaphoreOpaqueFd{false};
+    bool externalSemaphoreSyncFd{false};
 };
 
 inline constexpr uint64_t DEFAULT_DRIVER_WAIT_TIMEOUT_NS = 500'000'000ULL;

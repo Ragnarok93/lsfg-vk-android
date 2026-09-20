@@ -134,19 +134,55 @@ void LSFG_3_1::presentContext(int32_t id, int inSem, const std::vector<int>& out
 }
 
 void LSFG_3_1::presentContextWithCount(int32_t id, int inSem,
-        const std::vector<int>& outSem, size_t activeGenerationCount) {
+        const std::vector<int>& outSem, size_t activeGenerationCount,
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
+        size_t interpolationGenerationCount) {
     const std::scoped_lock lock(runtimeMutex);
     if (!instance.has_value() || !device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
     if (activeGenerationCount > device->generationCount)
         throw std::runtime_error("LSFG active generation count exceeds runtime capacity");
+    if (interpolationGenerationCount > device->generationCount)
+        throw std::runtime_error("LSFG interpolation generation count exceeds runtime capacity");
+    if (interpolationGenerationCount != 0
+            && interpolationGenerationCount < activeGenerationCount)
+        throw std::runtime_error("LSFG interpolation generation count is below active count");
 
     auto it = contexts.find(id);
     if (it == contexts.end())
         throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
 
-    it->second.present(*device, inSem, outSem, activeGenerationCount);
+    it->second.present(
+        *device, inSem, outSem, activeGenerationCount, inSemHandleType,
+        false, interpolationGenerationCount);
 }
+
+#ifdef __ANDROID__
+LSFG::AndroidFrameSyncFds LSFG_3_1::presentContextWithCountExportSyncFd(
+        int32_t id, int inSem, size_t activeGenerationCount,
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
+        size_t interpolationGenerationCount) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    if (activeGenerationCount > device->generationCount)
+        throw std::runtime_error("LSFG active generation count exceeds runtime capacity");
+    if (interpolationGenerationCount > device->generationCount)
+        throw std::runtime_error("LSFG interpolation generation count exceeds runtime capacity");
+    if (interpolationGenerationCount != 0
+            && interpolationGenerationCount < activeGenerationCount)
+        throw std::runtime_error("LSFG interpolation generation count is below active count");
+
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
+
+    const std::vector<int> noImportedOutputs;
+    return it->second.present(
+        *device, inSem, noImportedOutputs, activeGenerationCount,
+        inSemHandleType, true, interpolationGenerationCount);
+}
+#endif
 
 void LSFG_3_1::deleteContext(int32_t id) {
     const std::scoped_lock lock(runtimeMutex);
@@ -196,6 +232,52 @@ int32_t LSFG_3_1::createContextFromAHB(
     const int32_t id = std::rand();
     contexts.emplace(id, Context(*device, in0, in1, outN, extent, format));
     return id;
+}
+
+int32_t LSFG_3_1::createAdaptiveContextFromAHB(
+        AHardwareBuffer* in0, AHardwareBuffer* in1,
+        const std::vector<AHardwareBuffer*>& outN,
+        VkExtent2D extent, VkFormat format,
+        const std::vector<float>& flowScales) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    validateOutputCount(outN.size());
+
+    const int32_t id = std::rand();
+    contexts.emplace(id, Context(
+        *device, in0, in1, outN, extent, format, flowScales));
+    return id;
+}
+
+void LSFG_3_1::requestContextFlowScale(int32_t id, float flowScale) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "Context not found");
+    it->second.requestFlowScale(flowScale);
+}
+
+LSFG::AdaptiveFlowContextState LSFG_3_1::getContextFlowScaleState(int32_t id) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        return {};
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        return {};
+    return it->second.flowScaleState();
+}
+
+LSFG::AdaptiveFlowGpuTiming LSFG_3_1::getContextGpuTiming(int32_t id) {
+    const std::scoped_lock lock(runtimeMutex);
+    if (!instance.has_value() || !device.has_value())
+        return {};
+    auto it = contexts.find(id);
+    if (it == contexts.end())
+        return {};
+    return it->second.gpuTiming();
 }
 
 #endif // __ANDROID__

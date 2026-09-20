@@ -25,6 +25,10 @@ using namespace Config;
 namespace {
     Configuration globalConf{};
     std::optional<std::unordered_map<std::string, Configuration>> gameConfs;
+
+    bool validAdaptiveFlowPreset(const std::string& preset) {
+        return preset == "quality" || preset == "balanced" || preset == "low";
+    }
 }
 
 Configuration Config::activeConf{};
@@ -105,6 +109,8 @@ void Config::updateConfig(const std::string& file) {
             .dll = global.dll,
             .multiplier = toml::find_or(gameTable, "multiplier", 2U),
             .flowScale = toml::find_or(gameTable, "flow_scale", 1.0F),
+            .adaptiveFlowScale = toml::find_or(gameTable, "adaptive_flow_scale", false),
+            .adaptiveFlowPreset = toml::find_or(gameTable, "adaptive_flow_preset", std::string("quality")),
             .performance = toml::find_or(gameTable, "performance_mode", false),
             .hdr = toml::find_or(gameTable, "hdr_mode", false),
             .adaptiveFramegen = toml::find_or(gameTable, "adaptive_framegen", false),
@@ -120,6 +126,8 @@ void Config::updateConfig(const std::string& file) {
             throw std::runtime_error("Multiplier cannot be less than 1");
         if (game.flowScale < 0.25F || game.flowScale > 1.0F)
             throw std::runtime_error("Flow scale must be between 0.25 and 1.0");
+        if (!validAdaptiveFlowPreset(game.adaptiveFlowPreset))
+            throw std::runtime_error("Adaptive Flow preset must be quality, balanced, or low");
         if (game.adaptiveFramegen && game.fpsLimit == 0)
             throw std::runtime_error("Adaptive frame generation requires a positive fps_limit");
         games[exe] = std::move(game);
@@ -147,6 +155,10 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
         if (multiplier) conf.multiplier = std::stoul(multiplier);
         const char* flow_scale = std::getenv("LSFG_FLOW_SCALE");
         if (flow_scale) conf.flowScale = std::stof(flow_scale);
+        const char* adaptive_flow = std::getenv("LSFG_ADAPTIVE_FLOW_SCALE");
+        if (adaptive_flow) conf.adaptiveFlowScale = std::string(adaptive_flow) == "1";
+        const char* adaptive_flow_preset = std::getenv("LSFG_ADAPTIVE_FLOW_PRESET");
+        if (adaptive_flow_preset) conf.adaptiveFlowPreset = std::string(adaptive_flow_preset);
         const char* performance = std::getenv("LSFG_PERFORMANCE_MODE");
         if (performance) conf.performance = std::string(performance) == "1";
         const char* hdr = std::getenv("LSFG_HDR_MODE");
@@ -158,6 +170,8 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
         const char* e_present = std::getenv("LSFG_EXPERIMENTAL_PRESENT_MODE");
         if (e_present) conf.e_present = into_present(std::string(e_present));
 
+        if (!validAdaptiveFlowPreset(conf.adaptiveFlowPreset))
+            throw std::runtime_error("Adaptive Flow preset must be quality, balanced, or low");
         return conf;
     }
 

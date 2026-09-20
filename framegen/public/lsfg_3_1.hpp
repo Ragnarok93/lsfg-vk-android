@@ -71,6 +71,28 @@ namespace LSFG_3_1 {
         AHardwareBuffer* in0, AHardwareBuffer* in1,
         const std::vector<AHardwareBuffer*>& outN,
         VkExtent2D extent, VkFormat format);
+
+    /// Create an Android context with preset-bounded Flow Scale graphs prepared
+    /// up front. flowScales are user-visible scales ordered target -> minimum.
+    __attribute__((visibility("default")))
+    int32_t createAdaptiveContextFromAHB(
+        AHardwareBuffer* in0, AHardwareBuffer* in1,
+        const std::vector<AHardwareBuffer*>& outN,
+        VkExtent2D extent, VkFormat format,
+        const std::vector<float>& flowScales);
+
+    /// Request a prepared Flow Scale. The context warms three exact source
+    /// history frames before atomically changing the generation graph.
+    __attribute__((visibility("default")))
+    void requestContextFlowScale(int32_t id, float flowScale);
+
+    /// Report requested/applied scale and handoff progress for diagnostics.
+    __attribute__((visibility("default")))
+    LSFG::AdaptiveFlowContextState getContextFlowScaleState(int32_t id);
+
+    /// Return the most recent completed Adaptive Flow GPU timing sample.
+    __attribute__((visibility("default")))
+    LSFG::AdaptiveFlowGpuTiming getContextGpuTiming(int32_t id);
 #endif
 
     ///
@@ -89,7 +111,18 @@ namespace LSFG_3_1 {
     /// adaptive Android path; the original API retains fixed-multiplier behavior.
     __attribute__((visibility("default")))
     void presentContextWithCount(int32_t id, int inSem,
-        const std::vector<int>& outSem, size_t activeGenerationCount);
+        const std::vector<int>& outSem, size_t activeGenerationCount,
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType =
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+        size_t interpolationGenerationCount = 0);
+
+#ifdef __ANDROID__
+    __attribute__((visibility("default")))
+    LSFG::AndroidFrameSyncFds presentContextWithCountExportSyncFd(
+        int32_t id, int inSem, size_t activeGenerationCount,
+        VkExternalSemaphoreHandleTypeFlagBits inSemHandleType,
+        size_t interpolationGenerationCount = 0);
+#endif
 
 #ifdef __ANDROID__
     /// Wait only for the most recent submissions belonging to this context.
