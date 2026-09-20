@@ -720,6 +720,9 @@ void GeneratedPresentationCapacityTracker::observe(
             && rejectionEvidence_ >= kWsiEvidenceThreshold
             && telemetry_.wsiRejectionRatio
                 >= kWsiSevereSingleFramePressureRatio
+            && !(context.outputDeficit
+                && sourceInsideBudget
+                && provenHigherCapacity)
             && telemetry_.singleFrameDuty
                 > kSingleFrameDuties.back() + 1e-6) {
         telemetry_.singleFrameDuty =
