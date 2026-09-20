@@ -32,6 +32,7 @@
 #include <thread>
 #include <array>
 #include <cmath>
+#include <atomic>
 
 namespace {
 
@@ -77,6 +78,15 @@ uint64_t processRuntimeSessionId() {
         return mixed != 0 ? mixed : 1ULL;
     }();
     return sessionId;
+}
+
+uint64_t nextRuntimeConfigRevision() {
+    static std::atomic<uint64_t> nextRevision{1};
+    uint64_t revision =
+        nextRevision.fetch_add(1, std::memory_order_relaxed);
+    if (revision == 0)
+        revision = nextRevision.fetch_add(1, std::memory_order_relaxed);
+    return revision;
 }
 
 uint64_t runtimeDiagnosticConfigSignature(
@@ -760,12 +770,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (!this->runtimeConfigSignatureValid_) {
         this->runtimeConfigSignature_ = currentConfigSignature;
         this->runtimeConfigSignatureValid_ = true;
-        this->configRevision_ = 1;
+        this->configRevision_ = nextRuntimeConfigRevision();
     } else if (this->runtimeConfigSignature_ != currentConfigSignature) {
         this->runtimeConfigSignature_ = currentConfigSignature;
-        ++this->configRevision_;
-        if (this->configRevision_ == 0)
-            this->configRevision_ = 1;
+        this->configRevision_ = nextRuntimeConfigRevision();
     }
 
     auto& metrics = this->runtimeMetrics;
