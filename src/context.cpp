@@ -67,6 +67,43 @@ uint64_t monotonicNowNs() {
         + static_cast<uint64_t>(now.tv_nsec);
 }
 
+uint64_t processRuntimeSessionId() {
+    static const uint64_t sessionId = [] {
+        const uint64_t now = monotonicNowNs();
+        const uint64_t pid = static_cast<uint64_t>(
+            static_cast<uint32_t>(::getpid()));
+        const uint64_t mixed =
+            (pid << 32) ^ now ^ 0x9e3779b97f4a7c15ULL;
+        return mixed != 0 ? mixed : 1ULL;
+    }();
+    return sessionId;
+}
+
+uint64_t runtimeDiagnosticConfigSignature(
+        const Config::Configuration& conf) {
+    uint64_t hash = 1469598103934665603ULL;
+    const auto mix = [&hash](uint64_t value) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    };
+
+    mix(conf.enable ? 1ULL : 0ULL);
+    mix(conf.targeted ? 1ULL : 0ULL);
+    mix(static_cast<uint64_t>(conf.multiplier));
+    const double flowScale = static_cast<double>(conf.flowScale);
+    mix(std::isfinite(flowScale)
+        ? static_cast<uint64_t>(std::llround(flowScale * 1'000'000.0))
+        : 0ULL);
+    mix(conf.adaptiveFlowScale ? 1ULL : 0ULL);
+    for (const unsigned char ch : conf.adaptiveFlowPreset)
+        mix(static_cast<uint64_t>(ch));
+    mix(conf.performance ? 1ULL : 0ULL);
+    mix(conf.hdr ? 1ULL : 0ULL);
+    mix(conf.adaptiveFramegen ? 1ULL : 0ULL);
+    mix(static_cast<uint64_t>(conf.fpsLimit));
+    return hash;
+}
+
 const char* handoffTypeName(VkExternalSemaphoreHandleTypeFlagBits handleType) {
     if (handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT)
         return "sync-fd";
@@ -716,6 +753,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     auto& pass = this->passInfos.at(this->frameIdx % 8);
 
 #ifdef __ANDROID__
+    if (this->runtimeSessionId_ == 0)
+        this->runtimeSessionId_ = processRuntimeSessionId();
+    const uint64_t currentConfigSignature =
+        runtimeDiagnosticConfigSignature(conf);
+    if (!this->runtimeConfigSignatureValid_) {
+        this->runtimeConfigSignature_ = currentConfigSignature;
+        this->runtimeConfigSignatureValid_ = true;
+        this->configRevision_ = 1;
+    } else if (this->runtimeConfigSignature_ != currentConfigSignature) {
+        this->runtimeConfigSignature_ = currentConfigSignature;
+        ++this->configRevision_;
+        if (this->configRevision_ == 0)
+            this->configRevision_ = 1;
+    }
+
     auto& metrics = this->runtimeMetrics;
     const auto cycleStart = RuntimeMetrics::Clock::now();
     bool excludeCurrentCycleFromTimingMetrics = false;
@@ -1164,6 +1216,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     *this->lsfgCtxId, selectedScale);
 
             std::cerr << "lsfg-vk: adaptive-flow-decision"
+                      << " runtime_session_id=" << this->runtimeSessionId_
+                      << " config_revision=" << this->configRevision_
                       << " previous=" << previousScale
                       << " requested=" << selectedScale
                       << " reason="
@@ -1194,10 +1248,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             __android_log_print(
                 ANDROID_LOG_INFO,
                 "LSFG_FLOW",
+                "runtime_session_id=%llu config_revision=%llu "
                 "previous=%.3f requested=%.3f reason=%s flow_ms=%.3f lsfg_ms=%.3f "
                 "budget_ms=%.3f generation_count=%zu gpu=%.1f pressure_valid=%d "
                 "output_fps=%.3f output_deficit=%d output_satisfied=%d "
                 "compute_pressure=%d wsi_pressure=%d wsi_loss_rate=%.3f",
+                static_cast<unsigned long long>(this->runtimeSessionId_),
+                static_cast<unsigned long long>(this->configRevision_),
                 static_cast<double>(previousScale),
                 static_cast<double>(selectedScale),
                 AdaptiveFlowController::reasonName(flowTelemetry.reason),
@@ -1262,6 +1319,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 || adaptiveTelemetry.costBackedOff || adaptiveTelemetry.costProbe
                 || adaptiveTelemetry.discontinuityReset) {
             std::cerr << "lsfg-vk: adaptive-event"
+                      << " runtime_session_id=" << this->runtimeSessionId_
+                      << " config_revision=" << this->configRevision_
                       << " source_fps=" << adaptiveTelemetry.sourceFps
                       << " smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
@@ -1281,10 +1340,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             __android_log_print(
                 ANDROID_LOG_INFO,
                 "LSFG_EVENT",
+                "runtime_session_id=%llu config_revision=%llu "
                 "source_fps=%.3f smoothed_source_fps=%.3f wanted_generated=%.3f "
                 "cost_limit=%zu final_generated=%zu rate_snap=%d cost_raise=%d "
                 "capacity_promoted=%d safe_generation_hint=%zu "
                 "cost_backoff=%d cost_probe=%d discontinuity=%d",
+                static_cast<unsigned long long>(this->runtimeSessionId_),
+                static_cast<unsigned long long>(this->configRevision_),
                 adaptiveTelemetry.sourceFps,
                 adaptiveTelemetry.smoothedSourceFps,
                 adaptiveTelemetry.wantedGeneratedFrames,
@@ -1465,6 +1527,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     : 0.0;
 
             std::cerr << "lsfg-vk: metrics"
+                      << " runtime_session_id=" << this->runtimeSessionId_
+                      << " config_revision=" << this->configRevision_
                       << " source_fps=" << sourceFps
                       << " generated_fps=" << generatedFps
                       << " output_fps=" << outputFps
@@ -1642,6 +1706,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             __android_log_print(
                 ANDROID_LOG_INFO,
                 "LSFG_METRICS",
+                "runtime_session_id=%llu config_revision=%llu "
                 "source_fps=%.3f generated_fps=%.3f output_fps=%.3f "
                 "late=%llu admission=%llu deadline=%llu wsi=%llu cap_drop=%llu "
                 "presentation_cap=%zu wsi_reject_ratio=%.3f "
@@ -1652,6 +1717,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "wanted=%.3f cost_limit=%zu final_generated=%zu history_only=%llu "
                 "flow_active=%.3f flow_gpu=%.1f flow_output_fps=%.3f "
                 "flow_deficit=%d flow_reason=%s multiplier=%zu adaptive=%d target=%u",
+                static_cast<unsigned long long>(this->runtimeSessionId_),
+                static_cast<unsigned long long>(this->configRevision_),
                 sourceFps,
                 generatedFps,
                 outputFps,

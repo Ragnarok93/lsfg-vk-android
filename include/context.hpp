@@ -155,6 +155,11 @@ private:
     size_t lastGeneratedFrameCount_{0};
 
 #ifdef __ANDROID__
+    uint64_t runtimeSessionId_{0};
+    uint64_t runtimeConfigSignature_{0};
+    uint64_t configRevision_{1};
+    bool runtimeConfigSignatureValid_{false};
+
     AdaptiveFrameScheduler adaptiveScheduler_;
     std::size_t lastDispatchedGeneratedFrameCount_{0};
     AdaptiveFlowController adaptiveFlowController_;

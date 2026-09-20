@@ -127,6 +127,22 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertNotIn("adaptiveFlowGlobalOutputFps_", deficit)
         self.assertNotIn("metrics.lastWindowOutputFps", deficit)
 
+    def test_logcat_diagnostics_include_runtime_session_and_config_epoch(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("runtimeSessionId_", header)
+        self.assertIn("runtimeConfigSignature_", header)
+        self.assertIn("configRevision_", header)
+        self.assertIn("processRuntimeSessionId", source)
+        self.assertIn("runtimeDiagnosticConfigSignature", source)
+        self.assertEqual(
+            source.count('"runtime_session_id=%llu config_revision=%llu "'),
+            3,
+        )
+        for tag in ('"LSFG_METRICS"', '"LSFG_EVENT"', '"LSFG_FLOW"'):
+            self.assertIn(tag, source)
+
     def test_budget_tracks_adaptive_target_or_fixed_output_period(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn("1000.0 / static_cast<double>(conf.fpsLimit)", source)
