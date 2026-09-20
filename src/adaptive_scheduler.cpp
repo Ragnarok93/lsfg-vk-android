@@ -591,18 +591,21 @@ void AdaptiveFrameScheduler::configure(
     // reconfiguration rather than a first-start cold configuration.
     const bool hadRuntimeCadence = runtimeCadenceEstablished_;
     const bool wasActive = targetFps_ != 0 && maxGeneratedFrames_ != 0;
+    const bool hadLearnedOperatingPoint =
+        provenCostLimit_ > 1
+        || (establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds
+            && establishedSourceFps_ > 0.0);
     targetFps_ = targetFps;
     maxGeneratedFrames_ = maxGeneratedFrames;
     resetRuntimeState(true);
 
     // A Quick Menu target/multiplier change is an explicit user request, not a
-    // scene-rate inference. If this scheduler was already running, remember
-    // that intent across the menu's suspend/resume discontinuity. The first
-    // valid cadence sample can then seed the requested generation ceiling
-    // immediately while the existing causal backoff logic watches for a source
-    // FPS regression.
+    // scene-rate inference. Preserve a causally-proven operating point across
+    // Adaptive -> fixed -> Adaptive toggles in the same runtime as well as
+    // direct Adaptive target changes. A true lifecycle reset() still clears
+    // both the cadence bit and learned operating point.
     reconfigureWarmStartPending_ = hadRuntimeCadence
-        && wasActive
+        && (wasActive || hadLearnedOperatingPoint)
         && targetFps_ != 0
         && maxGeneratedFrames_ != 0;
 }
