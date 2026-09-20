@@ -237,6 +237,15 @@ int main() {
         }
         assert(near(controller.currentScale(), 0.90F));
 
+        // Establish that the downstep itself was useful before testing whether
+        // stale headroom is allowed to restore quality.
+        for (int i = 0; i < 10; ++i) {
+            controller.observe(sample(
+                5.5, 1.8, 16.666, false, false,
+                90.0, true, false, false, false));
+        }
+        assert(near(controller.currentScale(), 0.90F));
+
         for (int i = 0; i < 70; ++i) {
             controller.observe(sample(
                 5.0, 1.5, 16.666, false, false,
