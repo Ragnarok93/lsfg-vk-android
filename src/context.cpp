@@ -139,6 +139,37 @@ bool adaptiveLsfgTransition(const AdaptiveSchedulerTelemetry& telemetry) {
         || telemetry.configWarmStart;
 }
 
+enum class AdaptiveAdmissionRejectReason {
+    None,
+    SourceDeadlineExpired,
+    PredictorUninitialized,
+    PredictorBudgetReject,
+    HistoryWarmupSuppress,
+    WsiCapSuppress,
+    WsiAcquireReject,
+};
+
+const char* adaptiveAdmissionRejectReasonName(
+        AdaptiveAdmissionRejectReason reason) {
+    switch (reason) {
+        case AdaptiveAdmissionRejectReason::SourceDeadlineExpired:
+            return "source_deadline_expired";
+        case AdaptiveAdmissionRejectReason::PredictorUninitialized:
+            return "predictor_uninitialized";
+        case AdaptiveAdmissionRejectReason::PredictorBudgetReject:
+            return "predictor_budget_reject";
+        case AdaptiveAdmissionRejectReason::HistoryWarmupSuppress:
+            return "history_warmup_suppress";
+        case AdaptiveAdmissionRejectReason::WsiCapSuppress:
+            return "wsi_cap_suppress";
+        case AdaptiveAdmissionRejectReason::WsiAcquireReject:
+            return "wsi_acquire_reject";
+        case AdaptiveAdmissionRejectReason::None:
+        default:
+            return "none";
+    }
+}
+
 double adaptiveFlowFrameBudgetMs(
         const Config::Configuration& conf,
         std::chrono::nanoseconds sourceInterval,
@@ -828,12 +859,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && maxAdaptiveGeneratedFrames > 0
         && capacityIntervalMs > 0.0
         && this->deadlineAdmissionPredictor_.hasEstimate();
-    this->adaptiveScheduler_.setSafeGenerationHint(
+    const size_t safeGenerationHint =
         safeGenerationHintValid
             ? this->deadlineAdmissionPredictor_.safeGenerationHint(
                 maxAdaptiveGeneratedFrames, capacityIntervalMs)
-            : 0,
-        safeGenerationHintValid);
+            : 0;
+    this->adaptiveScheduler_.setSafeGenerationHint(
+        safeGenerationHint, safeGenerationHintValid);
 
     const size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
@@ -899,90 +931,206 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->requiresSourceHistoryWarmup_
         && this->sourceHistoryWarmupRemaining_ > 0;
 
+    this->admissionLastRejectReason_ = "none";
+    this->admissionRemainingSlackMs_ = 0.0;
+    const auto recordAdmissionSuppression =
+        [&](AdaptiveAdmissionRejectReason reason,
+            size_t count,
+            bool countAsAdmissionReject) {
+            if (count == 0)
+                return;
+            this->admissionLastRejectReason_ =
+                adaptiveAdmissionRejectReasonName(reason);
+            if (countAsAdmissionReject) {
+                metrics.windowAdmissionRejects += count;
+                metrics.totalAdmissionRejects += count;
+            }
+            switch (reason) {
+                case AdaptiveAdmissionRejectReason::SourceDeadlineExpired:
+                    metrics.windowAdmissionSourceDeadlineExpired += count;
+                    metrics.totalAdmissionSourceDeadlineExpired += count;
+                    break;
+                case AdaptiveAdmissionRejectReason::PredictorUninitialized:
+                    metrics.windowAdmissionPredictorUninitialized += count;
+                    metrics.totalAdmissionPredictorUninitialized += count;
+                    break;
+                case AdaptiveAdmissionRejectReason::PredictorBudgetReject:
+                    metrics.windowAdmissionPredictorBudgetReject += count;
+                    metrics.totalAdmissionPredictorBudgetReject += count;
+                    break;
+                case AdaptiveAdmissionRejectReason::HistoryWarmupSuppress:
+                    metrics.windowAdmissionHistoryWarmupSuppress += count;
+                    metrics.totalAdmissionHistoryWarmupSuppress += count;
+                    break;
+                case AdaptiveAdmissionRejectReason::WsiCapSuppress:
+                    metrics.windowAdmissionWsiCapSuppress += count;
+                    metrics.totalAdmissionWsiCapSuppress += count;
+                    break;
+                case AdaptiveAdmissionRejectReason::WsiAcquireReject:
+                    metrics.windowAdmissionWsiAcquireReject += count;
+                    metrics.totalAdmissionWsiAcquireReject += count;
+                    break;
+                case AdaptiveAdmissionRejectReason::None:
+                default:
+                    break;
+            }
+        };
+
+    if (conf.adaptiveFramegen
+            && sourceHistoryWarmupActive
+            && plannedGeneratedFrameCount > 0) {
+        recordAdmissionSuppression(
+            AdaptiveAdmissionRejectReason::HistoryWarmupSuppress,
+            plannedGeneratedFrameCount,
+            false);
+    }
+
+    // Resolve one fixed source-owned timing window for this admission cycle.
+    // If the source timeline just rebased and its old desired timestamp is
+    // already behind us, refresh exactly one future source interval. Generated
+    // work may consume positions inside this window but never advances it.
+    uint64_t admissionWindowStartNs =
+        this->currentSourceTimeline_.previousSourceDesiredTimeNs;
+    uint64_t admissionSourceDeadlineNs =
+        this->currentSourceTimeline_.sourceDesiredTimeNs;
+    const uint64_t admissionNowNs = monotonicNowNs();
+    if (this->currentSourceTimeline_.valid && admissionNowNs > 0) {
+        admissionSourceDeadlineNs = sourceOwnedAdmissionDeadlineNs(
+            this->currentSourceTimeline_, admissionNowNs);
+        if (this->currentSourceTimeline_.rebased
+                && this->currentSourceTimeline_.sourceDesiredTimeNs
+                    <= admissionNowNs
+                && admissionSourceDeadlineNs > admissionNowNs) {
+            admissionWindowStartNs = admissionNowNs;
+        }
+    }
+    const auto admissionSyntheticDeadlineNs =
+        [&](double interpolationFraction) -> uint64_t {
+            if (!(interpolationFraction > 0.0)
+                    || !(interpolationFraction < 1.0)
+                    || admissionSourceDeadlineNs <= admissionWindowStartNs) {
+                return this->sourceTimeline_.syntheticDesiredTimeNs(
+                    this->currentSourceTimeline_, interpolationFraction);
+            }
+            const long double span = static_cast<long double>(
+                admissionSourceDeadlineNs - admissionWindowStartNs);
+            const long double offset =
+                span * static_cast<long double>(interpolationFraction);
+            const uint64_t roundedOffset = static_cast<uint64_t>(
+                std::llround(offset));
+            return admissionWindowStartNs
+                    > std::numeric_limits<uint64_t>::max() - roundedOffset
+                ? std::numeric_limits<uint64_t>::max()
+                : admissionWindowStartNs + roundedOffset;
+        };
+
     // Active deadline admission: generation is subordinate to the protected
-    // source timeline. Use measured GPU cost to choose the largest evenly
-    // distributed synthetic count whose prefixes can meet their own slots.
-    // A rejected opportunity is dropped, never accumulated as catch-up debt.
+    // source timeline. Cold Adaptive operation may admit one bounded probe to
+    // create the first GPU-cost sample; predictor history is not a prerequisite
+    // for the generated work needed to initialize that history.
     this->deadlineBatchDecision_ = {};
     if (conf.adaptiveFramegen
             && !sourceHistoryWarmupActive
             && generatedFrameCount > 0
-            && this->currentSourceTimeline_.valid) {
-        const uint64_t admissionNowNs = monotonicNowNs();
-        if (admissionNowNs > 0) {
-            if (this->currentSourceTimeline_.sourceDesiredTimeNs <= admissionNowNs) {
-                metrics.windowGeneratedLateDrops += generatedFrameCount;
-                metrics.totalGeneratedLateDrops += generatedFrameCount;
-                metrics.windowAdmissionRejects += generatedFrameCount;
-                metrics.totalAdmissionRejects += generatedFrameCount;
-                generatedFrameCount = 0;
+            && this->currentSourceTimeline_.valid
+            && admissionNowNs > 0) {
+        if (admissionSourceDeadlineNs <= admissionNowNs) {
+            recordAdmissionSuppression(
+                AdaptiveAdmissionRejectReason::SourceDeadlineExpired,
+                generatedFrameCount,
+                true);
+            metrics.windowGeneratedLateDrops += generatedFrameCount;
+            metrics.totalGeneratedLateDrops += generatedFrameCount;
+            this->admissionRemainingSlackMs_ = 0.0;
+            this->admissionBootstrapStarvedOpportunities_ +=
+                static_cast<unsigned>(generatedFrameCount);
+            generatedFrameCount = 0;
+        } else {
+            const double sourceBudgetMs =
+                static_cast<double>(
+                    admissionSourceDeadlineNs - admissionNowNs)
+                / 1'000'000.0;
+            this->admissionRemainingSlackMs_ = sourceBudgetMs;
+            const double admissionSourceIntervalMs =
+                this->currentSourceTimeline_.intervalNs > 0
+                    ? static_cast<double>(
+                        this->currentSourceTimeline_.intervalNs)
+                        / 1'000'000.0
+                    : sourceBudgetMs;
+            const bool predictorInitialized =
+                this->deadlineAdmissionPredictor_.hasEstimate();
+
+            if (!predictorInitialized) {
+                const size_t bootstrapGeneratedFrameCount =
+                    adaptiveAdmissionBootstrapGeneratedCount(
+                        generatedFrameCount,
+                        predictorInitialized,
+                        sourceBudgetMs,
+                        admissionSourceIntervalMs,
+                        this->admissionBootstrapStarvedOpportunities_);
+                if (bootstrapGeneratedFrameCount < generatedFrameCount) {
+                    const size_t suppressed =
+                        generatedFrameCount - bootstrapGeneratedFrameCount;
+                    recordAdmissionSuppression(
+                        AdaptiveAdmissionRejectReason::PredictorUninitialized,
+                        suppressed,
+                        true);
+                    metrics.windowGeneratedLateDrops += suppressed;
+                    metrics.totalGeneratedLateDrops += suppressed;
+                }
+                if (bootstrapGeneratedFrameCount == 0) {
+                    this->admissionBootstrapStarvedOpportunities_ +=
+                        static_cast<unsigned>(generatedFrameCount);
+                } else {
+                    this->admissionBootstrapStarvedOpportunities_ = 0;
+                }
+                generatedFrameCount = bootstrapGeneratedFrameCount;
             } else {
-                const double sourceBudgetMs =
-                    static_cast<double>(
-                        this->currentSourceTimeline_.sourceDesiredTimeNs - admissionNowNs)
-                    / 1'000'000.0;
+                this->admissionBootstrapStarvedOpportunities_ = 0;
                 const auto plannedBatchDecision =
                     this->deadlineAdmissionPredictor_.predict(
                         generatedFrameCount, sourceBudgetMs);
 
-                // Preserve the historical opportunity counters as predictor
-                // diagnostics, but the decision below is now authoritative.
-                if (!plannedBatchDecision.valid && generatedFrameCount > 1) {
-                    const size_t rejectedGeneratedFrameCount =
-                        generatedFrameCount - 1;
-                    metrics.windowGeneratedLateDrops +=
-                        rejectedGeneratedFrameCount;
-                    metrics.totalGeneratedLateDrops +=
-                        rejectedGeneratedFrameCount;
-                    metrics.windowAdmissionRejects +=
-                        rejectedGeneratedFrameCount;
-                    metrics.totalAdmissionRejects +=
-                        rejectedGeneratedFrameCount;
-                    generatedFrameCount = 1;
-                } else if (plannedBatchDecision.valid) {
-                    for (size_t slot = 0; slot < generatedFrameCount; ++slot) {
-                        const double interpolationFraction =
-                            static_cast<double>(slot + 1)
-                            / static_cast<double>(interpolationGenerationCount + 1);
-                        const uint64_t slotDeadlineNs =
-                            this->sourceTimeline_.syntheticDesiredTimeNs(
-                                this->currentSourceTimeline_, interpolationFraction);
-                        const double slotBudgetMs =
-                            slotDeadlineNs > admissionNowNs
-                                ? static_cast<double>(slotDeadlineNs - admissionNowNs)
-                                    / 1'000'000.0
-                                : 0.0;
-                        const auto slotDecision =
-                            this->deadlineAdmissionPredictor_.predict(
-                                slot + 1, slotBudgetMs);
-                        if (!slotDecision.valid)
-                            continue;
-
-                        ++metrics.windowDeadlineShadowOpportunities;
-                        ++metrics.totalDeadlineShadowOpportunities;
-                        if (slotDecision.wouldAdmit) {
-                            ++metrics.windowDeadlineShadowWouldAdmit;
-                        } else {
-                            ++metrics.windowDeadlineShadowWouldReject;
-                            ++metrics.totalDeadlineShadowWouldReject;
-                        }
+                // Preserve shadow diagnostics independently from authoritative
+                // candidate admission.
+                for (size_t slot = 0; slot < generatedFrameCount; ++slot) {
+                    const double interpolationFraction =
+                        static_cast<double>(slot + 1)
+                        / static_cast<double>(interpolationGenerationCount + 1);
+                    const uint64_t slotDeadlineNs =
+                        admissionSyntheticDeadlineNs(interpolationFraction);
+                    const double slotBudgetMs =
+                        slotDeadlineNs > admissionNowNs
+                            ? static_cast<double>(
+                                slotDeadlineNs - admissionNowNs)
+                                / 1'000'000.0
+                            : 0.0;
+                    const auto slotDecision =
+                        this->deadlineAdmissionPredictor_.predict(
+                            slot + 1, slotBudgetMs);
+                    if (!slotDecision.valid)
+                        continue;
+                    ++metrics.windowDeadlineShadowOpportunities;
+                    ++metrics.totalDeadlineShadowOpportunities;
+                    if (slotDecision.wouldAdmit) {
+                        ++metrics.windowDeadlineShadowWouldAdmit;
+                    } else {
+                        ++metrics.windowDeadlineShadowWouldReject;
+                        ++metrics.totalDeadlineShadowWouldReject;
                     }
+                }
 
-                    size_t admittedGeneratedFrameCount = 0;
+                size_t admittedGeneratedFrameCount = 0;
+                if (plannedBatchDecision.valid) {
                     for (size_t candidate = generatedFrameCount;
                             candidate > 0; --candidate) {
                         bool candidateFits = true;
                         for (size_t slot = 0; slot < candidate; ++slot) {
-                            // Admission occurs before dispatch. Evaluate each
-                            // candidate using the spacing it would actually use
-                            // so a 2 -> 1 reduction tests a midpoint rather than
-                            // retaining a prefix-biased 1/3 position.
                             const double interpolationFraction =
                                 static_cast<double>(slot + 1)
                                 / static_cast<double>(candidate + 1);
                             const uint64_t slotDeadlineNs =
-                                this->sourceTimeline_.syntheticDesiredTimeNs(
-                                    this->currentSourceTimeline_,
+                                admissionSyntheticDeadlineNs(
                                     interpolationFraction);
                             const double slotBudgetMs =
                                 slotDeadlineNs > admissionNowNs
@@ -993,7 +1141,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                             const auto slotDecision =
                                 this->deadlineAdmissionPredictor_.predict(
                                     slot + 1, slotBudgetMs);
-                            if (!slotDecision.valid || !slotDecision.wouldAdmit) {
+                            if (!slotDecision.valid
+                                    || !slotDecision.wouldAdmit) {
                                 candidateFits = false;
                                 break;
                             }
@@ -1003,38 +1152,56 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                             break;
                         }
                     }
+                }
 
-                    if (admittedGeneratedFrameCount < generatedFrameCount) {
-                        const size_t rejectedGeneratedFrameCount =
-                            generatedFrameCount - admittedGeneratedFrameCount;
-                        metrics.windowGeneratedLateDrops +=
-                            rejectedGeneratedFrameCount;
-                        metrics.totalGeneratedLateDrops +=
-                            rejectedGeneratedFrameCount;
-                        metrics.windowAdmissionRejects +=
-                            rejectedGeneratedFrameCount;
-                        metrics.totalAdmissionRejects +=
-                            rejectedGeneratedFrameCount;
-                        generatedFrameCount = admittedGeneratedFrameCount;
-                    }
+                if (admittedGeneratedFrameCount < generatedFrameCount) {
+                    const size_t rejectedGeneratedFrameCount =
+                        generatedFrameCount - admittedGeneratedFrameCount;
+                    recordAdmissionSuppression(
+                        AdaptiveAdmissionRejectReason::PredictorBudgetReject,
+                        rejectedGeneratedFrameCount,
+                        true);
+                    metrics.windowGeneratedLateDrops +=
+                        rejectedGeneratedFrameCount;
+                    metrics.totalGeneratedLateDrops +=
+                        rejectedGeneratedFrameCount;
+                    generatedFrameCount = admittedGeneratedFrameCount;
+                }
 
-                    if (generatedFrameCount > 0) {
-                        this->deadlineBatchDecision_ =
-                            this->deadlineAdmissionPredictor_.predict(
-                                generatedFrameCount, sourceBudgetMs);
-                    }
+                if (generatedFrameCount > 0) {
+                    this->deadlineBatchDecision_ =
+                        this->deadlineAdmissionPredictor_.predict(
+                            generatedFrameCount, sourceBudgetMs);
                 }
             }
         }
     }
 
+    const auto& presentationOutputCadence =
+        this->lsfgOutputCadenceTracker_.snapshot();
+    const bool presentationOutputDeficit =
+        conf.adaptiveFramegen
+        && conf.fpsLimit > 0
+        && (presentationOutputCadence.valid
+            ? presentationOutputCadence.deficitConfirmed
+            : adaptiveTelemetry.wantedGeneratedFrames > 0.05);
+    const GeneratedPresentationCapacityContext presentationCapacityContext{
+        .outputDeficit = presentationOutputDeficit,
+        .deadlineCapacityValid = safeGenerationHintValid,
+        .safeGenerationHint = safeGenerationHint,
+        .schedulerCostLimit = adaptiveTelemetry.costLimit,
+        .provenCostLimit = adaptiveTelemetry.provenCostLimit,
+        .sourceCadenceRatio = adaptiveTelemetry.sourceCadenceRatio,
+        .sourceBudgetMinRatio = adaptiveTelemetry.sourceBudgetMinRatio,
+    };
+
     // WSI capacity is a separate downstream constraint from GPU generation
-    // capacity. Apply its learned cap before expensive framegen dispatch; a
-    // suppressed slot is consumed and never repaid. Fixed mode is untouched.
+    // capacity. It may attempt a bounded higher-cap probe when output is below
+    // target and compute/source evidence says the extra work is viable.
     if (conf.adaptiveFramegen && generatedFrameCount > 0) {
         const size_t presentationCappedGeneratedFrameCount =
             this->generatedPresentationCapacityTracker_.limit(
-                generatedFrameCount);
+                generatedFrameCount, presentationCapacityContext);
         if (presentationCappedGeneratedFrameCount < generatedFrameCount) {
             const size_t cappedGeneratedFrames =
                 generatedFrameCount - presentationCappedGeneratedFrameCount;
@@ -1042,6 +1209,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 cappedGeneratedFrames;
             metrics.totalGeneratedPresentationCapDrops +=
                 cappedGeneratedFrames;
+            recordAdmissionSuppression(
+                AdaptiveAdmissionRejectReason::WsiCapSuppress,
+                cappedGeneratedFrames,
+                false);
             generatedFrameCount = presentationCappedGeneratedFrameCount;
         }
     }
@@ -1492,6 +1663,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedFrames = 0;
             metrics.windowGeneratedLateDrops = 0;
             metrics.windowAdmissionRejects = 0;
+            metrics.windowAdmissionSourceDeadlineExpired = 0;
+            metrics.windowAdmissionPredictorUninitialized = 0;
+            metrics.windowAdmissionPredictorBudgetReject = 0;
+            metrics.windowAdmissionHistoryWarmupSuppress = 0;
+            metrics.windowAdmissionWsiCapSuppress = 0;
+            metrics.windowAdmissionWsiAcquireReject = 0;
             metrics.windowGeneratedDeadlineDrops = 0;
             metrics.windowGeneratedWsiDrops = 0;
             metrics.windowGeneratedPresentationCapDrops = 0;
@@ -1592,6 +1769,22 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_late_drops_total=" << metrics.totalGeneratedLateDrops
                       << " admission_rejects=" << metrics.windowAdmissionRejects
                       << " admission_rejects_total=" << metrics.totalAdmissionRejects
+                      << " admission_reject_reason="
+                      << this->admissionLastRejectReason_
+                      << " admission_remaining_slack_ms="
+                      << this->admissionRemainingSlackMs_
+                      << " admission_source_deadline_expired="
+                      << metrics.windowAdmissionSourceDeadlineExpired
+                      << " admission_predictor_uninitialized="
+                      << metrics.windowAdmissionPredictorUninitialized
+                      << " admission_predictor_budget_reject="
+                      << metrics.windowAdmissionPredictorBudgetReject
+                      << " admission_history_warmup_suppress="
+                      << metrics.windowAdmissionHistoryWarmupSuppress
+                      << " admission_wsi_cap_suppress="
+                      << metrics.windowAdmissionWsiCapSuppress
+                      << " admission_wsi_acquire_reject="
+                      << metrics.windowAdmissionWsiAcquireReject
                       << " generated_deadline_drops="
                       << metrics.windowGeneratedDeadlineDrops
                       << " generated_deadline_drops_total="
@@ -1608,6 +1801,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->generatedPresentationCapacityTracker_.telemetry().singleFrameDuty
                       << " presentation_evidence="
                       << this->generatedPresentationCapacityTracker_.telemetry().rejectionEvidence
+                      << " presentation_recovery_evidence="
+                      << this->generatedPresentationCapacityTracker_.telemetry().recoveryEvidence
+                      << " presentation_attempted_generated="
+                      << this->generatedPresentationCapacityTracker_.telemetry().attemptedGeneratedFrames
+                      << " presentation_accepted_generated="
+                      << this->generatedPresentationCapacityTracker_.telemetry().acceptedGeneratedFrames
+                      << " presentation_delivered_efficiency="
+                      << this->generatedPresentationCapacityTracker_.telemetry().deliveredEfficiency
+                      << " presentation_last_change_reason="
+                      << generatedPresentationCapChangeReasonName(
+                          this->generatedPresentationCapacityTracker_.telemetry().lastChangeReason)
+                      << " presentation_last_change_output_deficit="
+                      << (this->generatedPresentationCapacityTracker_.telemetry().lastChangeOutputDeficit ? 1 : 0)
                       << " wsi_reject_ratio="
                       << this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio
                       << " cycle_avg_ms=" << cycleAvgMs
@@ -1779,7 +1985,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "runtime_session_id=%llu config_revision=%llu "
                 "source_fps=%.3f generated_fps=%.3f output_fps=%.3f "
                 "late=%llu admission=%llu deadline=%llu wsi=%llu cap_drop=%llu "
-                "presentation_cap=%zu presentation_duty=%.3f wsi_reject_ratio=%.3f "
+                "admission_reason=%s admission_slack_ms=%.3f "
+                "presentation_cap=%zu presentation_duty=%.3f "
+                "presentation_recovery=%.3f presentation_reason=%s "
+                "wsi_reject_ratio=%.3f "
                 "cycle_avg_ms=%.3f cycle_max_ms=%.3f handoff_ms=%.3f dispatch_ms=%.3f "
                 "wait_ms=%.3f source_interval_ms=%.3f source_interval_max_ms=%.3f "
                 "deadline_error_ms=%.3f rebases=%llu planned=%zu admitted=%zu "
@@ -1798,8 +2007,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 static_cast<unsigned long long>(metrics.windowGeneratedWsiDrops),
                 static_cast<unsigned long long>(
                     metrics.windowGeneratedPresentationCapDrops),
+                this->admissionLastRejectReason_,
+                this->admissionRemainingSlackMs_,
                 this->generatedPresentationCapacityTracker_.telemetry().generationCap,
                 this->generatedPresentationCapacityTracker_.telemetry().singleFrameDuty,
+                this->generatedPresentationCapacityTracker_.telemetry().recoveryEvidence,
+                generatedPresentationCapChangeReasonName(
+                    this->generatedPresentationCapacityTracker_.telemetry().lastChangeReason),
                 this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio,
                 cycleAvgMs,
                 metrics.windowCycleMaxMs,
@@ -1834,6 +2048,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedFrames = 0;
             metrics.windowGeneratedLateDrops = 0;
             metrics.windowAdmissionRejects = 0;
+            metrics.windowAdmissionSourceDeadlineExpired = 0;
+            metrics.windowAdmissionPredictorUninitialized = 0;
+            metrics.windowAdmissionPredictorBudgetReject = 0;
+            metrics.windowAdmissionHistoryWarmupSuppress = 0;
+            metrics.windowAdmissionWsiCapSuppress = 0;
+            metrics.windowAdmissionWsiAcquireReject = 0;
             metrics.windowGeneratedDeadlineDrops = 0;
             metrics.windowGeneratedWsiDrops = 0;
             metrics.windowGeneratedPresentationCapDrops = 0;
@@ -2347,8 +2567,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             static_cast<double>(i + 1)
             / static_cast<double>(interpolationGenerationCount + 1);
         const uint64_t syntheticDesiredTimeNs =
-            this->sourceTimeline_.syntheticDesiredTimeNs(
-                this->currentSourceTimeline_, syntheticFraction);
+            admissionSyntheticDeadlineNs(syntheticFraction);
         const uint64_t syntheticAdmissionNowNs = monotonicNowNs();
         if (syntheticDesiredTimeNs > 0
                 && syntheticAdmissionNowNs >= syntheticDesiredTimeNs) {
@@ -2385,6 +2604,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // submit-to-deadline lateness.
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
             generatedWsiRejectedFrameCount = droppedGeneratedFrames;
+            recordAdmissionSuppression(
+                AdaptiveAdmissionRejectReason::WsiAcquireReject,
+                droppedGeneratedFrames,
+                false);
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
             metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
             metrics.windowGeneratedWsiDrops += droppedGeneratedFrames;
@@ -2467,7 +2690,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             && generatedFrameCount > 0
             && generatedWsiObservationEligible) {
         this->generatedPresentationCapacityTracker_.observe(
-            generatedFrameCount, generatedWsiRejectedFrameCount);
+            generatedFrameCount,
+            queuedGeneratedFrameCount,
+            generatedWsiRejectedFrameCount,
+            presentationCapacityContext);
     }
     if (generatedFrameCount > 0
             && queuedGeneratedFrameCount == generatedFrameCount) {
