@@ -227,6 +227,56 @@ int main() {
     }
 
     {
+        // Build #385 regression: after a useful pressure downstep, a targeted
+        // Adaptive workload that is meeting its output goal must be allowed to
+        // recover Flow quality from fresh generated-work timing when the next
+        // state fits comfortably inside the LSFG-local budget. Whole-device GPU
+        // saturation alone must not strand the lower Flow state.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        bool lowered = false;
+        for (int i = 0; i < 12 && !lowered; ++i) {
+            auto observation = sample(
+                8.0, 3.0, 16.666, false, false,
+                99.0, true, true, false, true);
+            observation.outputTargeted = true;
+            observation.outputCadenceValid = true;
+            observation.outputFps = 54.0;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+            lowered = near(controller.currentScale(), 0.90F);
+        }
+        assert(lowered);
+
+        // Prove the downstep useful so this test exercises recovery rather than
+        // the provisional-downstep revert path.
+        for (int i = 0; i < 10; ++i) {
+            auto observation = sample(
+                5.5, 1.8, 16.666, false, false,
+                90.0, true, false, false, true);
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = true;
+            observation.outputCadenceValid = true;
+            observation.outputFps = 60.0;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+        }
+        assert(near(controller.currentScale(), 0.90F));
+
+        for (int i = 0; i < 70; ++i) {
+            auto observation = sample(
+                5.0, 1.5, 16.666, false, false,
+                99.0, true, false, false, true);
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = true;
+            observation.outputCadenceValid = true;
+            observation.outputFps = 60.0;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+        }
+        assert(near(controller.currentScale(), 1.00F));
+    }
+
+    {
         // Retained history timing alone is insufficient when current global
         // headroom is unavailable. Do not upscale from stale timing blindly.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
