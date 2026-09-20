@@ -331,17 +331,24 @@ int main() {
     }
 
     {
-        // Ordinary discontinuities still reset both fractional scheduling and
-        // the conservative generation-cost ceiling. Only an explicit config
-        // change is allowed to warm-start after a Quick Menu suspension.
+        // Build #386 regression: an ordinary source-timeline discontinuity may
+        // clear interpolation debt/cadence windows, but it must not erase a
+        // generation ceiling that already survived causal validation. After
+        // warmup the scheduler should resume that proven ceiling immediately.
         AdaptiveFrameScheduler scheduler(120, 3);
-        assert(scheduler.plan(50ms) == 1);
+        for (int frame = 0; frame < 60; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(33ms);
+        }
+        assert(scheduler.telemetry().costLimit == 3);
+
         assert(scheduler.plan(1s) == 0);
         assert(scheduler.telemetry().discontinuityReset);
-        assert(scheduler.telemetry().costLimit == 1);
-        assert(scheduler.plan(50ms) == 1);
-        assert(!scheduler.telemetry().costRaised);
-        assert(!scheduler.telemetry().configWarmStart);
+
+        scheduler.setSafeGenerationHint(3, true);
+        scheduler.plan(33ms);
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(!scheduler.telemetry().costBackedOff);
     }
 
     {
@@ -533,6 +540,82 @@ int main() {
         }
         assert(!repeatedProbe);
         assert(scheduler.telemetry().costLimit == restoredCost);
+    }
+
+    {
+        // Build #386 regression: a healthy proven 4x-capable operating point
+        // must survive a nearby target change. The target change may reset the
+        // fractional lattice, but unchanged source cadence plus a safe hint of
+        // three must not collapse the generation ceiling from 3 to 1/2.
+        AdaptiveFrameScheduler scheduler(90, 3);
+        for (int frame = 0; frame < 70; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(33ms);
+        }
+        assert(scheduler.telemetry().costLimit == 3);
+
+        scheduler.configure(95, 3);
+        assert(scheduler.plan(1s) == 0);
+        bool backedOff = false;
+        for (int frame = 0; frame < 45; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(33ms);
+            backedOff = backedOff || scheduler.telemetry().costBackedOff;
+        }
+        assert(!backedOff);
+        assert(scheduler.telemetry().costLimit == 3);
+    }
+
+    {
+        // Target deficit is demand for more generated work, not proof that the
+        // current generation level is harming source cadence. With a stable
+        // source and a predictor that says the next level fits, the scheduler
+        // must climb 1 -> 2 -> 3 instead of source-preservation probing 2 -> 1.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        bool preservationBackoff = false;
+        for (int frame = 0; frame < 70; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(33ms);
+            preservationBackoff = preservationBackoff
+                || (scheduler.telemetry().costBackedOff
+                    && scheduler.telemetry().costProbe);
+        }
+        assert(!preservationBackoff);
+        assert(scheduler.telemetry().costLimit == 3);
+    }
+
+    {
+        // A causal backoff must never become a permanent recovery lock. After
+        // the lower level observes a stable recovered source cadence and the
+        // predictor again supports the next level, persistent unmet demand must
+        // produce another probe within a bounded interval.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        bool promoted = false;
+        for (int frame = 0; frame < 30 && !promoted; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(40ms);
+            promoted = scheduler.telemetry().costLimit >= 2;
+        }
+        assert(promoted);
+
+        bool backedOff = false;
+        for (int frame = 0; frame < 10 && !backedOff; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(65ms);
+            backedOff = scheduler.telemetry().costBackedOff;
+        }
+        assert(backedOff);
+        assert(scheduler.telemetry().costLimit == 1);
+
+        bool retried = false;
+        for (int frame = 0; frame < 70 && !retried; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(40ms);
+            retried = scheduler.telemetry().costRaised
+                && scheduler.telemetry().costProbe;
+        }
+        assert(retried);
+        assert(scheduler.telemetry().costLimit >= 2);
     }
 
     {
@@ -797,6 +880,26 @@ int main() {
         assert(suppressed);
         assert(probeObserved);
         assert(capacity.telemetry().pressure);
+    }
+
+    {
+        // Build #386 regression: pressure evidence used to disappear at every
+        // integer cap reduction, so real intermittent WSI pressure could reach
+        // cap==1 yet never enter sub-one duty. Preserve enough pressure evidence
+        // across 3 -> 2 -> 1 that one further rejected single-frame probe can
+        // lower duty before more doomed work is dispatched.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        capacity.observe(3, 1);
+        capacity.observe(3, 1);
+        assert(capacity.telemetry().generationCap == 2);
+        capacity.observe(2, 1);
+        capacity.observe(2, 1);
+        assert(capacity.telemetry().generationCap == 1);
+        assert(capacity.telemetry().singleFrameDuty == 1.0);
+
+        capacity.observe(1, 1);
+        assert(capacity.telemetry().singleFrameDuty < 1.0);
     }
 
     {
