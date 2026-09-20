@@ -906,6 +906,40 @@ int main() {
     }
 
     {
+        // Direct 4x-dispatch invariant: when the target requires the full
+        // configured multiplier, the fractional distributor must emit three
+        // generated frames per source cycle after cost 3 is proven. For a
+        // nearby fractional target above 3x, it must distribute 2/3 generated
+        // cycles rather than collapsing to a permanent 2x-like pattern.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 120; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+        }
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(scheduler.telemetry().provenCostLimit == 3);
+
+        for (int frame = 0; frame < 20; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            assert(scheduler.plan(34ms) == 3);
+        }
+
+        scheduler.configure(95, 3);
+        std::size_t twoGenerated = 0;
+        std::size_t threeGenerated = 0;
+        for (int frame = 0; frame < 40; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            const auto generated = scheduler.plan(34ms);
+            assert(generated >= 2 && generated <= 3);
+            twoGenerated += generated == 2 ? 1 : 0;
+            threeGenerated += generated == 3 ? 1 : 0;
+        }
+        assert(twoGenerated > 0);
+        assert(threeGenerated >= 6);
+        assert(scheduler.telemetry().costLimit == 3);
+    }
+
+    {
         // Source rate by itself is never a reason to disable interpolation.
         // A slow but stable source remains eligible under the same generation
         // semantics as every other cadence.
