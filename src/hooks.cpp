@@ -464,6 +464,24 @@ namespace {
                 << adaptiveFlow.presentationGenerationCap << '\n'
                 << "adaptive_flow_presentation_duty="
                 << adaptiveFlow.presentationDuty << '\n'
+                << "adaptive_flow_presentation_rejection_evidence="
+                << adaptiveFlow.presentationRejectionEvidence << '\n'
+                << "adaptive_flow_presentation_recovery_evidence="
+                << adaptiveFlow.presentationRecoveryEvidence << '\n'
+                << "adaptive_flow_presentation_attempted_generated="
+                << adaptiveFlow.presentationAttemptedGeneratedFrames << '\n'
+                << "adaptive_flow_presentation_accepted_generated="
+                << adaptiveFlow.presentationAcceptedGeneratedFrames << '\n'
+                << "adaptive_flow_presentation_delivered_efficiency="
+                << adaptiveFlow.presentationDeliveredEfficiency << '\n'
+                << "adaptive_flow_presentation_last_change_reason="
+                << adaptiveFlow.presentationLastChangeReason << '\n'
+                << "adaptive_flow_presentation_last_change_output_deficit="
+                << (adaptiveFlow.presentationLastChangeOutputDeficit ? 1 : 0) << '\n'
+                << "adaptive_flow_presentation_provisional_lower="
+                << (adaptiveFlow.presentationProvisionalLowerActive ? 1 : 0) << '\n'
+                << "adaptive_flow_presentation_upward_probe="
+                << (adaptiveFlow.presentationUpwardProbePending ? 1 : 0) << '\n'
                 << "adaptive_flow_output_deficit="
                 << (adaptiveFlow.outputDeficit ? 1 : 0) << '\n'
                 << "adaptive_flow_synthetic_drop_pressure="

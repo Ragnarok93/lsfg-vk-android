@@ -828,11 +828,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && maxAdaptiveGeneratedFrames > 0
         && capacityIntervalMs > 0.0
         && this->deadlineAdmissionPredictor_.hasEstimate();
+    const size_t safeGenerationHint = safeGenerationHintValid
+        ? this->deadlineAdmissionPredictor_.safeGenerationHint(
+            maxAdaptiveGeneratedFrames, capacityIntervalMs)
+        : 0;
     this->adaptiveScheduler_.setSafeGenerationHint(
-        safeGenerationHintValid
-            ? this->deadlineAdmissionPredictor_.safeGenerationHint(
-                maxAdaptiveGeneratedFrames, capacityIntervalMs)
-            : 0,
+        safeGenerationHint,
         safeGenerationHintValid);
 
     const size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
@@ -1025,13 +1026,40 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    const auto& outputCadenceForPresentation =
+        this->lsfgOutputCadenceTracker_.snapshot();
+    const bool presentationOutputDeficit =
+        conf.adaptiveFramegen
+        && conf.fpsLimit > 0
+        && outputCadenceForPresentation.valid
+        && outputCadenceForPresentation.deficitConfirmed;
+    const bool sourceInsidePresentationBudget =
+        conf.adaptiveFramegen
+        && this->currentSourceTimeline_.valid
+        && sourceInterval.count() > 0
+        && !sourceTimelineDiscontinuity
+        && !sourceHistoryWarmupActive;
+    const auto& currentPresentationCapacity =
+        this->generatedPresentationCapacityTracker_.telemetry();
+    const bool higherPresentationCapacityProven =
+        currentPresentationCapacity.highestUsefulCapacity
+            > currentPresentationCapacity.generationCap;
+    const GeneratedPresentationCapacityContext presentationCapacityContext{
+        .outputDeficit = presentationOutputDeficit,
+        .deadlineCapacityValid = safeGenerationHintValid,
+        .safeGenerationHint = safeGenerationHint,
+        .schedulerCostLimit = adaptiveTelemetry.costLimit,
+        .sourceInsideBudget = sourceInsidePresentationBudget,
+        .higherCapacityProven = higherPresentationCapacityProven,
+    };
+
     // WSI capacity is a separate downstream constraint from GPU generation
-    // capacity. Apply its learned cap before expensive framegen dispatch; a
-    // suppressed slot is consumed and never repaid. Fixed mode is untouched.
+    // capacity. Apply its provisional cap before expensive framegen dispatch;
+    // a suppressed slot is consumed and never repaid. Fixed mode is untouched.
     if (conf.adaptiveFramegen && generatedFrameCount > 0) {
         const size_t presentationCappedGeneratedFrameCount =
             this->generatedPresentationCapacityTracker_.limit(
-                generatedFrameCount);
+                generatedFrameCount, presentationCapacityContext);
         if (presentationCappedGeneratedFrameCount < generatedFrameCount) {
             const size_t cappedGeneratedFrames =
                 generatedFrameCount - presentationCappedGeneratedFrameCount;
@@ -1533,6 +1561,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     ? metrics.windowDeadlinePredictionAbsErrorMs
                         / static_cast<double>(metrics.windowDeadlinePredictionSamples)
                     : 0.0;
+            const auto& presentationTelemetry =
+                this->generatedPresentationCapacityTracker_.telemetry();
 
             std::cerr << "lsfg-vk: metrics"
                       << " runtime_session_id=" << this->runtimeSessionId_
@@ -1563,11 +1593,30 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " presentation_cap_drops_total="
                       << metrics.totalGeneratedPresentationCapDrops
                       << " presentation_cap="
-                      << this->generatedPresentationCapacityTracker_.telemetry().generationCap
+                      << presentationTelemetry.generationCap
                       << " presentation_duty="
-                      << this->generatedPresentationCapacityTracker_.telemetry().singleFrameDuty
+                      << presentationTelemetry.singleFrameDuty
                       << " wsi_reject_ratio="
-                      << this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio
+                      << presentationTelemetry.wsiRejectionRatio
+                      << " presentation_rejection_evidence="
+                      << presentationTelemetry.rejectionEvidence
+                      << " presentation_recovery_evidence="
+                      << presentationTelemetry.recoveryEvidence
+                      << " presentation_attempted_generated="
+                      << presentationTelemetry.attemptedGeneratedFrames
+                      << " presentation_accepted_generated="
+                      << presentationTelemetry.acceptedGeneratedFrames
+                      << " presentation_delivered_efficiency="
+                      << presentationTelemetry.deliveredEfficiency
+                      << " presentation_last_change_reason="
+                      << generatedPresentationCapChangeReasonName(
+                          presentationTelemetry.lastChangeReason)
+                      << " presentation_last_change_output_deficit="
+                      << (presentationTelemetry.lastChangeOutputDeficit ? 1 : 0)
+                      << " presentation_provisional_lower="
+                      << (presentationTelemetry.provisionalLowerActive ? 1 : 0)
+                      << " presentation_upward_probe="
+                      << (presentationTelemetry.upwardProbePending ? 1 : 0)
                       << " cycle_avg_ms=" << cycleAvgMs
                       << " cycle_max_ms=" << metrics.windowCycleMaxMs
                       << " ahb_handoff_avg_ms=" << handoffAvgMs
@@ -1694,11 +1743,30 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_flow_wsi_pressure="
                       << (this->adaptiveFlowWsiPressure_ ? 1 : 0)
                       << " adaptive_flow_wsi_loss_rate="
-                      << this->generatedPresentationCapacityTracker_.telemetry().wsiRejectionRatio
+                      << presentationTelemetry.wsiRejectionRatio
                       << " adaptive_flow_presentation_cap="
-                      << this->generatedPresentationCapacityTracker_.telemetry().generationCap
+                      << presentationTelemetry.generationCap
                       << " adaptive_flow_presentation_duty="
-                      << this->generatedPresentationCapacityTracker_.telemetry().singleFrameDuty
+                      << presentationTelemetry.singleFrameDuty
+                      << " adaptive_flow_presentation_rejection_evidence="
+                      << presentationTelemetry.rejectionEvidence
+                      << " adaptive_flow_presentation_recovery_evidence="
+                      << presentationTelemetry.recoveryEvidence
+                      << " adaptive_flow_presentation_attempted_generated="
+                      << presentationTelemetry.attemptedGeneratedFrames
+                      << " adaptive_flow_presentation_accepted_generated="
+                      << presentationTelemetry.acceptedGeneratedFrames
+                      << " adaptive_flow_presentation_delivered_efficiency="
+                      << presentationTelemetry.deliveredEfficiency
+                      << " adaptive_flow_presentation_last_change_reason="
+                      << generatedPresentationCapChangeReasonName(
+                          presentationTelemetry.lastChangeReason)
+                      << " adaptive_flow_presentation_last_change_output_deficit="
+                      << (presentationTelemetry.lastChangeOutputDeficit ? 1 : 0)
+                      << " adaptive_flow_presentation_provisional_lower="
+                      << (presentationTelemetry.provisionalLowerActive ? 1 : 0)
+                      << " adaptive_flow_presentation_upward_probe="
+                      << (presentationTelemetry.upwardProbePending ? 1 : 0)
                       << " adaptive_flow_synthetic_drop_pressure="
                       << ((this->adaptiveFlowComputePressure_
                           || this->adaptiveFlowWsiPressure_) ? 1 : 0)
@@ -1769,6 +1837,30 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 conf.multiplier,
                 conf.adaptiveFramegen ? 1 : 0,
                 conf.fpsLimit);
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_METRICS",
+                "presentation_rejection_evidence=%u "
+                "presentation_recovery_evidence=%.3f "
+                "presentation_attempted_generated=%llu "
+                "presentation_accepted_generated=%llu "
+                "presentation_delivered_efficiency=%.3f "
+                "presentation_last_change_reason=%s "
+                "presentation_last_change_output_deficit=%d "
+                "presentation_provisional_lower=%d "
+                "presentation_upward_probe=%d",
+                presentationTelemetry.rejectionEvidence,
+                presentationTelemetry.recoveryEvidence,
+                static_cast<unsigned long long>(
+                    presentationTelemetry.attemptedGeneratedFrames),
+                static_cast<unsigned long long>(
+                    presentationTelemetry.acceptedGeneratedFrames),
+                presentationTelemetry.deliveredEfficiency,
+                generatedPresentationCapChangeReasonName(
+                    presentationTelemetry.lastChangeReason),
+                presentationTelemetry.lastChangeOutputDeficit ? 1 : 0,
+                presentationTelemetry.provisionalLowerActive ? 1 : 0,
+                presentationTelemetry.upwardProbePending ? 1 : 0);
 #endif
 
             metrics.windowStart = cycleEnd;
@@ -2409,7 +2501,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             && generatedFrameCount > 0
             && generatedWsiObservationEligible) {
         this->generatedPresentationCapacityTracker_.observe(
-            generatedFrameCount, generatedWsiRejectedFrameCount);
+            generatedFrameCount,
+            queuedGeneratedFrameCount,
+            generatedWsiRejectedFrameCount,
+            presentationCapacityContext);
     }
     if (generatedFrameCount > 0
             && queuedGeneratedFrameCount == generatedFrameCount) {

@@ -650,10 +650,14 @@ int main() {
         assert(capacity.telemetry().generationCap == 2);
         assert(capacity.telemetry().pressure);
 
-        for (int i = 0; i < 24; ++i)
+        bool sawRecoveryRaise = false;
+        for (int i = 0; i < 24; ++i) {
             capacity.observe(2, 0);
+            sawRecoveryRaise = sawRecoveryRaise
+                || capacity.telemetry().raised;
+        }
         assert(capacity.telemetry().generationCap == 3);
-        assert(capacity.telemetry().raised);
+        assert(sawRecoveryRaise);
     }
 
     {
@@ -695,6 +699,109 @@ int main() {
         assert(suppressed);
         assert(probeObserved);
         assert(capacity.telemetry().pressure);
+    }
+
+    {
+        // A WSI reduction is provisional. If the lower cap does not improve
+        // useful delivery while the target remains recoverable, restore the
+        // higher cap instead of turning presentation pressure into a target
+        // governor.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        GeneratedPresentationCapacityContext context{
+            .outputDeficit = false,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .sourceInsideBudget = true,
+            .higherCapacityProven = true,
+        };
+
+        for (int i = 0; i < 12; ++i) {
+            const auto attempted = capacity.limit(3, context);
+            const auto accepted = attempted > 0 ? attempted - 1 : 0;
+            capacity.observe(attempted, accepted, attempted - accepted, context);
+        }
+        assert(capacity.telemetry().generationCap <= 2);
+
+        context.outputDeficit = true;
+        bool restored = false;
+        for (int i = 0; i < 24; ++i) {
+            const auto attempted = capacity.limit(3, context);
+            capacity.observe(attempted, attempted, 0, context);
+            restored = restored
+                || capacity.telemetry().lastChangeReason
+                    == GeneratedPresentationCapChangeReason::ProfitabilityRestoreHigher
+                || capacity.telemetry().lastChangeReason
+                    == GeneratedPresentationCapChangeReason::TargetDeficitProbeSuccess;
+        }
+        assert(restored);
+        assert(capacity.telemetry().generationCap == 3);
+    }
+
+    {
+        // Once the output target is deficient, a proven higher presentation
+        // capacity must prevent persistent fractional-duty collapse. Hard WSI
+        // pressure may still lower the integer cap, but it must not suppress
+        // every remaining single-frame opportunity.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        GeneratedPresentationCapacityContext collapse{};
+        for (int i = 0; i < 80 && capacity.telemetry().generationCap > 1; ++i) {
+            const auto attempted = capacity.limit(3, collapse);
+            if (attempted > 0)
+                capacity.observe(attempted, 0, attempted, collapse);
+        }
+        assert(capacity.telemetry().generationCap == 1);
+
+        GeneratedPresentationCapacityContext recoverable{
+            .outputDeficit = true,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .sourceInsideBudget = true,
+            .higherCapacityProven = true,
+        };
+        for (int i = 0; i < 30; ++i) {
+            const auto attempted = capacity.limit(3, recoverable);
+            if (attempted > 0)
+                capacity.observe(attempted, 0, attempted, recoverable);
+        }
+        assert(capacity.telemetry().singleFrameDuty >= 0.999);
+    }
+
+    {
+        // A lower cap that preserves accepted throughput but does not materially
+        // improve delivery efficiency is still unprofitable while the target is
+        // unmet. It must be restored instead of becoming a hidden target cap.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(8);
+        GeneratedPresentationCapacityContext context{
+            .outputDeficit = false,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 8,
+            .schedulerCostLimit = 8,
+            .sourceInsideBudget = true,
+            .higherCapacityProven = true,
+        };
+
+        for (int i = 0; i < 4; ++i) {
+            const auto attempted = capacity.limit(8, context);
+            capacity.observe(attempted, 4, attempted - 4, context);
+        }
+        assert(capacity.telemetry().generationCap == 7);
+
+        context.outputDeficit = true;
+        bool restored = false;
+        for (int i = 0; i < 6; ++i) {
+            const auto attempted = capacity.limit(8, context);
+            capacity.observe(attempted, 4, attempted - 4, context);
+            restored = restored
+                || capacity.telemetry().lastChangeReason
+                    == GeneratedPresentationCapChangeReason::ProfitabilityRestoreHigher;
+        }
+        assert(restored);
+        assert(capacity.telemetry().generationCap == 8);
     }
 
     {

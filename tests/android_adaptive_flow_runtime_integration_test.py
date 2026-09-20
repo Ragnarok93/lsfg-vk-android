@@ -122,7 +122,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn(".wsiLossRate = presentationCapacity.wsiRejectionRatio", source)
 
         deficit_start = source.index("const auto& outputCadence")
-        deficit_end = source.index("const bool retainedTimingUsable", deficit_start)
+        deficit_end = source.index(
+            "const auto updateAdaptiveFlowGovernor", deficit_start
+        )
         deficit = source[deficit_start:deficit_end]
         self.assertNotIn("adaptiveFlowGlobalOutputFps_", deficit)
         self.assertNotIn("metrics.lastWindowOutputFps", deficit)
@@ -235,6 +237,55 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("windowGeneratedPresentationCapDrops", source)
         self.assertIn("presentation_duty=", source)
 
+    def test_presentation_capacity_is_target_aware_and_provisional(self) -> None:
+        header = (ROOT / "include/adaptive_scheduler.hpp").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "GeneratedPresentationCapacityContext",
+            "outputDeficit",
+            "deadlineCapacityValid",
+            "safeGenerationHint",
+            "schedulerCostLimit",
+            "sourceInsideBudget",
+            "higherCapacityProven",
+            "ProfitabilityRestoreHigher",
+            "TargetDeficitProbeSuccess",
+        ):
+            self.assertIn(token, header)
+
+        self.assertIn(
+            "GeneratedPresentationCapacityContext presentationCapacityContext",
+            source,
+        )
+        self.assertIn(
+            "generatedPresentationCapacityTracker_.limit(\n"
+            "                generatedFrameCount, presentationCapacityContext)",
+            source,
+        )
+        self.assertIn(
+            "generatedPresentationCapacityTracker_.observe(\n"
+            "            generatedFrameCount,\n"
+            "            queuedGeneratedFrameCount,\n"
+            "            generatedWsiRejectedFrameCount,\n"
+            "            presentationCapacityContext)",
+            source,
+        )
+
+        # Presentation pressure can evaluate delivery capacity, but must not
+        # become a source-FPS or long-term Adaptive generation backoff path.
+        scheduler = (ROOT / "src/adaptive_scheduler.cpp").read_text(
+            encoding="utf-8"
+        )
+        for rejected in (
+            "sourcePreservation",
+            "RaiseCausalSourceDrop",
+            "source-FPS veto",
+        ):
+            self.assertNotIn(rejected, scheduler)
+
     def test_rolling_output_tracker_updates_per_completed_source_cycle(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn("lsfgOutputCadenceTracker_.observe", source)
@@ -304,6 +355,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
     def test_runtime_telemetry_reports_requested_applied_and_reason(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        context_header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         fields = (
             "adaptive_flow_preset=",
             "adaptive_flow_target=",
@@ -331,6 +383,15 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "adaptive_flow_wsi_loss_rate=",
             "adaptive_flow_presentation_cap=",
             "adaptive_flow_presentation_duty=",
+            "adaptive_flow_presentation_rejection_evidence=",
+            "adaptive_flow_presentation_recovery_evidence=",
+            "adaptive_flow_presentation_attempted_generated=",
+            "adaptive_flow_presentation_accepted_generated=",
+            "adaptive_flow_presentation_delivered_efficiency=",
+            "adaptive_flow_presentation_last_change_reason=",
+            "adaptive_flow_presentation_last_change_output_deficit=",
+            "adaptive_flow_presentation_provisional_lower=",
+            "adaptive_flow_presentation_upward_probe=",
             "adaptive_flow_output_deficit=",
             "adaptive_flow_synthetic_drop_pressure=",
             "adaptive_flow_reason=",
@@ -340,6 +401,18 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             self.assertIn(field, hooks)
 
         self.assertIn("adaptiveFlowRuntimeSnapshot()", hooks)
+        for field in (
+            "presentationRejectionEvidence",
+            "presentationRecoveryEvidence",
+            "presentationAttemptedGeneratedFrames",
+            "presentationAcceptedGeneratedFrames",
+            "presentationDeliveredEfficiency",
+            "presentationLastChangeReason",
+            "presentationLastChangeOutputDeficit",
+            "presentationProvisionalLowerActive",
+            "presentationUpwardProbePending",
+        ):
+            self.assertIn(field, context_header)
 
 
     def test_adaptive_framegen_preserves_configured_present_mode(self) -> None:

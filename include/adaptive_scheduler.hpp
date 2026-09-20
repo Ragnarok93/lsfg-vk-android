@@ -122,10 +122,45 @@ private:
     double deliveryReserveMs_{0.0};
 };
 
+enum class GeneratedPresentationCapChangeReason {
+    None,
+    RejectionProbe,
+    ProfitabilityKeepLower,
+    ProfitabilityRestoreHigher,
+    RecoveryEvidenceRaise,
+    TargetDeficitProbeSuccess,
+    SubOneDutyLower,
+    SubOneDutyRecover,
+};
+
+const char* generatedPresentationCapChangeReasonName(
+    GeneratedPresentationCapChangeReason reason);
+
+struct GeneratedPresentationCapacityContext {
+    bool outputDeficit{false};
+    bool deadlineCapacityValid{false};
+    std::size_t safeGenerationHint{};
+    std::size_t schedulerCostLimit{};
+    bool sourceInsideBudget{false};
+    bool higherCapacityProven{false};
+};
+
 struct GeneratedPresentationCapacityTelemetry {
     std::size_t generationCap{};
     double singleFrameDuty{1.0};
     double wsiRejectionRatio{};
+    unsigned rejectionEvidence{};
+    double recoveryEvidence{};
+    uint64_t attemptedGeneratedFrames{};
+    uint64_t acceptedGeneratedFrames{};
+    double deliveredEfficiency{};
+    double acceptedFramesEwma{};
+    std::size_t highestUsefulCapacity{};
+    GeneratedPresentationCapChangeReason lastChangeReason{
+        GeneratedPresentationCapChangeReason::None};
+    bool lastChangeOutputDeficit{false};
+    bool upwardProbePending{false};
+    bool provisionalLowerActive{false};
     bool pressure{false};
     bool lowered{false};
     bool raised{false};
@@ -137,7 +172,15 @@ class GeneratedPresentationCapacityTracker {
 public:
     void configure(std::size_t maxGeneratedFrames);
     [[nodiscard]] std::size_t limit(std::size_t requested);
+    [[nodiscard]] std::size_t limit(
+        std::size_t requested,
+        const GeneratedPresentationCapacityContext& context);
     void observe(std::size_t attempted, std::size_t wsiRejected);
+    void observe(
+        std::size_t attempted,
+        std::size_t accepted,
+        std::size_t wsiRejected,
+        const GeneratedPresentationCapacityContext& context);
     void reset();
 
     [[nodiscard]] const GeneratedPresentationCapacityTelemetry& telemetry() const {
@@ -147,9 +190,24 @@ public:
 private:
     std::size_t maxGeneratedFrames_{};
     unsigned rejectionEvidence_{};
-    unsigned cleanSamples_{};
+    double recoveryEvidence_{};
     double singleFramePhase_{};
     bool hasObservation_{false};
+    double acceptedFramesEwma_{};
+    double efficiencyEwma_{};
+
+    bool provisionalLowerActive_{false};
+    std::size_t provisionalPreviousCap_{};
+    unsigned provisionalSamples_{};
+    double provisionalAcceptedSum_{};
+    double provisionalEfficiencySum_{};
+    double provisionalBaselineAccepted_{};
+    double provisionalBaselineEfficiency_{};
+
+    bool upwardProbePending_{false};
+    bool upwardProbeInFlight_{false};
+    std::size_t upwardProbeAttempted_{};
+
     GeneratedPresentationCapacityTelemetry telemetry_{};
 };
 

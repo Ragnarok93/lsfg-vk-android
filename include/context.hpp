@@ -50,6 +50,15 @@ struct AdaptiveFlowRuntimeSnapshot {
     double wsiLossRate{0.0};
     size_t presentationGenerationCap{0};
     double presentationDuty{1.0};
+    unsigned presentationRejectionEvidence{0};
+    double presentationRecoveryEvidence{0.0};
+    uint64_t presentationAttemptedGeneratedFrames{0};
+    uint64_t presentationAcceptedGeneratedFrames{0};
+    double presentationDeliveredEfficiency{0.0};
+    const char* presentationLastChangeReason{"none"};
+    bool presentationLastChangeOutputDeficit{false};
+    bool presentationProvisionalLowerActive{false};
+    bool presentationUpwardProbePending{false};
     bool outputDeficit{false};
     bool syntheticDropPressure{false};
     const char* reason{"none"};
@@ -129,6 +138,22 @@ public:
             .wsiLossRate = presentationCapacity.wsiRejectionRatio,
             .presentationGenerationCap = presentationCapacity.generationCap,
             .presentationDuty = presentationCapacity.singleFrameDuty,
+            .presentationRejectionEvidence = presentationCapacity.rejectionEvidence,
+            .presentationRecoveryEvidence = presentationCapacity.recoveryEvidence,
+            .presentationAttemptedGeneratedFrames =
+                presentationCapacity.attemptedGeneratedFrames,
+            .presentationAcceptedGeneratedFrames =
+                presentationCapacity.acceptedGeneratedFrames,
+            .presentationDeliveredEfficiency =
+                presentationCapacity.deliveredEfficiency,
+            .presentationLastChangeReason = generatedPresentationCapChangeReasonName(
+                presentationCapacity.lastChangeReason),
+            .presentationLastChangeOutputDeficit =
+                presentationCapacity.lastChangeOutputDeficit,
+            .presentationProvisionalLowerActive =
+                presentationCapacity.provisionalLowerActive,
+            .presentationUpwardProbePending =
+                presentationCapacity.upwardProbePending,
             .outputDeficit = telemetry.outputDeficit,
             .syntheticDropPressure =
                 adaptiveFlowComputePressure_ || adaptiveFlowWsiPressure_,
