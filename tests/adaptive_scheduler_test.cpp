@@ -474,6 +474,27 @@ int main() {
     }
 
     {
+        // A temporary lower configured multiplier (for example fixed 2x while
+        // comparing modes) must not erase a 4x ceiling that Adaptive already
+        // proved safe. The active ceiling is still bounded by the current
+        // multiplier; only the historical proof survives for later reuse.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 100; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+        }
+        assert(scheduler.telemetry().provenCostLimit == 3);
+
+        scheduler.configure(0, 1); // fixed 2x
+        scheduler.configure(120, 3); // back to Adaptive, max 4x
+        scheduler.setSafeGenerationHint(3, true);
+        scheduler.plan(34ms);
+        assert(scheduler.telemetry().configWarmStart);
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(scheduler.telemetry().provenCostLimit == 3);
+    }
+
+    {
         // First-time configuration is still a cold start; merely constructing
         // or enabling Adaptive must not bypass the established safety ramp.
         AdaptiveFrameScheduler scheduler;
