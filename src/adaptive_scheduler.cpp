@@ -20,7 +20,7 @@ constexpr double kEstablishedBaselineMinSeconds = 0.35;
 constexpr double kEstablishedBaselineMaxCoverageSeconds = 2.0;
 constexpr double kBackoffRebaselineSeconds = 0.45;
 constexpr double kBackoffRetrySourceRatio = 0.95;
-constexpr double kCapacitySupportedSourceDropRatio = 0.82;
+constexpr double kCapacityCorroboratedBackoffEvidenceSeconds = 0.20;
 // Treat a single interval as a suspend/stall discontinuity only when it is an
 // extreme outlier relative to an already-established source cadence. An
 // absolute FPS threshold would incorrectly disable generation for legitimately
@@ -940,13 +940,18 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
 
         const bool capacityCorroboratesRaise =
             safeGenerationHintValid_ && safeGenerationHint_ >= costLimit_;
-        const double causalDropRatio = capacityCorroboratesRaise
-            ? kCapacitySupportedSourceDropRatio
-            : kSourceDropRatio;
+        // Predictor capacity is corroborating evidence about LSFG compute
+        // budget, not permission to sacrifice the protected source timeline.
+        // Keep the same material source-drop threshold; when the predictor says
+        // the level still fits, require more sustained causal evidence before
+        // attributing the source loss to generated work.
         const bool sourceDropped = pendingRaiseBaselineFps_ > 0.0
-            && sourceFps < pendingRaiseBaselineFps_ * causalDropRatio
+            && sourceFps < pendingRaiseBaselineFps_ * kSourceDropRatio
             && telemetry_.sourceFps
-                < pendingRaiseBaselineFps_ * causalDropRatio;
+                < pendingRaiseBaselineFps_ * kSourceDropRatio;
+        const double backoffEvidenceRequired = capacityCorroboratesRaise
+            ? kCapacityCorroboratedBackoffEvidenceSeconds
+            : kRaiseBackoffEvidenceSeconds;
         if (sinceRaise >= kRaiseBackoffSettleSeconds) {
             if (sourceDropped) {
                 pendingRaiseSourceDropEvidenceSeconds_ +=
@@ -961,7 +966,7 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
 
         if (sinceRaise <= kBlameWindowSeconds
                 && pendingRaiseSourceDropEvidenceSeconds_
-                    >= kRaiseBackoffEvidenceSeconds) {
+                    >= backoffEvidenceRequired) {
             if (costLimit_ > 1)
                 costLimit_--;
             pendingCostRaise_ = false;
@@ -1070,17 +1075,12 @@ void AdaptiveFrameScheduler::updateCostLimit(double wantedGeneratedFrames) {
     const bool establishedBaselineReady =
         establishedSourceCoverageSeconds_ >= kEstablishedBaselineMinSeconds
         && establishedSourceFps_ > 0.0;
-    const bool capacitySupportsCurrent =
-        safeGenerationHintValid_ && safeGenerationHint_ >= costLimit_;
-    const double preservationDropRatio = capacitySupportsCurrent
-        ? kCapacitySupportedSourceDropRatio
-        : kSourceDropRatio;
     const bool sourceDegradedAtCurrentCost =
         costLimit_ > 1
         && establishedBaselineReady
-        && sourceFps < establishedSourceFps_ * preservationDropRatio
+        && sourceFps < establishedSourceFps_ * kSourceDropRatio
         && telemetry_.sourceFps
-            < establishedSourceFps_ * preservationDropRatio;
+            < establishedSourceFps_ * kSourceDropRatio;
 
     if (sourceDegradedAtCurrentCost
             && observedTimeSeconds_ >= sourcePreservationProbeHoldUntilSeconds_) {
