@@ -490,6 +490,14 @@ std::size_t GeneratedPresentationCapacityTracker::limit(
     if (requested == 0 || maxGeneratedFrames_ == 0)
         return 0;
 
+    // If a previous probe never reached WSI observation (for example because a
+    // later deadline gate dropped that cycle), it cannot be credited to this
+    // cycle. Cancel it before considering another bounded probe.
+    if (upwardProbeInFlight_) {
+        upwardProbeInFlight_ = false;
+        upwardProbeAttempted_ = 0;
+    }
+
     const bool sourceInsideBudget =
         context.sourceCadenceRatio + 1e-6 >= context.sourceBudgetMinRatio;
     const bool provenHigherCapacity =
@@ -658,10 +666,14 @@ void GeneratedPresentationCapacityTracker::observe(
                     >= provisionalBaselineAccepted_
                         * kWsiThroughputPreserveRatio;
 
+            const bool throughputRegressed =
+                provisionalBaselineAccepted_ > 0.0
+                && lowerAccepted + 1e-6 < provisionalBaselineAccepted_;
             const bool lowerCapUnprofitable =
                 !sourceImproved
-                && (!throughputPreserved
-                    || (context.outputDeficit && !efficiencyImproved));
+                && (context.outputDeficit
+                    ? throughputRegressed
+                    : (!throughputPreserved && !efficiencyImproved));
             if (lowerCapUnprofitable) {
                 telemetry_.generationCap = std::min(
                     provisionalPreviousCap_, maxGeneratedFrames_);
