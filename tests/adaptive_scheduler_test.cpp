@@ -562,6 +562,41 @@ int main() {
     }
 
     {
+        // Protected-source invariant: generated work is subordinate to the real
+        // source timeline. If removing one generated level causally restores
+        // the established source cadence, keep the cheaper level even when the
+        // resulting aggregate output misses a high target by more than 5%.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 120; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms);
+        }
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(scheduler.telemetry().provenCostLimit == 3);
+
+        bool probedLower = false;
+        for (int frame = 0; frame < 40 && !probedLower; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(42ms); // sustained source loss at the proven level
+            probedLower = scheduler.telemetry().costBackedOff
+                && scheduler.telemetry().costProbe;
+        }
+        assert(probedLower);
+        assert(scheduler.telemetry().costLimit == 2);
+
+        bool restoredHigher = false;
+        for (int frame = 0; frame < 35; ++frame) {
+            scheduler.setSafeGenerationHint(3, true);
+            scheduler.plan(34ms); // lower level restores established cadence
+            restoredHigher = restoredHigher
+                || (scheduler.telemetry().costRaised
+                    && scheduler.telemetry().costProbe);
+        }
+        assert(!restoredHigher);
+        assert(scheduler.telemetry().costLimit == 2);
+    }
+
+    {
         // A failed source-preservation probe must not repeat every ~0.6 s.
         // Once the cheaper level fails to recover enough cadence and the
         // original cost is restored, hold that causal experiment for several
