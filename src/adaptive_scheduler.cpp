@@ -1017,8 +1017,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         pendingRaiseSourceDropEvidenceSeconds_;
     telemetry_.stableCadenceSeconds = stableCadenceSeconds_;
     telemetry_.recoveryBaselineSourceFps = backoffRecoveryBaselineFps_;
-    telemetry_.recoveryThresholdSourceFps =
-        backoffRecoveryBaselineFps_ * kBackoffRetrySourceRatio;
+    telemetry_.recoveryThresholdSourceFps = 0.0;
     telemetry_.establishedSourceFps = establishedSourceFps_;
     telemetry_.sourceCadenceRatio = establishedSourceFps_ > 0.0
         ? telemetry_.smoothedSourceFps / establishedSourceFps_
