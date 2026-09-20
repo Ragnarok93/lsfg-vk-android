@@ -1390,20 +1390,22 @@ int main() {
         // Exact pre-device comparison: if a stable source can reach the target
         // with fixed 2x, Adaptive targeting that same output must bootstrap one
         // generated frame per source cycle even before predictor history exists.
+        AdaptiveFrameScheduler scheduler(120, 3);
         std::size_t deliveredGenerated = 0;
         unsigned starved = 0;
-        for (int frame = 0; frame < 60; ++frame) {
-            const auto planned = adaptiveDeficitCompensatedGeneratedCount(
-                1, 3, true, false, 0, 1, 1.0, 0.9);
+        constexpr int measuredSourceFrames = 60;
+        for (int frame = 0; frame < measuredSourceFrames; ++frame) {
+            const auto planned = scheduler.plan(16666667ns);
             const auto admitted = adaptiveAdmissionBootstrapGeneratedCount(
                 planned, false, 8.0, 16.666667, starved);
             deliveredGenerated += admitted;
-            if (admitted == 0)
-                ++starved;
-            else
+            if (planned > 0 && admitted == 0)
+                starved += static_cast<unsigned>(planned);
+            else if (admitted > 0)
                 starved = 0;
         }
-        const std::size_t deliveredOutputFrames = 60 + deliveredGenerated;
+        const std::size_t deliveredOutputFrames =
+            measuredSourceFrames + deliveredGenerated;
         assert(deliveredOutputFrames >= 118);
     }
 
@@ -1613,6 +1615,39 @@ int main() {
                 recovery);
         }
         assert(capacity.telemetry().generationCap > 1);
+    }
+
+    {
+        // Severe cap-1 WSI rejection is not sufficient by itself to reduce
+        // attempt duty while the target is unmet, source cadence remains inside
+        // budget, and higher proven/deadline-safe capacity is available.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        GeneratedPresentationCapacityContext collapse{};
+        for (int cycle = 0;
+                cycle < 80 && capacity.telemetry().generationCap > 1;
+                ++cycle) {
+            const auto attempted = capacity.limit(3, collapse);
+            if (attempted > 0)
+                capacity.observe(attempted, 0, attempted, collapse);
+        }
+        assert(capacity.telemetry().generationCap == 1);
+
+        GeneratedPresentationCapacityContext deficit{
+            .outputDeficit = true,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .provenCostLimit = 3,
+            .sourceCadenceRatio = 1.0,
+            .sourceBudgetMinRatio = 0.8,
+        };
+        for (int cycle = 0; cycle < 30; ++cycle) {
+            const auto attempted = capacity.limit(3, deficit);
+            if (attempted > 0)
+                capacity.observe(attempted, 0, attempted, deficit);
+        }
+        assert(capacity.telemetry().singleFrameDuty >= 0.999);
     }
 
     {
