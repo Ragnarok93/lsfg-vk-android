@@ -104,7 +104,8 @@ std::size_t adaptiveDeficitCompensatedGeneratedCount(
         std::size_t provenCostLimit,
         double sourceCadenceRatio,
         double sourceBudgetMinRatio) {
-    if (!outputDeficit
+    if (plannedGeneratedFrames == 0
+            || !outputDeficit
             || plannedGeneratedFrames >= maxGeneratedFrames
             || !deadlineCapacityValid
             || sourceCadenceRatio + 1e-6 < sourceBudgetMinRatio) {
