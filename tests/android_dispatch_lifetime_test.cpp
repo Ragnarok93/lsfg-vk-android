@@ -44,11 +44,12 @@ static VkDevice d4 = reinterpret_cast<VkDevice>(&d4Storage);
 static VkQueue q1 = reinterpret_cast<VkQueue>(0x3000);
 static VkQueue q2 = reinterpret_cast<VkQueue>(0x4000);
 static VkQueue q3 = reinterpret_cast<VkQueue>(0x5000);
+static VkQueue q4 = reinterpret_cast<VkQueue>(0x6000);
 static int submitted1, submitted2, submitted3, presented1, presented2;
 static std::set<VkSemaphore> alive;
 static uintptr_t nextSemaphore = 100;
 static VKAPI_ATTR void VKAPI_CALL getQueue(VkDevice d, uint32_t, uint32_t, VkQueue* q) {
-    *q = d == d1 ? q1 : (d == d2 ? q2 : q3);
+    *q = d == d1 ? q1 : (d == d2 ? q2 : (d == d3 ? q3 : q4));
 }
 static VKAPI_ATTR void VKAPI_CALL getQueue2(VkDevice d, const VkDeviceQueueInfo2*, VkQueue* q) { getQueue(d, 0, 0, q); }
 static VKAPI_ATTR VkResult VKAPI_CALL submit1(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q1); ++submitted1; return VK_SUCCESS; }
@@ -130,6 +131,21 @@ int main() {
         assert(privateQ == q3);
         assert(Layer::queueOwner(q3) == d3);
     }
+
+    // The private framegen device can use a different loader dispatch table
+    // even though it targets the exact same physical ICD. The known-good S20+
+    // build reused the established vkGetDeviceQueue thunk in this recursive
+    // backend setup window. Outside that window the same unknown device must fail.
+    VkQueue outsidePrivate{};
+    Layer::ovkGetDeviceQueue(d4, 0, 0, &outsidePrivate);
+    assert(outsidePrivate == VK_NULL_HANDLE);
+    setenv("DISABLE_LSFG", "1", 1);
+    VkQueue privateDifferentKey{};
+    Layer::ovkGetDeviceQueue(d4, 0, 0, &privateDifferentKey);
+    unsetenv("DISABLE_LSFG");
+    assert(privateDifferentKey == q4);
+    assert(Layer::queueOwner(q4) == d4);
+    eraseDeviceDispatch(d4);
 
     DeviceDispatch completed = bootstrap;
     completed.device = d3;
