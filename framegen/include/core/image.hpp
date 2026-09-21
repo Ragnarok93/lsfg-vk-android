@@ -58,9 +58,8 @@ namespace LSFG::Core {
         ///
         /// Used on Android where opaque-FD export from AHB-imported memory
         /// isn't supported by Adreno/Mali drivers — we share via the AHB
-        /// itself instead. The caller retains ownership of the AHB and must
-        /// keep it alive (via AHardwareBuffer_acquire) for the lifetime of
-        /// this Image.
+        /// itself instead. The Image acquires and retains its own reference
+        /// for the lifetime of the imported Vulkan objects.
         ///
         /// @param device Vulkan device (must have
         ///   VK_ANDROID_external_memory_android_hardware_buffer enabled)
@@ -104,8 +103,15 @@ namespace LSFG::Core {
         Image& operator=(Image&&) noexcept = default;
         ~Image() = default;
     private:
-        std::shared_ptr<VkImage> image;
+#ifdef __ANDROID__
+        // Must be destroyed after the imported Vulkan handles (members are
+        // destroyed in reverse declaration order).
+        std::shared_ptr<AHardwareBuffer> ahbRef;
+#endif
+        // Destroy the view, image, then bound memory in reverse declaration
+        // order before releasing the AHB reference.
         std::shared_ptr<VkDeviceMemory> memory;
+        std::shared_ptr<VkImage> image;
         std::shared_ptr<VkImageView> view;
 
         std::shared_ptr<VkImageLayout> layout;

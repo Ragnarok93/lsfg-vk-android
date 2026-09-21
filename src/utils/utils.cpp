@@ -17,6 +17,7 @@
 #include <utility>
 #include <fstream>
 #include <string>
+#include <mutex>
 #include <vector>
 #include <array>
 
@@ -206,9 +207,15 @@ namespace {
         static std::unordered_map<std::string, size_t> map;
         return map;
     }
+
+    auto& logCountsMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
 }
 
 void Utils::logLimitN(const std::string& id, size_t n, const std::string& message) {
+    std::lock_guard lock(logCountsMutex());
     auto& count = logCounts()[id];
     if (count <= n)
         std::cerr << "lsfg-vk: " << message << '\n';
@@ -218,6 +225,7 @@ void Utils::logLimitN(const std::string& id, size_t n, const std::string& messag
 }
 
 void Utils::resetLimitN(const std::string& id) noexcept {
+    std::lock_guard lock(logCountsMutex());
     logCounts().erase(id);
 }
 

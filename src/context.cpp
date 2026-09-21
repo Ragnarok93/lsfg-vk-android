@@ -463,7 +463,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         : swapchain(swapchain), swapchainImages(swapchainImages),
           extent(extent) {
     // get updated configuration
-    auto& conf = Config::activeConf;
+    auto conf = Config::snapshot();
     if (!conf.config_file.empty()
             && (
                     !std::filesystem::exists(conf.config_file)
@@ -477,7 +477,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         const auto name = Utils::getProcessName();
         try {
             Config::updateConfig(file);
-            conf = Config::getConfig(name);
+            Config::setActive(Config::getConfig(name));
+            conf = Config::snapshot();
         } catch (const std::exception& e) {
             std::cerr << "lsfg-vk: Failed to update configuration, continuing using old:\n";
             std::cerr << "- " << e.what() << '\n';
@@ -627,8 +628,11 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     this->lsfgCtxId = std::shared_ptr<int32_t>(
         new int32_t(ctxId),
-        [lsfgDeleteContext = lsfgDeleteContext](const int32_t* id) {
-            lsfgDeleteContext(*id);
+        [lsfgDeleteContext = lsfgDeleteContext](int32_t* id) {
+            if (id != nullptr) {
+                lsfgDeleteContext(*id);
+                delete id;
+            }
         }
     );
 
@@ -744,8 +748,11 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     this->lsfgCtxId = std::shared_ptr<int32_t>(
         new int32_t(lsfgCreateContext(fds.at(0), fds.at(1), outFds, extent, format)),
-        [lsfgDeleteContext = lsfgDeleteContext](const int32_t* id) {
-            lsfgDeleteContext(*id);
+        [lsfgDeleteContext = lsfgDeleteContext](int32_t* id) {
+            if (id != nullptr) {
+                lsfgDeleteContext(*id);
+                delete id;
+            }
         }
     );
 
@@ -764,9 +771,17 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     }
 }
 
+LsContext::~LsContext() {
+    // Destroy the backend context first so any imported VkImages are released
+    // before the Mini::Image owners release their AHardwareBuffers. Core::Image
+    // also retains its own AHB reference, but this ordering keeps both layers'
+    // Vulkan and native-handle lifetimes unambiguous on failure paths.
+    this->lsfgCtxId.reset();
+}
+
 VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
-    const auto& conf = Config::activeConf;
+    const auto conf = Config::snapshot();
     auto& pass = this->passInfos.at(this->frameIdx % 8);
 
 #ifdef __ANDROID__
@@ -2446,7 +2461,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // queued without generated-frame backpressure.
     size_t queuedGeneratedFrameCount = 0;
     size_t generatedWsiRejectedFrameCount = 0;
-    bool generatedWsiObservationEligible = true;
+    bool generatedDeadlineObservationEligible = true;
     for (size_t i = 0; i < generatedFrameCount; i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         const double syntheticFraction =
@@ -2464,7 +2479,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 / 1'000'000.0;
             this->deadlineAdmissionPredictor_.observeDeliveryMiss(
                 deliveryLatenessMs);
-            generatedWsiObservationEligible = false;
+            generatedDeadlineObservationEligible = false;
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
             metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
@@ -2571,7 +2586,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     if (conf.adaptiveFramegen
             && generatedFrameCount > 0
-            && generatedWsiObservationEligible) {
+            && generatedDeadlineObservationEligible) {
         this->generatedPresentationCapacityTracker_.observe(
             generatedFrameCount,
             queuedGeneratedFrameCount,

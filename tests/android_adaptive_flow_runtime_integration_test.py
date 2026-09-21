@@ -277,6 +277,8 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "            presentationCapacityContext)",
             source,
         )
+        self.assertIn("generatedDeadlineObservationEligible", source)
+        self.assertNotIn("generatedWsiObservationEligible", source)
 
     def test_flow_timing_is_batch_matched_and_stale_samples_are_rejected(self) -> None:
         backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(
@@ -338,6 +340,11 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "deadlineAdmissionPredictor_.observeDeliveryMiss",
             wsi_drop,
         )
+        observe_start = source.index(
+            "generatedPresentationCapacityTracker_.observe("
+        )
+        observe_prefix = source[max(0, observe_start - 180):observe_start]
+        self.assertIn("generatedDeadlineObservationEligible", observe_prefix)
 
         self.assertIn(
             "ovkAcquireNextImageKHR(info.device, this->swapchain, 0",
@@ -450,7 +457,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         )
         create_block = hooks[create_start:create_end]
         self.assertIn(
-            "const auto configuredPresentMode = Config::activeConf.e_present;",
+            "const auto configuredPresentMode = activeConf.e_present;",
             create_block,
         )
         self.assertNotIn(
@@ -463,7 +470,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         )
 
         desired_start = hooks.index("const VkPresentModeKHR desiredPresentMode")
-        desired_end = hooks.index("if (configuredPresent != desiredPresentMode)", desired_start)
+        desired_end = hooks.index(
+            "if (state->configuredPresent != desiredPresentMode)", desired_start
+        )
         desired_block = hooks[desired_start:desired_end]
         self.assertIn("desiredPresentMode = conf.e_present", desired_block)
         self.assertNotIn("adaptivePresentationPacing(conf)", desired_block)

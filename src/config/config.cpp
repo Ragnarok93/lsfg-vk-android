@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <utility>
 #include <string>
+#include <mutex>
 
 using namespace Config;
 
@@ -31,7 +32,20 @@ namespace {
     }
 }
 
-Configuration Config::activeConf{};
+namespace {
+    std::mutex configurationMutex;
+    Configuration activeConfiguration{};
+}
+
+Configuration Config::snapshot() {
+    std::lock_guard lock(configurationMutex);
+    return activeConfiguration;
+}
+
+void Config::setActive(Configuration configuration) {
+    std::lock_guard lock(configurationMutex);
+    activeConfiguration = std::move(configuration);
+}
 
 namespace {
     /// Turn a string into a VkPresentModeKHR enum value.
@@ -133,9 +147,13 @@ void Config::updateConfig(const std::string& file) {
         games[exe] = std::move(game);
     }
 
-    // store configurations
-    globalConf = global;
-    gameConfs = std::move(games);
+    // Store configurations only after the complete file has parsed and
+    // validated. Readers may be presenting concurrently with a hot reload.
+    {
+        std::lock_guard lock(configurationMutex);
+        globalConf = global;
+        gameConfs = std::move(games);
+    }
 }
 
 Configuration Config::getConfig(const std::pair<std::string, std::string>& name) {
@@ -175,7 +193,10 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
         return conf;
     }
 
-    // process new configuration system
+    // Process the new configuration system under the same lock used by the
+    // parser's publication step. Returning a Configuration by value keeps
+    // strings and paths detached from the mutable store.
+    std::lock_guard lock(configurationMutex);
     if (!gameConfs.has_value())
         return globalConf;
 

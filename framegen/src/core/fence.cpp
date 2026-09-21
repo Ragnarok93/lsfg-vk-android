@@ -25,6 +25,7 @@ Fence::Fence(const Core::Device& device) {
         new VkFence(fenceHandle),
         [dev = device.handle()](VkFence* fenceHandle) {
             vkDestroyFence(dev, *fenceHandle, nullptr);
+            delete fenceHandle;
         }
     );
 }

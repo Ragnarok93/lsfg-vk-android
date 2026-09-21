@@ -78,13 +78,17 @@ namespace Mini {
         Image& operator=(Image&&) noexcept = default;
         ~Image() = default;
     private:
-        std::shared_ptr<VkImage> image;
-        std::shared_ptr<VkDeviceMemory> memory;
-
 #ifdef __ANDROID__
         AHardwareBuffer* ahb{};  // owned, released via custom deleter
-        std::shared_ptr<AHardwareBuffer> ahbRef;  // shared ownership for copy/move
+        // Declared before Vulkan handles so reverse destruction order keeps
+        // the AHB alive until after the imported image and memory are gone.
+        std::shared_ptr<AHardwareBuffer> ahbRef;
 #endif
+
+        // Vulkan objects are destroyed in reverse declaration order: image
+        // before its bound memory, then the AHB reference.
+        std::shared_ptr<VkDeviceMemory> memory;
+        std::shared_ptr<VkImage> image;
 
         VkExtent2D extent{};
         VkFormat format{};

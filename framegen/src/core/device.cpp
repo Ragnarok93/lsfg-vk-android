@@ -470,7 +470,12 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->physicalDevice = physicalDevice;
     this->nullDescriptorSupported = enableNullDescriptor;
     this->device = std::shared_ptr<VkDevice>(
-        new VkDevice(handle), [](VkDevice* device) { vkDestroyDevice(*device, nullptr); });
+        new VkDevice(handle), [](VkDevice* device) {
+            if (device != nullptr) {
+                vkDestroyDevice(*device, nullptr);
+                delete device;
+            }
+        });
 
     if (!this->nullDescriptorSupported) {
         this->fallbackDescriptorImage = std::make_shared<Core::Image>(*this,

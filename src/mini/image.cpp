@@ -9,10 +9,65 @@
 #include <android/log.h>
 #endif
 
+namespace {
+    struct VulkanImageHandlesGuard {
+        VkDevice device{VK_NULL_HANDLE};
+        VkImage image{VK_NULL_HANDLE};
+        VkDeviceMemory memory{VK_NULL_HANDLE};
+
+        void destroyImage() noexcept {
+            if (image != VK_NULL_HANDLE) {
+                Layer::ovkDestroyImage(device, image, nullptr);
+                image = VK_NULL_HANDLE;
+            }
+        }
+
+        void destroyMemory() noexcept {
+            if (memory != VK_NULL_HANDLE) {
+                Layer::ovkFreeMemory(device, memory, nullptr);
+                memory = VK_NULL_HANDLE;
+            }
+        }
+
+        ~VulkanImageHandlesGuard() {
+            destroyImage();
+            destroyMemory();
+        }
+    };
+
+    struct VulkanImageOwners {
+        VulkanImageHandlesGuard handles;
+        std::shared_ptr<VkImage> image;
+        std::shared_ptr<VkDeviceMemory> memory;
+
+        ~VulkanImageOwners() {
+            // Release dependencies before the raw-handle fallback cleanup.
+            handles.destroyImage();
+            image.reset();
+            handles.destroyMemory();
+            memory.reset();
+        }
+    };
+
+#ifdef __ANDROID__
+    struct AhbHandleGuard {
+        AHardwareBuffer* handle{};
+
+        ~AhbHandleGuard() {
+            if (handle != nullptr)
+                AHardwareBuffer_release(handle);
+        }
+
+        void release() noexcept { handle = nullptr; }
+    };
+#endif
+}
+
 #include <memory>
 #include <cstdint>
 #include <optional>
 #include <iostream>
+#include <utility>
 
 using namespace Mini;
 
@@ -43,6 +98,9 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     };
     VkImage imageHandle{};
     auto res = Layer::ovkCreateImage(device, &desc, nullptr, &imageHandle);
+    VulkanImageOwners owners;
+    owners.handles.device = device;
+    owners.handles.image = imageHandle;
     if (res != VK_SUCCESS || imageHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create Vulkan image");
 
@@ -85,6 +143,7 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     };
     VkDeviceMemory memoryHandle{};
     res = Layer::ovkAllocateMemory(device, &allocInfo, nullptr, &memoryHandle);
+    owners.handles.memory = memoryHandle;
     if (res != VK_SUCCESS || memoryHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to allocate memory for Vulkan image");
 
@@ -92,7 +151,30 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Failed to bind memory to Vulkan image");
 
-    // obtain the sharing fd
+    owners.image = std::shared_ptr<VkImage>(
+        new VkImage(imageHandle),
+        [dev = device](VkImage* img) {
+            if (img != nullptr) {
+                Layer::ovkDestroyImage(dev, *img, nullptr);
+                delete img;
+            }
+        }
+    );
+    owners.handles.image = VK_NULL_HANDLE;
+    owners.memory = std::shared_ptr<VkDeviceMemory>(
+        new VkDeviceMemory(memoryHandle),
+        [dev = device](VkDeviceMemory* mem) {
+            if (mem != nullptr) {
+                Layer::ovkFreeMemory(dev, *mem, nullptr);
+                delete mem;
+            }
+        }
+    );
+    owners.handles.memory = VK_NULL_HANDLE;
+
+    // Export only after the owners are ready. If export or a later operation
+    // fails, the local owners still release the bound image before memory and
+    // no unowned FD is stranded by a constructor exception.
     const VkMemoryGetFdInfoKHR fdInfo{
         .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
         .memory = memoryHandle,
@@ -102,19 +184,8 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     if (res != VK_SUCCESS || *fd < 0)
         throw LSFG::vulkan_error(res, "Failed to obtain sharing fd for Vulkan image");
 
-    // store objects in shared ptr
-    this->image = std::shared_ptr<VkImage>(
-        new VkImage(imageHandle),
-        [dev = device](VkImage* img) {
-            Layer::ovkDestroyImage(dev, *img, nullptr);
-        }
-    );
-    this->memory = std::shared_ptr<VkDeviceMemory>(
-        new VkDeviceMemory(memoryHandle),
-        [dev = device](VkDeviceMemory* mem) {
-            Layer::ovkFreeMemory(dev, *mem, nullptr);
-        }
-    );
+    this->image = std::move(owners.image);
+    this->memory = std::move(owners.memory);
 }
 
 #ifdef __ANDROID__
@@ -157,10 +228,24 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
                   << " format=" << ahbFormat
                   << " usage=" << ahbDesc.usage
                   << " extent=" << extent.width << 'x' << extent.height << "\n";
+        if (ahbHandle != nullptr)
+            AHardwareBuffer_release(ahbHandle);
         throw LSFG::vulkan_error(VK_ERROR_OUT_OF_DEVICE_MEMORY,
             "Failed to allocate AHardwareBuffer for image");
     }
+    AhbHandleGuard ahbGuard{ahbHandle};
+    // Transfer the native reference to the member before any Vulkan
+    // allocation can fail. Member declaration order then keeps the AHB alive
+    // until the imported Vulkan handles have been destroyed on every path.
+    this->ahbRef = std::shared_ptr<AHardwareBuffer>(
+        ahbHandle,
+        [](AHardwareBuffer* b) {
+            if (b != nullptr)
+                AHardwareBuffer_release(b);
+        }
+    );
     this->ahb = ahbHandle;
+    ahbGuard.release();
 
     // A stock Android ICD exposes the AHB properties query when the extension
     // is enabled. Query it before importing so allocationSize and memoryTypeBits
@@ -211,6 +296,9 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     };
     VkImage imageHandle{};
     res = Layer::ovkCreateImage(device, &desc, nullptr, &imageHandle);
+    VulkanImageOwners owners;
+    owners.handles.device = device;
+    owners.handles.image = imageHandle;
     if (res != VK_SUCCESS || imageHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create Vulkan image from AHB");
 
@@ -272,6 +360,7 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     };
     VkDeviceMemory memoryHandle{};
     res = Layer::ovkAllocateMemory(device, &allocInfo, nullptr, &memoryHandle);
+    owners.handles.memory = memoryHandle;
     if (res != VK_SUCCESS || memoryHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to import AHB into Vulkan memory");
 
@@ -279,24 +368,29 @@ Image::Image(VkDevice device, VkPhysicalDevice physicalDevice,
     if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Failed to bind AHB memory to Vulkan image");
 
-    // Store objects with proper cleanup.
-    this->image = std::shared_ptr<VkImage>(
+    // Construct all owners off-object first. If any allocation throws, the
+    // bundle releases image and memory in Vulkan dependency order.
+    owners.image = std::shared_ptr<VkImage>(
         new VkImage(imageHandle),
         [dev = device](VkImage* img) {
-            Layer::ovkDestroyImage(dev, *img, nullptr);
+            if (img != nullptr) {
+                Layer::ovkDestroyImage(dev, *img, nullptr);
+                delete img;
+            }
         }
     );
-    this->memory = std::shared_ptr<VkDeviceMemory>(
+    owners.handles.image = VK_NULL_HANDLE;
+    owners.memory = std::shared_ptr<VkDeviceMemory>(
         new VkDeviceMemory(memoryHandle),
         [dev = device](VkDeviceMemory* mem) {
-            Layer::ovkFreeMemory(dev, *mem, nullptr);
+            if (mem != nullptr) {
+                Layer::ovkFreeMemory(dev, *mem, nullptr);
+                delete mem;
+            }
         }
     );
-    this->ahbRef = std::shared_ptr<AHardwareBuffer>(
-        ahbHandle,
-        [](AHardwareBuffer* b) {
-            if (b) AHardwareBuffer_release(b);
-        }
-    );
+    owners.handles.memory = VK_NULL_HANDLE;
+    this->image = std::move(owners.image);
+    this->memory = std::move(owners.memory);
 }
 #endif

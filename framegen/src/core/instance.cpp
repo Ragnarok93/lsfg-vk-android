@@ -43,5 +43,10 @@ Instance::Instance() {
     volkLoadInstance(instanceHandle);
     this->instance = std::shared_ptr<VkInstance>(
         new VkInstance(instanceHandle),
-        [](VkInstance* instance) { vkDestroyInstance(*instance, nullptr); });
+        [](VkInstance* instance) {
+            if (instance != nullptr) {
+                vkDestroyInstance(*instance, nullptr);
+                delete instance;
+            }
+        });
 }

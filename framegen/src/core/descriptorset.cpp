@@ -37,6 +37,7 @@ DescriptorSet::DescriptorSet(const Core::Device& device,
         new VkDescriptorSet(descriptorSetHandle),
         [dev = device.handle(), pool = pool](VkDescriptorSet* setHandle) {
             vkFreeDescriptorSets(dev, pool.handle(), 1, setHandle);
+            delete setHandle;
         }
     );
 }
@@ -118,15 +119,26 @@ DescriptorSetUpdateBuilder& DescriptorSetUpdateBuilder::add(VkDescriptorType typ
     return *this;
 }
 
+DescriptorSetUpdateBuilder::~DescriptorSetUpdateBuilder() noexcept {
+    this->clearEntries();
+}
+
+void DescriptorSetUpdateBuilder::clearEntries() noexcept {
+    // The Vulkan write structures only borrow these records during the update;
+    // the builder owns them before and after build(). This also covers a
+    // caller that abandons a builder before calling build().
+    for (auto& entry : this->entries) {
+        delete entry.pImageInfo;
+        delete entry.pBufferInfo;
+        entry.pImageInfo = nullptr;
+        entry.pBufferInfo = nullptr;
+    }
+    this->entries.clear();
+}
+
 void DescriptorSetUpdateBuilder::build() {
     vkUpdateDescriptorSets(this->device->handle(),
         static_cast<uint32_t>(this->entries.size()),
         this->entries.data(), 0, nullptr);
-
-    // NOLINTBEGIN
-    for (const auto& entry : this->entries) {
-        delete entry.pImageInfo;
-        delete entry.pBufferInfo;
-    }
-    // NOLINTEND
+    this->clearEntries();
 }

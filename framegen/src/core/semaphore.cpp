@@ -35,6 +35,7 @@ Semaphore::Semaphore(const Core::Device& device, std::optional<uint32_t> initial
         new VkSemaphore(semaphoreHandle),
         [dev = device.handle()](VkSemaphore* semaphoreHandle) {
             vkDestroySemaphore(dev, *semaphoreHandle, nullptr);
+            delete semaphoreHandle;
         }
     );
 }
@@ -60,6 +61,7 @@ Semaphore::Semaphore(const Core::Device& device,
         new VkSemaphore(semaphoreHandle),
         [dev = device.handle()](VkSemaphore* ownedSemaphore) {
             vkDestroySemaphore(dev, *ownedSemaphore, nullptr);
+            delete ownedSemaphore;
         }
     );
 }
@@ -136,6 +138,7 @@ Semaphore::Semaphore(const Core::Device& device, int fd,
         new VkSemaphore(semaphoreHandle),
         [dev = device.handle()](VkSemaphore* ownedSemaphore) {
             vkDestroySemaphore(dev, *ownedSemaphore, nullptr);
+            delete ownedSemaphore;
         }
     );
 }

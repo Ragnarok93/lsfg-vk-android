@@ -125,6 +125,53 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, hooks)
 
+    def test_ahb_imports_and_failure_paths_preserve_native_and_vulkan_lifetimes(self) -> None:
+        core_header = (ROOT / "framegen/include/core/image.hpp").read_text(encoding="utf-8")
+        core_source = (ROOT / "framegen/src/core/image.cpp").read_text(encoding="utf-8")
+        mini_header = (ROOT / "include/mini/image.hpp").read_text(encoding="utf-8")
+        mini_source = (ROOT / "src/mini/image.cpp").read_text(encoding="utf-8")
+        context_header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("AHardwareBuffer_acquire(ahb)", core_source)
+        self.assertIn("std::shared_ptr<AHardwareBuffer> ahbRef", core_header)
+        self.assertIn("VulkanImageHandlesGuard", core_source)
+        self.assertIn("AhbHandleGuard", mini_source)
+        self.assertIn("VulkanImageHandlesGuard", mini_source)
+        self.assertIn("std::shared_ptr<AHardwareBuffer> ahbRef", mini_header)
+        self.assertIn("this->lsfgCtxId.reset()", context)
+        self.assertLess(
+            context_header.index("out_n;"),
+            context_header.index("std::shared_ptr<int32_t> lsfgCtxId"),
+            "The framegen context owner must be declared after imported images so exceptional destruction retires it first",
+        )
+        self.assertGreaterEqual(
+            core_source.count("delete img"),
+            3,
+            "Core Vulkan image holder cells must be freed after their driver objects",
+        )
+        self.assertGreaterEqual(
+            mini_source.count("delete img"),
+            2,
+            "Game-side Vulkan image holder cells must be freed after their driver objects",
+        )
+        self.assertIn("delete id", context)
+
+    def test_hook_state_retirement_is_serialized_and_noexcept_file_checks_fail_open(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "std::mutex hookStateMutex",
+            "std::shared_ptr<SwapchainState>",
+            "std::mutex presentMutex",
+            "retireSwapchainState",
+            "configurationFileChanged",
+            "std::filesystem::exists(configFile, configError)",
+        ):
+            self.assertIn(token, hooks)
+        self.assertIn("while (true)", hooks)
+        self.assertNotIn("const auto& activeConf = Config::activeConf", hooks)
+
     def test_runtime_config_change_is_reparsed_before_swapchain_recreation(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         present = hooks.split("VkResult myvkQueuePresentKHR", 1)[1]
@@ -134,7 +181,7 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
             "A GameNative hot-reload must reparse conf.toml instead of remaining permanently OUT_OF_DATE",
         )
         self.assertIn(
-            "Config::activeConf = Config::getConfig(Utils::getProcessName())",
+            "Config::setActive(Config::getConfig(Utils::getProcessName()))",
             present,
         )
         self.assertIn("stage=config-reloaded", present)

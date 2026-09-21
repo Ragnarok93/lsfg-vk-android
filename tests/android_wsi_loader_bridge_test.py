@@ -199,16 +199,16 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
         self.assertIn("init stage=swapchain-pass-through reason=", hooks)
         self.assertIn("enabled=", hooks)
-        self.assertIn("swapchainToDeviceTable.emplace(*pSwapchain, device)", hooks)
+        self.assertIn("publishSwapchainState(*pSwapchain", hooks)
         self.assertNotIn("if (!conf.enable || conf.multiplier <= 1)", hooks)
         self.assertIn("if (conf.targeted && conf.multiplier <= 1)", hooks)
-        self.assertIn("swapchain.enterSourceOnlyBypass()", hooks)
+        self.assertIn("state->context->enterSourceOnlyBypass()", hooks)
         self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", hooks)
         self.assertIn("void enterSourceOnlyBypass();", header)
         self.assertIn("void LsContext::enterSourceOnlyBypass()", context)
 
         reload_pos = hooks.index("init stage=config-reloaded multiplier=")
-        context_lookup_pos = hooks.index("auto it3 = swapchains.find")
+        context_lookup_pos = hooks.index("if (!state->context)")
         self.assertLess(reload_pos, context_lookup_pos)
 
     def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:

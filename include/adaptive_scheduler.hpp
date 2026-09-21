@@ -14,6 +14,8 @@ struct AdaptiveSchedulerTelemetry {
     std::size_t generatedFrames{};
     bool sourceRateSnapped{false};
     bool costRaised{false};
+    // Compatibility telemetry retained for older log consumers. The unified
+    // target-authoritative scheduler deliberately never sets either flag.
     bool costBackedOff{false};
     bool costProbe{false};
     bool discontinuityReset{false};

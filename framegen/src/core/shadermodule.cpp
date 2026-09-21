@@ -54,12 +54,14 @@ ShaderModule::ShaderModule(const Core::Device& device, const std::vector<uint8_t
         new VkShaderModule(shaderModuleHandle),
         [dev = device.handle()](VkShaderModule* shaderModuleHandle) {
             vkDestroyShaderModule(dev, *shaderModuleHandle, nullptr);
+            delete shaderModuleHandle;
         }
     );
     this->descriptorSetLayout = std::shared_ptr<VkDescriptorSetLayout>(
         new VkDescriptorSetLayout(descriptorSetLayout),
         [dev = device.handle()](VkDescriptorSetLayout* layout) {
             vkDestroyDescriptorSetLayout(dev, *layout, nullptr);
+            delete layout;
         }
     );
 }

@@ -22,6 +22,29 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("std::shared_ptr<VkCommandBuffer>(owner, &owner->handle)", command_buffer)
         self.assertNotIn("new VkCommandBuffer(", command_buffer)
 
+    def test_framegen_wrappers_preserve_dependency_destruction_order(self) -> None:
+        pipeline_header = (ROOT / "framegen/include/core/pipeline.hpp").read_text(
+            encoding="utf-8"
+        )
+        pipeline_source = (ROOT / "framegen/src/core/pipeline.cpp").read_text(
+            encoding="utf-8"
+        )
+        descriptor_header = (ROOT / "framegen/include/core/descriptorset.hpp").read_text(
+            encoding="utf-8"
+        )
+        descriptor_source = (ROOT / "framegen/src/core/descriptorset.cpp").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertLess(
+            pipeline_header.index("std::shared_ptr<VkPipelineLayout> layout"),
+            pipeline_header.index("std::shared_ptr<VkPipeline> pipeline"),
+            "Pipeline must be destroyed before its layout because members are destroyed in reverse declaration order",
+        )
+        self.assertIn("PipelineHandleGuard", pipeline_source)
+        self.assertIn("~DescriptorSetUpdateBuilder() noexcept", descriptor_header)
+        self.assertIn("this->clearEntries()", descriptor_source)
+
     def test_common_submit_path_keeps_stage_masks_off_heap(self) -> None:
         source = (ROOT / "src/mini/commandbuffer.cpp").read_text(encoding="utf-8")
         self.assertIn("std::array<VkPipelineStageFlags, 4> inlineWaitStages", source)
@@ -244,7 +267,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             self.assertIn(token, source)
 
         self.assertNotIn("std::this_thread::sleep_for(delay)", source)
-        self.assertIn("swapchain.lastGeneratedFrameCount()", hooks)
+        self.assertIn("state->context->lastGeneratedFrameCount()", hooks)
         self.assertIn('"adaptive="', hooks)
         self.assertIn('"target_fps="', hooks)
 
@@ -349,10 +372,21 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         fallback = source[catch_start:catch_end]
 
         self.assertIn("ovkDestroySwapchainKHR", fallback)
-        self.assertIn("eraseSwapchainState", fallback)
+        self.assertIn("retireSwapchainState(pCreateInfo->oldSwapchain)", fallback)
         self.assertIn("ovkCreateSwapchainKHR(", fallback)
         self.assertIn("fallbackCreateInfo", fallback)
         self.assertIn("swapchain-fallback-pass-through", fallback)
+
+    def test_context_creation_failure_retires_old_wrapper_before_fallback_returns(self) -> None:
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        catch_start = source.index("const VkSwapchainKHR failedSwapchain")
+        catch_end = source.index("return VK_SUCCESS;", catch_start)
+        fallback = source[catch_start:catch_end]
+        self.assertLess(
+            fallback.index("fallbackRes"),
+            fallback.index("retireSwapchainState(pCreateInfo->oldSwapchain)"),
+        )
+        self.assertIn("retireSwapchainState(failedSwapchain)", fallback)
 
     def test_game_config_keeps_target_resident_while_multiplier_one_is_off(self) -> None:
         """GameNative Off remains a resident layer target; multiplier=1 is pass-through."""
@@ -396,7 +430,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("const size_t runtimeMultiplier = residentCapacityMultiplier(conf)", context)
         self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
         self.assertIn("if (conf.targeted && conf.multiplier <= 1)", hooks)
-        self.assertIn("swapchain.enterSourceOnlyBypass()", hooks)
+        self.assertIn("state->context->enterSourceOnlyBypass()", hooks)
         self.assertIn("const bool generationActive = activeConf.multiplier > 1", hooks)
         self.assertIn('generationActive ? "generating" : "source_only"', hooks)
         self.assertIn("runtime stage=config-reload-soft-toggle", hooks)

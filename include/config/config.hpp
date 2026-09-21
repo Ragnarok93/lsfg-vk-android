@@ -47,8 +47,11 @@ namespace Config {
         std::chrono::time_point<std::chrono::file_clock> timestamp;
     };
 
-    /// Active configuration. Must be set in main.cpp.
-    extern Configuration activeConf;
+    /// Return a thread-safe snapshot of the active configuration.
+    Configuration snapshot();
+
+    /// Publish a new active configuration atomically with respect to readers.
+    void setActive(Configuration configuration);
 
     ///
     /// Read the configuration file while preserving the previous configuration

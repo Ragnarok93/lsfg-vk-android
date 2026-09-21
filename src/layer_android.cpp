@@ -305,7 +305,7 @@ VkResult layer_vkCreateInstance(
         next_vkGetInstanceProcAddr = downstreamGipa;
         next_vkCreateInstance = downstreamCreateInstance;
 
-        if (!Config::activeConf.enable) {
+        if (!Config::snapshot().enable) {
             auto res = next_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
             if (res == VK_SUCCESS)
                 initInstanceFunc(*pInstance, "vkCreateDevice", &next_vkCreateDevice);
@@ -369,7 +369,7 @@ VkResult layer_vkCreateDevice(
                 "No layer device loader data found in pNext chain");
         next_vSetDeviceLoaderData = loaderData->u.pfnSetDeviceLoaderData;
 
-        if (!Config::activeConf.enable) {
+        if (!Config::snapshot().enable) {
             auto res = next_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
             if (res == VK_SUCCESS) registerPassthroughDevice(*pDevice);
             return res;
@@ -478,7 +478,7 @@ PFN_vkVoidFunction layer_vkGetInstanceProcAddr(VkInstance instance, const char* 
     auto it = layerFunctions.find(name);
     if (it != layerFunctions.end()) return it->second;
     it = Hooks::hooks.find(name);
-    if (it != Hooks::hooks.end() && Config::activeConf.enable) {
+    if (it != Hooks::hooks.end() && Config::snapshot().enable) {
         return it->second;
     }
     return next_vkGetInstanceProcAddr(instance, pName);
@@ -495,7 +495,7 @@ PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName)
         tracked && dispatch.GetDeviceProcAddr ? dispatch.GetDeviceProcAddr : next_vkGetDeviceProcAddr;
 
     it = Hooks::hooks.find(name);
-    if (it != Hooks::hooks.end() && Config::activeConf.enable) {
+    if (it != Hooks::hooks.end() && Config::snapshot().enable) {
         // The loader may query GDPA while it is still constructing a logical
         // device's dispatch table, before storeDeviceDispatch() has published
         // our per-device snapshot.  Do not hand it a permanent downstream WSI

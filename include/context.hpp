@@ -167,7 +167,7 @@ public:
     LsContext& operator=(const LsContext&) = delete;
     LsContext(LsContext&&) = default;
     LsContext& operator=(LsContext&&) = default;
-    ~LsContext() = default;
+    ~LsContext();
 private:
 #ifdef __ANDROID__
     void advanceAdaptiveFlowTimingEpoch();
@@ -176,9 +176,11 @@ private:
     std::vector<VkImage> swapchainImages;
     VkExtent2D extent;
 
-    std::shared_ptr<int32_t> lsfgCtxId; // lsfg context id
     Mini::Image frame_0, frame_1; // frames shared with lsfg. write to frame_0 when fc % 2 == 0
     std::vector<Mini::Image> out_n; // output images shared with lsfg, indexed by framegen id
+    // Declared after the imported images so exceptional construction and
+    // normal destruction release the framegen context before those images.
+    std::shared_ptr<int32_t> lsfgCtxId; // lsfg context id
 
     Mini::CommandPool cmdPool;
     uint64_t frameIdx{0};

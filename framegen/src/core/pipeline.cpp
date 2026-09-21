@@ -8,8 +8,26 @@
 #include "common/exception.hpp"
 
 #include <memory>
+#include <utility>
 
 using namespace LSFG::Core;
+
+namespace {
+
+struct PipelineHandleGuard {
+    VkDevice device{VK_NULL_HANDLE};
+    VkPipelineLayout layout{VK_NULL_HANDLE};
+    VkPipeline pipeline{VK_NULL_HANDLE};
+
+    ~PipelineHandleGuard() {
+        if (pipeline != VK_NULL_HANDLE)
+            vkDestroyPipeline(device, pipeline, nullptr);
+        if (layout != VK_NULL_HANDLE)
+            vkDestroyPipelineLayout(device, layout, nullptr);
+    }
+};
+
+} // namespace
 
 Pipeline::Pipeline(const Core::Device& device, const ShaderModule& shader) {
     // create pipeline layout
@@ -23,6 +41,8 @@ Pipeline::Pipeline(const Core::Device& device, const ShaderModule& shader) {
     auto res = vkCreatePipelineLayout(device.handle(), &layoutDesc, nullptr, &layoutHandle);
     if (res != VK_SUCCESS || !layoutHandle)
         throw LSFG::vulkan_error(res, "Failed to create pipeline layout");
+
+    PipelineHandleGuard handles{.device = device.handle(), .layout = layoutHandle};
 
     // create pipeline
     const VkPipelineShaderStageCreateInfo shaderStageInfo{
@@ -41,20 +61,28 @@ Pipeline::Pipeline(const Core::Device& device, const ShaderModule& shader) {
         VK_NULL_HANDLE, 1, &pipelineDesc, nullptr, &pipelineHandle);
     if (res != VK_SUCCESS || !pipelineHandle)
         throw LSFG::vulkan_error(res, "Failed to create compute pipeline");
+    handles.pipeline = pipelineHandle;
 
-    // store layout and pipeline in shared ptr
-    this->layout = std::shared_ptr<VkPipelineLayout>(
+    // Store both handles in shared owners only after all Vulkan construction
+    // succeeded. The stack guard covers allocation failures in the owners.
+    auto layoutOwner = std::shared_ptr<VkPipelineLayout>(
         new VkPipelineLayout(layoutHandle),
         [dev = device.handle()](VkPipelineLayout* layout) {
             vkDestroyPipelineLayout(dev, *layout, nullptr);
+            delete layout;
         }
     );
-    this->pipeline = std::shared_ptr<VkPipeline>(
+    handles.layout = VK_NULL_HANDLE;
+    auto pipelineOwner = std::shared_ptr<VkPipeline>(
         new VkPipeline(pipelineHandle),
         [dev = device.handle()](VkPipeline* pipeline) {
             vkDestroyPipeline(dev, *pipeline, nullptr);
+            delete pipeline;
         }
     );
+    handles.pipeline = VK_NULL_HANDLE;
+    this->layout = std::move(layoutOwner);
+    this->pipeline = std::move(pipelineOwner);
 }
 
 void Pipeline::bind(const CommandBuffer& commandBuffer) const {

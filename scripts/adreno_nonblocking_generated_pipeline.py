@@ -46,10 +46,10 @@ def patch_context_source(path: Path) -> None:
     # slot for the newly arriving source. Desktop keeps the original binding.
     text = replace_once(
         text,
-        "    const auto& conf = Config::activeConf;\n"
+        "    const auto conf = Config::snapshot();\n"
         "    auto& pass = this->passInfos.at(this->frameIdx % 8);\n\n"
         "#ifdef __ANDROID__\n",
-        "    const auto& conf = Config::activeConf;\n\n"
+        "    const auto conf = Config::snapshot();\n\n"
         "#ifdef __ANDROID__\n",
         f"{path}: defer Android pass selection",
     )
