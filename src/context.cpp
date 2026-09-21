@@ -755,6 +755,37 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->asyncFramegenCompletionEnabled_ =
         syncFdHandoffSupported && gameImportSemaphoreFd != nullptr;
 
+    // The S20+/Adreno 650 regression is isolated to the promoted cross-device
+    // history/completion chain: the first history present succeeds, while the
+    // next source cycle dies as it consumes the imported batch-complete SYNC_FD.
+    // Restore the proven Adreno 6xx contract without touching Xclipse: history
+    // cycles use the host-fence handoff and generated work uses the established
+    // bounded host completion wait. Generated source handoff may still use
+    // SYNC_FD, preserving the known-good Adreno overlap path.
+    VkPhysicalDeviceProperties gameDeviceProperties{};
+    Layer::ovkGetPhysicalDeviceProperties(
+        info.physicalDevice, &gameDeviceProperties);
+    const std::string gameDeviceName = gameDeviceProperties.deviceName;
+    constexpr uint32_t kQualcommVendorId = 0x5143U;
+    const bool adreno6xxName =
+        gameDeviceName.find("Adreno (TM) 6") != std::string::npos
+        || gameDeviceName.find("Adreno 6") != std::string::npos;
+    this->adreno6xxCompatibilityMode_ =
+        adreno6xxName
+        && (gameDeviceProperties.vendorID == kQualcommVendorId
+            || backendDiagnostics.driverName == "Turnip");
+    if (this->adreno6xxCompatibilityMode_) {
+        this->asyncFramegenCompletionEnabled_ = false;
+        std::cerr << "lsfg-vk: adreno6xx-sync-compat enabled=1"
+                  << " device=\"" << gameDeviceName << "\""
+                  << " history_handoff=host-fence"
+                  << " generated_handoff="
+                  << (this->asyncAhbHandoffEnabled_
+                        ? handoffTypeName(this->asyncAhbHandoffHandleType_)
+                        : "host-fence")
+                  << " completion=host-wait\n";
+    }
+
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
               << ", mode=" << LSFG::ahbTransportModeName(ahbTransportMode)
               << ", inputCopy=" << (LSFG::ahbInputCopyRequired(ahbTransportMode) ? 1 : 0)
@@ -2249,7 +2280,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // Every enabled cycle submits either interpolation or zero-count history
     // preprocessing. Prefer SYNC_FD for both so the source thread never needs a
     // host wait in the normal path.
-    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;
+    const bool adrenoHistoryCompatibilityCycle =
+        this->adreno6xxCompatibilityMode_ && historyOnly;
+    bool useAsyncHandoff =
+        this->asyncAhbHandoffEnabled_ && !adrenoHistoryCompatibilityCycle;
     bool asyncSubmissionIssued = false;
     bool asyncExportFailed = false;
     int framegenInputSemaphoreFd = -1;
@@ -2367,7 +2401,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // release; the next source copy consumes it before reusing the inputs.
         std::vector<int> noOutSems;
         LSFG::AndroidFrameSyncFds historySync{};
-        bool historyRequiresHostCompletionWait = false;
+        // Adreno 6xx must fully retire zero-count preprocessing before
+        // the next source copy reuses the alternating AHB pair. This is the
+        // known-good contract from the pre-unified S20+ baseline. Other GPUs
+        // retain the current async batch-complete path.
+        bool historyRequiresHostCompletionWait =
+            this->adreno6xxCompatibilityMode_;
         const auto historyAdvanceStart = RuntimeMetrics::Clock::now();
 
         if (this->asyncFramegenCompletionEnabled_ && useAsyncHandoff) {
