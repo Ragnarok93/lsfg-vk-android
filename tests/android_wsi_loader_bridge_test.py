@@ -53,7 +53,7 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
             "queueDispatchTables",
             "commandBufferDispatchTables",
             '"vkGetDeviceQueue"',
-            "storeQueueDispatch(*d, owner)",
+            "storeQueueDispatch(*d, dispatch)",
             "storeDeviceDispatch(*pDevice, dispatch)",
             "loadDeviceDispatch(device, &dispatch)",
             "dispatch.presentationDevice",
