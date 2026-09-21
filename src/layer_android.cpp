@@ -10,6 +10,7 @@
 #include <vulkan/vulkan_core.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <iostream>
@@ -115,6 +116,13 @@ std::unordered_map<VkDevice, DeviceDispatch> deviceDispatchTables;
 std::unordered_map<VkQueue, DeviceDispatch> queueDispatchTables;
 std::unordered_map<VkCommandBuffer, DeviceDispatch> commandBufferDispatchTables;
 std::shared_mutex deviceDispatchMutex;
+PFN_vkGetDeviceQueue knownGoodPrivateGetDeviceQueue{};
+PFN_vkGetDeviceQueue2 knownGoodPrivateGetDeviceQueue2{};
+
+bool recursiveBackendSetupActive() {
+    const char* disabled = std::getenv("DISABLE_LSFG");
+    return disabled != nullptr && std::strcmp(disabled, "1") == 0;
+}
 
 template <typename Handle>
 const void* deviceDispatchKey(Handle handle) {
@@ -140,6 +148,19 @@ bool loadCompatibleConstructionDispatch(VkDevice device, DeviceDispatch* dispatc
     }
     return false;
 }
+bool loadKnownGoodPrivateQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
+    if (!recursiveBackendSetupActive() || device == VK_NULL_HANDLE || dispatch == nullptr)
+        return false;
+    std::shared_lock lock(deviceDispatchMutex);
+    if (knownGoodPrivateGetDeviceQueue == nullptr
+            && knownGoodPrivateGetDeviceQueue2 == nullptr)
+        return false;
+    dispatch->device = device;
+    dispatch->GetDeviceQueue = knownGoodPrivateGetDeviceQueue;
+    dispatch->GetDeviceQueue2 = knownGoodPrivateGetDeviceQueue2;
+    return true;
+}
+
 bool loadDeviceDispatch(VkDevice device, DeviceDispatch* dispatch) {
     if (device == VK_NULL_HANDLE || !dispatch) return false;
     std::shared_lock lock(deviceDispatchMutex);
@@ -174,6 +195,12 @@ void storeDeviceDispatch(VkDevice device, const DeviceDispatch& dispatch) {
     ownedDispatch.device = device;
     std::unique_lock lock(deviceDispatchMutex);
     deviceDispatchTables[device] = ownedDispatch;
+    if (ownedDispatch.presentationDevice) {
+        if (ownedDispatch.GetDeviceQueue)
+            knownGoodPrivateGetDeviceQueue = ownedDispatch.GetDeviceQueue;
+        if (ownedDispatch.GetDeviceQueue2)
+            knownGoodPrivateGetDeviceQueue2 = ownedDispatch.GetDeviceQueue2;
+    }
     // A loader/driver may acquire queues from inside downstream vkCreateDevice,
     // before this full device snapshot can be published.  Promote any exact
     // construction-time queue entries to the completed per-device table now.
@@ -287,6 +314,19 @@ bool loadConstructionQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
                       << " device=" << device
                       << " dispatchKey=" << deviceDispatchKey(device)
                       << " source=compatible-live-device\n";
+        }
+    }
+
+    if (construction.GetDeviceQueue == nullptr
+            && construction.GetDeviceQueue2 == nullptr) {
+        DeviceDispatch privateFallback{};
+        if (loadKnownGoodPrivateQueueDispatch(device, &privateFallback)) {
+            construction.GetDeviceQueue = privateFallback.GetDeviceQueue;
+            construction.GetDeviceQueue2 = privateFallback.GetDeviceQueue2;
+            std::cerr << "lsfg-vk: construction queue bootstrap"
+                      << " device=" << device
+                      << " dispatchKey=" << deviceDispatchKey(device)
+                      << " source=known-good-private-fallback\n";
         }
     }
 
