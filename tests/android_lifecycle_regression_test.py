@@ -50,7 +50,9 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         """A 2x resident context must already own the slots needed by later 3x/4x hot toggles."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         allocation_start = source.index("for (size_t i = 0; i < 8; i++)")
-        allocation_end = source.index("\n    }\n}", allocation_start)
+        allocation_end = source.index(
+            'std::cerr << "lsfg-vk: retirement-policy=', allocation_start
+        )
         allocation = source[allocation_start:allocation_end]
 
         self.assertGreaterEqual(allocation.count("resize(runtimeMultiplier - 1)"), 5)
