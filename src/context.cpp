@@ -797,17 +797,17 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     const auto createCompletionFence = reinterpret_cast<PFN_vkCreateFence>(
         Layer::ovkGetDeviceProcAddr(info.device, "vkCreateFence"));
-    this->completionWaitFences = reinterpret_cast<PFN_vkWaitForFences>(
+    this->completionWaitFences_ = reinterpret_cast<PFN_vkWaitForFences>(
         Layer::ovkGetDeviceProcAddr(info.device, "vkWaitForFences"));
-    this->completionResetFences = reinterpret_cast<PFN_vkResetFences>(
+    this->completionResetFences_ = reinterpret_cast<PFN_vkResetFences>(
         Layer::ovkGetDeviceProcAddr(info.device, "vkResetFences"));
     this->waitQueueIdle_ = reinterpret_cast<PFN_vkQueueWaitIdle>(
         Layer::ovkGetDeviceProcAddr(info.device, "vkQueueWaitIdle"));
     const auto destroyCompletionFence = reinterpret_cast<PFN_vkDestroyFence>(
         Layer::ovkGetDeviceProcAddr(info.device, "vkDestroyFence"));
     if (createCompletionFence == nullptr
-            || this->completionWaitFences == nullptr
-            || this->completionResetFences == nullptr
+            || this->completionWaitFences_ == nullptr
+            || this->completionResetFences_ == nullptr
             || this->waitQueueIdle_ == nullptr
             || destroyCompletionFence == nullptr) {
         throw LSFG::vulkan_error(
@@ -873,12 +873,12 @@ bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
         return !pass.completionFenceFailed;
     if (pass.completionFenceFailed
             || pass.completionFence == nullptr
-            || this->completionWaitFences == nullptr
-            || this->completionResetFences == nullptr)
+            || this->completionWaitFences_ == nullptr
+            || this->completionResetFences_ == nullptr)
         return false;
 
     const VkFence fence = *pass.completionFence;
-    const auto waitResult = this->completionWaitFences(
+    const auto waitResult = this->completionWaitFences_(
         this->device_, 1, &fence, VK_TRUE, 0);
     if (waitResult != VK_SUCCESS) {
         if (waitResult != VK_TIMEOUT && waitResult != VK_NOT_READY) {
@@ -891,7 +891,7 @@ bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
         return false;
     }
 
-    const auto resetResult = this->completionResetFences(
+    const auto resetResult = this->completionResetFences_(
         this->device_, 1, &fence);
     if (resetResult != VK_SUCCESS) {
         pass.completionFenceFailed = true;
