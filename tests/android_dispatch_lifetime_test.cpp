@@ -113,24 +113,18 @@ int main() {
     storeDeviceDispatch(d1, bootstrap);
     {
         DeviceConstructionScope construction(constructionGdpaNoQueue);
-        VkQueue constructionQ3{};
-        Layer::ovkGetDeviceQueue(d3, 0, 0, &constructionQ3);
-        assert(constructionQ3 == q3);
-        assert(Layer::queueOwner(q3) == d3);
-
-        VkQueue mismatched{};
-        Layer::ovkGetDeviceQueue(d4, 0, 0, &mismatched);
-        assert(mismatched == VK_NULL_HANDLE);
+        VkQueue unresolved{};
+        Layer::ovkGetDeviceQueue(d3, 0, 0, &unresolved);
+        assert(unresolved == VK_NULL_HANDLE);
+        assert(Layer::queueOwner(q3) == VK_NULL_HANDLE);
     }
-    // Private framegen re-entry can also reach our queue wrapper without a
-    // DeviceConstructionScope at all (the private instance deliberately bypasses
-    // the game-instance compatibility globals). Same-key bootstrap must still work.
+    // An unknown device outside LSFG's recursive backend setup still fails closed.
     eraseDeviceDispatch(d3);
     {
-        VkQueue privateQ{};
-        Layer::ovkGetDeviceQueue(d3, 0, 0, &privateQ);
-        assert(privateQ == q3);
-        assert(Layer::queueOwner(q3) == d3);
+        VkQueue unknownConstructionQ{};
+        Layer::ovkGetDeviceQueue(d3, 0, 0, &unknownConstructionQ);
+        assert(unknownConstructionQ == VK_NULL_HANDLE);
+        assert(Layer::queueOwner(q3) == VK_NULL_HANDLE);
     }
 
     // The private framegen device can use a different loader dispatch table
