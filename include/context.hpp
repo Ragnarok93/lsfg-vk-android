@@ -277,6 +277,10 @@ private:
     // OPAQUE_FD compatibility, and fall back to the established host fence.
     bool asyncAhbHandoffEnabled_{false};
     bool asyncFramegenCompletionEnabled_{false};
+    // Qualcomm Adreno 6xx + Turnip/wrapper requires the proven source-history
+    // and framegen-completion synchronization contract. Xclipse and other
+    // devices remain on the capability-driven asynchronous path.
+    bool adreno6xxCompatibilityMode_{false};
     VkExternalSemaphoreHandleTypeFlagBits asyncAhbHandoffHandleType_{
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT};
     struct RuntimeMetrics {
