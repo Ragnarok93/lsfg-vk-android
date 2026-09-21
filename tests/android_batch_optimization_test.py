@@ -12,7 +12,7 @@ class AndroidBatchOptimizationTest(unittest.TestCase):
         self.assertTrue(transform.exists(), "missing Android private-runtime residency transform")
         text = transform.read_text(encoding="utf-8")
         for marker in (
-            "framegen runtime retained after last Android context",
+            "Android swapchain/context churn must not unload the private Vulkan runtime",
             "#ifndef __ANDROID__",
             "resetRuntime();",
             "explicit finalize() path",
