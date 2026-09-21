@@ -261,9 +261,8 @@ bool loadConstructionQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
     // Prefer the exact construction-thread GDPA when this call is nested in
     // layer_vkCreateDevice. Private LSFG backend devices can also re-enter the
     // queue wrapper without that scope because their private instance bypasses
-    // the game-instance hook. In either case, fall back only to a live device
-    // with the same loader dispatch key, matching the known-good S20+ behavior
-    // without restoring unrestricted cross-device dispatch.
+    // the game-instance hook. Only that recursive backend-setup window may use
+    // the cached known-good queue getter; ordinary unknown devices fail closed.
     if (next_vkGetDeviceProcAddr) {
         construction.GetDeviceProcAddr = next_vkGetDeviceProcAddr;
         construction.GetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
