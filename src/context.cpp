@@ -2289,10 +2289,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowAsyncHandoffs++;
             metrics.totalAsyncHandoffs++;
         } catch (const std::exception& e) {
-            // The copy was already submitted without a reusable fence. Do not
-            // dispatch framegen unsynchronized and do not block the source
-            // thread. Present the real frame from the source-copy signal and
-            // require one history warmup before generation resumes.
+            // The source copy is already protected by its pass-retirement
+            // fence, but framegen cannot consume it without an exported handoff.
+            // Do not dispatch framegen unsynchronized or block the source thread;
+            // present the real frame and require one history warmup before resuming.
             this->asyncAhbHandoffEnabled_ = false;
             useAsyncHandoff = false;
             asyncExportFailed = true;
