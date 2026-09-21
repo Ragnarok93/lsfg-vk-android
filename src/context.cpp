@@ -1048,7 +1048,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         safeGenerationHint,
         safeGenerationHintValid);
 
-    const size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
+    size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
         : requestedFixedGeneratedFrameCount;
     size_t generatedFrameCount = plannedGeneratedFrameCount;
@@ -1063,19 +1063,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         conf.adaptiveFramegen && adaptiveTelemetry.discontinuityReset;
 
     if (sourceTimelineDiscontinuity) {
-        this->advanceAdaptiveFlowTimingEpoch();
-        this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
-        this->requiresSourceHistoryWarmup_ = true;
-        this->deadlineAdmissionPredictor_.reset();
-        this->generatedPresentationCapacityTracker_.reset();
-        this->lsfgOutputCadenceTracker_.reset();
+        // The scheduler already consumed this discontinuity and cleared its
+        // own cadence state. Reset every dependent controller without
+        // overwriting the scheduler telemetry used for this cycle's logs.
+        this->resetAdaptiveSourceEpoch(false);
         this->lsfgOutputCadenceTracker_.configure(
             conf.adaptiveFramegen && conf.fpsLimit > 0,
             conf.adaptiveFramegen ? conf.fpsLimit : 0);
-        this->lastDispatchedGeneratedFrameCount_ = 0;
-        this->sourceTimeline_.reset();
-        this->currentSourceTimeline_ = {};
-        this->adaptivePresentPeriodNs_ = 0;
     } else {
         const bool hadValidSourceTimeline = this->currentSourceTimeline_.valid;
         this->currentSourceTimeline_ = this->sourceTimeline_.observe(
@@ -1083,11 +1077,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (hadValidSourceTimeline
                 && !this->currentSourceTimeline_.valid
                 && sourceInterval.count() > 0) {
-            this->advanceAdaptiveFlowTimingEpoch();
-            this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
-            this->requiresSourceHistoryWarmup_ = true;
-            this->deadlineAdmissionPredictor_.reset();
-            this->lastDispatchedGeneratedFrameCount_ = 0;
+            // SourceProtectedTimeline can reject an interval independently of
+            // the scheduler. Consume the source interval and force a clean
+            // epoch rather than letting stale demand/capacity state leak
+            // across a suspend or translation-layer discontinuity.
+            this->resetAdaptiveSourceEpoch(true);
+            this->lsfgOutputCadenceTracker_.configure(
+                conf.adaptiveFramegen && conf.fpsLimit > 0,
+                conf.adaptiveFramegen ? conf.fpsLimit : 0);
+            plannedGeneratedFrameCount = 0;
+            generatedFrameCount = 0;
+            interpolationGenerationCount = 0;
         }
         if (this->currentSourceTimeline_.valid) {
             if (this->currentSourceTimeline_.sourceIndex > 0) {
@@ -2956,6 +2956,47 @@ void LsContext::advanceAdaptiveFlowTimingEpoch() {
     this->adaptiveFlowTotalLsfgMs_ = 0.0;
     this->adaptiveFlowBudgetMs_ = 0.0;
     this->adaptiveFlowGenerationCount_ = 0;
+}
+
+void LsContext::resetAdaptiveSourceEpoch(bool resetScheduler) {
+    if (resetScheduler)
+        this->adaptiveScheduler_.reset();
+    this->advanceAdaptiveFlowTimingEpoch();
+    this->deadlineAdmissionPredictor_.reset();
+    this->generatedPresentationCapacityTracker_.reset();
+    this->lsfgOutputCadenceTracker_.reset();
+    this->deadlineBatchDecision_ = {};
+    this->sourceTimeline_.reset();
+    this->currentSourceTimeline_ = {};
+    this->adaptivePresentPeriodNs_ = 0;
+
+    this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
+    this->requiresSourceHistoryWarmup_ = true;
+    this->lastGeneratedFrameCount_ = 0;
+    this->lastDispatchedGeneratedFrameCount_ = 0;
+
+    this->adaptiveFlowController_.reset();
+    this->adaptiveFlowNextPressureRead_ = {};
+    this->adaptiveFlowGlobalPressureValid_ = false;
+    this->adaptiveFlowGlobalGpuUsagePercent_ = 0.0;
+    this->adaptiveFlowGlobalOutputFps_ = 0.0;
+    this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
+    this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
+    this->adaptiveFlowLastObservedComputeDrops_ =
+        this->runtimeMetrics.totalAdmissionRejects
+        + this->runtimeMetrics.totalGeneratedDeadlineDrops;
+    this->adaptiveFlowLastObservedWsiDrops_ =
+        this->runtimeMetrics.totalGeneratedWsiDrops;
+    this->adaptiveFlowComputePressure_ = false;
+    this->adaptiveFlowWsiPressure_ = false;
+    this->adaptiveFlowRequestedScale_ =
+        this->adaptiveFlowController_.currentScale();
+    this->adaptiveFlowActiveScale_ =
+        this->adaptiveFlowController_.currentScale();
+    this->adaptiveFlowWarmupRemaining_ = 0;
+    this->adaptiveFlowTransitionPending_ = false;
+    this->adaptiveFlowReason_ =
+        this->adaptiveFlowController_.telemetry().reason;
 }
 
 void LsContext::enterSourceOnlyBypass() {

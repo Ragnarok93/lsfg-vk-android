@@ -11,7 +11,6 @@ constexpr double kCadenceTargetMaxRatio = 1.30;
 constexpr double kOpportunityIntervalMaxRatio = 1.50;
 constexpr unsigned kCapacityRaiseSamplesRequired = 4;
 constexpr std::size_t kCapacityCadenceWindow = 4;
-constexpr unsigned kRaiseBackoffSamplesRequired = 3;
 constexpr double kCapacityCadenceDeviationRatio = 0.20;
 // Treat a single interval as a suspend/stall discontinuity only when it is an
 // extreme outlier relative to an already-established source cadence. An
@@ -36,11 +35,15 @@ SourceTimelineSample SourceProtectedTimeline::observe(
         return sample;
 
     const uint64_t intervalNs = static_cast<uint64_t>(intervalCount);
+    const uint64_t discontinuityThreshold =
+        lastIntervalNs_ > std::numeric_limits<uint64_t>::max()
+            / kSourceTimelineDiscontinuityRatio
+            ? std::numeric_limits<uint64_t>::max()
+            : lastIntervalNs_ * kSourceTimelineDiscontinuityRatio;
     if (discontinuity
             || (initialized_
                 && lastIntervalNs_ > 0
-                && intervalNs
-                    > lastIntervalNs_ * kSourceTimelineDiscontinuityRatio)) {
+                && intervalNs > discontinuityThreshold)) {
         reset();
         return sample;
     }

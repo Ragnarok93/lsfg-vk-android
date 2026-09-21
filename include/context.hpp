@@ -171,6 +171,7 @@ public:
 private:
 #ifdef __ANDROID__
     void advanceAdaptiveFlowTimingEpoch();
+    void resetAdaptiveSourceEpoch(bool resetScheduler);
 #endif
     VkSwapchainKHR swapchain;
     std::vector<VkImage> swapchainImages;
