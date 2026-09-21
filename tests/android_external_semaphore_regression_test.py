@@ -87,11 +87,21 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
     def test_batch_completion_is_consumed_by_next_source_copy(self) -> None:
         wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        producer = wrapper.index("pass.framegenBatchCompleteSemaphore = Mini::Semaphore")
-        consumer = wrapper.index("previousPass->framegenBatchCompleteSemaphore.handle()")
-        clear = wrapper.index("previousPass->framegenBatchCompleteValid = false", consumer)
+        consumer = wrapper.index("lastBatchCompleteDependency_.semaphore.handle()")
+        clear = wrapper.index("lastBatchCompleteDependency_.valid = false", consumer)
+        producer = wrapper.index(
+            "pass.framegenBatchCompleteSemaphore = Mini::Semaphore(", consumer)
         self.assertLess(consumer, producer)
         self.assertLess(consumer, clear)
+        self.assertLess(clear, producer)
+        self.assertIn("recordBatchCompleteDependency", wrapper)
+
+    def test_source_only_bypass_preserves_external_completion_ownership(self) -> None:
+        wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        bypass = wrapper[wrapper.index("void LsContext::enterSourceOnlyBypass"):]
+        self.assertIn("Preserve the last actual producer tokens", bypass)
+        self.assertNotIn("lastSourceCopyDependency_ = {}", bypass)
+        self.assertNotIn("lastBatchCompleteDependency_ = {}", bypass)
 
     def test_direct_input_ahbs_are_released_before_batch_complete_signal(self) -> None:
         for relative in (
@@ -116,7 +126,7 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
     def test_async_input_export_failure_keeps_source_retirement_fenced_without_host_wait(self) -> None:
         wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         async_submit = wrapper.index(
-            "submitAhbHandoff(info.device, pass.preCopyBuf, info.queue.second"
+            "submitAhbHandoff(pass.preCopyBuf, info.queue.second"
         )
         export_fd = wrapper.index("framegenInputSemaphore.exportFd", async_submit)
         fail_open = wrapper.index("pre-copy-syncfd-fail-open", export_fd)
@@ -125,10 +135,19 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         # The real source-copy submission carries the pass-retirement fence.
         # A failed SYNC_FD export must not fall back to the old host-fence path
         # or inject another queue submission just to retire the source copy.
-        self.assertIn("sourceRetirementFence, nullptr", submit_slice)
+        self.assertIn("sourceRetirementFence);", submit_slice)
+        self.assertNotIn("sourceRetirementFence, nullptr", submit_slice)
         self.assertNotIn("ahbHandoffFence", submit_slice)
         self.assertNotIn("waitForAhbHandoff(", wrapper[export_fd:fail_open])
         self.assertIn("requiresSourceHistoryWarmup_ = true", wrapper[export_fd:fail_open])
+
+        sync_submit = wrapper.index(
+            "submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second"
+        )
+        sync_metrics = wrapper.index("metrics.windowSyncHandoffs++", sync_submit)
+        sync_slice = wrapper[sync_submit:sync_metrics]
+        self.assertIn("sourceRetirementFence,\n            this->waitHandoffFences", sync_slice)
+        self.assertNotIn("sourceRetirementFence, nullptr", sync_slice)
 
     def test_submit_hot_path_preserves_batch_complete_signal(self) -> None:
         transform = (ROOT / "scripts/apply-android-submit-hot-path.py").read_text(
