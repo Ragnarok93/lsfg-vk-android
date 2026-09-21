@@ -113,15 +113,20 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             self.assertIn("this->inImg_0", source[final_release:batch_signal])
             self.assertIn("this->inImg_1", source[final_release:batch_signal])
 
-    def test_async_input_export_failure_fails_open_without_reusing_host_fence(self) -> None:
+    def test_async_input_export_failure_keeps_source_retirement_fenced_without_host_wait(self) -> None:
         wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         async_submit = wrapper.index(
             "submitAhbHandoff(info.device, pass.preCopyBuf, info.queue.second"
         )
         export_fd = wrapper.index("framegenInputSemaphore.exportFd", async_submit)
         fail_open = wrapper.index("pre-copy-syncfd-fail-open", export_fd)
+        submit_slice = wrapper[async_submit:export_fd]
 
-        self.assertIn("VK_NULL_HANDLE, nullptr", wrapper[async_submit:export_fd])
+        # The real source-copy submission carries the pass-retirement fence.
+        # A failed SYNC_FD export must not fall back to the old host-fence path
+        # or inject another queue submission just to retire the source copy.
+        self.assertIn("sourceRetirementFence, nullptr", submit_slice)
+        self.assertNotIn("ahbHandoffFence", submit_slice)
         self.assertNotIn("waitForAhbHandoff(", wrapper[export_fd:fail_open])
         self.assertIn("requiresSourceHistoryWarmup_ = true", wrapper[export_fd:fail_open])
 
