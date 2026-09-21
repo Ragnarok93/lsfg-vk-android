@@ -757,14 +757,16 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         && (gameDeviceProperties.vendorID == kQualcommVendorId
             || backendDiagnostics.driverName == "Turnip");
     if (this->adreno6xxCompatibilityMode_) {
+        // Restore the complete synchronization contract of the last
+        // device-proven S20+ baseline. The Adreno 6xx path does not export
+        // game-device source-copy semaphores across VkDevices and does not
+        // import framegen completion semaphores. This deliberately keeps the
+        // compatibility boundary narrow: only Adreno 6xx changes policy.
+        this->asyncAhbHandoffEnabled_ = false;
         this->asyncFramegenCompletionEnabled_ = false;
         std::cerr << "lsfg-vk: adreno6xx-sync-compat enabled=1"
                   << " device=\"" << gameDeviceName << "\""
-                  << " history_handoff=host-fence"
-                  << " generated_handoff="
-                  << (this->asyncAhbHandoffEnabled_
-                        ? handoffTypeName(this->asyncAhbHandoffHandleType_)
-                        : "host-fence")
+                  << " source_handoff=host-fence"
                   << " completion=host-wait\n";
     }
 
