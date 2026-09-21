@@ -42,8 +42,8 @@ class AndroidAdreno6xxCompatibilityContractTest(unittest.TestCase):
         )
         history = self.source[history_start:history_end]
         self.assertIn(
-            "bool historyRequiresHostCompletionWait = "
-            "this->adreno6xxCompatibilityMode_;",
+            "bool historyRequiresHostCompletionWait =\n"
+            "            this->adreno6xxCompatibilityMode_;",
             history,
         )
         self.assertIn("waitContext", history)
