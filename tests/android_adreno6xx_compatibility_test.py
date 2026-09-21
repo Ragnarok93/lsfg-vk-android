@@ -15,12 +15,17 @@ class AndroidAdreno6xxCompatibilityContractTest(unittest.TestCase):
         self.assertIn("0x5143", self.source)
         self.assertIn('Adreno (TM) 6', self.source)
 
-    def test_adreno6xx_does_not_use_async_completion_chain(self) -> None:
-        self.assertIn(
-            "this->asyncFramegenCompletionEnabled_ = false;",
-            self.source,
+    def test_adreno6xx_restores_proven_host_sync_contract(self) -> None:
+        gate_start = self.source.index("if (this->adreno6xxCompatibilityMode_)")
+        gate_end = self.source.index(
+            'std::cerr << "lsfg-vk: Android AHB context created', gate_start
         )
-        self.assertIn("adreno6xx-sync-compat", self.source)
+        gate = self.source[gate_start:gate_end]
+        self.assertIn("this->asyncAhbHandoffEnabled_ = false;", gate)
+        self.assertIn("this->asyncFramegenCompletionEnabled_ = false;", gate)
+        self.assertIn("source_handoff=host-fence", gate)
+        self.assertIn("completion=host-wait", gate)
+        self.assertIn("adreno6xx-sync-compat", gate)
 
     def test_adreno6xx_history_cycles_use_host_handoff(self) -> None:
         self.assertIn("adrenoHistoryCompatibilityCycle", self.source)
