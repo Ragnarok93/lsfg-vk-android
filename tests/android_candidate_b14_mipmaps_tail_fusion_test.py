@@ -289,6 +289,77 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
         self.assertIn('B14_SCRIPT="${REPO_ROOT}/scripts/apply-candidate-b14-mipmaps-tail-fusion.py"', build)
         self.assertIn("check-mipmaps-device-agnostic.py", build)
 
+    def test_rewriter_accepts_unified_scoped_disable_initializer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context = root / "src/context.cpp"
+            context.parent.mkdir(parents=True)
+            context.write_text(
+                '''    {
+        ScopedLsfgDisable disableRecursiveInterception;
+        lsfgInitialize(
+            info.identity, format,
+            conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
+            [](const std::string& name) {
+                auto dxbc = Extract::getShader(name);
+                auto spirv = Extract::translateShader(dxbc, name);
+                return spirv;
+            }
+        );
+    }
+
+    {
+        ScopedLsfgDisable disableRecursiveInterception;
+        lsfgInitialize(
+            info.identity, format,
+            conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
+            [](const std::string& name) {
+                auto dxbc = Extract::getShader(name);
+                auto spirv = Extract::translateShader(dxbc);
+                return spirv;
+            }
+        );
+    }
+''',
+                encoding="utf-8",
+            )
+            translation = root / "src/extract/trans.cpp"
+            translation.parent.mkdir(parents=True, exist_ok=True)
+            translation.write_text(
+                '''#include "extract/trans.hpp"
+#include <vector>
+#include <string>
+std::vector<uint8_t> Extract::translateShader(
+        std::vector<uint8_t> bytecode, const std::string& shaderName) {
+    auto spirvBytecode = bytecode;
+    return spirvBytecode;
+}
+''',
+                encoding="utf-8",
+            )
+            for _ in range(2):
+                subprocess.run(
+                    [sys.executable, str(PATCHER), "--root", str(root)],
+                    check=True,
+                )
+            transformed = context.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            transformed.count(
+                "const bool enableCooperativeMipmaps =\n"
+                "            info.mipmapsSubgroupBroadcastSupported;"
+            ),
+            1,
+        )
+        self.assertIn(
+            "[enableCooperativeMipmaps](const std::string& name)", transformed
+        )
+        self.assertIn(
+            "Extract::translateShader(dxbc);",
+            transformed,
+            "desktop callback must remain on the default capability gate",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

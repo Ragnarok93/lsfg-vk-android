@@ -195,40 +195,109 @@ def patch_translation_header(path: Path) -> None:
 
 def patch_android_context(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-    if "enableCooperativeMipmaps = info.mipmapsSubgroupBroadcastSupported" in text:
+    if (
+        "enableCooperativeMipmaps" in text
+        and "mipmapsSubgroupBroadcastSupported" in text
+    ):
         return
 
-    old_init = '''    setenv("DISABLE_LSFG", "1", 1); // NOLINT
+    # The unified branch owns recursive-interception cleanup with
+    # ScopedLsfgDisable. Older candidate snapshots used a raw setenv here.
+    # Match the Android-specific multiplier expression so this patch cannot
+    # accidentally alter the desktop loader's shader callback.
+    old_inits = (
+        (
+            '''    setenv("DISABLE_LSFG", "1", 1); // NOLINT
     lsfgInitialize(
         info.identity, format,
-'''
-    new_init = '''    setenv("DISABLE_LSFG", "1", 1); // NOLINT
+        conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
+''',
+            '''    setenv("DISABLE_LSFG", "1", 1); // NOLINT
     const bool enableCooperativeMipmaps =
         info.mipmapsSubgroupBroadcastSupported;
     lsfgInitialize(
         info.identity, format,
-'''
-    text = replace_exact(
-        text, old_init, new_init, count=1, label=f"{path}: Android B14 capability capture"
+        conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
+''',
+        ),
+        (
+            '''    {
+        ScopedLsfgDisable disableRecursiveInterception;
+        lsfgInitialize(
+            info.identity, format,
+            conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
+''',
+            '''    {
+        ScopedLsfgDisable disableRecursiveInterception;
+        const bool enableCooperativeMipmaps =
+            info.mipmapsSubgroupBroadcastSupported;
+        lsfgInitialize(
+            info.identity, format,
+            conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
+''',
+        ),
     )
+    for old_init, new_init in old_inits:
+        if old_init in text:
+            text = replace_exact(
+                text,
+                old_init,
+                new_init,
+                count=1,
+                label=f"{path}: Android B14 capability capture",
+            )
+            break
+    else:
+        raise RuntimeError(
+            f"{path}: Android B14 capability capture: unsupported LSFG initializer layout"
+        )
 
-    old_callback = '''        [](const std::string& name) {
+    old_callbacks = (
+        (
+            '''        [](const std::string& name) {
             auto dxbc = Extract::getShader(name);
             auto spirv = Extract::translateShader(dxbc, name);
             return spirv;
         }
-'''
-    new_callback = '''        [enableCooperativeMipmaps](const std::string& name) {
+''',
+            '''        [enableCooperativeMipmaps](const std::string& name) {
             auto dxbc = Extract::getShader(name);
             auto spirv = Extract::translateShader(
                 dxbc, name, enableCooperativeMipmaps);
             return spirv;
         }
-'''
-    text = replace_exact(
-        text, old_callback, new_callback, count=1,
-        label=f"{path}: B14 capability-aware Android shader callback",
+''',
+        ),
+        (
+            '''            [](const std::string& name) {
+                auto dxbc = Extract::getShader(name);
+                auto spirv = Extract::translateShader(dxbc, name);
+                return spirv;
+            }
+''',
+            '''            [enableCooperativeMipmaps](const std::string& name) {
+                auto dxbc = Extract::getShader(name);
+                auto spirv = Extract::translateShader(
+                    dxbc, name, enableCooperativeMipmaps);
+                return spirv;
+            }
+''',
+        ),
     )
+    for old_callback, new_callback in old_callbacks:
+        if old_callback in text:
+            text = replace_exact(
+                text,
+                old_callback,
+                new_callback,
+                count=1,
+                label=f"{path}: B14 capability-aware Android shader callback",
+            )
+            break
+    else:
+        raise RuntimeError(
+            f"{path}: B14 capability-aware Android shader callback: unsupported layout"
+        )
     path.write_text(text, encoding="utf-8")
 
 
