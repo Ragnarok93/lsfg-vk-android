@@ -81,11 +81,14 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
 
         self.assertIn("completionFence", header)
         self.assertIn("completionFenceSubmitted", header)
+        self.assertIn("postCopyCompletionFences", header)
+        self.assertIn("postCopyCompletionFenceSubmitted", header)
         self.assertIn("tryRecyclePass", source)
-        self.assertIn("submitPassCompletionFence", source)
         self.assertIn("VK_TRUE, 0", source)
-        self.assertIn("commandBufferCount = 0", source)
+        self.assertIn("postCopyCompletionFenceSubmitted.at(i) = true", source)
         self.assertIn("completionFenceSubmitted = true", source)
+        self.assertNotIn("submitPassCompletionFence", source)
+        self.assertNotIn("commandBufferCount = 0", source)
 
     def test_context_teardown_waits_the_game_queue_before_freeing_resources(self) -> None:
         """Regression: swapchain retirement must not free pass handles under GPU use."""

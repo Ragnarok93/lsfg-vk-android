@@ -474,18 +474,15 @@ void submitAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuffer,
         VkQueue queue, const std::vector<VkSemaphore>& waitSemaphores,
         const std::vector<VkSemaphore>& signalSemaphores,
         VkFence fence, PFN_vkResetFences resetFences) {
-    if (fence == VK_NULL_HANDLE) {
-        commandBuffer.submit(queue, waitSemaphores, signalSemaphores);
-        return;
+    // A non-null reset callback is used by the synchronous compatibility
+    // fallback. Async pass-retirement fences have already been reset by
+    // tryRecyclePass before they are attached to this real submission.
+    if (fence != VK_NULL_HANDLE && resetFences != nullptr) {
+        const auto resetRes = resetFences(device, 1, &fence);
+        if (resetRes != VK_SUCCESS)
+            throw LSFG::vulkan_error(resetRes,
+                "Failed resetting Android AHB handoff fence");
     }
-    if (resetFences == nullptr)
-        throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
-            "Android AHB handoff fence reset is unavailable");
-
-    const auto resetRes = resetFences(device, 1, &fence);
-    if (resetRes != VK_SUCCESS)
-        throw LSFG::vulkan_error(resetRes,
-            "Failed resetting Android AHB handoff fence");
 
     commandBuffer.submit(queue, waitSemaphores, signalSemaphores, fence);
 }
@@ -851,28 +848,36 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         pass.postCopyBufs.resize(runtimeMultiplier - 1);
         pass.postCopySemaphores.resize(runtimeMultiplier - 1);
         pass.prevPostCopySemaphores.resize(runtimeMultiplier - 1);
+        pass.postCopyCompletionFences.resize(runtimeMultiplier - 1);
+        pass.postCopyCompletionFenceSubmitted.assign(runtimeMultiplier - 1, false);
 
         const VkFenceCreateInfo fenceInfo{
             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
             .flags = 0,
         };
-        VkFence fence = VK_NULL_HANDLE;
-        const auto fenceResult = createCompletionFence(
-            info.device, &fenceInfo, nullptr, &fence);
-        if (fenceResult != VK_SUCCESS || fence == VK_NULL_HANDLE) {
-            throw LSFG::vulkan_error(
-                fenceResult == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : fenceResult,
-                "Failed to create pass-retirement fence");
-        }
-        pass.completionFence = std::shared_ptr<VkFence>(
-            new VkFence(fence),
-            [device = info.device, destroyCompletionFence](VkFence* ownedFence) {
-                if (ownedFence != nullptr) {
-                    if (*ownedFence != VK_NULL_HANDLE)
-                        destroyCompletionFence(device, *ownedFence, nullptr);
-                    delete ownedFence;
-                }
-            });
+        const auto createOwnedCompletionFence = [&]() {
+            VkFence fence = VK_NULL_HANDLE;
+            const auto fenceResult = createCompletionFence(
+                info.device, &fenceInfo, nullptr, &fence);
+            if (fenceResult != VK_SUCCESS || fence == VK_NULL_HANDLE) {
+                throw LSFG::vulkan_error(
+                    fenceResult == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : fenceResult,
+                    "Failed to create pass-retirement fence");
+            }
+            return std::shared_ptr<VkFence>(
+                new VkFence(fence),
+                [device = info.device, destroyCompletionFence](VkFence* ownedFence) {
+                    if (ownedFence != nullptr) {
+                        if (*ownedFence != VK_NULL_HANDLE)
+                            destroyCompletionFence(device, *ownedFence, nullptr);
+                        delete ownedFence;
+                    }
+                });
+        };
+
+        pass.completionFence = createOwnedCompletionFence();
+        for (auto& fence : pass.postCopyCompletionFences)
+            fence = createOwnedCompletionFence();
     }
 }
 
@@ -896,79 +901,63 @@ LsContext::~LsContext() {
 }
 
 bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
-    if (!pass.completionFenceSubmitted)
-        return !pass.completionFenceFailed;
-    if (pass.completionFenceFailed
-            || pass.completionFence == nullptr
-            || this->completionWaitFences_ == nullptr
-            || this->completionResetFences_ == nullptr)
+    if (pass.completionFenceFailed)
         return false;
 
-    const VkFence fence = *pass.completionFence;
-    const auto waitResult = this->completionWaitFences_(
-        this->device_, 1, &fence, VK_TRUE, 0);
-    if (waitResult != VK_SUCCESS) {
-        if (waitResult != VK_TIMEOUT && waitResult != VK_NOT_READY) {
+    const auto waitAndResetFence = [&](const std::shared_ptr<VkFence>& owner) -> bool {
+        if (owner == nullptr
+                || this->completionWaitFences_ == nullptr
+                || this->completionResetFences_ == nullptr) {
+            pass.completionFenceFailed = true;
+            return false;
+        }
+
+        const VkFence fence = *owner;
+        const auto waitResult = this->completionWaitFences_(
+            this->device_, 1, &fence, VK_TRUE, 0);
+        if (waitResult != VK_SUCCESS) {
+            if (waitResult != VK_TIMEOUT && waitResult != VK_NOT_READY) {
+                Utils::logLimitN(
+                    "passRetirement",
+                    5,
+                    "Pass completion fence query failed: "
+                        + std::to_string(waitResult));
+            }
+            return false;
+        }
+
+        const auto resetResult = this->completionResetFences_(
+            this->device_, 1, &fence);
+        if (resetResult != VK_SUCCESS) {
+            pass.completionFenceFailed = true;
             Utils::logLimitN(
                 "passRetirement",
                 5,
-                "Pass completion fence query failed: "
-                    + std::to_string(waitResult));
+                "Pass completion fence reset failed: "
+                    + std::to_string(resetResult));
+            return false;
         }
-        return false;
+        return true;
+    };
+
+    if (pass.completionFenceSubmitted) {
+        if (!waitAndResetFence(pass.completionFence))
+            return false;
+        pass.completionFenceSubmitted = false;
     }
 
-    const auto resetResult = this->completionResetFences_(
-        this->device_, 1, &fence);
-    if (resetResult != VK_SUCCESS) {
-        pass.completionFenceFailed = true;
-        Utils::logLimitN(
-            "passRetirement",
-            5,
-            "Pass completion fence reset failed: "
-                + std::to_string(resetResult));
-        return false;
+    for (size_t i = 0; i < pass.postCopyCompletionFenceSubmitted.size(); ++i) {
+        if (!pass.postCopyCompletionFenceSubmitted.at(i))
+            continue;
+        if (!waitAndResetFence(pass.postCopyCompletionFences.at(i)))
+            return false;
+        pass.postCopyCompletionFenceSubmitted.at(i) = false;
     }
 
-    pass.completionFenceSubmitted = false;
 #ifdef __ANDROID__
     pass.framegenBatchCompleteValid = false;
 #endif
     return true;
-}
-
-bool LsContext::submitPassCompletionFence(RenderPassInfo& pass, VkQueue queue) {
-    if (pass.completionFence == nullptr
-            || pass.completionFenceSubmitted
-            || pass.completionFenceFailed)
-        return false;
-
-    // An empty submit is ordered after the copy submits and the queue-present
-    // operation. It retires the slot without a device-wide idle wait.
-    const VkSubmitInfo submitInfo{
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 0,
-    };
-    const auto submitResult = Layer::ovkQueueSubmit(
-        queue, 1, &submitInfo, *pass.completionFence);
-    if (submitResult == VK_SUCCESS) {
-        pass.completionFenceSubmitted = true;
-        return true;
-    }
-
-    // The present already succeeded. Use a teardown-style queue wait only on
-    // this exceptional bookkeeping failure so resources remain safe to reuse.
-    Utils::logLimitN(
-        "passRetirement",
-        5,
-        "Pass completion fence submit failed: "
-            + std::to_string(submitResult));
-    if (this->waitQueueIdle_ != nullptr
-            && this->waitQueueIdle_(queue) == VK_SUCCESS)
-        return true;
-
-    pass.completionFenceFailed = true;
-    return false;
 }
 
 VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
@@ -1813,13 +1802,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceDeadlineSamples = 0;
             metrics.windowSourceTimelineRebases = 0;
         }
-        if (!this->submitPassCompletionFence(pass, queue)) {
-            Utils::logLimitN(
-                "passRetirement",
-                5,
-                "Pass completion fence unavailable; this slot will remain source-only");
-        }
-
         if (!excludeCurrentCycleFromTimingMetrics) {
             metrics.windowCycleMs += cycleMs;
             if (cycleMs > metrics.windowCycleMaxMs)
@@ -2289,9 +2271,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     if (useAsyncHandoff) {
+        const VkFence sourceRetirementFence = pass.completionFence != nullptr
+            ? *pass.completionFence : VK_NULL_HANDLE;
         submitAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
-            VK_NULL_HANDLE, nullptr);
+            sourceRetirementFence, nullptr);
+        pass.completionFenceSubmitted = sourceRetirementFence != VK_NULL_HANDLE;
         asyncSubmissionIssued = true;
         if (consumePreviousBatchComplete && previousPass != nullptr)
             previousPass->framegenBatchCompleteValid = false;
@@ -2767,10 +2752,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         };
         if (outputReadyWaitValid.at(i))
             generatedCopyWaits.emplace_back(pass.renderSemaphores.at(i).handle());
+        const VkFence postCopyRetirementFence =
+            *pass.postCopyCompletionFences.at(i);
         pass.postCopyBufs.at(i).submit(info.queue.second,
             generatedCopyWaits,
             { pass.postCopySemaphores.at(i).handle(),
-              pass.prevPostCopySemaphores.at(i).handle() });
+              pass.prevPostCopySemaphores.at(i).handle() },
+            postCopyRetirementFence);
+        pass.postCopyCompletionFenceSubmitted.at(i) = true;
 
         std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
         if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());
@@ -2882,7 +2871,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     pass.preCopyBuf.submit(info.queue.second,
         gameRenderSemaphores2,
         { pass.preCopySemaphores.at(0).handle(),
-          pass.preCopySemaphores.at(1).handle() });
+          pass.preCopySemaphores.at(1).handle() },
+        *pass.completionFence);
+    pass.completionFenceSubmitted = true;
 
     // 2. render intermediary frames
     std::vector<int> renderSemaphoreFds(conf.multiplier - 1);
@@ -2921,11 +2912,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             false, true);
 
         pass.postCopyBufs.at(i).end();
+        const VkFence postCopyRetirementFence =
+            *pass.postCopyCompletionFences.at(i);
         pass.postCopyBufs.at(i).submit(info.queue.second,
             { pass.acquireSemaphores.at(i).handle(),
               pass.renderSemaphores.at(i).handle() },
             { pass.postCopySemaphores.at(i).handle(),
-              pass.prevPostCopySemaphores.at(i).handle() });
+              pass.prevPostCopySemaphores.at(i).handle() },
+            postCopyRetirementFence);
+        pass.postCopyCompletionFenceSubmitted.at(i) = true;
 
         // 5. present swapchain image
         std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
@@ -2960,7 +2955,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
         throw LSFG::vulkan_error(res, "Failed to present swapchain image");
 
-    this->submitPassCompletionFence(pass, queue);
     this->frameIdx++;
     return res;
 #endif

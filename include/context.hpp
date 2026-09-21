@@ -382,15 +382,21 @@ private:
         std::vector<Mini::Semaphore> postCopySemaphores; // signal when postCopyBuf is done
         std::vector<Mini::Semaphore> prevPostCopySemaphores; // signal for previous postCopyBuf
 
-        // Signaled by an empty submit queued after the final source present.
-        // A slot is never overwritten until this fence is complete.
+        // Attached to the real source-copy submission. Android must not
+        // inject an empty vkQueueSubmit after vkQueuePresentKHR because some
+        // Adreno/Turnip combinations tear down the guest at that boundary.
         std::shared_ptr<VkFence> completionFence;
         bool completionFenceSubmitted{false};
+
+        // Each generated post-copy submission has its own retirement fence.
+        // This preserves pass-ring lifetime protection when several generated
+        // outputs are queued in one source cycle.
+        std::vector<std::shared_ptr<VkFence>> postCopyCompletionFences;
+        std::vector<bool> postCopyCompletionFenceSubmitted;
         bool completionFenceFailed{false};
     }; // data for a single render pass
 
     bool tryRecyclePass(RenderPassInfo& pass);
-    bool submitPassCompletionFence(RenderPassInfo& pass, VkQueue queue);
 
     std::array<RenderPassInfo, 8> passInfos; // allocate 8 because why not
 };
