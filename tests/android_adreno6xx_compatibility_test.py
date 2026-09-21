@@ -55,7 +55,8 @@ class AndroidAdreno6xxCompatibilityContractTest(unittest.TestCase):
             "this->asyncFramegenCompletionEnabled_ =",
             self.source,
         )
-        self.assertNotIn('Xclipse', self.source[self.source.index("adreno6xxCompatibilityMode_"):])
+        self.assertIn("adreno6xxName", self.source)
+        self.assertNotIn("xclipseCompatibilityMode_", self.source)
 
 
 if __name__ == "__main__":
