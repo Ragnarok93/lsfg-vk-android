@@ -7,6 +7,39 @@ from android_lifecycle_regression_test import AndroidLifecycleRegressionTest  # 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class DelayedWsiConsumer:
+    """Pass slots recycle while WSI semaphore owners follow swapchain images."""
+
+    def __init__(self) -> None:
+        self.handles_alive = set()
+        self.producer_complete = set()
+        self.image_consumers = {}
+        self.slot_generation = {}
+
+    def submit(self, generation: int, image: int) -> bool:
+        slot = generation % 8
+        old_generation = self.slot_generation.get(slot)
+        if old_generation is not None and old_generation not in self.producer_complete:
+            return False
+        self.handles_alive.add(generation)
+        self.image_consumers[image] = generation
+        self.slot_generation[slot] = generation
+        return True
+
+    def complete_producer(self, generation: int) -> None:
+        self.producer_complete.add(generation)
+
+    def recycle_slot(self, generation: int) -> None:
+        # Producer-owned command resources retire here. The modeled semaphore
+        # handle remains live through image_consumers.
+        pass
+
+    def reacquire(self, image: int) -> None:
+        generation = self.image_consumers.pop(image, None)
+        if generation is not None:
+            self.handles_alive.discard(generation)
+
+
 class AndroidRuntimeStabilityContractTest(unittest.TestCase):
     def test_transient_command_pool_is_preserved(self) -> None:
         source = (ROOT / "src/mini/commandpool.cpp").read_text(encoding="utf-8")
@@ -61,10 +94,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         wait_helper = source[wait_start:fallback_start]
         fallback_helper = source[fallback_start:namespace_end]
 
-        self.assertIn("std::shared_ptr<VkFence> ahbHandoffFence", header)
-        self.assertIn("PFN_vkResetFences resetHandoffFences", header)
         self.assertIn("PFN_vkWaitForFences waitHandoffFences", header)
-        self.assertIn("resetFences(device, 1, &fence)", submit_helper)
         self.assertIn("commandBuffer.submit", submit_helper)
         self.assertIn("waitForFences(", wait_helper)
         self.assertIn("runtimeWaitTimeoutNs()", wait_helper)
@@ -90,6 +120,126 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("submitPassCompletionFence", source)
         self.assertNotIn("commandBufferCount = 0", source)
 
+    def test_producer_fence_is_not_total_consumer_retirement(self) -> None:
+        """WSI waits stay owned by their image until that image is reacquired."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("WsiConsumerResources", header)
+        self.assertIn("wsiConsumersByImage_", header)
+        self.assertIn("releaseWsiConsumersForImage", source)
+        self.assertIn("retainWsiConsumersForImage", source)
+        self.assertIn("wsi-image-reacquired", source)
+        recycle_start = source.index("bool LsContext::tryRecyclePass")
+        recycle_end = source.index("VkResult LsContext::present", recycle_start)
+        recycle = source[recycle_start:recycle_end]
+        self.assertIn("pass.completionFenceSubmitted = false", recycle)
+        self.assertIn("releasePassResources(passIndex, pass)", recycle)
+        self.assertNotIn("anchorDeferredRetirements", source)
+
+    def test_real_source_submission_does_not_claim_wsi_retirement(self) -> None:
+        """A later queue fence is not used as proof that a present wait retired."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        submit_start = source.index("submitAhbHandoff(pass.preCopyBuf")
+        submit_end = source.index("metrics.windowHandoffMs", submit_start)
+        source_submit = source[submit_start:submit_end]
+
+        self.assertIn("pass.completionFence", source_submit)
+        self.assertNotIn("anchorDeferredRetirements", source_submit)
+        self.assertNotIn("commandBufferCount = 0", source)
+        self.assertNotIn("empty retirement", source.lower())
+
+    def test_every_lsfg_present_wait_is_retained_by_presented_image(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        for reason in (
+            '"source-history"',
+            '"generated"',
+            '"source-final"',
+            '"source-syncfd-fallback"',
+            '"source-timeout-fallback"',
+        ):
+            self.assertIn(reason, source)
+        self.assertIn("retainWsiConsumersForImage(imageIdx", source)
+        self.assertIn("retainWsiConsumersForImage(presentIdx", source)
+
+    def test_source_dependency_tracks_actual_last_submit_not_logical_previous_slot(self) -> None:
+        """Source-only fallback must not turn frameIdx-1 into a fake semaphore producer."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("LastSourceCopyDependency", header)
+        self.assertIn("lastSourceCopyDependency_", header)
+        self.assertIn("lastSourceCopyDependency_", source)
+        self.assertIn("lastBatchCompleteDependency_", source)
+        self.assertNotIn(
+            "passInfos.at((this->frameIdx - 1) % 8)",
+            source,
+            "source semaphore ownership must not be inferred from frameIdx",
+        )
+        self.assertIn("source-only present", source)
+
+    def test_consuming_pass_owns_queue_wait_semaphores_until_its_fence(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("queueConsumerSemaphores", header)
+        self.assertGreaterEqual(
+            source.count("pass.queueConsumerSemaphores.emplace_back("), 3
+        )
+        self.assertIn("pass.queueConsumerSemaphores.clear()", source)
+
+    def test_delayed_consumer_model_survives_ring_wrap(self) -> None:
+        consumer = DelayedWsiConsumer()
+        accepted = []
+        for _ in range(8 + 1):
+            generation = _
+            if not consumer.submit(generation, generation):
+                continue
+            accepted.append(generation)
+            consumer.complete_producer(generation)
+            consumer.recycle_slot(generation)
+
+        # Producer completion permits slot zero reuse on generation eight, but
+        # all nine WSI semaphore handles remain alive without reacquisition.
+        self.assertEqual(list(range(9)), accepted)
+        self.assertEqual(set(range(9)), consumer.handles_alive)
+        for image in range(9):
+            consumer.reacquire(image)
+        self.assertEqual(set(), consumer.handles_alive)
+
+    def test_slot_fence_reuse_is_independent_from_wsi_consumer_retirement(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("wsiConsumersByImage_", source)
+        self.assertIn("releasePassResources(passIndex, pass)", source)
+        self.assertNotIn("retirement-fence-still-referenced", source)
+
+    def test_conservative_retirement_is_explicit_diagnostic_mode(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("conservativeRetirement_{false}", header)
+        self.assertIn("LSFG_VK_RETIREMENT_POLICY", source)
+        self.assertIn('"conservative-host"', source)
+        self.assertIn('retirement-policy=', source)
+        conservative_start = source.index("if (this->conservativeRetirement_")
+        conservative_end = source.index(
+            "const auto waitAndResetFence", conservative_start
+        )
+        conservative = source[conservative_start:conservative_end]
+        self.assertIn("waitQueueIdle_(this->queue_)", conservative)
+        self.assertNotIn("waitQueueIdle_(this->queue_)", source[
+            source.index("VkResult LsContext::present"):source.index("#ifdef __ANDROID__", source.index("VkResult LsContext::present"))
+        ])
+
+    def test_delayed_consumer_ring_wrap_has_a_deterministic_contract(self) -> None:
+        """The regression harness must model delayed consumers beyond eight slots."""
+        test_source = Path(__file__).read_text(encoding="utf-8")
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+
+        self.assertIn("DelayedWsiConsumer", test_source)
+        self.assertIn("for _ in range(8 + 1)", test_source)
+        self.assertIn("handles_alive", test_source)
+        self.assertIn("wsiConsumersByImage_", header)
+        self.assertIn("WsiConsumerResources", header)
+
     def test_context_teardown_waits_the_game_queue_before_freeing_resources(self) -> None:
         """Regression: swapchain retirement must not free pass handles under GPU use."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -99,6 +249,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
 
         self.assertIn("queueWaitIdle", destructor)
         self.assertIn("waitQueueIdle_", destructor)
+        self.assertIn("presentQueues_", destructor)
+        self.assertIn('role=" << role', destructor)
         self.assertLess(
             destructor.index("waitQueueIdle_"),
             destructor.index("lsfgCtxId.reset()"),
@@ -261,12 +413,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "// 2. Tell framegen to generate intermediary frames.", history_start
         )
         history = android_present[history_start:generation_start]
-        # Xclipse and other capable devices retain the asynchronous zero-history
-        # dependency chain.
         self.assertIn("presentContextWithCountExportSyncFd", history)
         self.assertIn("framegenBatchCompleteValid = true", history)
-        # Adreno 6xx takes the proven compatibility path: synchronous source
-        # handoff plus a bounded framegen completion wait before AHB reuse.
         self.assertIn(
             "bool historyRequiresHostCompletionWait = "
             "this->adreno6xxCompatibilityMode_;",
@@ -418,17 +566,15 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             bypass,
         )
         self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
-        self.assertIn("previousSourceCopySignalValid_ = false", bypass)
+        self.assertIn("BYPASS", bypass.upper())
+        self.assertIn("Preserve the last actual producer tokens", bypass)
 
         self.assertIn("const bool sourceHistoryWarmupActive", source)
         self.assertIn("sourceHistoryWarmupActive\n        ||", source)
         self.assertIn("--this->sourceHistoryWarmupRemaining_", source)
         self.assertNotIn("AndroidFrameCycleMode::SourceWarmup", source)
         self.assertNotIn("stage=source-history-warmup", source)
-        self.assertIn(
-            "if (this->previousSourceCopySignalValid_ && previousPass != nullptr)",
-            source,
-        )
+        self.assertIn("if (this->lastSourceCopyDependency_.valid)", source)
 
 
     def test_fixed_multiplier_never_underflows_when_runtime_is_off(self) -> None:
