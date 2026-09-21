@@ -181,8 +181,9 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         busy_end = source.index("#ifdef __ANDROID__", busy_start)
         busy_fallback = source[busy_start:busy_end]
         self.assertIn("source-only present", busy_fallback)
-        self.assertIn("logical source index unchanged", busy_fallback)
-        self.assertNotIn("++this->frameIdx", busy_fallback)
+        self.assertIn("logical source index advanced", busy_fallback)
+        self.assertIn("++this->frameIdx", busy_fallback)
+        self.assertIn("lastSourceCopyDependency_", source)
 
     def test_old_swapchain_is_retired_before_new_global_context_is_created(self) -> None:
         """Swapchain recreation must not construct two incompatible global backends."""

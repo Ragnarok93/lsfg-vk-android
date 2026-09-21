@@ -377,8 +377,8 @@ private:
 
     // This token names the source-copy submission that actually produced the
     // semaphore consumed by the next source-copy submission. It must not be
-    // derived from frameIdx: a source-only pass-ring fallback is not an LSFG
-    // source/pass submission and does not advance the logical source index.
+    // derived from frameIdx: a source-only pass-ring fallback advances the
+    // logical source index without creating a new LSFG source/pass producer.
     struct LastSourceCopyDependency {
         bool valid{false};
         size_t passIndex{0};

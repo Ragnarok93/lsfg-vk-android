@@ -1108,15 +1108,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (passthroughResult == VK_SUCCESS
                 || passthroughResult == VK_SUBOPTIMAL_KHR) {
             this->lastGeneratedFrameCount_ = 0;
-            // This present did not submit a new LSFG source copy. Keep the
-            // logical source/pass index unchanged so the next accepted cycle
-            // reuses the explicit last-source dependency and the correct pass
-            // slot instead of manufacturing a frameIdx-based predecessor.
+            // This present did not submit a new LSFG source copy, but it is
+            // still a logical source frame. Advance temporal/pass accounting
+            // as before; the next accepted cycle consumes the explicit
+            // last-source dependency rather than manufacturing a predecessor
+            // from frameIdx - 1.
+            ++this->frameIdx;
             Utils::logLimitN(
                 "passRetirement",
                 5,
                 "Pass ring busy; queued source-only present until a slot retires; "
-                "logical source index unchanged");
+                "logical source index advanced; dependency producer explicit");
         }
         return passthroughResult;
     }
