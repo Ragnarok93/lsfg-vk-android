@@ -74,6 +74,45 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn('"vkCreateFence"', submit_helper + wait_helper + fallback_helper)
         self.assertNotIn('"vkDestroyFence"', submit_helper + wait_helper + fallback_helper)
 
+    def test_pass_ring_retires_gpu_resources_before_reuse(self) -> None:
+        """Regression: a slow WSI/translation backlog must not destroy an in-flight pass slot."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("completionFence", header)
+        self.assertIn("completionFenceSubmitted", header)
+        self.assertIn("tryRecyclePass", source)
+        self.assertIn("submitPassCompletionFence", source)
+        self.assertIn("VK_TRUE, 0", source)
+        self.assertIn("commandBufferCount = 0", source)
+        self.assertIn("completionFenceSubmitted = true", source)
+
+    def test_context_teardown_waits_the_game_queue_before_freeing_resources(self) -> None:
+        """Regression: swapchain retirement must not free pass handles under GPU use."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        destructor_start = source.index("LsContext::~LsContext()")
+        present_start = source.index("VkResult LsContext::present", destructor_start)
+        destructor = source[destructor_start:present_start]
+
+        self.assertIn("queueWaitIdle", destructor)
+        self.assertIn("waitQueueIdle_", destructor)
+        self.assertLess(
+            destructor.index("waitQueueIdle_"),
+            destructor.index("lsfgCtxId.reset()"),
+        )
+
+    def test_source_timeline_discontinuity_resets_all_adaptive_epoch_state(self) -> None:
+        """Regression: source-only discontinuities cannot leave scheduler/capacity history armed."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("resetAdaptiveSourceEpoch", header)
+        self.assertIn("resetAdaptiveSourceEpoch", source)
+        self.assertIn("adaptiveScheduler_.reset()", source)
+        self.assertIn("generatedPresentationCapacityTracker_.reset()", source)
+        self.assertIn("lsfgOutputCadenceTracker_.reset()", source)
+        self.assertIn("sourceTimeline_.reset()", source)
+
     def test_present_hook_debounces_fs_and_reuses_wait_storage(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         self.assertIn("Clock::time_point nextConfigPoll", source)
