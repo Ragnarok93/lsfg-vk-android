@@ -162,6 +162,10 @@ int main() {
     completed.device = d3;
     completed.QueueSubmit = submit3;
     storeDeviceDispatch(d3, completed);
+    VkQueue completedQ3{};
+    Layer::ovkGetDeviceQueue(d3, 0, 0, &completedQ3);
+    assert(completedQ3 == q3);
+    assert(Layer::queueOwner(q3) == d3);
     assert(Layer::ovkQueueSubmit(q3, 0, nullptr, {}) == VK_SUCCESS);
     eraseDeviceDispatch(d1);
     eraseDeviceDispatch(d3);
