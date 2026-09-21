@@ -31,17 +31,29 @@ std::unordered_map<SwapchainKey, std::shared_ptr<SwapchainState>, SwapchainKeyHa
 // Generated from the production hooks/context methods by the runner.
 #include "production_lifetime_methods.inc"
 
-static VkDevice d1 = reinterpret_cast<VkDevice>(0x1000);
-static VkDevice d2 = reinterpret_cast<VkDevice>(0x2000);
+struct FakeDispatchable { void* dispatch; };
+static int loaderKeyAStorage, loaderKeyBStorage;
+static FakeDispatchable d1Storage{&loaderKeyAStorage};
+static FakeDispatchable d2Storage{&loaderKeyBStorage};
+static FakeDispatchable d3Storage{&loaderKeyAStorage};
+static FakeDispatchable d4Storage{&loaderKeyBStorage};
+static VkDevice d1 = reinterpret_cast<VkDevice>(&d1Storage);
+static VkDevice d2 = reinterpret_cast<VkDevice>(&d2Storage);
+static VkDevice d3 = reinterpret_cast<VkDevice>(&d3Storage);
+static VkDevice d4 = reinterpret_cast<VkDevice>(&d4Storage);
 static VkQueue q1 = reinterpret_cast<VkQueue>(0x3000);
 static VkQueue q2 = reinterpret_cast<VkQueue>(0x4000);
-static int submitted1, submitted2, presented1, presented2;
+static VkQueue q3 = reinterpret_cast<VkQueue>(0x5000);
+static int submitted1, submitted2, submitted3, presented1, presented2;
 static std::set<VkSemaphore> alive;
 static uintptr_t nextSemaphore = 100;
-static VKAPI_ATTR void VKAPI_CALL getQueue(VkDevice d, uint32_t, uint32_t, VkQueue* q) { *q = d == d1 ? q1 : q2; }
+static VKAPI_ATTR void VKAPI_CALL getQueue(VkDevice d, uint32_t, uint32_t, VkQueue* q) {
+    *q = d == d1 ? q1 : (d == d2 ? q2 : q3);
+}
 static VKAPI_ATTR void VKAPI_CALL getQueue2(VkDevice d, const VkDeviceQueueInfo2*, VkQueue* q) { getQueue(d, 0, 0, q); }
 static VKAPI_ATTR VkResult VKAPI_CALL submit1(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q1); ++submitted1; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL submit2(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q2); ++submitted2; return VK_SUCCESS; }
+static VKAPI_ATTR VkResult VKAPI_CALL submit3(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q3); ++submitted3; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL present1(VkQueue q, const VkPresentInfoKHR*) { assert(q == q1); ++presented1; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL present2(VkQueue q, const VkPresentInfoKHR*) { assert(q == q2); ++presented2; return VK_SUCCESS; }
 static PFN_vkVoidFunction constructionGdpa(VkDevice d, const char* name) {
@@ -53,6 +65,11 @@ static PFN_vkVoidFunction constructionGdpa(VkDevice d, const char* name) {
         return reinterpret_cast<PFN_vkVoidFunction>(d == d1 ? submit1 : submit2);
     if (std::strcmp(name, "vkQueuePresentKHR") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(d == d1 ? present1 : present2);
+    return nullptr;
+}
+static PFN_vkVoidFunction constructionGdpaNoQueue(VkDevice d, const char* name) {
+    if (std::strcmp(name, "vkQueueSubmit") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(d == d3 ? submit3 : submit2);
     return nullptr;
 }
 static VKAPI_ATTR VkResult VKAPI_CALL createSem(VkDevice, const VkSemaphoreCreateInfo*, const VkAllocationCallbacks*, VkSemaphore* s) {
@@ -80,6 +97,37 @@ int main() {
     eraseDeviceDispatch(d1);
     eraseDeviceDispatch(d2);
     submitted1 = submitted2 = presented1 = presented2 = 0;
+
+    // Regression: Turnip/wrapper-gamenative can expose the new VkDevice handle
+    // before vkGetDeviceProcAddr(newDevice, "vkGetDeviceQueue") is usable.
+    // The known-good S20+ path reused the established queue thunk for devices
+    // sharing the same loader dispatch key. Preserve that bootstrap behavior
+    // only during construction; exact ownership must take over afterwards.
+    DeviceDispatch bootstrap{};
+    bootstrap.device = d1;
+    bootstrap.GetDeviceQueue = getQueue;
+    bootstrap.GetDeviceQueue2 = getQueue2;
+    bootstrap.QueueSubmit = submit1;
+    storeDeviceDispatch(d1, bootstrap);
+    {
+        DeviceConstructionScope construction(constructionGdpaNoQueue);
+        VkQueue constructionQ3{};
+        Layer::ovkGetDeviceQueue(d3, 0, 0, &constructionQ3);
+        assert(constructionQ3 == q3);
+        assert(Layer::queueOwner(q3) == d3);
+
+        VkQueue mismatched{};
+        Layer::ovkGetDeviceQueue(d4, 0, 0, &mismatched);
+        assert(mismatched == VK_NULL_HANDLE);
+    }
+    DeviceDispatch completed = bootstrap;
+    completed.device = d3;
+    completed.QueueSubmit = submit3;
+    storeDeviceDispatch(d3, completed);
+    assert(Layer::ovkQueueSubmit(q3, 0, nullptr, {}) == VK_SUCCESS);
+    eraseDeviceDispatch(d1);
+    eraseDeviceDispatch(d3);
+    submitted1 = submitted2 = submitted3 = presented1 = presented2 = 0;
 
     DeviceDispatch a{}, b{};
     a.device = d1; a.GetDeviceQueue = getQueue; a.GetDeviceQueue2 = getQueue2;
