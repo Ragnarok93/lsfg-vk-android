@@ -116,6 +116,30 @@ std::unordered_map<VkQueue, DeviceDispatch> queueDispatchTables;
 std::unordered_map<VkCommandBuffer, DeviceDispatch> commandBufferDispatchTables;
 std::shared_mutex deviceDispatchMutex;
 
+template <typename Handle>
+const void* deviceDispatchKey(Handle handle) {
+    if (handle == VK_NULL_HANDLE) return nullptr;
+    return *reinterpret_cast<void* const*>(handle);
+}
+
+bool loadCompatibleConstructionDispatch(VkDevice device, DeviceDispatch* dispatch) {
+    const void* key = deviceDispatchKey(device);
+    if (key == nullptr || dispatch == nullptr) return false;
+
+    std::shared_lock lock(deviceDispatchMutex);
+    for (const auto& [owner, candidate] : deviceDispatchTables) {
+        if (owner == device || candidate.device == VK_NULL_HANDLE)
+            continue;
+        if (deviceDispatchKey(owner) != key)
+            continue;
+        if (candidate.GetDeviceQueue == nullptr && candidate.GetDeviceQueue2 == nullptr)
+            continue;
+        *dispatch = candidate;
+        dispatch->device = device;
+        return true;
+    }
+    return false;
+}
 bool loadDeviceDispatch(VkDevice device, DeviceDispatch* dispatch) {
     if (device == VK_NULL_HANDLE || !dispatch) return false;
     std::shared_lock lock(deviceDispatchMutex);
@@ -228,10 +252,12 @@ bool loadConstructionQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
     if (device == VK_NULL_HANDLE || !dispatch || !next_vkGetDeviceProcAddr)
         return false;
 
-    // During downstream vkCreateDevice the Vulkan loader/vendor wrapper may
-    // request a queue before layer_vkCreateDevice regains control and can call
-    // storeDeviceDispatch().  Resolve only through this construction thread's
-    // exact downstream GDPA; never fall back to another device's mutable table.
+    // Turnip/wrapper-gamenative can call vkGetDeviceQueue from inside
+    // downstream vkCreateDevice before GDPA on the still-constructing device
+    // resolves the queue getter. Query exact GDPA first; if only that bootstrap
+    // lookup is unavailable, reuse the established thunk from a live device
+    // with the same loader dispatch key. This restores the known-good S20+
+    // construction behavior without permitting cross-driver dispatch guessing.
     DeviceDispatch construction{};
     construction.device = device;
     construction.GetDeviceProcAddr = next_vkGetDeviceProcAddr;
@@ -243,6 +269,24 @@ bool loadConstructionQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
         next_vkGetDeviceProcAddr(device, "vkQueueSubmit"));
     construction.QueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(
         next_vkGetDeviceProcAddr(device, "vkQueuePresentKHR"));
+
+    if (construction.GetDeviceQueue == nullptr
+            && construction.GetDeviceQueue2 == nullptr) {
+        DeviceDispatch compatible{};
+        if (loadCompatibleConstructionDispatch(device, &compatible)) {
+            construction.GetDeviceQueue = compatible.GetDeviceQueue;
+            construction.GetDeviceQueue2 = compatible.GetDeviceQueue2;
+            if (construction.QueueSubmit == nullptr)
+                construction.QueueSubmit = compatible.QueueSubmit;
+            if (construction.QueuePresentKHR == nullptr)
+                construction.QueuePresentKHR = compatible.QueuePresentKHR;
+            std::cerr << "lsfg-vk: construction queue bootstrap"
+                      << " device=" << device
+                      << " dispatchKey=" << deviceDispatchKey(device)
+                      << " source=compatible-live-device\n";
+        }
+    }
+
     *dispatch = construction;
     return construction.GetDeviceQueue || construction.GetDeviceQueue2;
 }
