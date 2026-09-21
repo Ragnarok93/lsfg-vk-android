@@ -44,12 +44,43 @@ static VKAPI_ATTR VkResult VKAPI_CALL submit1(VkQueue q, uint32_t, const VkSubmi
 static VKAPI_ATTR VkResult VKAPI_CALL submit2(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q2); ++submitted2; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL present1(VkQueue q, const VkPresentInfoKHR*) { assert(q == q1); ++presented1; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL present2(VkQueue q, const VkPresentInfoKHR*) { assert(q == q2); ++presented2; return VK_SUCCESS; }
+static PFN_vkVoidFunction constructionGdpa(VkDevice d, const char* name) {
+    if (std::strcmp(name, "vkGetDeviceQueue") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(getQueue);
+    if (std::strcmp(name, "vkGetDeviceQueue2") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(getQueue2);
+    if (std::strcmp(name, "vkQueueSubmit") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(d == d1 ? submit1 : submit2);
+    if (std::strcmp(name, "vkQueuePresentKHR") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(d == d1 ? present1 : present2);
+    return nullptr;
+}
 static VKAPI_ATTR VkResult VKAPI_CALL createSem(VkDevice, const VkSemaphoreCreateInfo*, const VkAllocationCallbacks*, VkSemaphore* s) {
     *s = reinterpret_cast<VkSemaphore>(nextSemaphore++); alive.insert(*s); return VK_SUCCESS;
 }
 static VKAPI_ATTR void VKAPI_CALL destroySem(VkDevice d, VkSemaphore s, const VkAllocationCallbacks*) { assert(d == d1); assert(alive.erase(s) == 1); }
 
 int main() {
+    // Regression: Turnip/wrapper-gamenative may request queues from inside the
+    // downstream vkCreateDevice call.  The full device dispatch table does not
+    // exist yet, but the construction thread's exact downstream GDPA does.
+    {
+        DeviceConstructionScope construction(constructionGdpa);
+        VkQueue constructionQ1{}, constructionQ2{};
+        Layer::ovkGetDeviceQueue(d1, 0, 0, &constructionQ1);
+        VkDeviceQueueInfo2 constructionInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2};
+        Layer::ovkGetDeviceQueue2(d2, &constructionInfo, &constructionQ2);
+        assert(constructionQ1 == q1 && constructionQ2 == q2);
+        assert(Layer::queueOwner(q1) == d1 && Layer::queueOwner(q2) == d2);
+        assert(Layer::ovkQueueSubmit(q1, 0, nullptr, {}) == VK_SUCCESS);
+        assert(Layer::ovkQueueSubmit(q2, 0, nullptr, {}) == VK_SUCCESS);
+        assert(Layer::ovkQueuePresentKHR(q1, nullptr) == VK_SUCCESS);
+        assert(Layer::ovkQueuePresentKHR(q2, nullptr) == VK_SUCCESS);
+    }
+    eraseDeviceDispatch(d1);
+    eraseDeviceDispatch(d2);
+    submitted1 = submitted2 = presented1 = presented2 = 0;
+
     DeviceDispatch a{}, b{};
     a.device = d1; a.GetDeviceQueue = getQueue; a.GetDeviceQueue2 = getQueue2;
     a.QueueSubmit = submit1; a.QueuePresentKHR = present1;
@@ -91,7 +122,7 @@ int main() {
     assert(findSwapchainState(sc, q2) == nullptr);
     storeQueueDispatch(q2, b); // live ownership collision poisons the entry
     assert(Layer::queueOwner(q2) == VK_NULL_HANDLE);
-    std::cout << "PASS queue1/queue2, two-device submits/presents, unknown owner, colliding/reused swapchains, device cleanup\n";
+    std::cout << "PASS construction-time queue acquisition, queue1/queue2, two-device submits/presents, unknown owner, colliding/reused swapchains, device cleanup\n";
 
     LsContext ctx;
     ctx.wsiConsumersByImage_.resize(32);

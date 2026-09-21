@@ -149,7 +149,15 @@ void storeDeviceDispatch(VkDevice device, const DeviceDispatch& dispatch) {
     auto ownedDispatch = dispatch;
     ownedDispatch.device = device;
     std::unique_lock lock(deviceDispatchMutex);
-    deviceDispatchTables[device] = std::move(ownedDispatch);
+    deviceDispatchTables[device] = ownedDispatch;
+    // A loader/driver may acquire queues from inside downstream vkCreateDevice,
+    // before this full device snapshot can be published.  Promote any exact
+    // construction-time queue entries to the completed per-device table now.
+    for (auto& [queue, queueDispatch] : queueDispatchTables) {
+        (void)queue;
+        if (queueDispatch.device == device)
+            queueDispatch = ownedDispatch;
+    }
 }
 
 void storeQueueDispatch(VkQueue queue, const DeviceDispatch& dispatch) {
@@ -214,6 +222,29 @@ bool initDeviceFunc(VkDevice device, PFN_vkGetDeviceProcAddr gdpa,
     if (!*func && required)
         std::cerr << "lsfg-vk: missing device function " << name << " owner=" << device << "\n";
     return *func != nullptr || !required;
+}
+
+bool loadConstructionQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
+    if (device == VK_NULL_HANDLE || !dispatch || !next_vkGetDeviceProcAddr)
+        return false;
+
+    // During downstream vkCreateDevice the Vulkan loader/vendor wrapper may
+    // request a queue before layer_vkCreateDevice regains control and can call
+    // storeDeviceDispatch().  Resolve only through this construction thread's
+    // exact downstream GDPA; never fall back to another device's mutable table.
+    DeviceDispatch construction{};
+    construction.device = device;
+    construction.GetDeviceProcAddr = next_vkGetDeviceProcAddr;
+    construction.GetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
+        next_vkGetDeviceProcAddr(device, "vkGetDeviceQueue"));
+    construction.GetDeviceQueue2 = reinterpret_cast<PFN_vkGetDeviceQueue2>(
+        next_vkGetDeviceProcAddr(device, "vkGetDeviceQueue2"));
+    construction.QueueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
+        next_vkGetDeviceProcAddr(device, "vkQueueSubmit"));
+    construction.QueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(
+        next_vkGetDeviceProcAddr(device, "vkQueuePresentKHR"));
+    *dispatch = construction;
+    return construction.GetDeviceQueue || construction.GetDeviceQueue2;
 }
 
 void registerPassthroughDevice(VkDevice device, DeviceDispatch dispatch) {
@@ -715,9 +746,12 @@ VkResult ovkGetAndroidHardwareBufferPropertiesANDROID(VkDevice a, const AHardwar
 }
 void ovkGetDeviceQueue(VkDevice a, uint32_t b, uint32_t c, VkQueue* d) {
     DeviceDispatch dispatch{};
-    if (loadDeviceDispatch(a, &dispatch) && dispatch.GetDeviceQueue) {
+    if ((loadDeviceDispatch(a, &dispatch)
+            || loadConstructionQueueDispatch(a, &dispatch))
+            && dispatch.GetDeviceQueue) {
         dispatch.GetDeviceQueue(a, b, c, d);
-        storeQueueDispatch(*d, dispatch);
+        if (d && *d != VK_NULL_HANDLE)
+            storeQueueDispatch(*d, dispatch);
         return;
     }
     if (d) *d = VK_NULL_HANDLE;
@@ -725,9 +759,12 @@ void ovkGetDeviceQueue(VkDevice a, uint32_t b, uint32_t c, VkQueue* d) {
 }
 void ovkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, VkQueue* queue) {
     DeviceDispatch dispatch{};
-    if (loadDeviceDispatch(device, &dispatch) && dispatch.GetDeviceQueue2) {
+    if ((loadDeviceDispatch(device, &dispatch)
+            || loadConstructionQueueDispatch(device, &dispatch))
+            && dispatch.GetDeviceQueue2) {
         dispatch.GetDeviceQueue2(device, info, queue);
-        storeQueueDispatch(*queue, dispatch);
+        if (queue && *queue != VK_NULL_HANDLE)
+            storeQueueDispatch(*queue, dispatch);
         return;
     }
     if (queue) *queue = VK_NULL_HANDLE;
