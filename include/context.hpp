@@ -181,6 +181,7 @@ private:
     // queue/device dispatch until every in-flight pass has retired.
     VkDevice device_{VK_NULL_HANDLE};
     VkQueue queue_{VK_NULL_HANDLE};
+    std::vector<VkQueue> presentQueues_;
     PFN_vkWaitForFences completionWaitFences_{nullptr};
     PFN_vkResetFences completionResetFences_{nullptr};
     PFN_vkQueueWaitIdle waitQueueIdle_{nullptr};
@@ -258,7 +259,18 @@ private:
     static constexpr uint32_t kSourceHistoryWarmupFrames = 4;
     uint32_t sourceHistoryWarmupRemaining_{kSourceHistoryWarmupFrames};
     bool requiresSourceHistoryWarmup_{true};
-    bool previousSourceCopySignalValid_{false};
+
+    // Framegen's batch-complete semaphore has the same ownership rule as the
+    // source-copy dependency, but is only present on asynchronous Android
+    // completion paths. Keep its producer explicit as well; otherwise a busy
+    // source-only cycle can make frameIdx-1 point at an unrelated pass slot.
+    struct LastBatchCompleteDependency {
+        bool valid{false};
+        size_t passIndex{0};
+        uint64_t generation{0};
+        Mini::Semaphore semaphore;
+    };
+    LastBatchCompleteDependency lastBatchCompleteDependency_;
 
     // Queue-target 1 delivery for Android: the application's real frame is
     // acknowledged this call, but displayed on the next source boundary so the
@@ -357,19 +369,31 @@ private:
         double lastWindowOutputFps{0.0};
     } runtimeMetrics;
 
-    // Reused for the game-device -> framegen AHB handoff. Async generated
-    // cycles still attach this fence to the source-copy submit; by the time the
-    // framegen completion wait returns, that submit has necessarily completed,
-    // so the fence is safe to reset on the next cycle. Warm-up/fallback cycles
-    // continue to wait it synchronously exactly as before.
-    std::shared_ptr<VkFence> ahbHandoffFence;
-    PFN_vkResetFences resetHandoffFences{nullptr};
+    // The source pass completion fence is also the authoritative bounded host
+    // fallback fence. Keeping one fence domain avoids treating a separate
+    // handoff fence as proof that pass-owned WSI semaphores are retired.
     PFN_vkWaitForFences waitHandoffFences{nullptr};
 #endif
 
+    // This token names the source-copy submission that actually produced the
+    // semaphore consumed by the next source-copy submission. It must not be
+    // derived from frameIdx: a source-only pass-ring fallback advances the
+    // logical frame without producing a new LSFG source dependency.
+    struct LastSourceCopyDependency {
+        bool valid{false};
+        size_t passIndex{0};
+        uint64_t generation{0};
+        Mini::Semaphore semaphore;
+    };
+    LastSourceCopyDependency lastSourceCopyDependency_;
+
     struct RenderPassInfo {
+        uint64_t generation{0};
         Mini::CommandBuffer preCopyBuf; // copy from swapchain image to frame_0/frame_1
         std::array<Mini::Semaphore, 2> preCopySemaphores; // signal when preCopyBuf is done
+        // Owners for semaphores consumed by this source-copy submission. The
+        // source producer fence proves those waits have completed.
+        std::vector<Mini::Semaphore> queueConsumerSemaphores;
 #ifdef __ANDROID__
         // Dedicated cross-device signal. It is never shared with source-present
         // or next-source-copy waits, so each binary semaphore has one consumer.
@@ -400,7 +424,27 @@ private:
         bool completionFenceFailed{false};
     }; // data for a single render pass
 
-    bool tryRecyclePass(RenderPassInfo& pass);
+    // vkQueuePresentKHR has no fence parameter. A producer fence therefore
+    // cannot prove that WSI has finished waiting on a semaphore. Associate
+    // each LSFG-owned present wait with the presented image instead: successful
+    // reacquisition of that image is the natural WSI retirement boundary.
+    struct WsiConsumerResources {
+        uint64_t generation{0};
+        std::vector<Mini::Semaphore> semaphores;
+    };
+
+    void releaseWsiConsumersForImage(uint32_t imageIndex, const char* reason);
+    void retainWsiConsumersForImage(uint32_t imageIndex, uint64_t generation,
+        std::vector<Mini::Semaphore> semaphores, const char* reason);
+    void releasePassResources(size_t passIndex, RenderPassInfo& pass);
+    bool tryRecyclePass(size_t passIndex, RenderPassInfo& pass);
+
+    // Default is the asynchronous, image-reacquisition policy. The conservative
+    // host policy is an explicit diagnostic mode only, selected with
+    // LSFG_VK_RETIREMENT_POLICY=conservative-host.
+    bool conservativeRetirement_{false};
+    uint64_t nextPassGeneration_{0};
+    std::vector<WsiConsumerResources> wsiConsumersByImage_;
 
     std::array<RenderPassInfo, 8> passInfos; // allocate 8 because why not
 };
