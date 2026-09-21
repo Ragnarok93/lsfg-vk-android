@@ -850,6 +850,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         pass.postCopyBufs.resize(runtimeMultiplier - 1);
         pass.postCopySemaphores.resize(runtimeMultiplier - 1);
         pass.prevPostCopySemaphores.resize(runtimeMultiplier - 1);
+        pass.nextPostCopySemaphores.resize(runtimeMultiplier - 1);
         pass.postCopyCompletionFences.resize(runtimeMultiplier - 1);
         pass.postCopyCompletionFenceSubmitted.assign(runtimeMultiplier - 1, false);
 
@@ -981,6 +982,7 @@ void LsContext::releasePassResources(size_t passIndex, RenderPassInfo& pass) {
     for (auto& commandBuffer : pass.postCopyBufs) commandBuffer = Mini::CommandBuffer{};
     for (auto& semaphore : pass.postCopySemaphores) semaphore = Mini::Semaphore{};
     for (auto& semaphore : pass.prevPostCopySemaphores) semaphore = Mini::Semaphore{};
+    for (auto& semaphore : pass.nextPostCopySemaphores) semaphore = Mini::Semaphore{};
     pass.generation = 0;
 
     Utils::logLimitN(
@@ -2974,6 +2976,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
+        pass.nextPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.postCopyBufs.at(i) = Mini::CommandBuffer(info.device, this->cmdPool);
         pass.postCopyBufs.at(i).begin();
 
@@ -2989,12 +2992,22 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         };
         if (outputReadyWaitValid.at(i))
             generatedCopyWaits.emplace_back(pass.renderSemaphores.at(i).handle());
+        if (i != 0) {
+            // This signal is distinct from prevPostCopySemaphores[i - 1],
+            // which is retained for the next WSI wait. The consuming
+            // post-copy fence below proves this queue wait has retired.
+            generatedCopyWaits.emplace_back(
+                pass.nextPostCopySemaphores.at(i - 1).handle());
+            pass.queueConsumerSemaphores.emplace_back(
+                pass.nextPostCopySemaphores.at(i - 1));
+        }
         const VkFence postCopyRetirementFence =
             *pass.postCopyCompletionFences.at(i);
         pass.postCopyBufs.at(i).submit(info.queue.second,
             generatedCopyWaits,
             { pass.postCopySemaphores.at(i).handle(),
-              pass.prevPostCopySemaphores.at(i).handle() },
+              pass.prevPostCopySemaphores.at(i).handle(),
+              pass.nextPostCopySemaphores.at(i).handle() },
             postCopyRetirementFence);
         pass.postCopyCompletionFenceSubmitted.at(i) = true;
 
@@ -3160,6 +3173,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // 4. copy output image to swapchain image
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
+        pass.nextPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.postCopyBufs.at(i) = Mini::CommandBuffer(info.device, this->cmdPool);
         pass.postCopyBufs.at(i).begin();
 
@@ -3173,11 +3187,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.postCopyBufs.at(i).end();
         const VkFence postCopyRetirementFence =
             *pass.postCopyCompletionFences.at(i);
+        std::vector<VkSemaphore> generatedCopyWaits{
+            pass.acquireSemaphores.at(i).handle(),
+            pass.renderSemaphores.at(i).handle(),
+        };
+        if (i != 0) {
+            generatedCopyWaits.emplace_back(
+                pass.nextPostCopySemaphores.at(i - 1).handle());
+            pass.queueConsumerSemaphores.emplace_back(
+                pass.nextPostCopySemaphores.at(i - 1));
+        }
         pass.postCopyBufs.at(i).submit(info.queue.second,
-            { pass.acquireSemaphores.at(i).handle(),
-              pass.renderSemaphores.at(i).handle() },
+            generatedCopyWaits,
             { pass.postCopySemaphores.at(i).handle(),
-              pass.prevPostCopySemaphores.at(i).handle() },
+              pass.prevPostCopySemaphores.at(i).handle(),
+              pass.nextPostCopySemaphores.at(i).handle() },
             postCopyRetirementFence);
         pass.postCopyCompletionFenceSubmitted.at(i) = true;
 

@@ -17,6 +17,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace {
 PFN_vkCreateInstance next_vkCreateInstance{};
@@ -92,13 +93,13 @@ void erasePrivateInstanceDispatch(VkInstance instance) {
 }
 
 // The Vulkan loader contract is distributed-dispatch: device entry points
-// returned by vkGetDeviceProcAddr belong to the queried logical device.  Some
-// Android vendor wrappers return device-specific thunks, so sharing one global
-// table across every logical device is not valid.  Key the table by the loader
-// dispatch pointer stored in the first word of every device-level dispatchable
-// handle; VkDevice, VkQueue and VkCommandBuffer from one logical device share
-// that key.
+// returned by vkGetDeviceProcAddr belong to the queried logical device. Some
+// Android vendor wrappers return device-specific thunks, so a table keyed only
+// by the loader dispatch pointer is not sufficient: two logical devices from
+// the same driver commonly share that pointer. Keep the device handle as the
+// owner key and explicitly associate queues/command buffers with that owner.
 struct DeviceDispatch {
+    VkDevice device{VK_NULL_HANDLE};
     PFN_vkGetDeviceProcAddr GetDeviceProcAddr{};
     PFN_vkSetDeviceLoaderData SetDeviceLoaderData{};
     PFN_vkDestroyDevice DestroyDevice{};
@@ -131,37 +132,78 @@ struct DeviceDispatch {
     bool presentationDevice{false};
 };
 
-std::unordered_map<const void*, DeviceDispatch> deviceDispatchTables;
+std::unordered_map<VkDevice, DeviceDispatch> deviceDispatchTables;
+std::unordered_map<VkQueue, DeviceDispatch> queueDispatchTables;
+std::unordered_map<VkCommandBuffer, DeviceDispatch> commandBufferDispatchTables;
 std::shared_mutex deviceDispatchMutex;
 
-template <typename Handle>
-const void* deviceDispatchKey(Handle handle) {
-    if (handle == VK_NULL_HANDLE) return nullptr;
-    return *reinterpret_cast<void* const*>(handle);
-}
-
-template <typename Handle>
-bool loadDeviceDispatch(Handle handle, DeviceDispatch* dispatch) {
-    const void* key = deviceDispatchKey(handle);
-    if (!key || !dispatch) return false;
+bool loadDeviceDispatch(VkDevice device, DeviceDispatch* dispatch) {
+    if (device == VK_NULL_HANDLE || !dispatch) return false;
     std::shared_lock lock(deviceDispatchMutex);
-    auto it = deviceDispatchTables.find(key);
+    const auto it = deviceDispatchTables.find(device);
     if (it == deviceDispatchTables.end()) return false;
     *dispatch = it->second;
     return true;
 }
 
-void storeDeviceDispatch(VkDevice device, const DeviceDispatch& dispatch) {
-    const void* key = deviceDispatchKey(device);
-    if (!key) return;
-    std::unique_lock lock(deviceDispatchMutex);
-    deviceDispatchTables[key] = dispatch;
+bool loadQueueDispatch(VkQueue queue, DeviceDispatch* dispatch) {
+    if (queue == VK_NULL_HANDLE || !dispatch) return false;
+    std::shared_lock lock(deviceDispatchMutex);
+    const auto it = queueDispatchTables.find(queue);
+    if (it == queueDispatchTables.end()) return false;
+    *dispatch = it->second;
+    return true;
 }
 
-void eraseDeviceDispatchKey(const void* key) {
-    if (!key) return;
+bool loadCommandBufferDispatch(VkCommandBuffer commandBuffer,
+        DeviceDispatch* dispatch) {
+    if (commandBuffer == VK_NULL_HANDLE || !dispatch) return false;
+    std::shared_lock lock(deviceDispatchMutex);
+    const auto it = commandBufferDispatchTables.find(commandBuffer);
+    if (it == commandBufferDispatchTables.end()) return false;
+    *dispatch = it->second;
+    return true;
+}
+
+void storeDeviceDispatch(VkDevice device, const DeviceDispatch& dispatch) {
+    if (device == VK_NULL_HANDLE) return;
+    auto ownedDispatch = dispatch;
+    ownedDispatch.device = device;
     std::unique_lock lock(deviceDispatchMutex);
-    deviceDispatchTables.erase(key);
+    deviceDispatchTables[device] = std::move(ownedDispatch);
+}
+
+void storeQueueDispatch(VkQueue queue, const DeviceDispatch& dispatch) {
+    if (queue == VK_NULL_HANDLE || dispatch.device == VK_NULL_HANDLE) return;
+    std::unique_lock lock(deviceDispatchMutex);
+    queueDispatchTables[queue] = dispatch;
+}
+
+void storeCommandBufferDispatch(
+        VkCommandBuffer commandBuffer, const DeviceDispatch& dispatch) {
+    if (commandBuffer == VK_NULL_HANDLE || dispatch.device == VK_NULL_HANDLE)
+        return;
+    std::unique_lock lock(deviceDispatchMutex);
+    commandBufferDispatchTables[commandBuffer] = dispatch;
+}
+
+void eraseDeviceDispatch(VkDevice device) {
+    if (device == VK_NULL_HANDLE) return;
+    std::unique_lock lock(deviceDispatchMutex);
+    deviceDispatchTables.erase(device);
+    for (auto it = queueDispatchTables.begin(); it != queueDispatchTables.end();) {
+        if (it->second.device == device)
+            it = queueDispatchTables.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = commandBufferDispatchTables.begin();
+            it != commandBufferDispatchTables.end();) {
+        if (it->second.device == device)
+            it = commandBufferDispatchTables.erase(it);
+        else
+            ++it;
+    }
 }
 
 DeviceDispatch snapshotPresentationDispatch() {
@@ -206,6 +248,8 @@ void registerPassthroughDevice(VkDevice device) {
     if (dispatch.GetDeviceProcAddr) {
         dispatch.DestroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(
             dispatch.GetDeviceProcAddr(device, "vkDestroyDevice"));
+        dispatch.GetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
+            dispatch.GetDeviceProcAddr(device, "vkGetDeviceQueue"));
     }
     storeDeviceDispatch(device, dispatch);
 }
@@ -443,7 +487,7 @@ VkResult layer_vkCreateDevice(
         res = postCreateDeviceHook(physicalDevice,
             const_cast<VkDeviceCreateInfo*>(pCreateInfo), pAllocator, pDevice);
         if (res != VK_SUCCESS) {
-            eraseDeviceDispatchKey(deviceDispatchKey(*pDevice));
+            eraseDeviceDispatch(*pDevice);
             throw LSFG::vulkan_error(res, "Failed to register Vulkan device");
         }
 
@@ -461,6 +505,10 @@ const std::unordered_map<std::string, PFN_vkVoidFunction> layerFunctions = {
     {"vkCreateDevice", reinterpret_cast<PFN_vkVoidFunction>(&layer_vkCreateDevice)},
     {"vkGetInstanceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(&layer_vkGetInstanceProcAddr)},
     {"vkGetDeviceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(&layer_vkGetDeviceProcAddr)},
+    // Track every application-created queue so a present queue is resolved by
+    // its exact logical-device owner, even when two devices share a loader
+    // dispatch pointer.
+    {"vkGetDeviceQueue", reinterpret_cast<PFN_vkVoidFunction>(&Layer::ovkGetDeviceQueue)},
 };
 
 PFN_vkVoidFunction layer_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
@@ -525,13 +573,12 @@ VkResult ovkCreateInstance(const VkInstanceCreateInfo* a, const VkAllocationCall
 void ovkDestroyInstance(VkInstance a, const VkAllocationCallbacks* b) { next_vkDestroyInstance(a, b); }
 VkResult ovkCreateDevice(VkPhysicalDevice a, const VkDeviceCreateInfo* b, const VkAllocationCallbacks* c, VkDevice* d) { return next_vkCreateDevice(a, b, c, d); }
 void ovkDestroyDevice(VkDevice a, const VkAllocationCallbacks* b) {
-    const void* key = deviceDispatchKey(a);
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.DestroyDevice)
         dispatch.DestroyDevice(a, b);
     else
         next_vkDestroyDevice(a, b);
-    eraseDeviceDispatchKey(key);
+    eraseDeviceDispatch(a);
 }
 VkResult ovkSetDeviceLoaderData(VkDevice a, void* b) {
     DeviceDispatch dispatch{};
@@ -558,7 +605,7 @@ VkResult ovkCreateSwapchainKHR(VkDevice a, const VkSwapchainCreateInfoKHR* b, co
 }
 VkResult ovkQueuePresentKHR(VkQueue a, const VkPresentInfoKHR* b) {
     DeviceDispatch dispatch{};
-    if (loadDeviceDispatch(a, &dispatch) && dispatch.QueuePresentKHR)
+    if (loadQueueDispatch(a, &dispatch) && dispatch.QueuePresentKHR)
         return dispatch.QueuePresentKHR(a, b);
     return next_vkQueuePresentKHR(a, b);
 }
@@ -578,27 +625,36 @@ VkResult ovkGetSwapchainImagesKHR(VkDevice a, VkSwapchainKHR b, uint32_t* c, VkI
 }
 VkResult ovkAllocateCommandBuffers(VkDevice a, const VkCommandBufferAllocateInfo* b, VkCommandBuffer* c) {
     DeviceDispatch dispatch{};
-    if (loadDeviceDispatch(a, &dispatch) && dispatch.AllocateCommandBuffers)
-        return dispatch.AllocateCommandBuffers(a, b, c);
+    if (loadDeviceDispatch(a, &dispatch) && dispatch.AllocateCommandBuffers) {
+        const auto result = dispatch.AllocateCommandBuffers(a, b, c);
+        if (result == VK_SUCCESS) {
+            for (uint32_t i = 0; i < b->commandBufferCount; ++i)
+                storeCommandBufferDispatch(c[i], dispatch);
+        }
+        return result;
+    }
     return next_vkAllocateCommandBuffers(a, b, c);
 }
 void ovkFreeCommandBuffers(VkDevice a, VkCommandPool b, uint32_t c, const VkCommandBuffer* d) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.FreeCommandBuffers) {
         dispatch.FreeCommandBuffers(a, b, c, d);
+        std::unique_lock lock(deviceDispatchMutex);
+        for (uint32_t i = 0; i < c; ++i)
+            commandBufferDispatchTables.erase(d[i]);
         return;
     }
     next_vkFreeCommandBuffers(a, b, c, d);
 }
 VkResult ovkBeginCommandBuffer(VkCommandBuffer a, const VkCommandBufferBeginInfo* b) {
     DeviceDispatch dispatch{};
-    if (loadDeviceDispatch(a, &dispatch) && dispatch.BeginCommandBuffer)
+    if (loadCommandBufferDispatch(a, &dispatch) && dispatch.BeginCommandBuffer)
         return dispatch.BeginCommandBuffer(a, b);
     return next_vkBeginCommandBuffer(a, b);
 }
 VkResult ovkEndCommandBuffer(VkCommandBuffer a) {
     DeviceDispatch dispatch{};
-    if (loadDeviceDispatch(a, &dispatch) && dispatch.EndCommandBuffer)
+    if (loadCommandBufferDispatch(a, &dispatch) && dispatch.EndCommandBuffer)
         return dispatch.EndCommandBuffer(a);
     return next_vkEndCommandBuffer(a);
 }
@@ -698,19 +754,20 @@ void ovkGetDeviceQueue(VkDevice a, uint32_t b, uint32_t c, VkQueue* d) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.GetDeviceQueue) {
         dispatch.GetDeviceQueue(a, b, c, d);
+        storeQueueDispatch(*d, dispatch);
         return;
     }
     next_vkGetDeviceQueue(a, b, c, d);
 }
 VkResult ovkQueueSubmit(VkQueue a, uint32_t b, const VkSubmitInfo* c, VkFence d) {
     DeviceDispatch dispatch{};
-    if (loadDeviceDispatch(a, &dispatch) && dispatch.QueueSubmit)
+    if (loadQueueDispatch(a, &dispatch) && dispatch.QueueSubmit)
         return dispatch.QueueSubmit(a, b, c, d);
     return next_vkQueueSubmit(a, b, c, d);
 }
 void ovkCmdPipelineBarrier(VkCommandBuffer a, VkPipelineStageFlags b, VkPipelineStageFlags c, VkDependencyFlags d, uint32_t e, const VkMemoryBarrier* f, uint32_t g, const VkBufferMemoryBarrier* h, uint32_t i, const VkImageMemoryBarrier* j) {
     DeviceDispatch dispatch{};
-    if (loadDeviceDispatch(a, &dispatch) && dispatch.CmdPipelineBarrier) {
+    if (loadCommandBufferDispatch(a, &dispatch) && dispatch.CmdPipelineBarrier) {
         dispatch.CmdPipelineBarrier(a, b, c, d, e, f, g, h, i, j);
         return;
     }
@@ -718,7 +775,7 @@ void ovkCmdPipelineBarrier(VkCommandBuffer a, VkPipelineStageFlags b, VkPipeline
 }
 void ovkCmdBlitImage(VkCommandBuffer a, VkImage b, VkImageLayout c, VkImage d, VkImageLayout e, uint32_t f, const VkImageBlit* g, VkFilter h) {
     DeviceDispatch dispatch{};
-    if (loadDeviceDispatch(a, &dispatch) && dispatch.CmdBlitImage) {
+    if (loadCommandBufferDispatch(a, &dispatch) && dispatch.CmdBlitImage) {
         dispatch.CmdBlitImage(a, b, c, d, e, f, g, h);
         return;
     }

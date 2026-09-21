@@ -391,8 +391,9 @@ private:
         uint64_t generation{0};
         Mini::CommandBuffer preCopyBuf; // copy from swapchain image to frame_0/frame_1
         std::array<Mini::Semaphore, 2> preCopySemaphores; // signal when preCopyBuf is done
-        // Owners for semaphores consumed by this source-copy submission. The
-        // source producer fence proves those waits have completed.
+        // Owners for semaphores consumed by queue submissions in this pass.
+        // The consuming submission's producer fence proves those waits have
+        // completed before this vector is cleared.
         std::vector<Mini::Semaphore> queueConsumerSemaphores;
 #ifdef __ANDROID__
         // Dedicated cross-device signal. It is never shared with source-present
@@ -407,8 +408,14 @@ private:
         std::vector<Mini::Semaphore> acquireSemaphores; // signal for swapchain image n
 
         std::vector<Mini::CommandBuffer> postCopyBufs; // copy from out_n to swapchain image
-        std::vector<Mini::Semaphore> postCopySemaphores; // signal when postCopyBuf is done
-        std::vector<Mini::Semaphore> prevPostCopySemaphores; // signal for previous postCopyBuf
+        // Each post-copy submit has separate binary-signal domains. The first
+        // signal is consumed by that output's WSI present; the second keeps
+        // WSI presents ordered; the third is consumed only by the next
+        // post-copy queue submit. A binary signal must never serve both a
+        // queued submit wait and a WSI wait.
+        std::vector<Mini::Semaphore> postCopySemaphores; // consumed by this output's WSI present
+        std::vector<Mini::Semaphore> prevPostCopySemaphores; // consumed by the next WSI present/final source present
+        std::vector<Mini::Semaphore> nextPostCopySemaphores; // consumed by the next post-copy submit
 
         // Attached to the real source-copy submission. Android must not
         // inject an empty vkQueueSubmit after vkQueuePresentKHR because some

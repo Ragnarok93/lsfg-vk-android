@@ -82,6 +82,9 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
             'Hooks::hooks["vkCreateInstance"]',
             "struct DeviceDispatch",
             "deviceDispatchTables",
+            "std::unordered_map<VkDevice, DeviceDispatch>",
+            "std::unordered_map<VkQueue, DeviceDispatch>",
+            "std::unordered_map<VkCommandBuffer, DeviceDispatch>",
             "storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())",
             "loadDeviceDispatch(device, &dispatch)",
             "dispatch.presentationDevice",
@@ -93,6 +96,18 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
         post_hook = layer.index('Hooks::hooks["vkCreateDevicePost"]')
         self.assertLess(snapshot, post_hook)
         self.assertNotIn("runtime stage=device-dispatch-ready presentation=1", layer)
+
+    def test_device_dispatch_does_not_alias_same_driver_dispatch_pointer(self) -> None:
+        layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("ownedDispatch.device = device", layer)
+        self.assertIn('"vkGetDeviceQueue"', layer)
+        self.assertIn("dispatch.GetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>", layer)
+        self.assertIn("queueDispatchTables[queue] = dispatch", layer)
+        self.assertIn("commandBufferDispatchTables[commandBuffer] = dispatch", layer)
+        self.assertIn("eraseDeviceDispatch(a)", layer)
+        self.assertNotIn("std::unordered_map<const void*, DeviceDispatch>", layer)
+        self.assertNotIn("deviceDispatchKey(", layer)
 
     def test_swapchain_context_creation_cannot_finalize_other_active_contexts(self) -> None:
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -107,6 +122,20 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
         self.assertNotIn("LSFG_3_1P::finalize()", constructor)
         self.assertNotIn("LSFG_3_1::finalize()", constructor)
         self.assertIn("configuration reloaded target=", constructor)
+
+    def test_swapchain_state_isolated_by_device_and_present_queue(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        # VkSwapchainKHR is non-dispatchable and its numeric value must not be
+        # treated as process-global ownership across logical devices. Present
+        # lookup must also refuse to guess if a vendor wrapper exposes an
+        # ambiguous queue dispatch identity.
+        self.assertIn("struct SwapchainKey", hooks)
+        self.assertIn("SwapchainKey{device, swapchain}", hooks)
+        self.assertIn("findSwapchainState(swapchainHandle, queue)", hooks)
+        self.assertIn("dispatchKey(key.device)", hooks)
+        self.assertIn("return ambiguous ? nullptr : onlyCandidate", hooks)
+        self.assertIn("retireSwapchainState(device, swapchain)", hooks)
 
 
 if __name__ == "__main__":

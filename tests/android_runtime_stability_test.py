@@ -191,7 +191,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         context = source.index("std::make_shared<LsContext>", retire)
         self.assertLess(retire, context)
         self.assertIn(
-            "retireSwapchainState(pCreateInfo->oldSwapchain)",
+            "retireSwapchainState(device, pCreateInfo->oldSwapchain)",
             source[retire - 300:retire + 300],
         )
 
@@ -200,9 +200,21 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn("queueConsumerSemaphores", header)
         self.assertGreaterEqual(
-            source.count("pass.queueConsumerSemaphores.emplace_back("), 3
+            source.count("pass.queueConsumerSemaphores.emplace_back("), 5
         )
         self.assertIn("pass.queueConsumerSemaphores.clear()", source)
+
+    def test_generated_binary_semaphore_consumers_are_disjoint(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("nextPostCopySemaphores", header)
+        self.assertIn("nextPostCopySemaphores.resize", source)
+        self.assertIn("nextPostCopySemaphores", source)
+        # prevPostCopySemaphores belongs to WSI ordering only; queue chaining
+        # uses a separately signaled semaphore retained by the consuming pass.
+        self.assertIn("pass.nextPostCopySemaphores.at(i - 1).handle()", source)
+        self.assertIn("pass.queueConsumerSemaphores.emplace_back(\n                pass.nextPostCopySemaphores.at(i - 1))", source)
 
     def test_delayed_consumer_model_survives_ring_wrap(self) -> None:
         consumer = DelayedWsiConsumer()
@@ -676,7 +688,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
 
         self.assertIn("ovkDestroySwapchainKHR", fallback)
         self.assertIn(
-            "retireSwapchainState(pCreateInfo->oldSwapchain)",
+            "retireSwapchainState(device, pCreateInfo->oldSwapchain)",
             source[:catch_start],
         )
         self.assertIn("ovkCreateSwapchainKHR(", fallback)
@@ -685,13 +697,13 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
 
     def test_context_creation_failure_retires_old_wrapper_before_new_context(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        retire = source.index("retireSwapchainState(pCreateInfo->oldSwapchain)")
+        retire = source.index("retireSwapchainState(device, pCreateInfo->oldSwapchain)")
         context = source.index("std::make_shared<LsContext>", retire)
         self.assertLess(
             retire,
             context,
         )
-        self.assertIn("retireSwapchainState(failedSwapchain)", source)
+        self.assertIn("retireSwapchainState(device, failedSwapchain)", source)
 
     def test_game_config_keeps_target_resident_while_multiplier_one_is_off(self) -> None:
         """GameNative Off remains a resident layer target; multiplier=1 is pass-through."""

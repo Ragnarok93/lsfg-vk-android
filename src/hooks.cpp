@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -359,7 +360,27 @@ namespace {
 #endif
     };
 
-    std::unordered_map<VkSwapchainKHR, std::shared_ptr<SwapchainState>> swapchains;
+    struct SwapchainKey {
+        VkDevice device{VK_NULL_HANDLE};
+        VkSwapchainKHR swapchain{VK_NULL_HANDLE};
+
+        bool operator==(const SwapchainKey& other) const {
+            return this->device == other.device
+                && this->swapchain == other.swapchain;
+        }
+    };
+
+    struct SwapchainKeyHash {
+        size_t operator()(const SwapchainKey& key) const noexcept {
+            const auto deviceHash = std::hash<VkDevice>{}(key.device);
+            const auto swapchainHash = std::hash<VkSwapchainKHR>{}(key.swapchain);
+            return deviceHash ^ (swapchainHash + 0x9e3779b9U
+                + (deviceHash << 6U) + (deviceHash >> 2U));
+        }
+    };
+
+    std::unordered_map<SwapchainKey, std::shared_ptr<SwapchainState>, SwapchainKeyHash>
+        swapchains;
 
     std::shared_ptr<DeviceInfo> findDeviceInfo(VkDevice device) {
         std::lock_guard lock(hookStateMutex);
@@ -367,25 +388,51 @@ namespace {
         return it == deviceToInfo.end() ? nullptr : it->second;
     }
 
-    std::shared_ptr<SwapchainState> findSwapchainState(VkSwapchainKHR swapchain) {
-        std::lock_guard lock(hookStateMutex);
-        const auto it = swapchains.find(swapchain);
-        return it == swapchains.end() ? nullptr : it->second;
+    template <typename Handle>
+    const void* dispatchKey(Handle handle) noexcept {
+        if (handle == VK_NULL_HANDLE)
+            return nullptr;
+        return *reinterpret_cast<void* const*>(handle);
     }
 
-    void publishSwapchainState(VkSwapchainKHR swapchain,
-            std::shared_ptr<SwapchainState> state) {
+    std::shared_ptr<SwapchainState> findSwapchainState(
+            VkSwapchainKHR swapchain, VkQueue queue) {
         std::lock_guard lock(hookStateMutex);
-        swapchains.insert_or_assign(swapchain, std::move(state));
+        const void* queueKey = dispatchKey(queue);
+        std::shared_ptr<SwapchainState> onlyCandidate;
+        bool ambiguous = false;
+        for (const auto& [key, state] : swapchains) {
+            if (key.swapchain != swapchain)
+                continue;
+            if (onlyCandidate)
+                ambiguous = true;
+            else
+                onlyCandidate = state;
+            if (queueKey != nullptr && dispatchKey(key.device) == queueKey)
+                return state;
+        }
+        // A valid present queue normally shares the device dispatch identity.
+        // If a vendor wrapper does not expose that identity consistently, only
+        // use a unique handle candidate; never guess when multiple instances
+        // own the same numeric VkSwapchainKHR value.
+        return ambiguous ? nullptr : onlyCandidate;
     }
 
-    std::shared_ptr<SwapchainState> detachSwapchainState(VkSwapchainKHR swapchain) {
+    void publishSwapchainState(std::shared_ptr<SwapchainState> state,
+            VkSwapchainKHR swapchain) {
+        std::lock_guard lock(hookStateMutex);
+        swapchains.insert_or_assign(
+            SwapchainKey{state->device, swapchain}, std::move(state));
+    }
+
+    std::shared_ptr<SwapchainState> detachSwapchainState(
+            VkDevice device, VkSwapchainKHR swapchain) {
         if (swapchain == VK_NULL_HANDLE)
             return nullptr;
         std::shared_ptr<SwapchainState> state;
         {
             std::lock_guard lock(hookStateMutex);
-            const auto it = swapchains.find(swapchain);
+            const auto it = swapchains.find(SwapchainKey{device, swapchain});
             if (it == swapchains.end())
                 return nullptr;
             state = std::move(it->second);
@@ -394,8 +441,8 @@ namespace {
         return state;
     }
 
-    void retireSwapchainState(VkSwapchainKHR swapchain) {
-        auto state = detachSwapchainState(swapchain);
+    void retireSwapchainState(VkDevice device, VkSwapchainKHR swapchain) {
+        auto state = detachSwapchainState(device, swapchain);
         if (!state)
             return;
         std::lock_guard presentLock(state->presentMutex);
@@ -414,7 +461,7 @@ namespace {
                 const auto it = std::find_if(
                     swapchains.begin(), swapchains.end(),
                     [device](const auto& entry) {
-                        return entry.second->device == device;
+                        return entry.first.device == device;
                     });
                 if (it == swapchains.end()) {
                     deviceToInfo.erase(device);
@@ -769,12 +816,12 @@ namespace {
                 device, pCreateInfo, pAllocator, pSwapchain);
             if (res == VK_SUCCESS) {
                 if (pCreateInfo->oldSwapchain)
-                    retireSwapchainState(pCreateInfo->oldSwapchain);
+                    retireSwapchainState(device, pCreateInfo->oldSwapchain);
                 try {
                     auto state = std::make_shared<SwapchainState>();
                     state->device = device;
                     state->deviceInfo = deviceInfo;
-                    publishSwapchainState(*pSwapchain, std::move(state));
+                    publishSwapchainState(std::move(state), *pSwapchain);
                 } catch (const std::exception& e) {
                     Utils::logLimitN("swapMap", 5,
                         "Could not retain pass-through swapchain state; continuing natively:\n- "
@@ -923,7 +970,7 @@ namespace {
             // Android, can tear down the private instance behind the old
             // context.
             if (pCreateInfo->oldSwapchain) {
-                retireSwapchainState(pCreateInfo->oldSwapchain);
+                retireSwapchainState(device, pCreateInfo->oldSwapchain);
                 std::cerr << "lsfg-vk: init stage=old-swapchain-retired-before-context\n";
             }
             std::cerr << "lsfg-vk: init stage=ls-context-begin images=" << imageCount
@@ -935,7 +982,7 @@ namespace {
             state->configuredPresent = configuredPresentMode;
             state->context = std::make_shared<LsContext>(
                 *deviceInfo, *pSwapchain, pCreateInfo->imageExtent, swapchainImages);
-            publishSwapchainState(*pSwapchain, std::move(state));
+            publishSwapchainState(std::move(state), *pSwapchain);
             std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 #ifdef __ANDROID__
             const bool generationActive = activeConf.multiplier > 1;
@@ -973,14 +1020,14 @@ namespace {
             // Retire its wrapper now so a later present cannot use a context
             // whose real swapchain has already been replaced.
             if (fallbackRes == VK_SUCCESS) {
-                retireSwapchainState(failedSwapchain);
+                retireSwapchainState(device, failedSwapchain);
                 Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);
                 *pSwapchain = fallbackSwapchain;
                 try {
                     auto state = std::make_shared<SwapchainState>();
                     state->device = device;
                     state->deviceInfo = deviceInfo;
-                    publishSwapchainState(*pSwapchain, std::move(state));
+                    publishSwapchainState(std::move(state), *pSwapchain);
                 } catch (const std::exception& e) {
                     Utils::logLimitN("swapMap", 5,
                         "Could not retain fallback swapchain state; continuing natively:\n- "
@@ -996,7 +1043,7 @@ namespace {
                              " reason=ls-context-failed\n";
                 return VK_SUCCESS;
             }
-            retireSwapchainState(failedSwapchain);
+            retireSwapchainState(device, failedSwapchain);
             Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);
             *pSwapchain = VK_NULL_HANDLE;
             std::cerr << "lsfg-vk: init stage=swapchain-fallback-failed result="
@@ -1010,7 +1057,7 @@ namespace {
             VkQueue queue,
             const VkPresentInfoKHR* pPresentInfo) noexcept {
         const VkSwapchainKHR swapchainHandle = *pPresentInfo->pSwapchains;
-        auto state = findSwapchainState(swapchainHandle);
+        auto state = findSwapchainState(swapchainHandle, queue);
         if (!state) {
             Utils::logLimitN("swapMap", 5,
                 "Swapchain not found in map");
@@ -1175,7 +1222,7 @@ namespace {
             VkDevice device,
             VkSwapchainKHR swapchain,
             const VkAllocationCallbacks* pAllocator) noexcept {
-        retireSwapchainState(swapchain);
+        retireSwapchainState(device, swapchain);
         Layer::ovkDestroySwapchainKHR(device, swapchain, pAllocator);
     }
 }

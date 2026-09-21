@@ -49,8 +49,11 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         for token in (
             "struct DeviceDispatch",
             "deviceDispatchTables",
-            "deviceDispatchKey",
-            "*reinterpret_cast<void* const*>(handle)",
+            "std::unordered_map<VkDevice, DeviceDispatch>",
+            "queueDispatchTables",
+            "commandBufferDispatchTables",
+            '"vkGetDeviceQueue"',
+            "storeQueueDispatch(*d, dispatch)",
             "storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())",
             "loadDeviceDispatch(device, &dispatch)",
             "dispatch.presentationDevice",
@@ -108,7 +111,12 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         ):
             start = layer.index(signature)
             body = layer[start:start + 900]
-            self.assertIn("loadDeviceDispatch(a, &dispatch)", body)
+            if "VkQueue" in signature:
+                self.assertIn("loadQueueDispatch(a, &dispatch)", body)
+            elif "VkCommandBuffer" in signature:
+                self.assertIn("loadCommandBufferDispatch(a, &dispatch)", body)
+            else:
+                self.assertIn("loadDeviceDispatch(a, &dispatch)", body)
 
     def test_android_runtime_metrics_cover_output_rate_latency_failures_and_stats_file(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
@@ -175,12 +183,23 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         android = source[android_start:desktop_start]
 
         # A Vulkan binary semaphore signal can satisfy only one wait. The
-        # generated present and following generated/source present therefore
-        # require independently signaled semaphores, matching the desktop path.
+        # generated WSI chain and the following post-copy queue therefore
+        # require independently signaled semaphores.
         self.assertIn("pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);", android)
+        self.assertIn("pass.nextPostCopySemaphores.at(i) = Mini::Semaphore(info.device);", android)
         self.assertIn(
             "{ pass.postCopySemaphores.at(i).handle(),\n"
-            "              pass.prevPostCopySemaphores.at(i).handle() }",
+            "              pass.prevPostCopySemaphores.at(i).handle(),\n"
+            "              pass.nextPostCopySemaphores.at(i).handle() }",
+            android,
+        )
+        self.assertIn(
+            "pass.nextPostCopySemaphores.at(i - 1).handle()",
+            android,
+        )
+        self.assertIn(
+            "pass.queueConsumerSemaphores.emplace_back(\n"
+            "                pass.nextPostCopySemaphores.at(i - 1))",
             android,
         )
         self.assertIn(
@@ -199,7 +218,7 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
         self.assertIn("init stage=swapchain-pass-through reason=", hooks)
         self.assertIn("enabled=", hooks)
-        self.assertIn("publishSwapchainState(*pSwapchain", hooks)
+        self.assertIn("publishSwapchainState(std::move(state), *pSwapchain)", hooks)
         self.assertNotIn("if (!conf.enable || conf.multiplier <= 1)", hooks)
         self.assertIn("if (conf.targeted && conf.multiplier <= 1)", hooks)
         self.assertIn("state->context->enterSourceOnlyBypass()", hooks)
