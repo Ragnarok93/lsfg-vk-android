@@ -45,7 +45,7 @@ static VkQueue q1 = reinterpret_cast<VkQueue>(0x3000);
 static VkQueue q2 = reinterpret_cast<VkQueue>(0x4000);
 static VkQueue q3 = reinterpret_cast<VkQueue>(0x5000);
 static VkQueue q4 = reinterpret_cast<VkQueue>(0x6000);
-static int submitted1, submitted2, submitted3, presented1, presented2;
+static int submitted1, submitted2, submitted3, submitted4, presented1, presented2;
 static std::set<VkSemaphore> alive;
 static uintptr_t nextSemaphore = 100;
 static VKAPI_ATTR void VKAPI_CALL getQueue(VkDevice d, uint32_t, uint32_t, VkQueue* q) {
@@ -55,6 +55,7 @@ static VKAPI_ATTR void VKAPI_CALL getQueue2(VkDevice d, const VkDeviceQueueInfo2
 static VKAPI_ATTR VkResult VKAPI_CALL submit1(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q1); ++submitted1; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL submit2(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q2); ++submitted2; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL submit3(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q3); ++submitted3; return VK_SUCCESS; }
+static VKAPI_ATTR VkResult VKAPI_CALL submit4(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q4); ++submitted4; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL present1(VkQueue q, const VkPresentInfoKHR*) { assert(q == q1); ++presented1; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL present2(VkQueue q, const VkPresentInfoKHR*) { assert(q == q2); ++presented2; return VK_SUCCESS; }
 static PFN_vkVoidFunction constructionGdpa(VkDevice d, const char* name) {
@@ -99,11 +100,8 @@ int main() {
     eraseDeviceDispatch(d2);
     submitted1 = submitted2 = presented1 = presented2 = 0;
 
-    // Regression: Turnip/wrapper-gamenative can expose the new VkDevice handle
-    // before vkGetDeviceProcAddr(newDevice, "vkGetDeviceQueue") is usable.
-    // The known-good S20+ path reused the established queue thunk for devices
-    // sharing the same loader dispatch key. Preserve that bootstrap behavior
-    // only during construction; exact ownership must take over afterwards.
+    // Seed the known-good presentation-device queue thunk. Unknown devices still
+    // fail closed unless LSFG is inside its own recursive backend setup window.
     DeviceDispatch bootstrap{};
     bootstrap.device = d1;
     bootstrap.GetDeviceQueue = getQueue;
@@ -140,6 +138,24 @@ int main() {
     unsetenv("DISABLE_LSFG");
     assert(privateDifferentKey == q4);
     assert(Layer::queueOwner(q4) == d4);
+    eraseDeviceDispatch(d4);
+
+    // Actual S20+ failure shape: vkCreateDevice has returned and the private
+    // passthrough device is already published, but its exact GDPA did not expose
+    // vkGetDeviceQueue. volkLoadDevice then calls our queue wrapper. Bootstrap
+    // the getter only; queue submit ownership must remain the exact private device.
+    DeviceDispatch privatePublished{};
+    privatePublished.device = d4;
+    privatePublished.QueueSubmit = submit4;
+    storeDeviceDispatch(d4, privatePublished);
+    setenv("DISABLE_LSFG", "1", 1);
+    VkQueue publishedPrivateQueue{};
+    Layer::ovkGetDeviceQueue(d4, 0, 0, &publishedPrivateQueue);
+    unsetenv("DISABLE_LSFG");
+    assert(publishedPrivateQueue == q4);
+    assert(Layer::queueOwner(q4) == d4);
+    assert(Layer::ovkQueueSubmit(q4, 0, nullptr, {}) == VK_SUCCESS);
+    assert(submitted4 == 1);
     eraseDeviceDispatch(d4);
 
     DeviceDispatch completed = bootstrap;
