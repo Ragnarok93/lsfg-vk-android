@@ -94,6 +94,20 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
         self.assertLess(snapshot, post_hook)
         self.assertNotIn("runtime stage=device-dispatch-ready presentation=1", layer)
 
+    def test_swapchain_context_creation_cannot_finalize_other_active_contexts(self) -> None:
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        ctor_start = context.index("LsContext::LsContext")
+        ctor_end = context.index("LsContext::~LsContext", ctor_start)
+        constructor = context[ctor_start:ctor_end]
+
+        # The framegen backend is process-global while LsContext is per
+        # swapchain. A second Vulkan instance/swapchain must not destroy the
+        # first one's backend context merely because its config timestamp is
+        # newer; initialize() already rejects incompatible active signatures.
+        self.assertNotIn("LSFG_3_1P::finalize()", constructor)
+        self.assertNotIn("LSFG_3_1::finalize()", constructor)
+        self.assertIn("configuration reloaded target=", constructor)
+
 
 if __name__ == "__main__":
     unittest.main()

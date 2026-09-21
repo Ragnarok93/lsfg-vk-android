@@ -555,8 +555,11 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             std::cerr << "- " << e.what() << '\n';
         }
 
-        LSFG_3_1P::finalize();
-        LSFG_3_1::finalize();
+        // The framegen backend is process-global, while this constructor is
+        // per swapchain. Do not finalize here: creating a second Vulkan
+        // swapchain must not destroy contexts owned by the first one. The
+        // backend initialize() call below validates the requested signature
+        // and rejects incompatible reconfiguration while contexts are active.
 
         std::cerr << "lsfg-vk: configuration reloaded target=" << name.second
                   << " multiplier=" << conf.multiplier
@@ -1485,16 +1488,32 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     enum class AndroidFrameCycleMode {
         Generate,
         HistoryOnly,
+        SourceWarmup,
     };
-    const bool historyOnly =
+    // A Qualcomm resume must not send the first post-discontinuity source pair
+    // through the zero-count framegen path. That path still submits cross-device
+    // AHB work even though it has no generated outputs, and the S20+/Turnip
+    // combination can tear down the guest immediately after the present. Keep
+    // the existing zero-count history path for capable devices and for genuine
+    // adaptive cadence zeros; only the conservative Qualcomm warmup uses
+    // direct source presentation until its source history is repopulated.
+    const bool sourceWarmupEligible =
         sourceHistoryWarmupActive
-        || plannedGeneratedFrameCount == 0
-        || (plannedGeneratedFrameCount > 0 && generatedFrameCount == 0);
+        && this->conservativeHistoryWarmupSynchronization_;
     const AndroidFrameCycleMode cycleMode =
-        historyOnly
-            ? AndroidFrameCycleMode::HistoryOnly
-            : AndroidFrameCycleMode::Generate;
-    this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
+        sourceWarmupEligible
+            ? AndroidFrameCycleMode::SourceWarmup
+            : ((sourceHistoryWarmupActive
+                    || plannedGeneratedFrameCount == 0
+                    || (plannedGeneratedFrameCount > 0 && generatedFrameCount == 0))
+                ? AndroidFrameCycleMode::HistoryOnly
+                : AndroidFrameCycleMode::Generate);
+    const bool historyOnly =
+        cycleMode == AndroidFrameCycleMode::HistoryOnly;
+    const bool warmupSourceHistory =
+        cycleMode == AndroidFrameCycleMode::SourceWarmup;
+    this->lastGeneratedFrameCount_ =
+        historyOnly || warmupSourceHistory ? 0 : generatedFrameCount;
 
     const auto updateAdaptiveFlowGovernor = [&]() {
         const LSFG::AdaptiveFlowGpuTiming timing = conf.performance
@@ -2390,9 +2409,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.preCopySemaphores.at(1).handle(),
     };
 
-    // Every enabled cycle submits either interpolation or zero-count history
-    // preprocessing. Prefer SYNC_FD for both so the source thread never needs a
-    // host wait in the normal path.
+    // Every enabled non-warmup cycle submits either interpolation or zero-count
+    // history preprocessing. Prefer SYNC_FD so the source thread never needs a
+    // host wait in the normal path; Qualcomm warmup deliberately remains
+    // source-only below.
     bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
         && !(sourceHistoryWarmupActive
             && this->conservativeHistoryWarmupSynchronization_);
@@ -2673,6 +2693,57 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << "\n";
         }
         return finishSourcePresent(adaptiveSourceResult, "pre-copy-history-only");
+    }
+
+    if (warmupSourceHistory) {
+        // Rebuild the source pair through the game device only. In particular,
+        // do not dispatch zero-output framegen work here: Qualcomm/Turnip can
+        // lose the guest when it overlaps the first WSI operation after a
+        // suspend or LSFG re-enable.
+        this->lastDispatchedGeneratedFrameCount_ = 0;
+        this->lastBatchCompleteDependency_ = {};
+        this->lastGeneratedFrameCount_ = 0;
+        if (this->sourceHistoryWarmupRemaining_ > 0)
+            --this->sourceHistoryWarmupRemaining_;
+        this->requiresSourceHistoryWarmup_ =
+            this->sourceHistoryWarmupRemaining_ > 0;
+
+        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+        VkPresentTimeGOOGLE warmupPresentTime{};
+        VkPresentTimesInfoGOOGLE warmupPresentTimes{};
+        const VkPresentInfoKHR warmupPresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = adaptivePresentPNext(
+                pNext,
+                this->currentSourceTimeline_.sourceDesiredTimeNs,
+                warmupPresentTime, warmupPresentTimes),
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &sourceReady,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        const auto warmupResult = Layer::ovkQueuePresentKHR(
+            queue, &warmupPresentInfo);
+        this->retainWsiConsumersForImage(presentIdx, pass.generation,
+            {pass.preCopySemaphores.at(0)}, "source-history-warmup");
+        if (warmupResult != VK_SUCCESS && warmupResult != VK_SUBOPTIMAL_KHR) {
+            metrics.windowSourcePresentFailures++;
+            metrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(warmupResult,
+                "Failed to present source-history warmup frame");
+        }
+        if (firstPresentDiagnostic || this->sourceHistoryWarmupRemaining_ == 0) {
+            std::cerr << "lsfg-vk: runtime stage=source-history-warmup"
+                      << " generated=0 history_valid="
+                      << (this->requiresSourceHistoryWarmup_ ? 0 : 1)
+                      << " history_warmup_remaining="
+                      << this->sourceHistoryWarmupRemaining_
+                      << " discontinuity="
+                      << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
+                      << "\n";
+        }
+        return finishSourcePresent(warmupResult, "pre-copy-warmup");
     }
 
 

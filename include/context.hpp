@@ -289,10 +289,9 @@ private:
     // OPAQUE_FD compatibility, and fall back to the established host fence.
     bool asyncAhbHandoffEnabled_{false};
     bool asyncFramegenCompletionEnabled_{false};
-    // Turnip/Adreno cannot safely overlap the zero-count history dispatch
-    // used immediately after an LSFG enable/resume boundary with game WSI.
-    // Keep normal generated-frame SYNC_FD work asynchronous; only this short
-    // history-rebuild boundary uses the proven bounded host completion path.
+    // Turnip/Adreno uses a source-only warmup at an LSFG enable/resume
+    // boundary. Keep normal generated-frame SYNC_FD work asynchronous while
+    // rebuilding the source-history pair without zero-count framegen work.
     bool conservativeHistoryWarmupSynchronization_{false};
     VkExternalSemaphoreHandleTypeFlagBits asyncAhbHandoffHandleType_{
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT};

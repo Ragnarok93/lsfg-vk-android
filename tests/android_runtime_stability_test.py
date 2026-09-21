@@ -153,6 +153,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         for reason in (
             '"source-history"',
+            '"source-history-warmup"',
             '"generated"',
             '"source-final"',
             '"source-syncfd-fallback"',
@@ -592,11 +593,43 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("Preserve the last actual producer tokens", bypass)
 
         self.assertIn("const bool sourceHistoryWarmupActive", source)
-        self.assertIn("sourceHistoryWarmupActive\n        ||", source)
+        self.assertIn("sourceHistoryWarmupActive", source)
+        self.assertIn("AndroidFrameCycleMode::SourceWarmup", source)
         self.assertIn("--this->sourceHistoryWarmupRemaining_", source)
-        self.assertNotIn("AndroidFrameCycleMode::SourceWarmup", source)
-        self.assertNotIn("stage=source-history-warmup", source)
         self.assertIn("if (this->lastSourceCopyDependency_.valid)", source)
+
+    def test_qualcomm_warmup_skips_zero_count_framegen_dispatch(self) -> None:
+        """Adreno warmup must present real source frames before LSFG history work."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        cycle_start = source.index("enum class AndroidFrameCycleMode")
+        cycle_end = source.index(
+            "const auto updateAdaptiveFlowGovernor", cycle_start
+        )
+        cycle = source[cycle_start:cycle_end]
+        self.assertIn("AndroidFrameCycleMode::SourceWarmup", cycle)
+        self.assertIn("conservativeHistoryWarmupSynchronization_", cycle)
+        self.assertIn(
+            "const bool sourceWarmupEligible =\n"
+            "        sourceHistoryWarmupActive\n"
+            "        && this->conservativeHistoryWarmupSynchronization_;",
+            cycle,
+        )
+
+        history_start = source.index("if (historyOnly)")
+        generation_start = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        pre_generation = source[history_start:generation_start]
+        warmup_start = pre_generation.index("if (warmupSourceHistory)")
+        warmup_end = pre_generation.index(
+            "this->lastDispatchedGeneratedFrameCount_ = generatedFrameCount",
+            warmup_start,
+        )
+        warmup = pre_generation[warmup_start:warmup_end]
+        self.assertNotIn("presentContextWithCount", warmup)
+        self.assertIn("stage=source-history-warmup", warmup)
+        self.assertIn("pre-copy-warmup", warmup)
 
 
     def test_fixed_multiplier_never_underflows_when_runtime_is_off(self) -> None:
