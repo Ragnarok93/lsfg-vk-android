@@ -789,9 +789,9 @@ VkResult ovkGetAndroidHardwareBufferPropertiesANDROID(VkDevice a, const AHardwar
     return VK_ERROR_DEVICE_LOST;
 }
 void ovkGetDeviceQueue(VkDevice a, uint32_t b, uint32_t c, VkQueue* d) {
-    DeviceDispatch owner{};
-    const bool tracked = loadDeviceDispatch(a, &owner);
-    PFN_vkGetDeviceQueue getQueue = tracked ? owner.GetDeviceQueue : nullptr;
+    DeviceDispatch dispatch{};
+    const bool tracked = loadDeviceDispatch(a, &dispatch);
+    PFN_vkGetDeviceQueue getQueue = tracked ? dispatch.GetDeviceQueue : nullptr;
 
     // Turnip can publish the private logical device before its downstream GDPA
     // exposes vkGetDeviceQueue. Do not let the successful exact-device lookup
@@ -803,14 +803,14 @@ void ovkGetDeviceQueue(VkDevice a, uint32_t b, uint32_t c, VkQueue* d) {
                 && bootstrap.GetDeviceQueue != nullptr) {
             getQueue = bootstrap.GetDeviceQueue;
             if (!tracked)
-                owner = bootstrap;
+                dispatch = bootstrap;
         }
     }
 
     if (getQueue != nullptr) {
         getQueue(a, b, c, d);
         if (d && *d != VK_NULL_HANDLE)
-            storeQueueDispatch(*d, owner);
+            storeQueueDispatch(*d, dispatch);
         return;
     }
     if (d) *d = VK_NULL_HANDLE;
