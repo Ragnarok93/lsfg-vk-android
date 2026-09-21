@@ -240,7 +240,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             2,
         )
 
-    def test_zero_generation_history_uses_async_dependency_chain(self) -> None:
+    def test_zero_generation_history_uses_async_dependency_chain_except_adreno6xx(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         android_start = source.index(
             "#ifdef __ANDROID__", source.index("VkResult LsContext::present")
@@ -249,7 +249,11 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         android_present = source[android_start:desktop_start]
 
         self.assertIn(
-            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;",
+            "const bool adrenoHistoryCompatibilityCycle =",
+            android_present,
+        )
+        self.assertIn(
+            "this->asyncAhbHandoffEnabled_ && !adrenoHistoryCompatibilityCycle",
             android_present,
         )
         history_start = android_present.index("if (historyOnly)")
@@ -257,10 +261,18 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "// 2. Tell framegen to generate intermediary frames.", history_start
         )
         history = android_present[history_start:generation_start]
+        # Xclipse and other capable devices retain the asynchronous zero-history
+        # dependency chain.
         self.assertIn("presentContextWithCountExportSyncFd", history)
         self.assertIn("framegenBatchCompleteValid = true", history)
-        self.assertIn("historyRequiresHostCompletionWait", history)
-        self.assertNotIn("submitAndWaitForAhbHandoff", history)
+        # Adreno 6xx takes the proven compatibility path: synchronous source
+        # handoff plus a bounded framegen completion wait before AHB reuse.
+        self.assertIn(
+            "bool historyRequiresHostCompletionWait = "
+            "this->adreno6xxCompatibilityMode_;",
+            history,
+        )
+        self.assertIn("waitContext", history)
 
     def test_fixed_mode_preserves_requested_multiplier_and_adaptive_flow_does_not_own_pacing(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
