@@ -109,6 +109,7 @@ int main() {
     bootstrap.GetDeviceQueue = getQueue;
     bootstrap.GetDeviceQueue2 = getQueue2;
     bootstrap.QueueSubmit = submit1;
+    bootstrap.presentationDevice = true;
     storeDeviceDispatch(d1, bootstrap);
     {
         DeviceConstructionScope construction(constructionGdpaNoQueue);
