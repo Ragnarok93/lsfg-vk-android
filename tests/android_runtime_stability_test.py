@@ -401,9 +401,14 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         android_present = source[android_start:desktop_start]
 
         self.assertIn(
-            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;",
+            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_",
             android_present,
         )
+        self.assertIn(
+            "sourceHistoryWarmupActive",
+            android_present,
+        )
+        self.assertIn("conservativeHistoryWarmupSynchronization_", android_present)
         history_start = android_present.index("if (historyOnly)")
         generation_start = android_present.index(
             "// 2. Tell framegen to generate intermediary frames.", history_start
@@ -413,6 +418,31 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("framegenBatchCompleteValid = true", history)
         self.assertIn("historyRequiresHostCompletionWait", history)
         self.assertNotIn("submitAndWaitForAhbHandoff", history)
+
+    def test_qualcomm_history_warmup_uses_bounded_completion_policy(self) -> None:
+        """Adreno must not overlap zero-count cross-device history with resumed WSI."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("conservativeHistoryWarmupSynchronization_", header)
+        self.assertIn("kQualcommVendorId", source)
+        self.assertIn("physicalDeviceProperties.vendorID == kQualcommVendorId", source)
+        self.assertIn("sourceHistoryWarmupActive", source)
+        self.assertIn("conservativeHistoryWarmupSynchronization_", source)
+
+        history_start = source.index("if (historyOnly)")
+        generation_start = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        history = source[history_start:generation_start]
+        self.assertIn("historyRequiresHostCompletionWait =", history)
+        self.assertIn("sourceHistoryWarmupActive", history)
+        self.assertIn("this->conservativeHistoryWarmupSynchronization_;", history)
+        self.assertIn("waitContext", history)
+        policy_start = source.index('std::cerr << "lsfg-vk: history-sync-policy="')
+        policy = source[policy_start : policy_start + 320]
+        self.assertIn('"bounded-host"', policy)
+        self.assertIn('"async-safe"', policy)
 
     def test_fixed_mode_preserves_requested_multiplier_and_adaptive_flow_does_not_own_pacing(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")

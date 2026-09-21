@@ -89,7 +89,7 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
         self.assertIn("this->asyncAhbHandoffEnabled_", android_present)
         handoff_start = android_present.index(
-            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;"
+            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_"
         )
         handoff_end = android_present.index(
             "if (!useAsyncHandoff && !asyncSubmissionIssued)", handoff_start
@@ -97,6 +97,11 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         handoff_decision = android_present[handoff_start:handoff_end]
         self.assertNotIn("generatedFrameCount > 0", handoff_decision)
         self.assertNotIn("warmupSourceHistory", handoff_decision)
+        self.assertIn(
+            "sourceHistoryWarmupActive",
+            handoff_decision,
+        )
+        self.assertIn("conservativeHistoryWarmupSynchronization_", handoff_decision)
         self.assertIn(
             "if (!useAsyncHandoff && !asyncSubmissionIssued)",
             android_present,

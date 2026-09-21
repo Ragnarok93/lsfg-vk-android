@@ -41,6 +41,7 @@
 namespace {
 
 std::mutex lsfgDisableEnvMutex;
+constexpr uint32_t kQualcommVendorId = 0x5143;
 
 class ScopedLsfgDisable {
 public:
@@ -575,6 +576,20 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     if (!info.identityValid)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
             "Exact Vulkan device/driver UUID provenance is unavailable");
+
+#ifdef __ANDROID__
+    VkPhysicalDeviceProperties physicalDeviceProperties{};
+    Layer::ovkGetPhysicalDeviceProperties(
+        info.physicalDevice, &physicalDeviceProperties);
+    this->conservativeHistoryWarmupSynchronization_ =
+        physicalDeviceProperties.vendorID == kQualcommVendorId;
+    std::cerr << "lsfg-vk: history-sync-policy="
+              << (this->conservativeHistoryWarmupSynchronization_
+                    ? "bounded-host" : "async-safe")
+              << " vendor_id=0x" << std::hex
+              << physicalDeviceProperties.vendorID << std::dec
+              << " device=\"" << physicalDeviceProperties.deviceName << "\"\n";
+#endif
 
 #ifdef __ANDROID__
     // Select and validate the exact framegen ICD before allocating any shared AHB.
@@ -2378,7 +2393,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // Every enabled cycle submits either interpolation or zero-count history
     // preprocessing. Prefer SYNC_FD for both so the source thread never needs a
     // host wait in the normal path.
-    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;
+    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
+        && !(sourceHistoryWarmupActive
+            && this->conservativeHistoryWarmupSynchronization_);
     bool asyncSubmissionIssued = false;
     bool asyncExportFailed = false;
     int framegenInputSemaphoreFd = -1;
@@ -2497,7 +2514,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // release; the next source copy consumes it before reusing the inputs.
         std::vector<int> noOutSems;
         LSFG::AndroidFrameSyncFds historySync{};
-        bool historyRequiresHostCompletionWait = false;
+        bool historyRequiresHostCompletionWait =
+            sourceHistoryWarmupActive
+            && this->conservativeHistoryWarmupSynchronization_;
         const auto historyAdvanceStart = RuntimeMetrics::Clock::now();
 
         if (this->asyncFramegenCompletionEnabled_ && useAsyncHandoff) {
