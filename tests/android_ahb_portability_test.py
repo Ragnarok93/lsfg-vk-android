@@ -89,12 +89,18 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
         self.assertIn("this->asyncAhbHandoffEnabled_", android_present)
         handoff_start = android_present.index(
-            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;"
+            "const bool adrenoHistoryCompatibilityCycle ="
         )
         handoff_end = android_present.index(
             "if (!useAsyncHandoff && !asyncSubmissionIssued)", handoff_start
         )
         handoff_decision = android_present[handoff_start:handoff_end]
+        self.assertIn(
+            "this->asyncAhbHandoffEnabled_ && !adrenoHistoryCompatibilityCycle",
+            handoff_decision,
+            "General Android async handoff must remain capability-driven; only the "
+            "Adreno 6xx history compatibility cycle may force the host fence",
+        )
         self.assertNotIn("generatedFrameCount > 0", handoff_decision)
         self.assertNotIn("warmupSourceHistory", handoff_decision)
         self.assertIn(
