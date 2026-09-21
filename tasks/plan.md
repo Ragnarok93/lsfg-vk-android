@@ -121,3 +121,44 @@ provisional and profitability-driven.
 - Superseded remote branches remain untouched until the build/device gates are
   complete. Their deletion is a separate cleanup action, not part of the
   implementation commits.
+
+## Addendum: Adreno pass-retirement and semaphore lifetime repair (2026-09-21)
+
+This is a continuation of the same unified-stability work, scoped to the
+remaining Adreno/Turnip lifetime failure at `10dcf53115f2c215e4dc9e159de9693ede79ba6c`.
+The existing scheduler, shader, AHB transport, SYNC_FD, and presentation policy
+remain protected surfaces.
+
+### Contract
+
+- Producer fences prove completion of the submission that owns them; they do
+  not by themselves prove that presentation or later queue consumers no longer
+  reference the submission's binary semaphores.
+- A pass slot may be reused for recording only after its command-buffer
+  submissions complete, while its old Vulkan handles remain owned by a deferred
+  retirement bundle until a later real queue fence proves prior queue work has
+  completed.
+- Source-copy dependency ownership is represented by the actual last submitted
+  source-copy semaphore/generation, never by `frameIdx - 1`.
+- No empty post-present submission is permitted. Normal source presentation
+  must retain its asynchronous handoff/completion behavior.
+
+### Ordered work
+
+1. [x] Add deterministic RED tests for producer-vs-consumer retirement, delayed WSI
+   consumption across ring wrap, and source-only fallback dependency ownership.
+2. [x] Introduce explicit pass generations, deferred pass-resource ownership, and a
+   real-submission retirement anchor.
+3. [x] Replace implicit previous-pass indexing with an explicit last-source-copy
+   dependency token and preserve it through source-only fallback.
+4. [x] Add bounded debug diagnostics/assertions for unresolved retired consumers,
+   pass reuse, lifecycle discontinuities, and selected retirement policy.
+5. [ ] Run the static producer/consumer audit, native contract suite, build checks,
+   and GameNative integration/provenance checks before requesting device tests.
+
+### Non-goals
+
+- No B14/B15 shader, Flow Scale, adaptive scheduler, fractional multiplier,
+  image-quality, or GameNative UI changes.
+- No vendor gate unless a correct common lifetime model still exposes a
+  capability-specific driver limitation.

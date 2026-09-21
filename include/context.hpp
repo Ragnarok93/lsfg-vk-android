@@ -258,7 +258,18 @@ private:
     static constexpr uint32_t kSourceHistoryWarmupFrames = 4;
     uint32_t sourceHistoryWarmupRemaining_{kSourceHistoryWarmupFrames};
     bool requiresSourceHistoryWarmup_{true};
-    bool previousSourceCopySignalValid_{false};
+
+    // Framegen's batch-complete semaphore has the same ownership rule as the
+    // source-copy dependency, but is only present on asynchronous Android
+    // completion paths. Keep its producer explicit as well; otherwise a busy
+    // source-only cycle can make frameIdx-1 point at an unrelated pass slot.
+    struct LastBatchCompleteDependency {
+        bool valid{false};
+        size_t passIndex{0};
+        uint64_t generation{0};
+        Mini::Semaphore semaphore;
+    };
+    LastBatchCompleteDependency lastBatchCompleteDependency_;
 
     // Queue-target 1 delivery for Android: the application's real frame is
     // acknowledged this call, but displayed on the next source boundary so the
@@ -353,17 +364,26 @@ private:
         double lastWindowOutputFps{0.0};
     } runtimeMetrics;
 
-    // Reused for the game-device -> framegen AHB handoff. Async generated
-    // cycles still attach this fence to the source-copy submit; by the time the
-    // framegen completion wait returns, that submit has necessarily completed,
-    // so the fence is safe to reset on the next cycle. Warm-up/fallback cycles
-    // continue to wait it synchronously exactly as before.
-    std::shared_ptr<VkFence> ahbHandoffFence;
-    PFN_vkResetFences resetHandoffFences{nullptr};
+    // The source pass completion fence is also the authoritative bounded host
+    // fallback fence. Keeping one fence domain avoids treating a separate
+    // handoff fence as proof that pass-owned WSI semaphores are retired.
     PFN_vkWaitForFences waitHandoffFences{nullptr};
 #endif
 
+    // This token names the source-copy submission that actually produced the
+    // semaphore consumed by the next source-copy submission. It must not be
+    // derived from frameIdx: a source-only pass-ring fallback advances the
+    // logical frame without producing a new LSFG source dependency.
+    struct LastSourceCopyDependency {
+        bool valid{false};
+        size_t passIndex{0};
+        uint64_t generation{0};
+        Mini::Semaphore semaphore;
+    };
+    LastSourceCopyDependency lastSourceCopyDependency_;
+
     struct RenderPassInfo {
+        uint64_t generation{0};
         Mini::CommandBuffer preCopyBuf; // copy from swapchain image to frame_0/frame_1
         std::array<Mini::Semaphore, 2> preCopySemaphores; // signal when preCopyBuf is done
 #ifdef __ANDROID__
@@ -396,7 +416,41 @@ private:
         bool completionFenceFailed{false};
     }; // data for a single render pass
 
-    bool tryRecyclePass(RenderPassInfo& pass);
+    // A pass slot may be reused for command recording before every old Vulkan
+    // handle owned by that generation may be destroyed. Keep old bundles alive
+    // until a later real queue submission proves that WSI/queue consumers have
+    // completed. This deliberately contains no synthetic post-present submit.
+    struct RetiredPassResources {
+        uint64_t generation{0};
+        bool producerCompleted{false};
+        std::shared_ptr<VkFence> retirementFence;
+        bool consumerRetirementAnchored{false};
+        bool consumerRetired{false};
+        bool objectDestroyPermitted{false};
+        Mini::CommandBuffer preCopyBuf;
+        std::array<Mini::Semaphore, 2> preCopySemaphores;
+#ifdef __ANDROID__
+        Mini::Semaphore framegenInputSemaphore;
+        Mini::Semaphore framegenBatchCompleteSemaphore;
+#endif
+        std::vector<Mini::Semaphore> renderSemaphores;
+        std::vector<Mini::Semaphore> acquireSemaphores;
+        std::vector<Mini::CommandBuffer> postCopyBufs;
+        std::vector<Mini::Semaphore> postCopySemaphores;
+        std::vector<Mini::Semaphore> prevPostCopySemaphores;
+    };
+
+    void collectRetiredPassResources();
+    void anchorDeferredRetirements(const std::shared_ptr<VkFence>& retirementFence);
+    void deferPassResources(size_t passIndex, RenderPassInfo& pass);
+    bool tryRecyclePass(size_t passIndex, RenderPassInfo& pass);
+
+    // Default is the asynchronous, fence-anchored policy. The conservative
+    // host policy is an explicit diagnostic mode only, selected with
+    // LSFG_VK_RETIREMENT_POLICY=conservative-host.
+    bool conservativeRetirement_{false};
+    uint64_t nextPassGeneration_{0};
+    std::vector<RetiredPassResources> deferredRetirements_;
 
     std::array<RenderPassInfo, 8> passInfos; // allocate 8 because why not
 };

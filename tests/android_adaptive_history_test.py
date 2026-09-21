@@ -201,7 +201,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
         self.assertIn("sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames", bypass)
         self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
-        self.assertIn("previousSourceCopySignalValid_ = false", bypass)
+        self.assertIn("Preserve the last actual producer tokens", bypass)
         self.assertIn("adaptiveScheduler_.reset()", bypass)
         self.assertIn("deadlineAdmissionPredictor_.reset()", bypass)
         self.assertIn("adaptiveFlowController_.reset()", bypass)

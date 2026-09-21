@@ -36,6 +36,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 
@@ -470,20 +471,13 @@ void copyExternalAhbToSwapchain(VkCommandBuffer buf,
         static_cast<uint32_t>(std::size(releaseBarriers)), releaseBarriers);
 }
 
-void submitAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuffer,
-        VkQueue queue, const std::vector<VkSemaphore>& waitSemaphores,
+void submitAhbHandoff(Mini::CommandBuffer& commandBuffer, VkQueue queue,
+        const std::vector<VkSemaphore>& waitSemaphores,
         const std::vector<VkSemaphore>& signalSemaphores,
-        VkFence fence, PFN_vkResetFences resetFences) {
-    // A non-null reset callback is used by the synchronous compatibility
-    // fallback. Async pass-retirement fences have already been reset by
-    // tryRecyclePass before they are attached to this real submission.
-    if (fence != VK_NULL_HANDLE && resetFences != nullptr) {
-        const auto resetRes = resetFences(device, 1, &fence);
-        if (resetRes != VK_SUCCESS)
-            throw LSFG::vulkan_error(resetRes,
-                "Failed resetting Android AHB handoff fence");
-    }
-
+        VkFence fence) {
+    // Pass-retirement fences have already been reset by tryRecyclePass before
+    // they are attached to this real submission. This path never uses an
+    // artificial retirement-only submission.
     commandBuffer.submit(queue, waitSemaphores, signalSemaphores, fence);
 }
 
@@ -506,14 +500,24 @@ void waitForAhbHandoff(VkDevice device, VkFence fence,
 void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuffer,
         VkQueue queue, const std::vector<VkSemaphore>& waitSemaphores,
         const std::vector<VkSemaphore>& signalSemaphores,
-        VkFence fence, PFN_vkResetFences resetFences,
-        PFN_vkWaitForFences waitForFences) {
-    submitAhbHandoff(device, commandBuffer, queue, waitSemaphores,
-        signalSemaphores, fence, resetFences);
+        VkFence fence, PFN_vkWaitForFences waitForFences) {
+    submitAhbHandoff(commandBuffer, queue, waitSemaphores,
+        signalSemaphores, fence);
     waitForAhbHandoff(device, fence, waitForFences);
 }
 
 #endif
+
+std::string uuidHex(const std::array<uint8_t, VK_UUID_SIZE>& uuid) {
+    constexpr char hex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(VK_UUID_SIZE * 2);
+    for (const uint8_t byte : uuid) {
+        result.push_back(hex[(byte >> 4) & 0x0f]);
+        result.push_back(hex[byte & 0x0f]);
+    }
+    return result;
+}
 
 } // namespace
 
@@ -521,6 +525,12 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages)
         : swapchain(swapchain), swapchainImages(swapchainImages),
           extent(extent), device_(info.device), queue_(info.queue.second) {
+    if (const char* requestedRetirementPolicy = std::getenv(
+                "LSFG_VK_RETIREMENT_POLICY")) {
+        this->conservativeRetirement_ =
+            std::string(requestedRetirementPolicy) == "conservative-host";
+    }
+
     // get updated configuration
     auto conf = Config::snapshot();
     if (!conf.config_file.empty()
@@ -699,42 +709,14 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         );
     }
 
-    // Resolve and allocate one handoff fence per swapchain context. It remains
-    // authoritative for compatibility fallback and is also attached to async
-    // source-copy submissions so their lifetime can be proven complete before
-    // the next reset/reuse.
-    const auto createHandoffFence = reinterpret_cast<PFN_vkCreateFence>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkCreateFence"));
-    this->resetHandoffFences = reinterpret_cast<PFN_vkResetFences>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkResetFences"));
+    // The source pass completion fence is authoritative for both asynchronous
+    // retirement and the bounded host fallback. The fallback only needs the
+    // wait entry point; pass recycling owns fence reset and reuse.
     this->waitHandoffFences = reinterpret_cast<PFN_vkWaitForFences>(
         Layer::ovkGetDeviceProcAddr(info.device, "vkWaitForFences"));
-    const auto destroyHandoffFence = reinterpret_cast<PFN_vkDestroyFence>(
-        Layer::ovkGetDeviceProcAddr(info.device, "vkDestroyFence"));
-    if (createHandoffFence == nullptr || this->resetHandoffFences == nullptr
-            || this->waitHandoffFences == nullptr || destroyHandoffFence == nullptr)
+    if (this->waitHandoffFences == nullptr)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
             "Required fence functions unavailable for Android AHB handoff");
-
-    const VkFenceCreateInfo handoffFenceInfo{
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-    };
-    VkFence handoffFence{};
-    const auto handoffFenceRes = createHandoffFence(
-        info.device, &handoffFenceInfo, nullptr, &handoffFence);
-    if (handoffFenceRes != VK_SUCCESS || handoffFence == VK_NULL_HANDLE)
-        throw LSFG::vulkan_error(handoffFenceRes,
-            "Failed to create Android AHB handoff fence");
-
-    this->ahbHandoffFence = std::shared_ptr<VkFence>(
-        new VkFence(handoffFence),
-        [device = info.device, destroyHandoffFence](VkFence* ownedFence) {
-            if (ownedFence != nullptr) {
-                if (*ownedFence != VK_NULL_HANDLE)
-                    destroyHandoffFence(device, *ownedFence, nullptr);
-                delete ownedFence;
-            }
-        });
 
     const auto gameGetSemaphoreFd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
         Layer::ovkGetDeviceProcAddr(info.device, "vkGetSemaphoreFdKHR"));
@@ -765,6 +747,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     : "host-fence")
               << ", completion="
               << (this->asyncFramegenCompletionEnabled_ ? "sync-fd" : "host-wait")
+              << ", driver=\"" << backendDiagnostics.driverName << "\""
               << ")\n";
 
 #else
@@ -879,6 +862,14 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         for (auto& fence : pass.postCopyCompletionFences)
             fence = createOwnedCompletionFence();
     }
+
+    std::cerr << "lsfg-vk: retirement-policy="
+              << (this->conservativeRetirement_ ? "conservative-host" : "async-safe")
+              << " device-identity=" << (info.identityValid ? "validated" : "unknown")
+              << " device_uuid=" << uuidHex(info.identity.deviceUUID)
+              << " driver_uuid=" << uuidHex(info.identity.driverUUID)
+              << " pass-ring=" << this->passInfos.size()
+              << " consumer-anchor=real-source-submit\n";
 }
 
 LsContext::~LsContext() {
@@ -897,12 +888,174 @@ LsContext::~LsContext() {
     // before the Mini::Image owners release their AHardwareBuffers. Core::Image
     // also retains its own AHB reference, but this ordering keeps both layers'
     // Vulkan and native-handle lifetimes unambiguous on failure paths.
+    for (auto& retired : this->deferredRetirements_) {
+        retired.consumerRetired = true;
+        retired.objectDestroyPermitted = true;
+    }
     this->lsfgCtxId.reset();
 }
 
-bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
+void LsContext::collectRetiredPassResources() {
+    if (this->deferredRetirements_.empty())
+        return;
+
+    for (auto it = this->deferredRetirements_.begin();
+            it != this->deferredRetirements_.end();) {
+        auto& retired = *it;
+        if (!retired.consumerRetirementAnchored
+                || retired.retirementFence == nullptr) {
+            ++it;
+            continue;
+        }
+
+        const VkFence retirementFence = *retired.retirementFence;
+        const auto waitResult = this->completionWaitFences_(
+            this->device_, 1, &retirementFence, VK_TRUE, 0);
+        if (waitResult == VK_SUCCESS) {
+            retired.consumerRetired = true;
+            retired.objectDestroyPermitted = true;
+            Utils::logLimitN(
+                "passRetirement",
+                5,
+                "Retired pass generation " + std::to_string(retired.generation)
+                    + " consumer-retired; deferred Vulkan handles may be destroyed");
+            it = this->deferredRetirements_.erase(it);
+            continue;
+        }
+        if (waitResult != VK_TIMEOUT && waitResult != VK_NOT_READY) {
+            Utils::logLimitN(
+                "passRetirement",
+                5,
+                "Deferred pass consumer retirement query failed: "
+                    + std::to_string(waitResult));
+        }
+        ++it;
+    }
+}
+
+void LsContext::anchorDeferredRetirements(
+        const std::shared_ptr<VkFence>& retirementFence) {
+    if (retirementFence == nullptr)
+        return;
+
+    for (auto& retired : this->deferredRetirements_) {
+        if (retired.consumerRetirementAnchored)
+            continue;
+        // This is a real source-copy submission on the same queue, not an
+        // artificial retirement-only submit. Queue ordering places it after
+        // the earlier source/generated submits and their WSI wait operations.
+        retired.retirementFence = retirementFence;
+        retired.consumerRetirementAnchored = true;
+        Utils::logLimitN(
+            "passRetirement",
+            5,
+            "Anchored deferred pass generation " + std::to_string(retired.generation)
+                + " to a real source-copy retirement fence");
+    }
+}
+
+void LsContext::deferPassResources(size_t passIndex, RenderPassInfo& pass) {
+    if (pass.generation == 0)
+        return;
+
+    RetiredPassResources retired;
+    retired.generation = pass.generation;
+    retired.producerCompleted = true;
+    retired.preCopyBuf = std::move(pass.preCopyBuf);
+    retired.preCopySemaphores = std::move(pass.preCopySemaphores);
+#ifdef __ANDROID__
+    retired.framegenInputSemaphore = std::move(pass.framegenInputSemaphore);
+    retired.framegenBatchCompleteSemaphore =
+        std::move(pass.framegenBatchCompleteSemaphore);
+#endif
+    retired.renderSemaphores = std::move(pass.renderSemaphores);
+    retired.acquireSemaphores = std::move(pass.acquireSemaphores);
+    retired.postCopyBufs = std::move(pass.postCopyBufs);
+    retired.postCopySemaphores = std::move(pass.postCopySemaphores);
+    retired.prevPostCopySemaphores = std::move(pass.prevPostCopySemaphores);
+    this->deferredRetirements_.push_back(std::move(retired));
+
+    // Keep the slot's shape intact for the next generation. The old wrappers
+    // now live in deferredRetirements_; assigning new wrappers below therefore
+    // cannot destroy a semaphore or command buffer still visible to WSI.
+    pass.preCopyBuf = Mini::CommandBuffer{};
+    pass.preCopySemaphores = {};
+#ifdef __ANDROID__
+    pass.framegenInputSemaphore = Mini::Semaphore{};
+    pass.framegenBatchCompleteSemaphore = Mini::Semaphore{};
+    pass.framegenBatchCompleteValid = false;
+#endif
+    pass.renderSemaphores.resize(this->deferredRetirements_.back().renderSemaphores.size());
+    pass.acquireSemaphores.resize(this->deferredRetirements_.back().acquireSemaphores.size());
+    pass.postCopyBufs.resize(this->deferredRetirements_.back().postCopyBufs.size());
+    pass.postCopySemaphores.resize(
+        this->deferredRetirements_.back().postCopySemaphores.size());
+    pass.prevPostCopySemaphores.resize(
+        this->deferredRetirements_.back().prevPostCopySemaphores.size());
+    pass.generation = 0;
+
+    Utils::logLimitN(
+        "passRetirement",
+        5,
+        "Deferred pass generation " + std::to_string(this->deferredRetirements_.back().generation)
+            + " after producer completion; pass_index=" + std::to_string(passIndex)
+            + " consumerRetired=0 objectDestroyPermitted=0");
+}
+
+bool LsContext::tryRecyclePass(size_t passIndex, RenderPassInfo& pass) {
     if (pass.completionFenceFailed)
         return false;
+
+    this->collectRetiredPassResources();
+
+    const bool hasSubmittedWork = pass.completionFenceSubmitted
+        || std::any_of(
+            pass.postCopyCompletionFenceSubmitted.begin(),
+            pass.postCopyCompletionFenceSubmitted.end(),
+            [](bool submitted) { return submitted; });
+    if (this->conservativeRetirement_
+            && (hasSubmittedWork || !this->deferredRetirements_.empty())) {
+        // Diagnostic-only policy. It restores conservative lifetime behavior
+        // for isolation while leaving shaders, scheduling, AHB transport, and
+        // presentation policy unchanged.
+        const auto queueWaitResult = this->waitQueueIdle_(this->queue_);
+        if (queueWaitResult != VK_SUCCESS) {
+            pass.completionFenceFailed = true;
+            Utils::logLimitN(
+                "passRetirement",
+                5,
+                "Conservative retirement queue wait failed: "
+                    + std::to_string(queueWaitResult));
+            return false;
+        }
+        for (auto& retired : this->deferredRetirements_) {
+            retired.consumerRetired = true;
+            retired.consumerRetirementAnchored = true;
+            retired.objectDestroyPermitted = true;
+        }
+        this->deferredRetirements_.clear();
+    }
+
+    // A slot's producer fence can also be the real retirement anchor for an
+    // older generation of that same slot. Even when the old producer work has
+    // completed, the fence cannot be reset/reused until the deferred bundle's
+    // consumer generation has retired. Otherwise the next vkQueueSubmit would
+    // reuse a fence that is still serving as the lifetime proof for old WSI
+    // semaphores.
+    for (const auto& retired : this->deferredRetirements_) {
+        if (retired.retirementFence != nullptr
+                && retired.retirementFence == pass.completionFence
+                && !retired.consumerRetired) {
+            Utils::logLimitN(
+                "passRetirement",
+                5,
+                "Pass reuse blocked: pass_index=" + std::to_string(passIndex)
+                    + " generation=" + std::to_string(pass.generation)
+                    + " producerComplete=1 consumerRetired=0"
+                    + " reason=retirement-fence-still-referenced");
+            return false;
+        }
+    }
 
     const auto waitAndResetFence = [&](const std::shared_ptr<VkFence>& owner) -> bool {
         if (owner == nullptr
@@ -957,14 +1110,16 @@ bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
 #ifdef __ANDROID__
     pass.framegenBatchCompleteValid = false;
 #endif
+    this->deferPassResources(passIndex, pass);
     return true;
 }
 
 VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
     const auto conf = Config::snapshot();
-    auto& pass = this->passInfos.at(this->frameIdx % 8);
-    if (!this->tryRecyclePass(pass)) {
+    const size_t passIndex = this->frameIdx % this->passInfos.size();
+    auto& pass = this->passInfos.at(passIndex);
+    if (!this->tryRecyclePass(passIndex, pass)) {
         const VkPresentInfoKHR passthroughPresentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = pNext,
@@ -2201,6 +2356,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // 1. Copy every active Adaptive source frame into frame_0/frame_1, even on
     // a zero-generation cadence cycle. That zero is cadence, not lifecycle: it
     // must refresh temporal history instead of entering the Off/source-only path.
+    pass.generation = ++this->nextPassGeneration_;
     pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
     pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
@@ -2227,18 +2383,34 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     pass.preCopyBuf.end();
 
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
-    RenderPassInfo* previousPass = nullptr;
     bool consumePreviousBatchComplete = false;
-    if (this->frameIdx > 0)
-        previousPass = &this->passInfos.at((this->frameIdx - 1) % 8);
-    if (this->previousSourceCopySignalValid_ && previousPass != nullptr)
+    if (this->lastSourceCopyDependency_.valid) {
         gameRenderSemaphores2.emplace_back(
-            previousPass->preCopySemaphores.at(1).handle());
-    if (previousPass != nullptr && previousPass->framegenBatchCompleteValid) {
+            this->lastSourceCopyDependency_.semaphore.handle());
+    }
+    if (this->lastBatchCompleteDependency_.valid) {
         gameRenderSemaphores2.emplace_back(
-            previousPass->framegenBatchCompleteSemaphore.handle());
+            this->lastBatchCompleteDependency_.semaphore.handle());
         consumePreviousBatchComplete = true;
     }
+
+    const auto recordSourceCopyDependency = [&]() {
+        this->lastSourceCopyDependency_.valid = true;
+        this->lastSourceCopyDependency_.passIndex = passIndex;
+        this->lastSourceCopyDependency_.generation = pass.generation;
+        this->lastSourceCopyDependency_.semaphore = pass.preCopySemaphores.at(1);
+    };
+    const auto recordBatchCompleteDependency = [&]() {
+        if (!pass.framegenBatchCompleteValid) {
+            this->lastBatchCompleteDependency_ = {};
+            return;
+        }
+        this->lastBatchCompleteDependency_.valid = true;
+        this->lastBatchCompleteDependency_.passIndex = passIndex;
+        this->lastBatchCompleteDependency_.generation = pass.generation;
+        this->lastBatchCompleteDependency_.semaphore =
+            pass.framegenBatchCompleteSemaphore;
+    };
 
     const auto handoffStart = RuntimeMetrics::Clock::now();
     std::vector<VkSemaphore> preCopySignals{
@@ -2253,6 +2425,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     bool asyncSubmissionIssued = false;
     bool asyncExportFailed = false;
     int framegenInputSemaphoreFd = -1;
+    const VkFence sourceRetirementFence = pass.completionFence != nullptr
+        ? *pass.completionFence : VK_NULL_HANDLE;
 
     if (useAsyncHandoff) {
         try {
@@ -2271,15 +2445,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     if (useAsyncHandoff) {
-        const VkFence sourceRetirementFence = pass.completionFence != nullptr
-            ? *pass.completionFence : VK_NULL_HANDLE;
-        submitAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
+        submitAhbHandoff(pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
             sourceRetirementFence, nullptr);
         pass.completionFenceSubmitted = sourceRetirementFence != VK_NULL_HANDLE;
         asyncSubmissionIssued = true;
-        if (consumePreviousBatchComplete && previousPass != nullptr)
-            previousPass->framegenBatchCompleteValid = false;
 
         try {
             // SYNC_FD copy transference requires its signal operation to be
@@ -2308,14 +2478,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (!useAsyncHandoff && !asyncSubmissionIssued) {
         submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
-            *this->ahbHandoffFence, this->resetHandoffFences,
+            sourceRetirementFence, nullptr,
             this->waitHandoffFences);
-        if (consumePreviousBatchComplete && previousPass != nullptr)
-            previousPass->framegenBatchCompleteValid = false;
         metrics.windowSyncHandoffs++;
         metrics.totalSyncHandoffs++;
     }
-    this->previousSourceCopySignalValid_ = true;
+    pass.completionFenceSubmitted = sourceRetirementFence != VK_NULL_HANDLE;
+    if (consumePreviousBatchComplete)
+        this->lastBatchCompleteDependency_.valid = false;
+    recordSourceCopyDependency();
+    this->anchorDeferredRetirements(pass.completionFence);
     metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - handoffStart).count();
     if (firstPresentDiagnostic) {
@@ -2441,6 +2613,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - historyWaitStart).count();
             if (!historyReady) {
+                this->lastBatchCompleteDependency_ = {};
                 this->sourceHistoryWarmupRemaining_ =
                     kSourceHistoryWarmupFrames;
                 this->requiresSourceHistoryWarmup_ = true;
@@ -2470,6 +2643,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             }
         }
 
+        recordBatchCompleteDependency();
         metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
         updateAdaptiveFlowGovernor();
@@ -2622,6 +2796,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->asyncFramegenCompletionEnabled_ = false;
     }
 
+    recordBatchCompleteDependency();
+
     // 3. Compatibility/error fallback only. The normal SYNC_FD path queues the
     //    game-device copies against framegen completion and does not block here.
     bool framegenReady = true;
@@ -2635,6 +2811,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             RuntimeMetrics::Clock::now() - waitIdleStart).count();
     }
     if (!framegenReady) {
+        this->lastBatchCompleteDependency_ = {};
         const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
         this->lastGeneratedFrameCount_ = 0;
         std::cerr << "lsfg-vk: runtime stage=framegen-completion-timeout timeout_ms="
@@ -2849,6 +3026,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // Desktop Linux path: OPAQUE_FD semaphore-based synchronization
 
     // 1. copy swapchain image to frame_0/frame_1
+    pass.generation = ++this->nextPassGeneration_;
     int preCopySemaphoreFd{};
     pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device, &preCopySemaphoreFd);
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
@@ -2865,15 +3043,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     pass.preCopyBuf.end();
 
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
-    if (this->frameIdx > 0)
-        gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
-            .preCopySemaphores.at(1).handle());
+    if (this->lastSourceCopyDependency_.valid)
+        gameRenderSemaphores2.emplace_back(
+            this->lastSourceCopyDependency_.semaphore.handle());
     pass.preCopyBuf.submit(info.queue.second,
         gameRenderSemaphores2,
         { pass.preCopySemaphores.at(0).handle(),
           pass.preCopySemaphores.at(1).handle() },
         *pass.completionFence);
     pass.completionFenceSubmitted = true;
+    this->lastSourceCopyDependency_.valid = true;
+    this->lastSourceCopyDependency_.passIndex = passIndex;
+    this->lastSourceCopyDependency_.generation = pass.generation;
+    this->lastSourceCopyDependency_.semaphore = pass.preCopySemaphores.at(1);
+    this->anchorDeferredRetirements(pass.completionFence);
 
     // 2. render intermediary frames
     std::vector<int> renderSemaphoreFds(conf.multiplier - 1);
@@ -3040,7 +3223,10 @@ void LsContext::enterSourceOnlyBypass() {
     this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ = true;
     this->lastDispatchedGeneratedFrameCount_ = 0;
-    this->previousSourceCopySignalValid_ = false;
+    // Bypass presents do not produce a replacement source-copy or batch
+    // semaphore. Preserve the last actual producer tokens so a later
+    // re-enable drains asynchronous AHB/framegen work instead of starting
+    // from an unsynchronized source image.
     this->generatedPresentationCapacityTracker_.reset();
     this->lsfgOutputCadenceTracker_.reset();
     this->adaptiveFlowLastObservedComputeDrops_ =
