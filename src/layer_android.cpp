@@ -789,26 +789,52 @@ VkResult ovkGetAndroidHardwareBufferPropertiesANDROID(VkDevice a, const AHardwar
     return VK_ERROR_DEVICE_LOST;
 }
 void ovkGetDeviceQueue(VkDevice a, uint32_t b, uint32_t c, VkQueue* d) {
-    DeviceDispatch dispatch{};
-    if ((loadDeviceDispatch(a, &dispatch)
-            || loadConstructionQueueDispatch(a, &dispatch))
-            && dispatch.GetDeviceQueue) {
-        dispatch.GetDeviceQueue(a, b, c, d);
+    DeviceDispatch owner{};
+    const bool tracked = loadDeviceDispatch(a, &owner);
+    PFN_vkGetDeviceQueue getQueue = tracked ? owner.GetDeviceQueue : nullptr;
+
+    // Turnip can publish the private logical device before its downstream GDPA
+    // exposes vkGetDeviceQueue. Do not let the successful exact-device lookup
+    // suppress the private bootstrap path. The fallback supplies only the queue
+    // getter; a tracked device keeps its own exact submit/present dispatch.
+    if (getQueue == nullptr) {
+        DeviceDispatch bootstrap{};
+        if (loadConstructionQueueDispatch(a, &bootstrap)
+                && bootstrap.GetDeviceQueue != nullptr) {
+            getQueue = bootstrap.GetDeviceQueue;
+            if (!tracked)
+                owner = bootstrap;
+        }
+    }
+
+    if (getQueue != nullptr) {
+        getQueue(a, b, c, d);
         if (d && *d != VK_NULL_HANDLE)
-            storeQueueDispatch(*d, dispatch);
+            storeQueueDispatch(*d, owner);
         return;
     }
     if (d) *d = VK_NULL_HANDLE;
     std::cerr << "lsfg-vk: dispatch rejected queue acquisition device=" << a << "\n";
 }
 void ovkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, VkQueue* queue) {
-    DeviceDispatch dispatch{};
-    if ((loadDeviceDispatch(device, &dispatch)
-            || loadConstructionQueueDispatch(device, &dispatch))
-            && dispatch.GetDeviceQueue2) {
-        dispatch.GetDeviceQueue2(device, info, queue);
+    DeviceDispatch owner{};
+    const bool tracked = loadDeviceDispatch(device, &owner);
+    PFN_vkGetDeviceQueue2 getQueue2 = tracked ? owner.GetDeviceQueue2 : nullptr;
+
+    if (getQueue2 == nullptr) {
+        DeviceDispatch bootstrap{};
+        if (loadConstructionQueueDispatch(device, &bootstrap)
+                && bootstrap.GetDeviceQueue2 != nullptr) {
+            getQueue2 = bootstrap.GetDeviceQueue2;
+            if (!tracked)
+                owner = bootstrap;
+        }
+    }
+
+    if (getQueue2 != nullptr) {
+        getQueue2(device, info, queue);
         if (queue && *queue != VK_NULL_HANDLE)
-            storeQueueDispatch(*queue, dispatch);
+            storeQueueDispatch(*queue, owner);
         return;
     }
     if (queue) *queue = VK_NULL_HANDLE;
