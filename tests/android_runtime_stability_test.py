@@ -424,6 +424,17 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
 
 
+    def test_adreno_residency_transform_tracks_pending_context_state(self) -> None:
+        script = (ROOT / "scripts/adreno_android_runtime_residency.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("pendingContextDeletes", script)
+        self.assertIn("std::mutex runtimeMutex", script)
+        self.assertIn("pendingContextDeletes.erase(id)", script)
+        self.assertIn("state_marker", script)
+        self.assertIn("delete_marker", script)
+
+
     def test_context_creation_failure_recreates_original_swapchain(self) -> None:
         """Regression: failed LSFG setup must not leave a modified swapchain contextless."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")

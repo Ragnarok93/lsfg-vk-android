@@ -15,28 +15,30 @@ BACKENDS = (
 
 def patch_backend(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-    if "framegen runtime retained after last Android context" in text:
-        return
 
-    old_state = """    std::optional<Core::Instance> instance;\n    std::optional<Vulkan> device;\n    std::optional<RuntimeSignature> activeSignature;\n    std::unordered_map<int32_t, Context> contexts;\n    std::mutex runtimeMutex;\n"""
-    new_state = """    // Keep the lock alive until after every resident private-runtime object.\n    // Namespace statics are destroyed in reverse declaration order.\n    std::mutex runtimeMutex;\n    std::optional<Core::Instance> instance;\n    std::optional<Vulkan> device;\n    std::optional<RuntimeSignature> activeSignature;\n    std::unordered_map<int32_t, Context> contexts;\n"""
-    text = replace_exact(
-        text,
-        old_state,
-        new_state,
-        count=1,
-        label=f"{path}: make runtime mutex outlive private runtime",
-    )
+    old_state = """    std::optional<Core::Instance> instance;\n    std::optional<Vulkan> device;\n    std::optional<RuntimeSignature> activeSignature;\n    std::unordered_map<int32_t, Context> contexts;\n    std::unordered_set<int32_t> pendingContextDeletes;\n    std::mutex runtimeMutex;\n"""
+    new_state = """    // Keep the lock alive until after every resident private-runtime object.\n    // Namespace statics are destroyed in reverse declaration order.\n    std::mutex runtimeMutex;\n    std::optional<Core::Instance> instance;\n    std::optional<Vulkan> device;\n    std::optional<RuntimeSignature> activeSignature;\n    std::unordered_map<int32_t, Context> contexts;\n    std::unordered_set<int32_t> pendingContextDeletes;\n"""
+    state_marker = "    std::mutex runtimeMutex;\n    std::optional<Core::Instance> instance;"
+    if state_marker not in text:
+        text = replace_exact(
+            text,
+            old_state,
+            new_state,
+            count=1,
+            label=f"{path}: make runtime mutex outlive private runtime",
+        )
 
-    old_delete = """    contexts.erase(it);\n    if (contexts.empty())\n        resetRuntime();\n}\n"""
-    new_delete = """    contexts.erase(it);\n#ifndef __ANDROID__\n    if (contexts.empty())\n        resetRuntime();\n#else\n    // Android swapchain/context churn must not unload the private Vulkan runtime\n    // from deleteContext() while runtimeMutex is held. Reconfiguration and the\n    // explicit finalize() path remain the only runtime destruction boundaries.\n#endif\n}\n"""
-    text = replace_exact(
-        text,
-        old_delete,
-        new_delete,
-        count=1,
-        label=f"{path}: keep Android private runtime resident",
-    )
+    old_delete = """    contexts.erase(it);\n    pendingContextDeletes.erase(id);\n    if (contexts.empty())\n        resetRuntime();\n}\n"""
+    new_delete = """    contexts.erase(it);\n    pendingContextDeletes.erase(id);\n#ifndef __ANDROID__\n    if (contexts.empty())\n        resetRuntime();\n#else\n    // Android swapchain/context churn must not unload the private Vulkan runtime\n    // from deleteContext() while runtimeMutex is held. Reconfiguration and the\n    // explicit finalize() path remain the only runtime destruction boundaries.\n#endif\n}\n"""
+    delete_marker = "    pendingContextDeletes.erase(id);\n#ifndef __ANDROID__"
+    if delete_marker not in text:
+        text = replace_exact(
+            text,
+            old_delete,
+            new_delete,
+            count=1,
+            label=f"{path}: keep Android private runtime resident",
+        )
     path.write_text(text, encoding="utf-8")
 
 
