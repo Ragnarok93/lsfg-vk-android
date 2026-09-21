@@ -181,6 +181,7 @@ private:
     // queue/device dispatch until every in-flight pass has retired.
     VkDevice device_{VK_NULL_HANDLE};
     VkQueue queue_{VK_NULL_HANDLE};
+    std::vector<VkQueue> presentQueues_;
     PFN_vkWaitForFences completionWaitFences_{nullptr};
     PFN_vkResetFences completionResetFences_{nullptr};
     PFN_vkQueueWaitIdle waitQueueIdle_{nullptr};
@@ -386,6 +387,9 @@ private:
         uint64_t generation{0};
         Mini::CommandBuffer preCopyBuf; // copy from swapchain image to frame_0/frame_1
         std::array<Mini::Semaphore, 2> preCopySemaphores; // signal when preCopyBuf is done
+        // Owners for semaphores consumed by this source-copy submission. The
+        // source producer fence proves those waits have completed.
+        std::vector<Mini::Semaphore> queueConsumerSemaphores;
 #ifdef __ANDROID__
         // Dedicated cross-device signal. It is never shared with source-present
         // or next-source-copy waits, so each binary semaphore has one consumer.
@@ -416,41 +420,27 @@ private:
         bool completionFenceFailed{false};
     }; // data for a single render pass
 
-    // A pass slot may be reused for command recording before every old Vulkan
-    // handle owned by that generation may be destroyed. Keep old bundles alive
-    // until a later real queue submission proves that WSI/queue consumers have
-    // completed. This deliberately contains no synthetic post-present submit.
-    struct RetiredPassResources {
+    // vkQueuePresentKHR has no fence parameter. A producer fence therefore
+    // cannot prove that WSI has finished waiting on a semaphore. Associate
+    // each LSFG-owned present wait with the presented image instead: successful
+    // reacquisition of that image is the natural WSI retirement boundary.
+    struct WsiConsumerResources {
         uint64_t generation{0};
-        bool producerCompleted{false};
-        std::shared_ptr<VkFence> retirementFence;
-        bool consumerRetirementAnchored{false};
-        bool consumerRetired{false};
-        bool objectDestroyPermitted{false};
-        Mini::CommandBuffer preCopyBuf;
-        std::array<Mini::Semaphore, 2> preCopySemaphores;
-#ifdef __ANDROID__
-        Mini::Semaphore framegenInputSemaphore;
-        Mini::Semaphore framegenBatchCompleteSemaphore;
-#endif
-        std::vector<Mini::Semaphore> renderSemaphores;
-        std::vector<Mini::Semaphore> acquireSemaphores;
-        std::vector<Mini::CommandBuffer> postCopyBufs;
-        std::vector<Mini::Semaphore> postCopySemaphores;
-        std::vector<Mini::Semaphore> prevPostCopySemaphores;
+        std::vector<Mini::Semaphore> semaphores;
     };
 
-    void collectRetiredPassResources();
-    void anchorDeferredRetirements(const std::shared_ptr<VkFence>& retirementFence);
-    void deferPassResources(size_t passIndex, RenderPassInfo& pass);
+    void releaseWsiConsumersForImage(uint32_t imageIndex, const char* reason);
+    void retainWsiConsumersForImage(uint32_t imageIndex, uint64_t generation,
+        std::vector<Mini::Semaphore> semaphores, const char* reason);
+    void releasePassResources(size_t passIndex, RenderPassInfo& pass);
     bool tryRecyclePass(size_t passIndex, RenderPassInfo& pass);
 
-    // Default is the asynchronous, fence-anchored policy. The conservative
+    // Default is the asynchronous, image-reacquisition policy. The conservative
     // host policy is an explicit diagnostic mode only, selected with
     // LSFG_VK_RETIREMENT_POLICY=conservative-host.
     bool conservativeRetirement_{false};
     uint64_t nextPassGeneration_{0};
-    std::vector<RetiredPassResources> deferredRetirements_;
+    std::vector<WsiConsumerResources> wsiConsumersByImage_;
 
     std::array<RenderPassInfo, 8> passInfos; // allocate 8 because why not
 };

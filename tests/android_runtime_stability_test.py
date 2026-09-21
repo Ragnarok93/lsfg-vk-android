@@ -8,22 +8,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DelayedWsiConsumer:
-    """Small deterministic model for pass-ring ownership across WSI delay."""
+    """Pass slots recycle while WSI semaphore owners follow swapchain images."""
 
     def __init__(self) -> None:
         self.handles_alive = set()
         self.producer_complete = set()
-        self.pending_consumers = set()
-        self.retired = {}
+        self.image_consumers = {}
         self.slot_generation = {}
 
-    def submit(self, generation: int) -> bool:
+    def submit(self, generation: int, image: int) -> bool:
         slot = generation % 8
         old_generation = self.slot_generation.get(slot)
-        if old_generation is not None and old_generation in self.handles_alive:
+        if old_generation is not None and old_generation not in self.producer_complete:
             return False
         self.handles_alive.add(generation)
-        self.pending_consumers.add(generation)
+        self.image_consumers[image] = generation
         self.slot_generation[slot] = generation
         return True
 
@@ -31,17 +30,14 @@ class DelayedWsiConsumer:
         self.producer_complete.add(generation)
 
     def recycle_slot(self, generation: int) -> None:
-        if generation in self.producer_complete:
-            self.retired[generation] = {
-                "slot": generation % 8,
-                "consumerRetired": False,
-            }
+        # Producer-owned command resources retire here. The modeled semaphore
+        # handle remains live through image_consumers.
+        pass
 
-    def anchor_and_complete_consumers(self) -> None:
-        for generation, state in self.retired.items():
-            if generation not in self.pending_consumers:
-                state["consumerRetired"] = True
-                self.handles_alive.discard(generation)
+    def reacquire(self, image: int) -> None:
+        generation = self.image_consumers.pop(image, None)
+        if generation is not None:
+            self.handles_alive.discard(generation)
 
 
 class AndroidRuntimeStabilityContractTest(unittest.TestCase):
@@ -125,41 +121,46 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("commandBufferCount = 0", source)
 
     def test_producer_fence_is_not_total_consumer_retirement(self) -> None:
-        """A producer fence must not authorize destruction of WSI-consumed handles."""
+        """WSI waits stay owned by their image until that image is reacquired."""
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("RetiredPassResources", header)
-        self.assertIn("deferredRetirements_", header)
-        self.assertIn("consumerRetired", header)
-        self.assertIn("retirementFence", header)
-        self.assertIn("producerCompleted", header)
-        self.assertIn("objectDestroyPermitted", header)
-        self.assertIn("deferPassResources", source)
-        self.assertIn("collectRetiredPassResources", source)
+        self.assertIn("WsiConsumerResources", header)
+        self.assertIn("wsiConsumersByImage_", header)
+        self.assertIn("releaseWsiConsumersForImage", source)
+        self.assertIn("retainWsiConsumersForImage", source)
+        self.assertIn("wsi-image-reacquired", source)
         recycle_start = source.index("bool LsContext::tryRecyclePass")
         recycle_end = source.index("VkResult LsContext::present", recycle_start)
         recycle = source[recycle_start:recycle_end]
-        self.assertLess(
-            recycle.index("pass.completionFenceSubmitted = false"),
-            recycle.index("deferPassResources(passIndex, pass)"),
-            "the slot must be detached only after producer fences are handled",
-        )
-        self.assertIn("pass.preCopySemaphores = {}", source)
-        self.assertIn("objectDestroyPermitted=0", source)
+        self.assertIn("pass.completionFenceSubmitted = false", recycle)
+        self.assertIn("releasePassResources(passIndex, pass)", recycle)
+        self.assertNotIn("anchorDeferredRetirements", source)
 
-    def test_real_source_submission_anchors_deferred_wsi_retirement(self) -> None:
-        """Retirement must be attached to existing ordered source work, not an empty submit."""
+    def test_real_source_submission_does_not_claim_wsi_retirement(self) -> None:
+        """A later queue fence is not used as proof that a present wait retired."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         submit_start = source.index("submitAhbHandoff(pass.preCopyBuf")
-        submit_end = source.index("this->anchorDeferredRetirements(pass.completionFence)", submit_start)
-        source_submit = source[submit_start:submit_end + len(
-            "this->anchorDeferredRetirements(pass.completionFence)")]
+        submit_end = source.index("metrics.windowHandoffMs", submit_start)
+        source_submit = source[submit_start:submit_end]
 
-        self.assertIn("anchorDeferredRetirements", source_submit)
         self.assertIn("pass.completionFence", source_submit)
+        self.assertNotIn("anchorDeferredRetirements", source_submit)
         self.assertNotIn("commandBufferCount = 0", source)
         self.assertNotIn("empty retirement", source.lower())
+
+    def test_every_lsfg_present_wait_is_retained_by_presented_image(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        for reason in (
+            '"source-history"',
+            '"generated"',
+            '"source-final"',
+            '"source-syncfd-fallback"',
+            '"source-timeout-fallback"',
+        ):
+            self.assertIn(reason, source)
+        self.assertIn("retainWsiConsumersForImage(imageIdx", source)
+        self.assertIn("retainWsiConsumersForImage(presentIdx", source)
 
     def test_source_dependency_tracks_actual_last_submit_not_logical_previous_slot(self) -> None:
         """Source-only fallback must not turn frameIdx-1 into a fake semaphore producer."""
@@ -177,38 +178,39 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
         self.assertIn("source-only present", source)
 
+    def test_consuming_pass_owns_queue_wait_semaphores_until_its_fence(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("queueConsumerSemaphores", header)
+        self.assertGreaterEqual(
+            source.count("pass.queueConsumerSemaphores.emplace_back("), 3
+        )
+        self.assertIn("pass.queueConsumerSemaphores.clear()", source)
+
     def test_delayed_consumer_model_survives_ring_wrap(self) -> None:
         consumer = DelayedWsiConsumer()
         accepted = []
         for _ in range(8 + 1):
             generation = _
-            if not consumer.submit(generation):
+            if not consumer.submit(generation, generation):
                 continue
             accepted.append(generation)
             consumer.complete_producer(generation)
             consumer.recycle_slot(generation)
 
-        # A producer fence completed every generation, but no WSI consumer has
-        # retired yet. The ninth generation cannot reuse slot zero.
-        self.assertEqual(list(range(8)), accepted)
-        self.assertEqual(set(range(8)), consumer.handles_alive)
-        self.assertTrue(all(not state["consumerRetired"] for state in consumer.retired.values()))
-
-        consumer.pending_consumers.clear()
-        consumer.anchor_and_complete_consumers()
+        # Producer completion permits slot zero reuse on generation eight, but
+        # all nine WSI semaphore handles remain alive without reacquisition.
+        self.assertEqual(list(range(9)), accepted)
+        self.assertEqual(set(range(9)), consumer.handles_alive)
+        for image in range(9):
+            consumer.reacquire(image)
         self.assertEqual(set(), consumer.handles_alive)
-        self.assertTrue(all(state["consumerRetired"] for state in consumer.retired.values()))
 
-        self.assertTrue(consumer.submit(8))
-
-    def test_slot_fence_reuse_is_blocked_until_consumer_retirement(self) -> None:
+    def test_slot_fence_reuse_is_independent_from_wsi_consumer_retirement(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        block = source[source.index("// A slot's producer fence can also be"):source.index(
-            "const auto waitAndResetFence", source.index("// A slot's producer fence can also be"))]
-        self.assertIn("retired.retirementFence == pass.completionFence", block)
-        self.assertIn("!retired.consumerRetired", block)
-        self.assertIn("return false", block)
-        self.assertIn("reason=retirement-fence-still-referenced", block)
+        self.assertIn("wsiConsumersByImage_", source)
+        self.assertIn("releasePassResources(passIndex, pass)", source)
+        self.assertNotIn("retirement-fence-still-referenced", source)
 
     def test_conservative_retirement_is_explicit_diagnostic_mode(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
@@ -219,7 +221,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn('retirement-policy=', source)
         conservative_start = source.index("if (this->conservativeRetirement_")
         conservative_end = source.index(
-            "// A slot's producer fence can also be", conservative_start
+            "const auto waitAndResetFence", conservative_start
         )
         conservative = source[conservative_start:conservative_end]
         self.assertIn("waitQueueIdle_(this->queue_)", conservative)
@@ -235,7 +237,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("DelayedWsiConsumer", test_source)
         self.assertIn("for _ in range(8 + 1)", test_source)
         self.assertIn("handles_alive", test_source)
-        self.assertIn("retirementFence", header)
+        self.assertIn("wsiConsumersByImage_", header)
+        self.assertIn("WsiConsumerResources", header)
 
     def test_context_teardown_waits_the_game_queue_before_freeing_resources(self) -> None:
         """Regression: swapchain retirement must not free pass handles under GPU use."""
@@ -246,6 +249,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
 
         self.assertIn("queueWaitIdle", destructor)
         self.assertIn("waitQueueIdle_", destructor)
+        self.assertIn("presentQueues_", destructor)
+        self.assertIn('role=" << role', destructor)
         self.assertLess(
             destructor.index("waitQueueIdle_"),
             destructor.index("lsfgCtxId.reset()"),

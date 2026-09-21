@@ -8,16 +8,16 @@ plans.
 
 | Resource | Producer | Consumer | Producer-complete evidence | Destruction permission |
 | --- | --- | --- | --- | --- |
-| `preCopyBuf` | Game-device source-copy submit | Game queue completion | `completionFence` | Deferred bundle after a real later source-submit fence, or teardown queue idle |
-| `preCopySemaphores[0]` | Source-copy submit | Source `vkQueuePresentKHR` | `completionFence` only proves signal submission | Same deferred bundle rule; WSI wait is not inferred from the producer fence |
-| `preCopySemaphores[1]` | Source-copy submit | Next actual source-copy submit | `completionFence` only proves signal submission | Explicit `lastSourceCopyDependency_` token plus deferred bundle |
-| `framegenInputSemaphore` | Source-copy submit | Framegen-device imported handoff | Game producer fence | Deferred bundle and the existing AHB/framegen completion path |
-| `framegenBatchCompleteSemaphore` | Framegen-device batch | Next source-copy submit | Framegen completion/export result | `lastBatchCompleteDependency_` token plus deferred bundle |
-| `renderSemaphores` | Framegen output completion | Generated post-copy submit | Framegen output-ready dependency or host fallback | Deferred bundle; post-copy producer fence does not retire WSI consumers |
-| `acquireSemaphores` | WSI image acquisition | Generated post-copy submit | Acquisition operation | Deferred bundle until the later real source-submit anchor |
-| `postCopyBufs` | Game-device generated post-copy submit | Queue execution | Per-output post-copy fence | Deferred bundle until WSI consumers retire |
-| `postCopySemaphores` | Generated post-copy submit | Generated `vkQueuePresentKHR` | Per-output post-copy fence only proves signal submit | Deferred bundle until the later real source-submit anchor |
-| `prevPostCopySemaphores` | Generated post-copy submit | Next generated present or final source present | Per-output post-copy fence only proves signal submit | Deferred bundle until the later real source-submit anchor |
+| `preCopyBuf` | Game-device source-copy submit | Game queue completion | `completionFence` | Producer fence, or teardown queue idle |
+| `preCopySemaphores[0]` | Source-copy submit | Source `vkQueuePresentKHR` | `completionFence` only proves signal submission | Retained by the presented swapchain image until that image is reacquired |
+| `preCopySemaphores[1]` | Source-copy submit | Next actual source-copy submit | Consuming source submit's `completionFence` | Explicit producer token copied into the consuming pass |
+| `framegenInputSemaphore` | Source-copy submit | Framegen-device imported SYNC_FD handoff | Game producer fence after payload export | Producer fence; the imported SYNC_FD owns the transferred payload independently |
+| `framegenBatchCompleteSemaphore` | Framegen-device batch | Next source-copy submit | Consuming source submit's `completionFence` | Explicit producer token copied into the consuming pass |
+| `renderSemaphores` | Framegen output completion | Generated post-copy submit | Per-output post-copy fence | Consuming post-copy producer fence |
+| `acquireSemaphores` | WSI image acquisition | Generated post-copy submit | Per-output post-copy fence | Consuming post-copy producer fence |
+| `postCopyBufs` | Game-device generated post-copy submit | Queue execution | Per-output post-copy fence | Per-output post-copy fence |
+| `postCopySemaphores` | Generated post-copy submit | Generated `vkQueuePresentKHR` | Per-output post-copy fence only proves signal submit | Retained by the generated swapchain image until reacquisition |
+| `prevPostCopySemaphores` | Generated post-copy submit | Next generated present or final source present | Per-output post-copy fence only proves signal submit | Retained by the image presented by that consumer until reacquisition |
 | Source/output AHB-backed images | Game/framegen devices | Cross-device image operations | Existing SYNC_FD/host completion and EXTERNAL barriers | Context lifetime; pass reuse does not release the imported images |
 
 The distinction is deliberate: Vulkan's semaphore destruction rule requires all
@@ -32,16 +32,16 @@ and [`vkQueuePresentKHR`](https://docs.vulkan.org/refpages/latest/refpages/sourc
 1. A pass generation records real source and generated submissions with their
    producer fences.
 2. `tryRecyclePass()` waits for those producer fences with a zero timeout.
-3. Once producer work is complete, the slot's command buffers and semaphore
-   wrappers move to `RetiredPassResources`; the slot receives empty wrappers and
-   can be prepared for a later generation.
-4. The next real source-copy submission anchors all unanchored retired bundles
-   to its existing completion fence. No empty post-present submission is used.
-5. `collectRetiredPassResources()` removes a bundle only after that anchor fence
-   signals. If the bundle is anchored to the same fence owned by the slot being
-   reused, slot reuse is blocked until the consumer retirement is observed.
-6. Destruction after context teardown is preceded by queue idle; the backend
-   context is released before member-owned deferred bundles are destroyed.
+3. Queue-wait semaphore owners are copied into the consuming pass and remain
+   there until that pass's producer fence signals.
+4. Every LSFG-owned semaphore passed to `vkQueuePresentKHR` is copied into the
+   ownership record for the presented swapchain image.
+5. Reacquiring that exact image retires its previous WSI ownership record. Pass
+   slots may recycle independently because their WSI handles remain shared-owned.
+6. No later queue submit is treated as proof of WSI completion, and no empty
+   post-present submission is used.
+7. Context teardown waits both producer and observed present queues idle before
+   releasing any image-owned WSI semaphore handles.
 
 The asynchronous policy uses only zero-timeout host queries on the normal path.
 `LSFG_VK_RETIREMENT_POLICY=conservative-host` is a diagnostic isolation mode;

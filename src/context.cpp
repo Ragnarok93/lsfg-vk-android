@@ -524,7 +524,8 @@ std::string uuidHex(const std::array<uint8_t, VK_UUID_SIZE>& uuid) {
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages)
         : swapchain(swapchain), swapchainImages(swapchainImages),
-          extent(extent), device_(info.device), queue_(info.queue.second) {
+          extent(extent), device_(info.device), queue_(info.queue.second),
+          wsiConsumersByImage_(swapchainImages.size()) {
     if (const char* requestedRetirementPolicy = std::getenv(
                 "LSFG_VK_RETIREMENT_POLICY")) {
         this->conservativeRetirement_ =
@@ -869,152 +870,120 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
               << " device_uuid=" << uuidHex(info.identity.deviceUUID)
               << " driver_uuid=" << uuidHex(info.identity.driverUUID)
               << " pass-ring=" << this->passInfos.size()
-              << " consumer-anchor=real-source-submit\n";
+              << " consumer-anchor=swapchain-image-reacquire\n";
 }
 
 LsContext::~LsContext() {
     // All pass command buffers and semaphores may still be referenced by the
     // game/WSI queue. This is teardown-only synchronization: it is never used
     // on the present hot path.
-    if (this->waitQueueIdle_ != nullptr && this->queue_ != VK_NULL_HANDLE) {
-        const auto queueWaitResult = this->waitQueueIdle_(this->queue_);
+    const auto waitTeardownQueue = [this](VkQueue queue, const char* role) {
+        if (this->waitQueueIdle_ == nullptr || queue == VK_NULL_HANDLE)
+            return;
+        const auto queueWaitResult = this->waitQueueIdle_(queue);
         if (queueWaitResult != VK_SUCCESS) {
-            std::cerr << "lsfg-vk: pass teardown queueWaitIdle failed result="
-                      << queueWaitResult << "\n";
+            std::cerr << "lsfg-vk: pass teardown queueWaitIdle failed"
+                      << " role=" << role
+                      << " result=" << queueWaitResult << "\n";
         }
+    };
+    waitTeardownQueue(this->queue_, "producer");
+    for (const VkQueue presentQueue : this->presentQueues_) {
+        if (presentQueue != this->queue_)
+            waitTeardownQueue(presentQueue, "present");
     }
 
     // Destroy the backend context first so any imported VkImages are released
     // before the Mini::Image owners release their AHardwareBuffers. Core::Image
     // also retains its own AHB reference, but this ordering keeps both layers'
     // Vulkan and native-handle lifetimes unambiguous on failure paths.
-    for (auto& retired : this->deferredRetirements_) {
-        retired.consumerRetired = true;
-        retired.objectDestroyPermitted = true;
-    }
+    this->wsiConsumersByImage_.clear();
     this->lsfgCtxId.reset();
 }
 
-void LsContext::collectRetiredPassResources() {
-    if (this->deferredRetirements_.empty())
+void LsContext::releaseWsiConsumersForImage(
+        uint32_t imageIndex, const char* reason) {
+    if (imageIndex >= this->wsiConsumersByImage_.size())
         return;
-
-    for (auto it = this->deferredRetirements_.begin();
-            it != this->deferredRetirements_.end();) {
-        auto& retired = *it;
-        if (!retired.consumerRetirementAnchored
-                || retired.retirementFence == nullptr) {
-            ++it;
-            continue;
-        }
-
-        const VkFence retirementFence = *retired.retirementFence;
-        const auto waitResult = this->completionWaitFences_(
-            this->device_, 1, &retirementFence, VK_TRUE, 0);
-        if (waitResult == VK_SUCCESS) {
-            retired.consumerRetired = true;
-            retired.objectDestroyPermitted = true;
-            Utils::logLimitN(
-                "passRetirement",
-                5,
-                "Retired pass generation " + std::to_string(retired.generation)
-                    + " consumer-retired; deferred Vulkan handles may be destroyed");
-            it = this->deferredRetirements_.erase(it);
-            continue;
-        }
-        if (waitResult != VK_TIMEOUT && waitResult != VK_NOT_READY) {
-            Utils::logLimitN(
-                "passRetirement",
-                5,
-                "Deferred pass consumer retirement query failed: "
-                    + std::to_string(waitResult));
-        }
-        ++it;
-    }
-}
-
-void LsContext::anchorDeferredRetirements(
-        const std::shared_ptr<VkFence>& retirementFence) {
-    if (retirementFence == nullptr)
-        return;
-
-    for (auto& retired : this->deferredRetirements_) {
-        if (retired.consumerRetirementAnchored)
-            continue;
-        // This is a real source-copy submission on the same queue, not an
-        // artificial retirement-only submit. Queue ordering places it after
-        // the earlier source/generated submits and their WSI wait operations.
-        retired.retirementFence = retirementFence;
-        retired.consumerRetirementAnchored = true;
+    auto& consumer = this->wsiConsumersByImage_.at(imageIndex);
+    if (!consumer.semaphores.empty()) {
         Utils::logLimitN(
             "passRetirement",
             5,
-            "Anchored deferred pass generation " + std::to_string(retired.generation)
-                + " to a real source-copy retirement fence");
+            "WSI consumer retired at wsi-image-reacquired: image="
+                + std::to_string(imageIndex)
+                + " generation=" + std::to_string(consumer.generation)
+                + " reason=" + reason);
     }
+    consumer = {};
 }
 
-void LsContext::deferPassResources(size_t passIndex, RenderPassInfo& pass) {
+void LsContext::retainWsiConsumersForImage(
+        uint32_t imageIndex, uint64_t generation,
+        std::vector<Mini::Semaphore> semaphores, const char* reason) {
+    if (imageIndex >= this->wsiConsumersByImage_.size()) {
+        Utils::logLimitN("passRetirement", 5,
+            "Cannot retain WSI consumers for invalid image="
+                + std::to_string(imageIndex));
+        return;
+    }
+    auto& consumer = this->wsiConsumersByImage_.at(imageIndex);
+#ifndef NDEBUG
+    if (!consumer.semaphores.empty()) {
+        std::cerr << "lsfg-vk: lifetime assertion failed: replacing unresolved WSI consumer"
+                  << " image=" << imageIndex
+                  << " old_generation=" << consumer.generation
+                  << " new_generation=" << generation << "\n";
+        std::abort();
+    }
+#endif
+    consumer.generation = generation;
+    consumer.semaphores = std::move(semaphores);
+    Utils::logLimitN("passRetirement", 5,
+        "WSI consumer retained: image=" + std::to_string(imageIndex)
+            + " generation=" + std::to_string(generation)
+            + " reason=" + reason);
+}
+
+void LsContext::releasePassResources(size_t passIndex, RenderPassInfo& pass) {
     if (pass.generation == 0)
         return;
 
-    RetiredPassResources retired;
-    retired.generation = pass.generation;
-    retired.producerCompleted = true;
-    retired.preCopyBuf = std::move(pass.preCopyBuf);
-    retired.preCopySemaphores = std::move(pass.preCopySemaphores);
-#ifdef __ANDROID__
-    retired.framegenInputSemaphore = std::move(pass.framegenInputSemaphore);
-    retired.framegenBatchCompleteSemaphore =
-        std::move(pass.framegenBatchCompleteSemaphore);
-#endif
-    retired.renderSemaphores = std::move(pass.renderSemaphores);
-    retired.acquireSemaphores = std::move(pass.acquireSemaphores);
-    retired.postCopyBufs = std::move(pass.postCopyBufs);
-    retired.postCopySemaphores = std::move(pass.postCopySemaphores);
-    retired.prevPostCopySemaphores = std::move(pass.prevPostCopySemaphores);
-    this->deferredRetirements_.push_back(std::move(retired));
-
-    // Keep the slot's shape intact for the next generation. The old wrappers
-    // now live in deferredRetirements_; assigning new wrappers below therefore
-    // cannot destroy a semaphore or command buffer still visible to WSI.
+    const uint64_t retiredGeneration = pass.generation;
     pass.preCopyBuf = Mini::CommandBuffer{};
     pass.preCopySemaphores = {};
+    pass.queueConsumerSemaphores.clear();
 #ifdef __ANDROID__
     pass.framegenInputSemaphore = Mini::Semaphore{};
     pass.framegenBatchCompleteSemaphore = Mini::Semaphore{};
     pass.framegenBatchCompleteValid = false;
 #endif
-    pass.renderSemaphores.resize(this->deferredRetirements_.back().renderSemaphores.size());
-    pass.acquireSemaphores.resize(this->deferredRetirements_.back().acquireSemaphores.size());
-    pass.postCopyBufs.resize(this->deferredRetirements_.back().postCopyBufs.size());
-    pass.postCopySemaphores.resize(
-        this->deferredRetirements_.back().postCopySemaphores.size());
-    pass.prevPostCopySemaphores.resize(
-        this->deferredRetirements_.back().prevPostCopySemaphores.size());
+    for (auto& semaphore : pass.renderSemaphores) semaphore = Mini::Semaphore{};
+    for (auto& semaphore : pass.acquireSemaphores) semaphore = Mini::Semaphore{};
+    for (auto& commandBuffer : pass.postCopyBufs) commandBuffer = Mini::CommandBuffer{};
+    for (auto& semaphore : pass.postCopySemaphores) semaphore = Mini::Semaphore{};
+    for (auto& semaphore : pass.prevPostCopySemaphores) semaphore = Mini::Semaphore{};
     pass.generation = 0;
 
     Utils::logLimitN(
         "passRetirement",
         5,
-        "Deferred pass generation " + std::to_string(this->deferredRetirements_.back().generation)
-            + " after producer completion; pass_index=" + std::to_string(passIndex)
-            + " consumerRetired=0 objectDestroyPermitted=0");
+        "Released pass producer resources: generation="
+            + std::to_string(retiredGeneration)
+            + " pass_index=" + std::to_string(passIndex)
+            + " wsi_consumers=independently-retained");
 }
 
 bool LsContext::tryRecyclePass(size_t passIndex, RenderPassInfo& pass) {
     if (pass.completionFenceFailed)
         return false;
 
-    this->collectRetiredPassResources();
-
     const bool hasSubmittedWork = pass.completionFenceSubmitted
         || std::any_of(
             pass.postCopyCompletionFenceSubmitted.begin(),
             pass.postCopyCompletionFenceSubmitted.end(),
             [](bool submitted) { return submitted; });
-    if (this->conservativeRetirement_
-            && (hasSubmittedWork || !this->deferredRetirements_.empty())) {
+    if (this->conservativeRetirement_ && hasSubmittedWork) {
         // Diagnostic-only policy. It restores conservative lifetime behavior
         // for isolation while leaving shaders, scheduling, AHB transport, and
         // presentation policy unchanged.
@@ -1026,33 +995,6 @@ bool LsContext::tryRecyclePass(size_t passIndex, RenderPassInfo& pass) {
                 5,
                 "Conservative retirement queue wait failed: "
                     + std::to_string(queueWaitResult));
-            return false;
-        }
-        for (auto& retired : this->deferredRetirements_) {
-            retired.consumerRetired = true;
-            retired.consumerRetirementAnchored = true;
-            retired.objectDestroyPermitted = true;
-        }
-        this->deferredRetirements_.clear();
-    }
-
-    // A slot's producer fence can also be the real retirement anchor for an
-    // older generation of that same slot. Even when the old producer work has
-    // completed, the fence cannot be reset/reused until the deferred bundle's
-    // consumer generation has retired. Otherwise the next vkQueueSubmit would
-    // reuse a fence that is still serving as the lifetime proof for old WSI
-    // semaphores.
-    for (const auto& retired : this->deferredRetirements_) {
-        if (retired.retirementFence != nullptr
-                && retired.retirementFence == pass.completionFence
-                && !retired.consumerRetired) {
-            Utils::logLimitN(
-                "passRetirement",
-                5,
-                "Pass reuse blocked: pass_index=" + std::to_string(passIndex)
-                    + " generation=" + std::to_string(pass.generation)
-                    + " producerComplete=1 consumerRetired=0"
-                    + " reason=retirement-fence-still-referenced");
             return false;
         }
     }
@@ -1110,13 +1052,24 @@ bool LsContext::tryRecyclePass(size_t passIndex, RenderPassInfo& pass) {
 #ifdef __ANDROID__
     pass.framegenBatchCompleteValid = false;
 #endif
-    this->deferPassResources(passIndex, pass);
+    // Producer fences authorize command-buffer and queue-consumer retirement.
+    // WSI-consumed semaphore wrappers are copied into wsiConsumersByImage_
+    // when each present is queued, so slot reuse cannot destroy their handles.
+    this->releasePassResources(passIndex, pass);
     return true;
 }
 
 VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
     const auto conf = Config::snapshot();
+    if (std::find(this->presentQueues_.begin(), this->presentQueues_.end(), queue)
+            == this->presentQueues_.end()) {
+        this->presentQueues_.push_back(queue);
+    }
+    // The application can legally present this index only after acquiring it.
+    // Reacquisition proves that the prior presentation of this image, including
+    // its semaphore waits, has retired from WSI.
+    this->releaseWsiConsumersForImage(presentIdx, "source-acquire");
     const size_t passIndex = this->frameIdx % this->passInfos.size();
     auto& pass = this->passInfos.at(passIndex);
     if (!this->tryRecyclePass(passIndex, pass)) {
@@ -2387,10 +2340,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (this->lastSourceCopyDependency_.valid) {
         gameRenderSemaphores2.emplace_back(
             this->lastSourceCopyDependency_.semaphore.handle());
+        pass.queueConsumerSemaphores.emplace_back(
+            this->lastSourceCopyDependency_.semaphore);
     }
     if (this->lastBatchCompleteDependency_.valid) {
         gameRenderSemaphores2.emplace_back(
             this->lastBatchCompleteDependency_.semaphore.handle());
+        pass.queueConsumerSemaphores.emplace_back(
+            this->lastBatchCompleteDependency_.semaphore);
         consumePreviousBatchComplete = true;
     }
 
@@ -2487,7 +2444,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (consumePreviousBatchComplete)
         this->lastBatchCompleteDependency_.valid = false;
     recordSourceCopyDependency();
-    this->anchorDeferredRetirements(pass.completionFence);
     metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - handoffStart).count();
     if (firstPresentDiagnostic) {
@@ -2515,6 +2471,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         };
         const auto failOpenResult =
             Layer::ovkQueuePresentKHR(queue, &failOpenPresentInfo);
+        this->retainWsiConsumersForImage(presentIdx, pass.generation,
+            {pass.preCopySemaphores.at(0)}, "source-syncfd-fallback");
         if (failOpenResult != VK_SUCCESS
                 && failOpenResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
@@ -2630,6 +2588,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 };
                 const auto timeoutResult =
                     Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
+                this->retainWsiConsumersForImage(presentIdx, pass.generation,
+                    {pass.preCopySemaphores.at(0)}, "source-timeout-fallback");
                 if (timeoutResult != VK_SUCCESS
                         && timeoutResult != VK_SUBOPTIMAL_KHR) {
                     metrics.windowSourcePresentFailures++;
@@ -2672,6 +2632,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         };
         const auto adaptiveSourceResult = Layer::ovkQueuePresentKHR(
             queue, &adaptiveSourcePresentInfo);
+        this->retainWsiConsumersForImage(presentIdx, pass.generation,
+            {pass.preCopySemaphores.at(0)}, "source-history");
         if (adaptiveSourceResult != VK_SUCCESS
                 && adaptiveSourceResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
@@ -2828,6 +2790,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pImageIndices = &presentIdx,
         };
         const auto timeoutPresentResult = Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
+        this->retainWsiConsumersForImage(presentIdx, pass.generation,
+            {pass.preCopySemaphores.at(0)}, "source-timeout-fallback");
         if (timeoutPresentResult != VK_SUCCESS && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
             metrics.totalSourcePresentFailures++;
@@ -2912,6 +2876,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");
         }
 
+        this->releaseWsiConsumersForImage(imageIdx, "generated-acquire");
+
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.postCopyBufs.at(i) = Mini::CommandBuffer(info.device, this->cmdPool);
@@ -2959,6 +2925,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pImageIndices = &imageIdx,
         };
         res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
+        std::vector<Mini::Semaphore> generatedWsiConsumers{
+            pass.postCopySemaphores.at(i)
+        };
+        if (i != 0)
+            generatedWsiConsumers.emplace_back(
+                pass.prevPostCopySemaphores.at(i - 1));
+        this->retainWsiConsumersForImage(imageIdx, pass.generation,
+            std::move(generatedWsiConsumers), "generated");
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowGeneratedPresentFailures++;
             metrics.totalGeneratedPresentFailures++;
@@ -3012,6 +2986,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .pImageIndices = &presentIdx,
     };
     auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);
+    this->retainWsiConsumersForImage(presentIdx, pass.generation,
+        {queuedGeneratedFrameCount > 0
+            ? pass.prevPostCopySemaphores.at(queuedGeneratedFrameCount - 1)
+            : pass.preCopySemaphores.at(0)},
+        "source-final");
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
         metrics.windowSourcePresentFailures++;
         metrics.totalSourcePresentFailures++;
@@ -3043,9 +3022,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     pass.preCopyBuf.end();
 
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
-    if (this->lastSourceCopyDependency_.valid)
+    if (this->lastSourceCopyDependency_.valid) {
         gameRenderSemaphores2.emplace_back(
             this->lastSourceCopyDependency_.semaphore.handle());
+        pass.queueConsumerSemaphores.emplace_back(
+            this->lastSourceCopyDependency_.semaphore);
+    }
     pass.preCopyBuf.submit(info.queue.second,
         gameRenderSemaphores2,
         { pass.preCopySemaphores.at(0).handle(),
@@ -3056,7 +3038,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     this->lastSourceCopyDependency_.passIndex = passIndex;
     this->lastSourceCopyDependency_.generation = pass.generation;
     this->lastSourceCopyDependency_.semaphore = pass.preCopySemaphores.at(1);
-    this->anchorDeferredRetirements(pass.completionFence);
 
     // 2. render intermediary frames
     std::vector<int> renderSemaphoreFds(conf.multiplier - 1);
@@ -3080,6 +3061,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");
+        this->releaseWsiConsumersForImage(imageIdx, "generated-acquire");
 
         // 4. copy output image to swapchain image
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
@@ -3119,6 +3101,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pImageIndices = &imageIdx,
         };
         res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
+        std::vector<Mini::Semaphore> generatedWsiConsumers{
+            pass.postCopySemaphores.at(i)
+        };
+        if (i != 0)
+            generatedWsiConsumers.emplace_back(
+                pass.prevPostCopySemaphores.at(i - 1));
+        this->retainWsiConsumersForImage(imageIdx, pass.generation,
+            std::move(generatedWsiConsumers), "generated");
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to present swapchain image");
     }
@@ -3135,6 +3125,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .pImageIndices = &presentIdx,
     };
     auto res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
+    this->retainWsiConsumersForImage(presentIdx, pass.generation,
+        {pass.prevPostCopySemaphores.at(conf.multiplier - 2)},
+        "source-final");
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
         throw LSFG::vulkan_error(res, "Failed to present swapchain image");
 
