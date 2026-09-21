@@ -2447,7 +2447,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (useAsyncHandoff) {
         submitAhbHandoff(pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
-            sourceRetirementFence, nullptr);
+            sourceRetirementFence);
         pass.completionFenceSubmitted = sourceRetirementFence != VK_NULL_HANDLE;
         asyncSubmissionIssued = true;
 
@@ -2478,7 +2478,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (!useAsyncHandoff && !asyncSubmissionIssued) {
         submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
-            sourceRetirementFence, nullptr,
+            sourceRetirementFence,
             this->waitHandoffFences);
         metrics.windowSyncHandoffs++;
         metrics.totalSyncHandoffs++;

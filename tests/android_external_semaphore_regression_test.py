@@ -135,10 +135,19 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         # The real source-copy submission carries the pass-retirement fence.
         # A failed SYNC_FD export must not fall back to the old host-fence path
         # or inject another queue submission just to retire the source copy.
-        self.assertIn("sourceRetirementFence, nullptr", submit_slice)
+        self.assertIn("sourceRetirementFence);", submit_slice)
+        self.assertNotIn("sourceRetirementFence, nullptr", submit_slice)
         self.assertNotIn("ahbHandoffFence", submit_slice)
         self.assertNotIn("waitForAhbHandoff(", wrapper[export_fd:fail_open])
         self.assertIn("requiresSourceHistoryWarmup_ = true", wrapper[export_fd:fail_open])
+
+        sync_submit = wrapper.index(
+            "submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second"
+        )
+        sync_metrics = wrapper.index("metrics.windowSyncHandoffs++", sync_submit)
+        sync_slice = wrapper[sync_submit:sync_metrics]
+        self.assertIn("sourceRetirementFence,\n            this->waitHandoffFences", sync_slice)
+        self.assertNotIn("sourceRetirementFence, nullptr", sync_slice)
 
     def test_submit_hot_path_preserves_batch_complete_signal(self) -> None:
         transform = (ROOT / "scripts/apply-android-submit-hot-path.py").read_text(
