@@ -496,7 +496,7 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages)
         : swapchain(swapchain), swapchainImages(swapchainImages),
-          extent(extent) {
+          extent(extent), device_(info.device), queue_(info.queue.second) {
     // get updated configuration
     auto conf = Config::snapshot();
     if (!conf.config_file.empty()
@@ -795,6 +795,26 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     }
 #endif
 
+    const auto createCompletionFence = reinterpret_cast<PFN_vkCreateFence>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkCreateFence"));
+    this->completionWaitFences = reinterpret_cast<PFN_vkWaitForFences>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkWaitForFences"));
+    this->completionResetFences = reinterpret_cast<PFN_vkResetFences>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkResetFences"));
+    this->waitQueueIdle_ = reinterpret_cast<PFN_vkQueueWaitIdle>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkQueueWaitIdle"));
+    const auto destroyCompletionFence = reinterpret_cast<PFN_vkDestroyFence>(
+        Layer::ovkGetDeviceProcAddr(info.device, "vkDestroyFence"));
+    if (createCompletionFence == nullptr
+            || this->completionWaitFences == nullptr
+            || this->completionResetFences == nullptr
+            || this->waitQueueIdle_ == nullptr
+            || destroyCompletionFence == nullptr) {
+        throw LSFG::vulkan_error(
+            VK_ERROR_INITIALIZATION_FAILED,
+            "Required pass-retirement fence functions unavailable");
+    }
+
     // prepare render passes
     this->cmdPool = Mini::CommandPool(info.device, info.queue.first);
     for (size_t i = 0; i < 8; i++) {
@@ -804,10 +824,43 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         pass.postCopyBufs.resize(runtimeMultiplier - 1);
         pass.postCopySemaphores.resize(runtimeMultiplier - 1);
         pass.prevPostCopySemaphores.resize(runtimeMultiplier - 1);
+
+        const VkFenceCreateInfo fenceInfo{
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            .flags = 0,
+        };
+        VkFence fence = VK_NULL_HANDLE;
+        const auto fenceResult = createCompletionFence(
+            info.device, &fenceInfo, nullptr, &fence);
+        if (fenceResult != VK_SUCCESS || fence == VK_NULL_HANDLE) {
+            throw LSFG::vulkan_error(
+                fenceResult == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : fenceResult,
+                "Failed to create pass-retirement fence");
+        }
+        pass.completionFence = std::shared_ptr<VkFence>(
+            new VkFence(fence),
+            [device = info.device, destroyCompletionFence](VkFence* ownedFence) {
+                if (ownedFence != nullptr) {
+                    if (*ownedFence != VK_NULL_HANDLE)
+                        destroyCompletionFence(device, *ownedFence, nullptr);
+                    delete ownedFence;
+                }
+            });
     }
 }
 
 LsContext::~LsContext() {
+    // All pass command buffers and semaphores may still be referenced by the
+    // game/WSI queue. This is teardown-only synchronization: it is never used
+    // on the present hot path.
+    if (this->waitQueueIdle_ != nullptr && this->queue_ != VK_NULL_HANDLE) {
+        const auto queueWaitResult = this->waitQueueIdle_(this->queue_);
+        if (queueWaitResult != VK_SUCCESS) {
+            std::cerr << "lsfg-vk: pass teardown queueWaitIdle failed result="
+                      << queueWaitResult << "\n";
+        }
+    }
+
     // Destroy the backend context first so any imported VkImages are released
     // before the Mini::Image owners release their AHardwareBuffers. Core::Image
     // also retains its own AHB reference, but this ordering keeps both layers'
@@ -815,10 +868,110 @@ LsContext::~LsContext() {
     this->lsfgCtxId.reset();
 }
 
+bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
+    if (!pass.completionFenceSubmitted)
+        return !pass.completionFenceFailed;
+    if (pass.completionFenceFailed
+            || pass.completionFence == nullptr
+            || this->completionWaitFences == nullptr
+            || this->completionResetFences == nullptr)
+        return false;
+
+    const VkFence fence = *pass.completionFence;
+    const auto waitResult = this->completionWaitFences(
+        this->device_, 1, &fence, VK_TRUE, 0);
+    if (waitResult != VK_SUCCESS) {
+        if (waitResult != VK_TIMEOUT && waitResult != VK_NOT_READY) {
+            Utils::logLimitN(
+                "passRetirement",
+                5,
+                "Pass completion fence query failed: "
+                    + std::to_string(waitResult));
+        }
+        return false;
+    }
+
+    const auto resetResult = this->completionResetFences(
+        this->device_, 1, &fence);
+    if (resetResult != VK_SUCCESS) {
+        pass.completionFenceFailed = true;
+        Utils::logLimitN(
+            "passRetirement",
+            5,
+            "Pass completion fence reset failed: "
+                + std::to_string(resetResult));
+        return false;
+    }
+
+    pass.completionFenceSubmitted = false;
+#ifdef __ANDROID__
+    pass.framegenBatchCompleteValid = false;
+#endif
+    return true;
+}
+
+bool LsContext::submitPassCompletionFence(RenderPassInfo& pass, VkQueue queue) {
+    if (pass.completionFence == nullptr
+            || pass.completionFenceSubmitted
+            || pass.completionFenceFailed)
+        return false;
+
+    // An empty submit is ordered after the copy submits and the queue-present
+    // operation. It retires the slot without a device-wide idle wait.
+    const VkSubmitInfo submitInfo{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 0,
+    };
+    const auto submitResult = Layer::ovkQueueSubmit(
+        queue, 1, &submitInfo, *pass.completionFence);
+    if (submitResult == VK_SUCCESS) {
+        pass.completionFenceSubmitted = true;
+        return true;
+    }
+
+    // The present already succeeded. Use a teardown-style queue wait only on
+    // this exceptional bookkeeping failure so resources remain safe to reuse.
+    Utils::logLimitN(
+        "passRetirement",
+        5,
+        "Pass completion fence submit failed: "
+            + std::to_string(submitResult));
+    if (this->waitQueueIdle_ != nullptr
+            && this->waitQueueIdle_(queue) == VK_SUCCESS)
+        return true;
+
+    pass.completionFenceFailed = true;
+    return false;
+}
+
 VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
     const auto conf = Config::snapshot();
     auto& pass = this->passInfos.at(this->frameIdx % 8);
+    if (!this->tryRecyclePass(pass)) {
+        const VkPresentInfoKHR passthroughPresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = pNext,
+            .waitSemaphoreCount =
+                static_cast<uint32_t>(gameRenderSemaphores.size()),
+            .pWaitSemaphores = gameRenderSemaphores.data(),
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        const auto passthroughResult = Layer::ovkQueuePresentKHR(
+            queue, &passthroughPresentInfo);
+        if (passthroughResult == VK_SUCCESS
+                || passthroughResult == VK_SUBOPTIMAL_KHR) {
+            this->lastGeneratedFrameCount_ = 0;
+            ++this->frameIdx;
+            Utils::logLimitN(
+                "passRetirement",
+                5,
+                "Pass ring busy; queued source-only present until a slot retires");
+        }
+        return passthroughResult;
+    }
 
 #ifdef __ANDROID__
     if (this->runtimeSessionId_ == 0)
@@ -1631,6 +1784,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceDeadlineSamples = 0;
             metrics.windowSourceTimelineRebases = 0;
         }
+        if (!this->submitPassCompletionFence(pass, queue)) {
+            Utils::logLimitN(
+                "passRetirement",
+                5,
+                "Pass completion fence unavailable; this slot will remain source-only");
+        }
+
         if (!excludeCurrentCycleFromTimingMetrics) {
             metrics.windowCycleMs += cycleMs;
             if (cycleMs > metrics.windowCycleMaxMs)
@@ -2771,6 +2931,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
         throw LSFG::vulkan_error(res, "Failed to present swapchain image");
 
+    this->submitPassCompletionFence(pass, queue);
     this->frameIdx++;
     return res;
 #endif

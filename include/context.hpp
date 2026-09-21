@@ -176,6 +176,14 @@ private:
     std::vector<VkImage> swapchainImages;
     VkExtent2D extent;
 
+    // The pass ring owns resources submitted to the game's queue. Retain the
+    // queue/device dispatch until every in-flight pass has retired.
+    VkDevice device_{VK_NULL_HANDLE};
+    VkQueue queue_{VK_NULL_HANDLE};
+    PFN_vkWaitForFences completionWaitFences_{nullptr};
+    PFN_vkResetFences completionResetFences_{nullptr};
+    PFN_vkQueueWaitIdle waitQueueIdle_{nullptr};
+
     Mini::Image frame_0, frame_1; // frames shared with lsfg. write to frame_0 when fc % 2 == 0
     std::vector<Mini::Image> out_n; // output images shared with lsfg, indexed by framegen id
     // Declared after the imported images so exceptional construction and
@@ -372,6 +380,16 @@ private:
         std::vector<Mini::CommandBuffer> postCopyBufs; // copy from out_n to swapchain image
         std::vector<Mini::Semaphore> postCopySemaphores; // signal when postCopyBuf is done
         std::vector<Mini::Semaphore> prevPostCopySemaphores; // signal for previous postCopyBuf
+
+        // Signaled by an empty submit queued after the final source present.
+        // A slot is never overwritten until this fence is complete.
+        std::shared_ptr<VkFence> completionFence;
+        bool completionFenceSubmitted{false};
+        bool completionFenceFailed{false};
     }; // data for a single render pass
+
+    bool tryRecyclePass(RenderPassInfo& pass);
+    bool submitPassCompletionFence(RenderPassInfo& pass, VkQueue queue);
+
     std::array<RenderPassInfo, 8> passInfos; // allocate 8 because why not
 };
