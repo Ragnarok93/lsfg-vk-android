@@ -174,7 +174,10 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
 
     def test_runtime_config_change_is_reparsed_before_swapchain_recreation(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
         present = hooks.split("VkResult myvkQueuePresentKHR", 1)[1]
+        self.assertIn("configurationUpdateMutex", config)
+        self.assertIn("std::lock_guard updateLock(configurationUpdateMutex)", config)
         self.assertIn(
             "Config::updateConfig(",
             present,

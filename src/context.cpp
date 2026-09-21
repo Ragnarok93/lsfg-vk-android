@@ -33,8 +33,43 @@
 #include <array>
 #include <cmath>
 #include <atomic>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
 
 namespace {
+
+std::mutex lsfgDisableEnvMutex;
+
+class ScopedLsfgDisable {
+public:
+    ScopedLsfgDisable()
+            : lock_(lsfgDisableEnvMutex) {
+        if (const char* previous = std::getenv("DISABLE_LSFG"))
+            previousValue_ = previous;
+        if (setenv("DISABLE_LSFG", "1", 1) != 0)
+            throw std::runtime_error("Unable to disable recursive LSFG interception");
+        active_ = true;
+    }
+
+    ScopedLsfgDisable(const ScopedLsfgDisable&) = delete;
+    ScopedLsfgDisable& operator=(const ScopedLsfgDisable&) = delete;
+
+    ~ScopedLsfgDisable() noexcept {
+        if (!active_)
+            return;
+        const int result = previousValue_.has_value()
+            ? setenv("DISABLE_LSFG", previousValue_->c_str(), 1)
+            : unsetenv("DISABLE_LSFG");
+        if (result != 0)
+            std::cerr << "lsfg-vk: failed to restore DISABLE_LSFG after backend setup\n";
+    }
+
+private:
+    std::unique_lock<std::mutex> lock_;
+    std::optional<std::string> previousValue_;
+    bool active_{false};
+};
 
 size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 #ifdef __ANDROID__
@@ -547,96 +582,98 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                   << '\n';
     }
 
-    setenv("DISABLE_LSFG", "1", 1); // NOLINT
-    lsfgInitialize(
-        info.identity, format,
-        conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
-        [](const std::string& name) {
-            auto dxbc = Extract::getShader(name);
-            auto spirv = Extract::translateShader(dxbc);
-            return spirv;
-        }
-    );
-
-    const LSFG::BackendDiagnostics backendDiagnostics = conf.performance
-        ? LSFG_3_1P::getBackendDiagnostics()
-        : LSFG_3_1::getBackendDiagnostics();
-    const auto ahbTransportMode = backendDiagnostics.ahbTransportMode;
-    if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported)
-        throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
-            "Exact game/framegen ICD has no supported AHB image transport for LSFG format");
-
-    // Android path: use AHardwareBuffer-backed images for sharing with framegen.
-    // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL
-    // ownership around every shared-image access, so this path is valid on
-    // stock Android ICDs as well as wrapper/custom drivers.
-    this->frame_0 = Mini::Image(info.device, info.physicalDevice,
-        extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-        ahbTransportMode, LSFG::AhbImageRole::Input);
-    this->frame_1 = Mini::Image(info.device, info.physicalDevice,
-        extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-        ahbTransportMode, LSFG::AhbImageRole::Input);
-
-    for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
-        this->out_n.emplace_back(info.device, info.physicalDevice,
-            extent, format,
-            VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-            ahbTransportMode, LSFG::AhbImageRole::Output);
-
-    // Create framegen context using AHB sharing
-    std::vector<AHardwareBuffer*> outAhbs;
-    outAhbs.reserve(runtimeMultiplier - 1);
-    for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
-        outAhbs.push_back(this->out_n.at(i).getAhb());
-
-    int32_t ctxId;
-    if (conf.adaptiveFlowScale) {
-        try {
-            if (conf.performance)
-                ctxId = LSFG_3_1P::createAdaptiveContextFromAHB(
-                    this->frame_0.getAhb(), this->frame_1.getAhb(),
-                    outAhbs, extent, format, adaptiveFlowScales);
-            else
-                ctxId = LSFG_3_1::createAdaptiveContextFromAHB(
-                    this->frame_0.getAhb(), this->frame_1.getAhb(),
-                    outAhbs, extent, format, adaptiveFlowScales);
-            this->adaptiveFlowRuntimeAvailable_ = true;
-        } catch (const std::exception& e) {
-            std::cerr << "lsfg-vk: adaptive-flow-fallback mode=fixed-target"
-                      << " target=" << initialFlowScale
-                      << " reason=" << e.what() << '\n';
-            this->adaptiveFlowController_.configure(
-                false, this->adaptiveFlowPreset_);
-            if (conf.performance)
-                ctxId = LSFG_3_1P::createContextFromAHB(
-                    this->frame_0.getAhb(), this->frame_1.getAhb(),
-                    outAhbs, extent, format);
-            else
-                ctxId = LSFG_3_1::createContextFromAHB(
-                    this->frame_0.getAhb(), this->frame_1.getAhb(),
-                    outAhbs, extent, format);
-        }
-    } else if (conf.performance) {
-        ctxId = LSFG_3_1P::createContextFromAHB(
-            this->frame_0.getAhb(), this->frame_1.getAhb(),
-            outAhbs, extent, format);
-    } else {
-        ctxId = LSFG_3_1::createContextFromAHB(
-            this->frame_0.getAhb(), this->frame_1.getAhb(),
-            outAhbs, extent, format);
-    }
-
-    this->lsfgCtxId = std::shared_ptr<int32_t>(
-        new int32_t(ctxId),
-        [lsfgDeleteContext = lsfgDeleteContext](int32_t* id) {
-            if (id != nullptr) {
-                lsfgDeleteContext(*id);
-                delete id;
+    LSFG::BackendDiagnostics backendDiagnostics{};
+    auto ahbTransportMode = LSFG::AhbTransportMode::Unsupported;
+    int32_t ctxId{};
+    {
+        ScopedLsfgDisable disableRecursiveInterception;
+        lsfgInitialize(
+            info.identity, format,
+            conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
+            [](const std::string& name) {
+                auto dxbc = Extract::getShader(name);
+                auto spirv = Extract::translateShader(dxbc);
+                return spirv;
             }
-        }
-    );
+        );
 
-    unsetenv("DISABLE_LSFG"); // NOLINT
+        backendDiagnostics = conf.performance
+            ? LSFG_3_1P::getBackendDiagnostics()
+            : LSFG_3_1::getBackendDiagnostics();
+        ahbTransportMode = backendDiagnostics.ahbTransportMode;
+        if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported)
+            throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
+                "Exact game/framegen ICD has no supported AHB image transport for LSFG format");
+
+        // Android path: use AHardwareBuffer-backed images for sharing with framegen.
+        // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL
+        // ownership around every shared-image access, so this path is valid on
+        // stock Android ICDs as well as wrapper/custom drivers.
+        this->frame_0 = Mini::Image(info.device, info.physicalDevice,
+            extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+            ahbTransportMode, LSFG::AhbImageRole::Input);
+        this->frame_1 = Mini::Image(info.device, info.physicalDevice,
+            extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+            ahbTransportMode, LSFG::AhbImageRole::Input);
+
+        for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
+            this->out_n.emplace_back(info.device, info.physicalDevice,
+                extent, format,
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+                ahbTransportMode, LSFG::AhbImageRole::Output);
+
+        // Create framegen context using AHB sharing
+        std::vector<AHardwareBuffer*> outAhbs;
+        outAhbs.reserve(runtimeMultiplier - 1);
+        for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
+            outAhbs.push_back(this->out_n.at(i).getAhb());
+
+        if (conf.adaptiveFlowScale) {
+            try {
+                if (conf.performance)
+                    ctxId = LSFG_3_1P::createAdaptiveContextFromAHB(
+                        this->frame_0.getAhb(), this->frame_1.getAhb(),
+                        outAhbs, extent, format, adaptiveFlowScales);
+                else
+                    ctxId = LSFG_3_1::createAdaptiveContextFromAHB(
+                        this->frame_0.getAhb(), this->frame_1.getAhb(),
+                        outAhbs, extent, format, adaptiveFlowScales);
+                this->adaptiveFlowRuntimeAvailable_ = true;
+            } catch (const std::exception& e) {
+                std::cerr << "lsfg-vk: adaptive-flow-fallback mode=fixed-target"
+                          << " target=" << initialFlowScale
+                          << " reason=" << e.what() << '\n';
+                this->adaptiveFlowController_.configure(
+                    false, this->adaptiveFlowPreset_);
+                if (conf.performance)
+                    ctxId = LSFG_3_1P::createContextFromAHB(
+                        this->frame_0.getAhb(), this->frame_1.getAhb(),
+                        outAhbs, extent, format);
+                else
+                    ctxId = LSFG_3_1::createContextFromAHB(
+                        this->frame_0.getAhb(), this->frame_1.getAhb(),
+                        outAhbs, extent, format);
+            }
+        } else if (conf.performance) {
+            ctxId = LSFG_3_1P::createContextFromAHB(
+                this->frame_0.getAhb(), this->frame_1.getAhb(),
+                outAhbs, extent, format);
+        } else {
+            ctxId = LSFG_3_1::createContextFromAHB(
+                this->frame_0.getAhb(), this->frame_1.getAhb(),
+                outAhbs, extent, format);
+        }
+
+        this->lsfgCtxId = std::shared_ptr<int32_t>(
+            new int32_t(ctxId),
+            [lsfgDeleteContext = lsfgDeleteContext](int32_t* id) {
+                if (id != nullptr) {
+                    lsfgDeleteContext(*id);
+                    delete id;
+                }
+            }
+        );
+    }
 
     // Resolve and allocate one handoff fence per swapchain context. It remains
     // authoritative for compatibility fallback and is also attached to async
@@ -734,29 +771,28 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         lsfgDeleteContext = LSFG_3_1P::deleteContext;
     }
 
-    setenv("DISABLE_LSFG", "1", 1); // NOLINT
-
-    lsfgInitialize(
-        info.identity, format,
-        conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
-        [](const std::string& name) {
-            auto dxbc = Extract::getShader(name);
-            auto spirv = Extract::translateShader(dxbc);
-            return spirv;
-        }
-    );
-
-    this->lsfgCtxId = std::shared_ptr<int32_t>(
-        new int32_t(lsfgCreateContext(fds.at(0), fds.at(1), outFds, extent, format)),
-        [lsfgDeleteContext = lsfgDeleteContext](int32_t* id) {
-            if (id != nullptr) {
-                lsfgDeleteContext(*id);
-                delete id;
+    {
+        ScopedLsfgDisable disableRecursiveInterception;
+        lsfgInitialize(
+            info.identity, format,
+            conf.hdr, 1.0F / conf.flowScale, conf.multiplier - 1,
+            [](const std::string& name) {
+                auto dxbc = Extract::getShader(name);
+                auto spirv = Extract::translateShader(dxbc);
+                return spirv;
             }
-        }
-    );
+        );
 
-    unsetenv("DISABLE_LSFG"); // NOLINT
+        this->lsfgCtxId = std::shared_ptr<int32_t>(
+            new int32_t(lsfgCreateContext(fds.at(0), fds.at(1), outFds, extent, format)),
+            [lsfgDeleteContext = lsfgDeleteContext](int32_t* id) {
+                if (id != nullptr) {
+                    lsfgDeleteContext(*id);
+                    delete id;
+                }
+            }
+        );
+    }
 #endif
 
     // prepare render passes

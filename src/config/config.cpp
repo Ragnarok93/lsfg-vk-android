@@ -34,6 +34,11 @@ namespace {
 
 namespace {
     std::mutex configurationMutex;
+    // Parsing and first-time file creation must be serialized separately from
+    // readers. Multiple swapchain threads can notice the same timestamp at
+    // once; without this lock they could parse a partially written file or
+    // race while installing the default configuration.
+    std::mutex configurationUpdateMutex;
     Configuration activeConfiguration{};
 }
 
@@ -61,6 +66,7 @@ namespace {
 }
 
 void Config::updateConfig(const std::string& file) {
+    std::lock_guard updateLock(configurationUpdateMutex);
     if (!std::filesystem::exists(file)) {
         std::cerr << "lsfg-vk: Placing default configuration file at " << file << '\n';
         const auto parent = std::filesystem::path(file).parent_path();

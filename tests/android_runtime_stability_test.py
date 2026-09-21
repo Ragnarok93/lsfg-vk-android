@@ -113,6 +113,14 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
                 "Framegen completion and teardown must use bounded context fences rather than an uninterruptible device-wide idle wait",
             )
 
+    def test_recursive_layer_disable_is_exception_safe_and_serialized(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("std::mutex lsfgDisableEnvMutex", source)
+        self.assertIn("class ScopedLsfgDisable", source)
+        self.assertIn("previousValue_", source)
+        self.assertIn("ScopedLsfgDisable disableRecursiveInterception", source)
+        self.assertEqual(source.count('unsetenv("DISABLE_LSFG")'), 1)
+
     def test_generated_wsi_acquire_is_opportunistic_and_source_safe(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         android_start = source.index(
