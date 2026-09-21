@@ -124,30 +124,6 @@ bool recursiveBackendSetupActive() {
     return disabled != nullptr && std::strcmp(disabled, "1") == 0;
 }
 
-template <typename Handle>
-const void* deviceDispatchKey(Handle handle) {
-    if (handle == VK_NULL_HANDLE) return nullptr;
-    return *reinterpret_cast<void* const*>(handle);
-}
-
-bool loadCompatibleConstructionDispatch(VkDevice device, DeviceDispatch* dispatch) {
-    const void* key = deviceDispatchKey(device);
-    if (key == nullptr || dispatch == nullptr) return false;
-
-    std::shared_lock lock(deviceDispatchMutex);
-    for (const auto& [owner, candidate] : deviceDispatchTables) {
-        if (owner == device || candidate.device == VK_NULL_HANDLE)
-            continue;
-        if (deviceDispatchKey(owner) != key)
-            continue;
-        if (candidate.GetDeviceQueue == nullptr && candidate.GetDeviceQueue2 == nullptr)
-            continue;
-        *dispatch = candidate;
-        dispatch->device = device;
-        return true;
-    }
-    return false;
-}
 bool loadKnownGoodPrivateQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
     if (!recursiveBackendSetupActive() || device == VK_NULL_HANDLE || dispatch == nullptr)
         return false;
@@ -302,30 +278,12 @@ bool loadConstructionQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
 
     if (construction.GetDeviceQueue == nullptr
             && construction.GetDeviceQueue2 == nullptr) {
-        DeviceDispatch compatible{};
-        if (loadCompatibleConstructionDispatch(device, &compatible)) {
-            construction.GetDeviceQueue = compatible.GetDeviceQueue;
-            construction.GetDeviceQueue2 = compatible.GetDeviceQueue2;
-            if (construction.QueueSubmit == nullptr)
-                construction.QueueSubmit = compatible.QueueSubmit;
-            if (construction.QueuePresentKHR == nullptr)
-                construction.QueuePresentKHR = compatible.QueuePresentKHR;
-            std::cerr << "lsfg-vk: construction queue bootstrap"
-                      << " device=" << device
-                      << " dispatchKey=" << deviceDispatchKey(device)
-                      << " source=compatible-live-device\n";
-        }
-    }
-
-    if (construction.GetDeviceQueue == nullptr
-            && construction.GetDeviceQueue2 == nullptr) {
         DeviceDispatch privateFallback{};
         if (loadKnownGoodPrivateQueueDispatch(device, &privateFallback)) {
             construction.GetDeviceQueue = privateFallback.GetDeviceQueue;
             construction.GetDeviceQueue2 = privateFallback.GetDeviceQueue2;
             std::cerr << "lsfg-vk: construction queue bootstrap"
                       << " device=" << device
-                      << " dispatchKey=" << deviceDispatchKey(device)
                       << " source=known-good-private-fallback\n";
         }
     }
