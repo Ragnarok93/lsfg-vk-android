@@ -85,14 +85,14 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
             "std::unordered_map<VkDevice, DeviceDispatch>",
             "std::unordered_map<VkQueue, DeviceDispatch>",
             "std::unordered_map<VkCommandBuffer, DeviceDispatch>",
-            "storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())",
+            "storeDeviceDispatch(*pDevice, dispatch)",
             "loadDeviceDispatch(device, &dispatch)",
             "dispatch.presentationDevice",
-            ".presentationDevice = true",
+            "dispatch.presentationDevice = true",
         ):
             self.assertIn(token, layer)
 
-        snapshot = layer.index("storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())")
+        snapshot = layer.index("storeDeviceDispatch(*pDevice, dispatch)")
         post_hook = layer.index('Hooks::hooks["vkCreateDevicePost"]')
         self.assertLess(snapshot, post_hook)
         self.assertNotIn("runtime stage=device-dispatch-ready presentation=1", layer)
@@ -102,7 +102,12 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
 
         self.assertIn("ownedDispatch.device = device", layer)
         self.assertIn('"vkGetDeviceQueue"', layer)
-        self.assertIn("dispatch.GetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>", layer)
+        self.assertIn("&dispatch.GetDeviceQueue", layer)
+        self.assertIn('"vkGetDeviceQueue2"', layer)
+        self.assertIn("DeviceConstructionScope construction(dispatch.GetDeviceProcAddr)", layer)
+        self.assertNotIn("return next_vkQueueSubmit", layer)
+        self.assertNotIn("return next_vkQueuePresentKHR", layer)
+        self.assertNotIn("snapshotPresentationDispatch", layer)
         self.assertIn("queueDispatchTables[queue] = dispatch", layer)
         self.assertIn("commandBufferDispatchTables[commandBuffer] = dispatch", layer)
         self.assertIn("eraseDeviceDispatch(a)", layer)
@@ -133,8 +138,8 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
         self.assertIn("struct SwapchainKey", hooks)
         self.assertIn("SwapchainKey{device, swapchain}", hooks)
         self.assertIn("findSwapchainState(swapchainHandle, queue)", hooks)
-        self.assertIn("dispatchKey(key.device)", hooks)
-        self.assertIn("return ambiguous ? nullptr : onlyCandidate", hooks)
+        self.assertIn("const VkDevice device = Layer::queueOwner(queue)", hooks)
+        self.assertIn("swapchains.find(SwapchainKey{device, swapchain})", hooks)
         self.assertIn("retireSwapchainState(device, swapchain)", hooks)
 
 

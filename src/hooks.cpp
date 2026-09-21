@@ -398,6 +398,12 @@ namespace {
     std::shared_ptr<SwapchainState> findSwapchainState(
             VkSwapchainKHR swapchain, VkQueue queue) {
         std::lock_guard lock(hookStateMutex);
+#ifdef __ANDROID__
+        const VkDevice device = Layer::queueOwner(queue);
+        if (device == VK_NULL_HANDLE) return nullptr;
+        const auto it = swapchains.find(SwapchainKey{device, swapchain});
+        return it == swapchains.end() ? nullptr : it->second;
+#else
         const void* queueKey = dispatchKey(queue);
         std::shared_ptr<SwapchainState> onlyCandidate;
         bool ambiguous = false;
@@ -416,6 +422,7 @@ namespace {
         // use a unique handle candidate; never guess when multiple instances
         // own the same numeric VkSwapchainKHR value.
         return ambiguous ? nullptr : onlyCandidate;
+#endif
     }
 
     void publishSwapchainState(std::shared_ptr<SwapchainState> state,

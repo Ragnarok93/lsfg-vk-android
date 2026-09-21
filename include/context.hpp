@@ -433,14 +433,14 @@ private:
 
     // vkQueuePresentKHR has no fence parameter. A producer fence therefore
     // cannot prove that WSI has finished waiting on a semaphore. Associate
-    // each LSFG-owned present wait with the presented image instead: successful
-    // reacquisition of that image is the natural WSI retirement boundary.
+    // each LSFG-owned present wait with the presented image. After reacquisition,
+    // retain it through the fence of the real submission consuming acquisition.
     struct WsiConsumerResources {
         uint64_t generation{0};
         std::vector<Mini::Semaphore> semaphores;
     };
 
-    void releaseWsiConsumersForImage(uint32_t imageIndex, const char* reason);
+    void transferWsiConsumersToPass(uint32_t imageIndex, RenderPassInfo& pass, const char* reason);
     void retainWsiConsumersForImage(uint32_t imageIndex, uint64_t generation,
         std::vector<Mini::Semaphore> semaphores, const char* reason);
     void releasePassResources(size_t passIndex, RenderPassInfo& pass);

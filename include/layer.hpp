@@ -10,6 +10,10 @@
 #include <cstdint>
 
 namespace Layer {
+#ifdef __ANDROID__
+    VkDevice queueOwner(VkQueue queue);
+    void ovkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, VkQueue* queue);
+#endif
     /// Call to the original vkCreateInstance function.
     VkResult ovkCreateInstance(
         const VkInstanceCreateInfo* pCreateInfo,

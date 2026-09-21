@@ -54,7 +54,7 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
             "commandBufferDispatchTables",
             '"vkGetDeviceQueue"',
             "storeQueueDispatch(*d, dispatch)",
-            "storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())",
+            "storeDeviceDispatch(*pDevice, dispatch)",
             "loadDeviceDispatch(device, &dispatch)",
             "dispatch.presentationDevice",
             "downstream(device, pName)",
@@ -64,13 +64,13 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         # The presentation dispatch snapshot must exist before the post-create
         # hook obtains VkQueue/command buffers, otherwise those dispatchable
         # handles can be initialized against a later device's function table.
-        snapshot = layer.index("storeDeviceDispatch(*pDevice, snapshotPresentationDispatch())")
+        snapshot = layer.index("storeDeviceDispatch(*pDevice, dispatch)")
         post_hook = layer.index("Hooks::hooks[\"vkCreateDevicePost\"]")
         self.assertLess(snapshot, post_hook)
 
     def test_wsi_hooks_are_not_advertised_for_helper_devices(self) -> None:
         layer = (ROOT / "src/layer_android.cpp").read_text(encoding="utf-8")
-        self.assertIn("registerPassthroughDevice(*pDevice)", layer)
+        self.assertIn("registerPassthroughDevice(*pDevice, dispatch)", layer)
         self.assertIn("!dispatch.presentationDevice", layer)
         self.assertIn("if (!downstream || !downstream(device, pName))", layer)
         self.assertIn("return nullptr;", layer)

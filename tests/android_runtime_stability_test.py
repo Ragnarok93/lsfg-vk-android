@@ -15,6 +15,7 @@ class DelayedWsiConsumer:
         self.producer_complete = set()
         self.image_consumers = {}
         self.slot_generation = {}
+        self.acquire_wait_consumers = {}
 
     def submit(self, generation: int, image: int) -> bool:
         slot = generation % 8
@@ -36,6 +37,11 @@ class DelayedWsiConsumer:
 
     def reacquire(self, image: int) -> None:
         generation = self.image_consumers.pop(image, None)
+        if generation is not None:
+            self.acquire_wait_consumers[image] = generation
+
+    def complete_acquire_wait(self, image: int) -> None:
+        generation = self.acquire_wait_consumers.pop(image, None)
         if generation is not None:
             self.handles_alive.discard(generation)
 
@@ -127,9 +133,9 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
 
         self.assertIn("WsiConsumerResources", header)
         self.assertIn("wsiConsumersByImage_", header)
-        self.assertIn("releaseWsiConsumersForImage", source)
+        self.assertIn("transferWsiConsumersToPass", source)
         self.assertIn("retainWsiConsumersForImage", source)
-        self.assertIn("wsi-image-reacquired", source)
+        self.assertIn("acquire-wait fence", source)
         recycle_start = source.index("bool LsContext::tryRecyclePass")
         recycle_end = source.index("VkResult LsContext::present", recycle_start)
         recycle = source[recycle_start:recycle_end]
@@ -234,6 +240,9 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertEqual(set(range(9)), consumer.handles_alive)
         for image in range(9):
             consumer.reacquire(image)
+        self.assertEqual(set(range(9)), consumer.handles_alive)
+        for image in range(9):
+            consumer.complete_acquire_wait(image)
         self.assertEqual(set(), consumer.handles_alive)
 
     def test_slot_fence_reuse_is_independent_from_wsi_consumer_retirement(self) -> None:

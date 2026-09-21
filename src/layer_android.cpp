@@ -23,40 +23,18 @@ namespace {
 PFN_vkCreateInstance next_vkCreateInstance{};
 PFN_vkDestroyInstance next_vkDestroyInstance{};
 PFN_vkCreateDevice next_vkCreateDevice{};
-PFN_vkDestroyDevice next_vkDestroyDevice{};
-PFN_vkSetDeviceLoaderData next_vSetDeviceLoaderData{};
 PFN_vkGetInstanceProcAddr next_vkGetInstanceProcAddr{};
-PFN_vkGetDeviceProcAddr next_vkGetDeviceProcAddr{};
+thread_local PFN_vkGetDeviceProcAddr next_vkGetDeviceProcAddr{};
+struct DeviceConstructionScope {
+    PFN_vkGetDeviceProcAddr previous;
+    explicit DeviceConstructionScope(PFN_vkGetDeviceProcAddr gdpa)
+        : previous(next_vkGetDeviceProcAddr) { next_vkGetDeviceProcAddr = gdpa; }
+    ~DeviceConstructionScope() { next_vkGetDeviceProcAddr = previous; }
+};
 PFN_vkGetPhysicalDeviceQueueFamilyProperties next_vkGetPhysicalDeviceQueueFamilyProperties{};
 PFN_vkGetPhysicalDeviceMemoryProperties next_vkGetPhysicalDeviceMemoryProperties{};
 PFN_vkGetPhysicalDeviceProperties next_vkGetPhysicalDeviceProperties{};
 PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR next_vkGetPhysicalDeviceSurfaceCapabilitiesKHR{};
-PFN_vkCreateSwapchainKHR next_vkCreateSwapchainKHR{};
-PFN_vkQueuePresentKHR next_vkQueuePresentKHR{};
-PFN_vkDestroySwapchainKHR next_vkDestroySwapchainKHR{};
-PFN_vkGetSwapchainImagesKHR next_vkGetSwapchainImagesKHR{};
-PFN_vkAllocateCommandBuffers next_vkAllocateCommandBuffers{};
-PFN_vkFreeCommandBuffers next_vkFreeCommandBuffers{};
-PFN_vkBeginCommandBuffer next_vkBeginCommandBuffer{};
-PFN_vkEndCommandBuffer next_vkEndCommandBuffer{};
-PFN_vkCreateCommandPool next_vkCreateCommandPool{};
-PFN_vkDestroyCommandPool next_vkDestroyCommandPool{};
-PFN_vkCreateImage next_vkCreateImage{};
-PFN_vkDestroyImage next_vkDestroyImage{};
-PFN_vkGetImageMemoryRequirements next_vkGetImageMemoryRequirements{};
-PFN_vkBindImageMemory next_vkBindImageMemory{};
-PFN_vkAllocateMemory next_vkAllocateMemory{};
-PFN_vkFreeMemory next_vkFreeMemory{};
-PFN_vkCreateSemaphore next_vkCreateSemaphore{};
-PFN_vkDestroySemaphore next_vkDestroySemaphore{};
-PFN_vkGetMemoryFdKHR next_vkGetMemoryFdKHR{};
-PFN_vkGetSemaphoreFdKHR next_vkGetSemaphoreFdKHR{};
-PFN_vkGetAndroidHardwareBufferPropertiesANDROID next_vkGetAndroidHardwareBufferPropertiesANDROID{};
-PFN_vkGetDeviceQueue next_vkGetDeviceQueue{};
-PFN_vkQueueSubmit next_vkQueueSubmit{};
-PFN_vkCmdPipelineBarrier next_vkCmdPipelineBarrier{};
-PFN_vkCmdBlitImage next_vkCmdBlitImage{};
-PFN_vkAcquireNextImageKHR next_vkAcquireNextImageKHR{};
 
 struct PrivateInstanceDispatch {
     PFN_vkGetInstanceProcAddr GetInstanceProcAddr{};
@@ -125,6 +103,7 @@ struct DeviceDispatch {
     PFN_vkGetSemaphoreFdKHR GetSemaphoreFdKHR{};
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID GetAndroidHardwareBufferPropertiesANDROID{};
     PFN_vkGetDeviceQueue GetDeviceQueue{};
+    PFN_vkGetDeviceQueue2 GetDeviceQueue2{};
     PFN_vkQueueSubmit QueueSubmit{};
     PFN_vkCmdPipelineBarrier CmdPipelineBarrier{};
     PFN_vkCmdBlitImage CmdBlitImage{};
@@ -176,6 +155,18 @@ void storeDeviceDispatch(VkDevice device, const DeviceDispatch& dispatch) {
 void storeQueueDispatch(VkQueue queue, const DeviceDispatch& dispatch) {
     if (queue == VK_NULL_HANDLE || dispatch.device == VK_NULL_HANDLE) return;
     std::unique_lock lock(deviceDispatchMutex);
+    const auto previous = queueDispatchTables.find(queue);
+    if (previous == queueDispatchTables.end()) {
+        std::cerr << "lsfg-vk: dispatch queue=" << queue << " owner=" << dispatch.device
+                  << " policy=exact-device-queue submit=" << reinterpret_cast<void*>(dispatch.QueueSubmit)
+                  << " present=" << reinterpret_cast<void*>(dispatch.QueuePresentKHR) << "\n";
+    } else if (previous->second.device != dispatch.device) {
+        // Two live devices cannot own the same dispatchable handle. Poison the
+        // entry instead of replacing a still-live owner with a guessed one.
+        previous->second = DeviceDispatch{};
+        std::cerr << "lsfg-vk: dispatch queue ownership collision queue=" << queue << "\n";
+        return;
+    }
     queueDispatchTables[queue] = dispatch;
 }
 
@@ -206,54 +197,6 @@ void eraseDeviceDispatch(VkDevice device) {
     }
 }
 
-DeviceDispatch snapshotPresentationDispatch() {
-    return DeviceDispatch {
-        .GetDeviceProcAddr = next_vkGetDeviceProcAddr,
-        .SetDeviceLoaderData = next_vSetDeviceLoaderData,
-        .DestroyDevice = next_vkDestroyDevice,
-        .CreateSwapchainKHR = next_vkCreateSwapchainKHR,
-        .QueuePresentKHR = next_vkQueuePresentKHR,
-        .DestroySwapchainKHR = next_vkDestroySwapchainKHR,
-        .GetSwapchainImagesKHR = next_vkGetSwapchainImagesKHR,
-        .AllocateCommandBuffers = next_vkAllocateCommandBuffers,
-        .FreeCommandBuffers = next_vkFreeCommandBuffers,
-        .BeginCommandBuffer = next_vkBeginCommandBuffer,
-        .EndCommandBuffer = next_vkEndCommandBuffer,
-        .CreateCommandPool = next_vkCreateCommandPool,
-        .DestroyCommandPool = next_vkDestroyCommandPool,
-        .CreateImage = next_vkCreateImage,
-        .DestroyImage = next_vkDestroyImage,
-        .GetImageMemoryRequirements = next_vkGetImageMemoryRequirements,
-        .BindImageMemory = next_vkBindImageMemory,
-        .AllocateMemory = next_vkAllocateMemory,
-        .FreeMemory = next_vkFreeMemory,
-        .CreateSemaphore = next_vkCreateSemaphore,
-        .DestroySemaphore = next_vkDestroySemaphore,
-        .GetMemoryFdKHR = next_vkGetMemoryFdKHR,
-        .GetSemaphoreFdKHR = next_vkGetSemaphoreFdKHR,
-        .GetAndroidHardwareBufferPropertiesANDROID = next_vkGetAndroidHardwareBufferPropertiesANDROID,
-        .GetDeviceQueue = next_vkGetDeviceQueue,
-        .QueueSubmit = next_vkQueueSubmit,
-        .CmdPipelineBarrier = next_vkCmdPipelineBarrier,
-        .CmdBlitImage = next_vkCmdBlitImage,
-        .AcquireNextImageKHR = next_vkAcquireNextImageKHR,
-        .presentationDevice = true,
-    };
-}
-
-void registerPassthroughDevice(VkDevice device) {
-    DeviceDispatch dispatch{};
-    dispatch.GetDeviceProcAddr = next_vkGetDeviceProcAddr;
-    dispatch.SetDeviceLoaderData = next_vSetDeviceLoaderData;
-    if (dispatch.GetDeviceProcAddr) {
-        dispatch.DestroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(
-            dispatch.GetDeviceProcAddr(device, "vkDestroyDevice"));
-        dispatch.GetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
-            dispatch.GetDeviceProcAddr(device, "vkGetDeviceQueue"));
-    }
-    storeDeviceDispatch(device, dispatch);
-}
-
 template <typename T>
 bool initInstanceFunc(VkInstance instance, const char* name, T* func) {
     *func = reinterpret_cast<T>(next_vkGetInstanceProcAddr(instance, name));
@@ -265,14 +208,22 @@ bool initInstanceFunc(VkInstance instance, const char* name, T* func) {
 }
 
 template <typename T>
-bool initDeviceFunc(VkDevice device, const char* name, T* func, bool required = true) {
-    *func = reinterpret_cast<T>(next_vkGetDeviceProcAddr(device, name));
-    if (!*func) {
-        std::cerr << (required ? "(no function pointer for " : "(optional function pointer unavailable for ")
-                  << name << ")\n";
-        return !required;
-    }
-    return true;
+bool initDeviceFunc(VkDevice device, PFN_vkGetDeviceProcAddr gdpa,
+        const char* name, T* func, bool required = true) {
+    *func = gdpa ? reinterpret_cast<T>(gdpa(device, name)) : nullptr;
+    if (!*func && required)
+        std::cerr << "lsfg-vk: missing device function " << name << " owner=" << device << "\n";
+    return *func != nullptr || !required;
+}
+
+void registerPassthroughDevice(VkDevice device, DeviceDispatch dispatch) {
+    const auto gdpa = dispatch.GetDeviceProcAddr;
+    initDeviceFunc(device, gdpa, "vkDestroyDevice", &dispatch.DestroyDevice);
+    initDeviceFunc(device, gdpa, "vkGetDeviceQueue", &dispatch.GetDeviceQueue);
+    initDeviceFunc(device, gdpa, "vkGetDeviceQueue2", &dispatch.GetDeviceQueue2, false);
+    initDeviceFunc(device, gdpa, "vkQueueSubmit", &dispatch.QueueSubmit);
+    initDeviceFunc(device, gdpa, "vkQueuePresentKHR", &dispatch.QueuePresentKHR, false);
+    storeDeviceDispatch(device, dispatch);
 }
 
 bool deviceExtensionEnabled(const VkDeviceCreateInfo* createInfo, const char* extension) {
@@ -398,7 +349,10 @@ VkResult layer_vkCreateDevice(
             throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
                 "No layer creation info found in pNext chain");
 
-        next_vkGetDeviceProcAddr = layerDesc->u.pLayerInfo->pfnNextGetDeviceProcAddr;
+        DeviceDispatch dispatch{};
+        dispatch.GetDeviceProcAddr = layerDesc->u.pLayerInfo->pfnNextGetDeviceProcAddr;
+        // Used only while the loader is resolving this construction thread.
+        DeviceConstructionScope construction(dispatch.GetDeviceProcAddr);
         layerDesc->u.pLayerInfo = layerDesc->u.pLayerInfo->pNext;
 
         auto* loaderData = const_cast<VkLayerDeviceCreateInfo*>(
@@ -411,11 +365,11 @@ VkResult layer_vkCreateDevice(
         if (!loaderData)
             throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
                 "No layer device loader data found in pNext chain");
-        next_vSetDeviceLoaderData = loaderData->u.pfnSetDeviceLoaderData;
+        dispatch.SetDeviceLoaderData = loaderData->u.pfnSetDeviceLoaderData;
 
         if (!Config::snapshot().enable) {
             auto res = next_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
-            if (res == VK_SUCCESS) registerPassthroughDevice(*pDevice);
+            if (res == VK_SUCCESS) registerPassthroughDevice(*pDevice, dispatch);
             return res;
         }
 
@@ -427,7 +381,7 @@ VkResult layer_vkCreateDevice(
         if (!deviceExtensionEnabled(pCreateInfo, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
             auto res = next_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
             if (res == VK_SUCCESS) {
-                registerPassthroughDevice(*pDevice);
+                registerPassthroughDevice(*pDevice, dispatch);
             }
             return res;
         }
@@ -439,48 +393,47 @@ VkResult layer_vkCreateDevice(
             throw LSFG::vulkan_error(res, "Failed to create Vulkan device");
 
         bool success = true;
-        success &= initDeviceFunc(*pDevice, "vkDestroyDevice", &next_vkDestroyDevice);
-        success &= initDeviceFunc(*pDevice, "vkCreateSwapchainKHR", &next_vkCreateSwapchainKHR);
-        success &= initDeviceFunc(*pDevice, "vkQueuePresentKHR", &next_vkQueuePresentKHR);
-        success &= initDeviceFunc(*pDevice, "vkDestroySwapchainKHR", &next_vkDestroySwapchainKHR);
-        success &= initDeviceFunc(*pDevice, "vkGetSwapchainImagesKHR", &next_vkGetSwapchainImagesKHR);
-        success &= initDeviceFunc(*pDevice, "vkAllocateCommandBuffers", &next_vkAllocateCommandBuffers);
-        success &= initDeviceFunc(*pDevice, "vkFreeCommandBuffers", &next_vkFreeCommandBuffers);
-        success &= initDeviceFunc(*pDevice, "vkBeginCommandBuffer", &next_vkBeginCommandBuffer);
-        success &= initDeviceFunc(*pDevice, "vkEndCommandBuffer", &next_vkEndCommandBuffer);
-        success &= initDeviceFunc(*pDevice, "vkCreateCommandPool", &next_vkCreateCommandPool);
-        success &= initDeviceFunc(*pDevice, "vkDestroyCommandPool", &next_vkDestroyCommandPool);
-        success &= initDeviceFunc(*pDevice, "vkCreateImage", &next_vkCreateImage);
-        success &= initDeviceFunc(*pDevice, "vkDestroyImage", &next_vkDestroyImage);
-        success &= initDeviceFunc(*pDevice, "vkGetImageMemoryRequirements", &next_vkGetImageMemoryRequirements);
-        success &= initDeviceFunc(*pDevice, "vkBindImageMemory", &next_vkBindImageMemory);
-        success &= initDeviceFunc(*pDevice, "vkAllocateMemory", &next_vkAllocateMemory);
-        success &= initDeviceFunc(*pDevice, "vkFreeMemory", &next_vkFreeMemory);
-        success &= initDeviceFunc(*pDevice, "vkCreateSemaphore", &next_vkCreateSemaphore);
-        success &= initDeviceFunc(*pDevice, "vkDestroySemaphore", &next_vkDestroySemaphore);
-        success &= initDeviceFunc(*pDevice, "vkGetDeviceQueue", &next_vkGetDeviceQueue);
-        success &= initDeviceFunc(*pDevice, "vkQueueSubmit", &next_vkQueueSubmit);
-        success &= initDeviceFunc(*pDevice, "vkCmdPipelineBarrier", &next_vkCmdPipelineBarrier);
-        success &= initDeviceFunc(*pDevice, "vkCmdBlitImage", &next_vkCmdBlitImage);
-        success &= initDeviceFunc(*pDevice, "vkAcquireNextImageKHR", &next_vkAcquireNextImageKHR);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkDestroyDevice", &dispatch.DestroyDevice);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkCreateSwapchainKHR", &dispatch.CreateSwapchainKHR);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkQueuePresentKHR", &dispatch.QueuePresentKHR);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkDestroySwapchainKHR", &dispatch.DestroySwapchainKHR);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkGetSwapchainImagesKHR", &dispatch.GetSwapchainImagesKHR);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkAllocateCommandBuffers", &dispatch.AllocateCommandBuffers);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkFreeCommandBuffers", &dispatch.FreeCommandBuffers);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkBeginCommandBuffer", &dispatch.BeginCommandBuffer);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkEndCommandBuffer", &dispatch.EndCommandBuffer);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkCreateCommandPool", &dispatch.CreateCommandPool);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkDestroyCommandPool", &dispatch.DestroyCommandPool);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkCreateImage", &dispatch.CreateImage);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkDestroyImage", &dispatch.DestroyImage);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkGetImageMemoryRequirements", &dispatch.GetImageMemoryRequirements);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkBindImageMemory", &dispatch.BindImageMemory);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkAllocateMemory", &dispatch.AllocateMemory);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkFreeMemory", &dispatch.FreeMemory);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkCreateSemaphore", &dispatch.CreateSemaphore);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkDestroySemaphore", &dispatch.DestroySemaphore);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkGetDeviceQueue", &dispatch.GetDeviceQueue);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkQueueSubmit", &dispatch.QueueSubmit);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkCmdPipelineBarrier", &dispatch.CmdPipelineBarrier);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkCmdBlitImage", &dispatch.CmdBlitImage);
+        success &= initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkAcquireNextImageKHR", &dispatch.AcquireNextImageKHR);
 
         // Desktop FD export is not part of the Android AHardwareBuffer exchange.
         // Keep these pointers when the driver exposes them, but never reject an
         // otherwise valid Android presentation device because they are absent.
-        initDeviceFunc(*pDevice, "vkGetMemoryFdKHR", &next_vkGetMemoryFdKHR, false);
-        initDeviceFunc(*pDevice, "vkGetSemaphoreFdKHR", &next_vkGetSemaphoreFdKHR, false);
-        initDeviceFunc(*pDevice, "vkGetAndroidHardwareBufferPropertiesANDROID",
-            &next_vkGetAndroidHardwareBufferPropertiesANDROID, false);
+        initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkGetMemoryFdKHR", &dispatch.GetMemoryFdKHR, false);
+        initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkGetSemaphoreFdKHR", &dispatch.GetSemaphoreFdKHR, false);
+        initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr, "vkGetAndroidHardwareBufferPropertiesANDROID",
+            &dispatch.GetAndroidHardwareBufferPropertiesANDROID, false);
 
         if (!success)
             throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED,
                 "Failed to get required device function pointers");
 
-        // Snapshot the exact downstream function pointers returned for this
-        // logical device before any later helper/presentation device can replace
-        // the compatibility globals.  Register before the post hook because the
-        // post hook obtains VkQueue and allocates device-level objects.
-        storeDeviceDispatch(*pDevice, snapshotPresentationDispatch());
+        initDeviceFunc(*pDevice, dispatch.GetDeviceProcAddr,
+            "vkGetDeviceQueue2", &dispatch.GetDeviceQueue2, false);
+        dispatch.presentationDevice = true;
+        storeDeviceDispatch(*pDevice, dispatch);
 
         auto* postCreateDeviceHook = reinterpret_cast<PFN_vkCreateDevice>(
             Hooks::hooks["vkCreateDevicePost"]);
@@ -509,6 +462,7 @@ const std::unordered_map<std::string, PFN_vkVoidFunction> layerFunctions = {
     // its exact logical-device owner, even when two devices share a loader
     // dispatch pointer.
     {"vkGetDeviceQueue", reinterpret_cast<PFN_vkVoidFunction>(&Layer::ovkGetDeviceQueue)},
+    {"vkGetDeviceQueue2", reinterpret_cast<PFN_vkVoidFunction>(&Layer::ovkGetDeviceQueue2)},
 };
 
 PFN_vkVoidFunction layer_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
@@ -523,6 +477,7 @@ PFN_vkVoidFunction layer_vkGetInstanceProcAddr(VkInstance instance, const char* 
             : nullptr;
     }
 
+    if (name == "vkDestroyDevice") return Hooks::hooks.at(name);
     auto it = layerFunctions.find(name);
     if (it != layerFunctions.end()) return it->second;
     it = Hooks::hooks.find(name);
@@ -534,6 +489,15 @@ PFN_vkVoidFunction layer_vkGetInstanceProcAddr(VkInstance instance, const char* 
 
 PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     const std::string name(pName);
+    if (name == "vkDestroyDevice") return Hooks::hooks.at(name);
+    if (name == "vkGetDeviceQueue2") {
+        DeviceDispatch owner{};
+        if (loadDeviceDispatch(device, &owner))
+            return owner.GetDeviceQueue2
+                ? reinterpret_cast<PFN_vkVoidFunction>(&Layer::ovkGetDeviceQueue2) : nullptr;
+        return next_vkGetDeviceProcAddr && next_vkGetDeviceProcAddr(device, pName)
+            ? reinterpret_cast<PFN_vkVoidFunction>(&Layer::ovkGetDeviceQueue2) : nullptr;
+    }
     auto it = layerFunctions.find(name);
     if (it != layerFunctions.end()) return it->second;
 
@@ -577,21 +541,21 @@ void ovkDestroyDevice(VkDevice a, const VkAllocationCallbacks* b) {
     if (loadDeviceDispatch(a, &dispatch) && dispatch.DestroyDevice)
         dispatch.DestroyDevice(a, b);
     else
-        next_vkDestroyDevice(a, b);
+        return;
     eraseDeviceDispatch(a);
 }
 VkResult ovkSetDeviceLoaderData(VkDevice a, void* b) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.SetDeviceLoaderData)
         return dispatch.SetDeviceLoaderData(a, b);
-    return next_vSetDeviceLoaderData(a, b);
+    return VK_ERROR_DEVICE_LOST;
 }
 PFN_vkVoidFunction ovkGetInstanceProcAddr(VkInstance a, const char* b) { return next_vkGetInstanceProcAddr(a, b); }
 PFN_vkVoidFunction ovkGetDeviceProcAddr(VkDevice a, const char* b) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.GetDeviceProcAddr)
         return dispatch.GetDeviceProcAddr(a, b);
-    return next_vkGetDeviceProcAddr(a, b);
+    return nullptr;
 }
 void ovkGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice a, uint32_t* b, VkQueueFamilyProperties* c) { next_vkGetPhysicalDeviceQueueFamilyProperties(a, b, c); }
 void ovkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice a, VkPhysicalDeviceMemoryProperties* b) { next_vkGetPhysicalDeviceMemoryProperties(a, b); }
@@ -601,13 +565,14 @@ VkResult ovkCreateSwapchainKHR(VkDevice a, const VkSwapchainCreateInfoKHR* b, co
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.CreateSwapchainKHR)
         return dispatch.CreateSwapchainKHR(a, b, c, d);
-    return next_vkCreateSwapchainKHR(a, b, c, d);
+    return VK_ERROR_DEVICE_LOST;
 }
 VkResult ovkQueuePresentKHR(VkQueue a, const VkPresentInfoKHR* b) {
     DeviceDispatch dispatch{};
     if (loadQueueDispatch(a, &dispatch) && dispatch.QueuePresentKHR)
         return dispatch.QueuePresentKHR(a, b);
-    return next_vkQueuePresentKHR(a, b);
+    std::cerr << "lsfg-vk: dispatch rejected present queue=" << a << " owner=unknown-or-unavailable\n";
+    return VK_ERROR_DEVICE_LOST;
 }
 void ovkDestroySwapchainKHR(VkDevice a, VkSwapchainKHR b, const VkAllocationCallbacks* c) {
     DeviceDispatch dispatch{};
@@ -615,13 +580,13 @@ void ovkDestroySwapchainKHR(VkDevice a, VkSwapchainKHR b, const VkAllocationCall
         dispatch.DestroySwapchainKHR(a, b, c);
         return;
     }
-    next_vkDestroySwapchainKHR(a, b, c);
+    return;
 }
 VkResult ovkGetSwapchainImagesKHR(VkDevice a, VkSwapchainKHR b, uint32_t* c, VkImage* d) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.GetSwapchainImagesKHR)
         return dispatch.GetSwapchainImagesKHR(a, b, c, d);
-    return next_vkGetSwapchainImagesKHR(a, b, c, d);
+    return VK_ERROR_DEVICE_LOST;
 }
 VkResult ovkAllocateCommandBuffers(VkDevice a, const VkCommandBufferAllocateInfo* b, VkCommandBuffer* c) {
     DeviceDispatch dispatch{};
@@ -633,7 +598,7 @@ VkResult ovkAllocateCommandBuffers(VkDevice a, const VkCommandBufferAllocateInfo
         }
         return result;
     }
-    return next_vkAllocateCommandBuffers(a, b, c);
+    return VK_ERROR_DEVICE_LOST;
 }
 void ovkFreeCommandBuffers(VkDevice a, VkCommandPool b, uint32_t c, const VkCommandBuffer* d) {
     DeviceDispatch dispatch{};
@@ -644,25 +609,25 @@ void ovkFreeCommandBuffers(VkDevice a, VkCommandPool b, uint32_t c, const VkComm
             commandBufferDispatchTables.erase(d[i]);
         return;
     }
-    next_vkFreeCommandBuffers(a, b, c, d);
+    return;
 }
 VkResult ovkBeginCommandBuffer(VkCommandBuffer a, const VkCommandBufferBeginInfo* b) {
     DeviceDispatch dispatch{};
     if (loadCommandBufferDispatch(a, &dispatch) && dispatch.BeginCommandBuffer)
         return dispatch.BeginCommandBuffer(a, b);
-    return next_vkBeginCommandBuffer(a, b);
+    return VK_ERROR_DEVICE_LOST;
 }
 VkResult ovkEndCommandBuffer(VkCommandBuffer a) {
     DeviceDispatch dispatch{};
     if (loadCommandBufferDispatch(a, &dispatch) && dispatch.EndCommandBuffer)
         return dispatch.EndCommandBuffer(a);
-    return next_vkEndCommandBuffer(a);
+    return VK_ERROR_DEVICE_LOST;
 }
 VkResult ovkCreateCommandPool(VkDevice a, const VkCommandPoolCreateInfo* b, const VkAllocationCallbacks* c, VkCommandPool* d) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.CreateCommandPool)
         return dispatch.CreateCommandPool(a, b, c, d);
-    return next_vkCreateCommandPool(a, b, c, d);
+    return VK_ERROR_DEVICE_LOST;
 }
 void ovkDestroyCommandPool(VkDevice a, VkCommandPool b, const VkAllocationCallbacks* c) {
     DeviceDispatch dispatch{};
@@ -670,13 +635,13 @@ void ovkDestroyCommandPool(VkDevice a, VkCommandPool b, const VkAllocationCallba
         dispatch.DestroyCommandPool(a, b, c);
         return;
     }
-    next_vkDestroyCommandPool(a, b, c);
+    return;
 }
 VkResult ovkCreateImage(VkDevice a, const VkImageCreateInfo* b, const VkAllocationCallbacks* c, VkImage* d) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.CreateImage)
         return dispatch.CreateImage(a, b, c, d);
-    return next_vkCreateImage(a, b, c, d);
+    return VK_ERROR_DEVICE_LOST;
 }
 void ovkDestroyImage(VkDevice a, VkImage b, const VkAllocationCallbacks* c) {
     DeviceDispatch dispatch{};
@@ -684,7 +649,7 @@ void ovkDestroyImage(VkDevice a, VkImage b, const VkAllocationCallbacks* c) {
         dispatch.DestroyImage(a, b, c);
         return;
     }
-    next_vkDestroyImage(a, b, c);
+    return;
 }
 void ovkGetImageMemoryRequirements(VkDevice a, VkImage b, VkMemoryRequirements* c) {
     DeviceDispatch dispatch{};
@@ -692,19 +657,19 @@ void ovkGetImageMemoryRequirements(VkDevice a, VkImage b, VkMemoryRequirements* 
         dispatch.GetImageMemoryRequirements(a, b, c);
         return;
     }
-    next_vkGetImageMemoryRequirements(a, b, c);
+    return;
 }
 VkResult ovkBindImageMemory(VkDevice a, VkImage b, VkDeviceMemory c, VkDeviceSize d) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.BindImageMemory)
         return dispatch.BindImageMemory(a, b, c, d);
-    return next_vkBindImageMemory(a, b, c, d);
+    return VK_ERROR_DEVICE_LOST;
 }
 VkResult ovkAllocateMemory(VkDevice a, const VkMemoryAllocateInfo* b, const VkAllocationCallbacks* c, VkDeviceMemory* d) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.AllocateMemory)
         return dispatch.AllocateMemory(a, b, c, d);
-    return next_vkAllocateMemory(a, b, c, d);
+    return VK_ERROR_DEVICE_LOST;
 }
 void ovkFreeMemory(VkDevice a, VkDeviceMemory b, const VkAllocationCallbacks* c) {
     DeviceDispatch dispatch{};
@@ -712,13 +677,13 @@ void ovkFreeMemory(VkDevice a, VkDeviceMemory b, const VkAllocationCallbacks* c)
         dispatch.FreeMemory(a, b, c);
         return;
     }
-    next_vkFreeMemory(a, b, c);
+    return;
 }
 VkResult ovkCreateSemaphore(VkDevice a, const VkSemaphoreCreateInfo* b, const VkAllocationCallbacks* c, VkSemaphore* d) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.CreateSemaphore)
         return dispatch.CreateSemaphore(a, b, c, d);
-    return next_vkCreateSemaphore(a, b, c, d);
+    return VK_ERROR_DEVICE_LOST;
 }
 void ovkDestroySemaphore(VkDevice a, VkSemaphore b, const VkAllocationCallbacks* c) {
     DeviceDispatch dispatch{};
@@ -726,19 +691,19 @@ void ovkDestroySemaphore(VkDevice a, VkSemaphore b, const VkAllocationCallbacks*
         dispatch.DestroySemaphore(a, b, c);
         return;
     }
-    next_vkDestroySemaphore(a, b, c);
+    return;
 }
 VkResult ovkGetMemoryFdKHR(VkDevice a, const VkMemoryGetFdInfoKHR* b, int* c) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch))
         return dispatch.GetMemoryFdKHR ? dispatch.GetMemoryFdKHR(a, b, c) : VK_ERROR_EXTENSION_NOT_PRESENT;
-    return next_vkGetMemoryFdKHR ? next_vkGetMemoryFdKHR(a, b, c) : VK_ERROR_EXTENSION_NOT_PRESENT;
+    return VK_ERROR_DEVICE_LOST;
 }
 VkResult ovkGetSemaphoreFdKHR(VkDevice a, const VkSemaphoreGetFdInfoKHR* b, int* c) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch))
         return dispatch.GetSemaphoreFdKHR ? dispatch.GetSemaphoreFdKHR(a, b, c) : VK_ERROR_EXTENSION_NOT_PRESENT;
-    return next_vkGetSemaphoreFdKHR ? next_vkGetSemaphoreFdKHR(a, b, c) : VK_ERROR_EXTENSION_NOT_PRESENT;
+    return VK_ERROR_DEVICE_LOST;
 }
 VkResult ovkGetAndroidHardwareBufferPropertiesANDROID(VkDevice a, const AHardwareBuffer* b, VkAndroidHardwareBufferPropertiesANDROID* c) {
     DeviceDispatch dispatch{};
@@ -746,9 +711,7 @@ VkResult ovkGetAndroidHardwareBufferPropertiesANDROID(VkDevice a, const AHardwar
         return dispatch.GetAndroidHardwareBufferPropertiesANDROID
             ? dispatch.GetAndroidHardwareBufferPropertiesANDROID(a, b, c)
             : VK_ERROR_EXTENSION_NOT_PRESENT;
-    return next_vkGetAndroidHardwareBufferPropertiesANDROID
-        ? next_vkGetAndroidHardwareBufferPropertiesANDROID(a, b, c)
-        : VK_ERROR_EXTENSION_NOT_PRESENT;
+    return VK_ERROR_DEVICE_LOST;
 }
 void ovkGetDeviceQueue(VkDevice a, uint32_t b, uint32_t c, VkQueue* d) {
     DeviceDispatch dispatch{};
@@ -757,13 +720,29 @@ void ovkGetDeviceQueue(VkDevice a, uint32_t b, uint32_t c, VkQueue* d) {
         storeQueueDispatch(*d, dispatch);
         return;
     }
-    next_vkGetDeviceQueue(a, b, c, d);
+    if (d) *d = VK_NULL_HANDLE;
+    std::cerr << "lsfg-vk: dispatch rejected queue acquisition device=" << a << "\n";
+}
+void ovkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, VkQueue* queue) {
+    DeviceDispatch dispatch{};
+    if (loadDeviceDispatch(device, &dispatch) && dispatch.GetDeviceQueue2) {
+        dispatch.GetDeviceQueue2(device, info, queue);
+        storeQueueDispatch(*queue, dispatch);
+        return;
+    }
+    if (queue) *queue = VK_NULL_HANDLE;
+    std::cerr << "lsfg-vk: dispatch rejected queue2 acquisition device=" << device << "\n";
+}
+VkDevice queueOwner(VkQueue queue) {
+    DeviceDispatch dispatch{};
+    return loadQueueDispatch(queue, &dispatch) ? dispatch.device : VK_NULL_HANDLE;
 }
 VkResult ovkQueueSubmit(VkQueue a, uint32_t b, const VkSubmitInfo* c, VkFence d) {
     DeviceDispatch dispatch{};
     if (loadQueueDispatch(a, &dispatch) && dispatch.QueueSubmit)
         return dispatch.QueueSubmit(a, b, c, d);
-    return next_vkQueueSubmit(a, b, c, d);
+    std::cerr << "lsfg-vk: dispatch rejected submit queue=" << a << " owner=unknown-or-unavailable\n";
+    return VK_ERROR_DEVICE_LOST;
 }
 void ovkCmdPipelineBarrier(VkCommandBuffer a, VkPipelineStageFlags b, VkPipelineStageFlags c, VkDependencyFlags d, uint32_t e, const VkMemoryBarrier* f, uint32_t g, const VkBufferMemoryBarrier* h, uint32_t i, const VkImageMemoryBarrier* j) {
     DeviceDispatch dispatch{};
@@ -771,7 +750,7 @@ void ovkCmdPipelineBarrier(VkCommandBuffer a, VkPipelineStageFlags b, VkPipeline
         dispatch.CmdPipelineBarrier(a, b, c, d, e, f, g, h, i, j);
         return;
     }
-    next_vkCmdPipelineBarrier(a, b, c, d, e, f, g, h, i, j);
+    return;
 }
 void ovkCmdBlitImage(VkCommandBuffer a, VkImage b, VkImageLayout c, VkImage d, VkImageLayout e, uint32_t f, const VkImageBlit* g, VkFilter h) {
     DeviceDispatch dispatch{};
@@ -779,13 +758,13 @@ void ovkCmdBlitImage(VkCommandBuffer a, VkImage b, VkImageLayout c, VkImage d, V
         dispatch.CmdBlitImage(a, b, c, d, e, f, g, h);
         return;
     }
-    next_vkCmdBlitImage(a, b, c, d, e, f, g, h);
+    return;
 }
 VkResult ovkAcquireNextImageKHR(VkDevice a, VkSwapchainKHR b, uint64_t c, VkSemaphore d, VkFence e, uint32_t* f) {
     DeviceDispatch dispatch{};
     if (loadDeviceDispatch(a, &dispatch) && dispatch.AcquireNextImageKHR)
         return dispatch.AcquireNextImageKHR(a, b, c, d, e, f);
-    return next_vkAcquireNextImageKHR(a, b, c, d, e, f);
+    return VK_ERROR_DEVICE_LOST;
 }
 } // namespace Layer
 

@@ -889,7 +889,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
               << " device_uuid=" << uuidHex(info.identity.deviceUUID)
               << " driver_uuid=" << uuidHex(info.identity.driverUUID)
               << " pass-ring=" << this->passInfos.size()
-              << " consumer-anchor=swapchain-image-reacquire\n";
+              << " consumer-anchor=acquire-wait-submit-fence\n";
 }
 
 LsContext::~LsContext() {
@@ -920,18 +920,22 @@ LsContext::~LsContext() {
     this->lsfgCtxId.reset();
 }
 
-void LsContext::releaseWsiConsumersForImage(
-        uint32_t imageIndex, const char* reason) {
+void LsContext::transferWsiConsumersToPass(
+        uint32_t imageIndex, RenderPassInfo& pass, const char* reason) {
     if (imageIndex >= this->wsiConsumersByImage_.size())
         return;
     auto& consumer = this->wsiConsumersByImage_.at(imageIndex);
+    // Acquisition returning an index is not host completion. The caller has
+    // submitted a real copy which waits on acquisition (or game rendering).
+    // Retain prior WSI owners until that consuming submission's fence retires.
+    pass.queueConsumerSemaphores.insert(pass.queueConsumerSemaphores.end(),
+        consumer.semaphores.begin(), consumer.semaphores.end());
     if (!consumer.semaphores.empty()) {
-        Utils::logLimitN(
-            "passRetirement",
-            5,
-            "WSI consumer retired at wsi-image-reacquired: image="
+        Utils::logLimitN("passRetirement", 5,
+            "WSI consumers transferred to acquire-wait fence: image="
                 + std::to_string(imageIndex)
                 + " generation=" + std::to_string(consumer.generation)
+                + " consumer_generation=" + std::to_string(pass.generation)
                 + " reason=" + reason);
     }
     consumer = {};
@@ -947,17 +951,12 @@ void LsContext::retainWsiConsumersForImage(
         return;
     }
     auto& consumer = this->wsiConsumersByImage_.at(imageIndex);
-#ifndef NDEBUG
-    if (!consumer.semaphores.empty()) {
-        std::cerr << "lsfg-vk: lifetime assertion failed: replacing unresolved WSI consumer"
-                  << " image=" << imageIndex
-                  << " old_generation=" << consumer.generation
-                  << " new_generation=" << generation << "\n";
-        std::abort();
-    }
-#endif
+    // Source-only passthrough can revisit this image without a fenced LSFG
+    // consumer. Preserve unresolved owners until a later real copy consumes
+    // acquisition; do not overwrite them just because a new present is queued.
     consumer.generation = generation;
-    consumer.semaphores = std::move(semaphores);
+    consumer.semaphores.insert(consumer.semaphores.end(),
+        semaphores.begin(), semaphores.end());
     Utils::logLimitN("passRetirement", 5,
         "WSI consumer retained: image=" + std::to_string(imageIndex)
             + " generation=" + std::to_string(generation)
@@ -1086,10 +1085,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             == this->presentQueues_.end()) {
         this->presentQueues_.push_back(queue);
     }
-    // The application can legally present this index only after acquiring it.
-    // Reacquisition proves that the prior presentation of this image, including
-    // its semaphore waits, has retired from WSI.
-    this->releaseWsiConsumersForImage(presentIdx, "source-acquire");
     const size_t passIndex = this->frameIdx % this->passInfos.size();
     auto& pass = this->passInfos.at(passIndex);
     if (!this->tryRecyclePass(passIndex, pass)) {
@@ -2486,6 +2481,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.totalSyncHandoffs++;
     }
     pass.completionFenceSubmitted = sourceRetirementFence != VK_NULL_HANDLE;
+    this->transferWsiConsumersToPass(presentIdx, pass, "source-copy-acquire-wait");
     if (consumePreviousBatchComplete)
         this->lastBatchCompleteDependency_.valid = false;
     recordSourceCopyDependency();
@@ -2974,7 +2970,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");
         }
 
-        this->releaseWsiConsumersForImage(imageIdx, "generated-acquire");
 
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
@@ -3012,6 +3007,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
               pass.nextPostCopySemaphores.at(i).handle() },
             postCopyRetirementFence);
         pass.postCopyCompletionFenceSubmitted.at(i) = true;
+        this->transferWsiConsumersToPass(imageIdx, pass, "generated-copy-acquire-wait");
 
         std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
         if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());
@@ -3143,6 +3139,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
           pass.preCopySemaphores.at(1).handle() },
         *pass.completionFence);
     pass.completionFenceSubmitted = true;
+    this->transferWsiConsumersToPass(presentIdx, pass, "source-copy-acquire-wait");
     this->lastSourceCopyDependency_.valid = true;
     this->lastSourceCopyDependency_.passIndex = passIndex;
     this->lastSourceCopyDependency_.generation = pass.generation;
@@ -3170,7 +3167,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");
-        this->releaseWsiConsumersForImage(imageIdx, "generated-acquire");
 
         // 4. copy output image to swapchain image
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
@@ -3206,6 +3202,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
               pass.nextPostCopySemaphores.at(i).handle() },
             postCopyRetirementFence);
         pass.postCopyCompletionFenceSubmitted.at(i) = true;
+        this->transferWsiConsumersToPass(imageIdx, pass, "generated-copy-acquire-wait");
 
         // 5. present swapchain image
         std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
