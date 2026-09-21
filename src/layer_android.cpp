@@ -249,26 +249,29 @@ bool initDeviceFunc(VkDevice device, PFN_vkGetDeviceProcAddr gdpa,
 }
 
 bool loadConstructionQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
-    if (device == VK_NULL_HANDLE || !dispatch || !next_vkGetDeviceProcAddr)
+    if (device == VK_NULL_HANDLE || !dispatch)
         return false;
 
-    // Turnip/wrapper-gamenative can call vkGetDeviceQueue from inside
-    // downstream vkCreateDevice before GDPA on the still-constructing device
-    // resolves the queue getter. Query exact GDPA first; if only that bootstrap
-    // lookup is unavailable, reuse the established thunk from a live device
-    // with the same loader dispatch key. This restores the known-good S20+
-    // construction behavior without permitting cross-driver dispatch guessing.
     DeviceDispatch construction{};
     construction.device = device;
-    construction.GetDeviceProcAddr = next_vkGetDeviceProcAddr;
-    construction.GetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
-        next_vkGetDeviceProcAddr(device, "vkGetDeviceQueue"));
-    construction.GetDeviceQueue2 = reinterpret_cast<PFN_vkGetDeviceQueue2>(
-        next_vkGetDeviceProcAddr(device, "vkGetDeviceQueue2"));
-    construction.QueueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
-        next_vkGetDeviceProcAddr(device, "vkQueueSubmit"));
-    construction.QueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(
-        next_vkGetDeviceProcAddr(device, "vkQueuePresentKHR"));
+
+    // Prefer the exact construction-thread GDPA when this call is nested in
+    // layer_vkCreateDevice. Private LSFG backend devices can also re-enter the
+    // queue wrapper without that scope because their private instance bypasses
+    // the game-instance hook. In either case, fall back only to a live device
+    // with the same loader dispatch key, matching the known-good S20+ behavior
+    // without restoring unrestricted cross-device dispatch.
+    if (next_vkGetDeviceProcAddr) {
+        construction.GetDeviceProcAddr = next_vkGetDeviceProcAddr;
+        construction.GetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
+            next_vkGetDeviceProcAddr(device, "vkGetDeviceQueue"));
+        construction.GetDeviceQueue2 = reinterpret_cast<PFN_vkGetDeviceQueue2>(
+            next_vkGetDeviceProcAddr(device, "vkGetDeviceQueue2"));
+        construction.QueueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
+            next_vkGetDeviceProcAddr(device, "vkQueueSubmit"));
+        construction.QueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(
+            next_vkGetDeviceProcAddr(device, "vkQueuePresentKHR"));
+    }
 
     if (construction.GetDeviceQueue == nullptr
             && construction.GetDeviceQueue2 == nullptr) {
