@@ -120,6 +120,17 @@ int main() {
         Layer::ovkGetDeviceQueue(d4, 0, 0, &mismatched);
         assert(mismatched == VK_NULL_HANDLE);
     }
+    // Private framegen re-entry can also reach our queue wrapper without a
+    // DeviceConstructionScope at all (the private instance deliberately bypasses
+    // the game-instance compatibility globals). Same-key bootstrap must still work.
+    eraseDeviceDispatch(d3);
+    {
+        VkQueue privateQ{};
+        Layer::ovkGetDeviceQueue(d3, 0, 0, &privateQ);
+        assert(privateQ == q3);
+        assert(Layer::queueOwner(q3) == d3);
+    }
+
     DeviceDispatch completed = bootstrap;
     completed.device = d3;
     completed.QueueSubmit = submit3;
