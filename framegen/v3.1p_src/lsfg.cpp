@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace LSFG;
@@ -40,13 +41,38 @@ namespace {
     std::optional<Vulkan> device;
     std::optional<RuntimeSignature> activeSignature;
     std::unordered_map<int32_t, Context> contexts;
+    std::unordered_set<int32_t> pendingContextDeletes;
     std::mutex runtimeMutex;
 
     void resetRuntime() {
         contexts.clear();
+        pendingContextDeletes.clear();
         device.reset();
         instance.reset();
         activeSignature.reset();
+    }
+
+    void collectCompletedContextDeletes() {
+        if (!device.has_value() || pendingContextDeletes.empty())
+            return;
+
+        for (auto pending = pendingContextDeletes.begin();
+                pending != pendingContextDeletes.end();) {
+            const auto context = contexts.find(*pending);
+            if (context == contexts.end()) {
+                pending = pendingContextDeletes.erase(pending);
+                continue;
+            }
+            if (!context->second.waitForCompletion(*device)) {
+                ++pending;
+                continue;
+            }
+            contexts.erase(context);
+            pending = pendingContextDeletes.erase(pending);
+        }
+
+        if (contexts.empty() && pendingContextDeletes.empty())
+            resetRuntime();
     }
 
     void validateOutputCount(size_t outputCount) {
@@ -71,6 +97,12 @@ void LSFG_3_1P::initialize(const LSFG::DeviceIdentity& identity, VkFormat shared
         .flowScale = flowScale,
         .generationCount = generationCount,
     };
+
+    // A previous context can outlive its wrapper when the bounded teardown
+    // wait expires. Reclaim completed pending contexts before deciding whether
+    // a new runtime signature may be installed.
+    collectCompletedContextDeletes();
+
     if (instance.has_value() && device.has_value()
             && activeSignature.has_value()
             && requestedSignature == activeSignature.value())
@@ -105,6 +137,7 @@ void LSFG_3_1P::initialize(const LSFG::DeviceIdentity& identity, VkFormat shared
 }
 
 LSFG::BackendDiagnostics LSFG_3_1P::getBackendDiagnostics() {
+    const std::scoped_lock lock(runtimeMutex);
     if (!device.has_value())
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "LSFG not initialized");
     return device->device.getDiagnostics();
@@ -196,24 +229,35 @@ void LSFG_3_1P::deleteContext(int32_t id) {
         return;
 
     if (!it->second.waitForCompletion(*device)) {
-        std::cerr << "lsfg-vk: framegen teardown timed out; retaining context resources for safe bypass\n";
+        pendingContextDeletes.insert(id);
+        std::cerr << "lsfg-vk: framegen teardown timed out; retaining context resources for retry\n";
         return;
     }
     contexts.erase(it);
+    pendingContextDeletes.erase(id);
     if (contexts.empty())
         resetRuntime();
 }
 
 void LSFG_3_1P::finalize() {
     const std::scoped_lock lock(runtimeMutex);
+    collectCompletedContextDeletes();
     if (!instance.has_value() || !device.has_value())
         return;
+
+    bool allCompleted = true;
     for (auto& [id, context] : contexts) {
         (void)id;
-        if (!context.waitForCompletion(*device)) {
-            std::cerr << "lsfg-vk: framegen finalize timed out; retaining Vulkan resources for safe bypass\n";
-            return;
+        if (!context.waitForCompletion(*device))
+            allCompleted = false;
+    }
+    if (!allCompleted) {
+        for (const auto& [id, context] : contexts) {
+            (void)context;
+            pendingContextDeletes.insert(id);
         }
+        std::cerr << "lsfg-vk: framegen finalize timed out; retaining Vulkan resources for retry\n";
+        return;
     }
     resetRuntime();
 }

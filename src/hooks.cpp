@@ -81,7 +81,11 @@ namespace {
             const bool fixedFlowScaleChanged =
                 !previous.adaptiveFlowScale && !next.adaptiveFlowScale
                 && previous.flowScale != next.flowScale;
-            return previous.dll != next.dll
+            // A resident context is allocated for at least four
+            // generated outputs. A larger hot-reloaded multiplier needs a new
+            // swapchain/context before present can index those outputs.
+            return next.multiplier > residentCapacityMultiplier(previous)
+                || previous.dll != next.dll
                 || adaptiveFlowModeChanged
                 || adaptiveFlowPresetChanged
                 || fixedFlowScaleChanged

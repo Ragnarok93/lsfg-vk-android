@@ -356,6 +356,11 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             delete_body = source[delete_start:finalize_start]
             self.assertIn("if (contexts.empty())", delete_body)
             self.assertIn("resetRuntime", delete_body)
+            self.assertIn("pendingContextDeletes", source)
+            self.assertIn("collectCompletedContextDeletes", source)
+            diagnostics_start = source.index(f"{'LSFG_3_1P' if 'v3.1p' in backend else 'LSFG_3_1'}::getBackendDiagnostics")
+            diagnostics_end = source.index("int32_t", diagnostics_start)
+            self.assertIn("scoped_lock lock(runtimeMutex)", source[diagnostics_start:diagnostics_end])
 
     def test_adaptive_zero_generation_crosses_handoff_and_advances_history(self) -> None:
         """Fractional zero-generation cadence fills the same temporal history ring."""
@@ -407,6 +412,14 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("stage=source-history-warmup", source)
         self.assertIn(
             "if (this->previousSourceCopySignalValid_ && previousPass != nullptr)",
+            source,
+        )
+
+
+    def test_fixed_multiplier_never_underflows_when_runtime_is_off(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn(
+            "conf.multiplier > 1\n            ? static_cast<size_t>(conf.multiplier - 1)",
             source,
         )
 
@@ -467,6 +480,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
         helper = hooks[helper_start:helper_end]
         self.assertIn("const bool residentTarget = previous.targeted && next.targeted", helper)
+        self.assertIn("next.multiplier > residentCapacityMultiplier(previous)", helper)
         self.assertNotIn("previous.multiplier != next.multiplier", helper.split("#endif", 1)[0])
 
         self.assertIn("kAndroidResidentMaxMultiplier = 4", hooks)

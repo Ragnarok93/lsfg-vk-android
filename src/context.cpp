@@ -224,7 +224,11 @@ RuntimePressureSample readRuntimePressure(
     if (!input)
         return sample;
 
+    bool sawTimestamp = false;
     bool sawGpu = false;
+    bool sawOutput = false;
+    bool sawFrameTime = false;
+    bool sawSlowRatio = false;
     std::string line;
     while (std::getline(input, line)) {
         const auto separator = line.find('=');
@@ -232,27 +236,51 @@ RuntimePressureSample readRuntimePressure(
             continue;
         const std::string key = line.substr(0, separator);
         const std::string value = line.substr(separator + 1);
+        const bool knownKey =
+            key == "timestamp_ms"
+            || key == "gpu_usage_percent"
+            || key == "output_fps"
+            || key == "frame_time_p95_ms"
+            || key == "slow_frame_ratio";
+        if (!knownKey)
+            continue;
+
+        std::size_t consumed = 0;
+        double parsed = 0.0;
         try {
-            const double parsed = std::stod(value);
-            if (!std::isfinite(parsed))
-                continue;
-            if (key == "gpu_usage_percent") {
-                sample.gpuUsagePercent = parsed;
-                sawGpu = true;
-            } else if (key == "output_fps") {
-                sample.outputFps = parsed;
-            } else if (key == "frame_time_p95_ms") {
-                sample.frameTimeP95Ms = parsed;
-            } else if (key == "slow_frame_ratio") {
-                sample.slowFrameRatio = parsed;
-            }
+            parsed = std::stod(value, &consumed);
         } catch (const std::exception&) {
             continue;
         }
+        if (consumed != value.size() || !std::isfinite(parsed))
+            continue;
+
+        if (key == "timestamp_ms") {
+            sawTimestamp = parsed > 0.0;
+        } else if (key == "gpu_usage_percent") {
+            sample.gpuUsagePercent = parsed;
+            sawGpu = true;
+        } else if (key == "output_fps") {
+            sample.outputFps = parsed;
+            sawOutput = true;
+        } else if (key == "frame_time_p95_ms") {
+            sample.frameTimeP95Ms = parsed;
+            sawFrameTime = true;
+        } else if (key == "slow_frame_ratio") {
+            sample.slowFrameRatio = parsed;
+            sawSlowRatio = true;
+        }
     }
 
+    // GameNative publishes this file atomically. Require the complete record so
+    // a reader that races a replacement, or a stale producer with missing
+    // fields, cannot turn default-zero values into false global pressure.
     sample.valid =
-        sawGpu
+        sawTimestamp
+        && sawGpu
+        && sawOutput
+        && sawFrameTime
+        && sawSlowRatio
         && sample.gpuUsagePercent >= 0.0
         && sample.gpuUsagePercent <= 100.0
         && sample.outputFps >= 0.0
@@ -261,7 +289,6 @@ RuntimePressureSample readRuntimePressure(
         && sample.slowFrameRatio <= 1.0;
     return sample;
 }
-
 
 VkImageSubresourceRange colorSubresourceRange() {
     return VkImageSubresourceRange{
@@ -1018,7 +1045,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     metrics.lastSourcePresent = cycleStart;
     metrics.hasLastSourcePresent = true;
     const size_t requestedFixedGeneratedFrameCount =
-        static_cast<size_t>(conf.multiplier - 1);
+        conf.multiplier > 1
+            ? static_cast<size_t>(conf.multiplier - 1)
+            : 0;
 
     // Capacity feedback is advisory and comes from the previous measured GPU
     // cost/timeline. It may accelerate one scheduler level only after repeated

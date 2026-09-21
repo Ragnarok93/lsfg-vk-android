@@ -441,6 +441,26 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             self.assertIn(field, context_header)
 
 
+    def test_runtime_pressure_requires_a_complete_fresh_record(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        reader_start = source.index("RuntimePressureSample readRuntimePressure")
+        reader_end = source.index("VkImageSubresourceRange colorSubresourceRange", reader_start)
+        reader = source[reader_start:reader_end]
+        for field in (
+            "timestamp_ms",
+            "gpu_usage_percent",
+            "output_fps",
+            "frame_time_p95_ms",
+            "slow_frame_ratio",
+        ):
+            self.assertIn(f'key == "{field}"', reader)
+        self.assertIn("consumed != value.size()", reader)
+        self.assertIn("sawTimestamp", reader)
+        self.assertIn("sawOutput", reader)
+        self.assertIn("sawFrameTime", reader)
+        self.assertIn("sawSlowRatio", reader)
+
+
     def test_adaptive_framegen_preserves_configured_present_mode(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
