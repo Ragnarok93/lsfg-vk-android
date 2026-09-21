@@ -177,7 +177,23 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             source,
             "source semaphore ownership must not be inferred from frameIdx",
         )
-        self.assertIn("source-only present", source)
+        busy_start = source.index("if (!this->tryRecyclePass(passIndex, pass))")
+        busy_end = source.index("#ifdef __ANDROID__", busy_start)
+        busy_fallback = source[busy_start:busy_end]
+        self.assertIn("source-only present", busy_fallback)
+        self.assertIn("logical source index unchanged", busy_fallback)
+        self.assertNotIn("++this->frameIdx", busy_fallback)
+
+    def test_old_swapchain_is_retired_before_new_global_context_is_created(self) -> None:
+        """Swapchain recreation must not construct two incompatible global backends."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        retire = source.index("old-swapchain-retired-before-context")
+        context = source.index("std::make_shared<LsContext>", retire)
+        self.assertLess(retire, context)
+        self.assertIn(
+            "retireSwapchainState(pCreateInfo->oldSwapchain)",
+            source[retire - 300:retire + 300],
+        )
 
     def test_consuming_pass_owns_queue_wait_semaphores_until_its_fence(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
@@ -659,21 +675,23 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         fallback = source[catch_start:catch_end]
 
         self.assertIn("ovkDestroySwapchainKHR", fallback)
-        self.assertIn("retireSwapchainState(pCreateInfo->oldSwapchain)", fallback)
+        self.assertIn(
+            "retireSwapchainState(pCreateInfo->oldSwapchain)",
+            source[:catch_start],
+        )
         self.assertIn("ovkCreateSwapchainKHR(", fallback)
         self.assertIn("fallbackCreateInfo", fallback)
         self.assertIn("swapchain-fallback-pass-through", fallback)
 
-    def test_context_creation_failure_retires_old_wrapper_before_fallback_returns(self) -> None:
+    def test_context_creation_failure_retires_old_wrapper_before_new_context(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        catch_start = source.index("const VkSwapchainKHR failedSwapchain")
-        catch_end = source.index("return VK_SUCCESS;", catch_start)
-        fallback = source[catch_start:catch_end]
+        retire = source.index("retireSwapchainState(pCreateInfo->oldSwapchain)")
+        context = source.index("std::make_shared<LsContext>", retire)
         self.assertLess(
-            fallback.index("fallbackRes"),
-            fallback.index("retireSwapchainState(pCreateInfo->oldSwapchain)"),
+            retire,
+            context,
         )
-        self.assertIn("retireSwapchainState(failedSwapchain)", fallback)
+        self.assertIn("retireSwapchainState(failedSwapchain)", source)
 
     def test_game_config_keeps_target_resident_while_multiplier_one_is_off(self) -> None:
         """GameNative Off remains a resident layer target; multiplier=1 is pass-through."""

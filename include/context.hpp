@@ -262,8 +262,8 @@ private:
 
     // Framegen's batch-complete semaphore has the same ownership rule as the
     // source-copy dependency, but is only present on asynchronous Android
-    // completion paths. Keep its producer explicit as well; otherwise a busy
-    // source-only cycle can make frameIdx-1 point at an unrelated pass slot.
+    // completion paths. Keep its producer explicit as well; a native
+    // pass-ring-busy present does not create a new dependency generation.
     struct LastBatchCompleteDependency {
         bool valid{false};
         size_t passIndex{0};
@@ -377,8 +377,8 @@ private:
 
     // This token names the source-copy submission that actually produced the
     // semaphore consumed by the next source-copy submission. It must not be
-    // derived from frameIdx: a source-only pass-ring fallback advances the
-    // logical frame without producing a new LSFG source dependency.
+    // derived from frameIdx: a source-only pass-ring fallback is not an LSFG
+    // source/pass submission and does not advance the logical source index.
     struct LastSourceCopyDependency {
         bool valid{false};
         size_t passIndex{0};

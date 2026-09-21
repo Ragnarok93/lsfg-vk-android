@@ -915,9 +915,17 @@ namespace {
             if (res != VK_SUCCESS)
                 throw LSFG::vulkan_error(res, "Failed to get swapchain images");
 
-            // Retire the old LSFG bookkeeping only after the replacement Vulkan
-            // swapchain is known-good. If downstream creation fails, the old
-            // swapchain remains usable and its context remains intact.
+            // The replacement Vulkan swapchain is known-good now. Retire the
+            // old per-swapchain context before constructing the new one: the
+            // framegen backend is process-global, while LsContext is per
+            // swapchain. Keeping both contexts alive across recreation lets a
+            // changed runtime signature collide with the old backend and, on
+            // Android, can tear down the private instance behind the old
+            // context.
+            if (pCreateInfo->oldSwapchain) {
+                retireSwapchainState(pCreateInfo->oldSwapchain);
+                std::cerr << "lsfg-vk: init stage=old-swapchain-retired-before-context\n";
+            }
             std::cerr << "lsfg-vk: init stage=ls-context-begin images=" << imageCount
                       << " selectedPresentMode=" << createInfo.presentMode << "\n";
             auto state = std::make_shared<SwapchainState>();
@@ -927,8 +935,6 @@ namespace {
             state->configuredPresent = configuredPresentMode;
             state->context = std::make_shared<LsContext>(
                 *deviceInfo, *pSwapchain, pCreateInfo->imageExtent, swapchainImages);
-            if (pCreateInfo->oldSwapchain)
-                retireSwapchainState(pCreateInfo->oldSwapchain);
             publishSwapchainState(*pSwapchain, std::move(state));
             std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 #ifdef __ANDROID__
@@ -953,10 +959,10 @@ namespace {
                 "An error occurred while creating the swapchain wrapper:\n"
                 "- " + std::string(e.what()));
 
-            // The modified swapchain has already retired pCreateInfo->oldSwapchain.
-            // Use the modified handle as oldSwapchain for a replacement created
-            // with the application's untouched parameters, and only destroy it
-            // after the fallback has been created successfully.
+            // The old wrapper was retired before LsContext construction. Use
+            // the modified handle as oldSwapchain for a replacement created
+            // with the application's untouched parameters, and only destroy
+            // it after the fallback has been created successfully.
             const VkSwapchainKHR failedSwapchain = *pSwapchain;
             VkSwapchainCreateInfoKHR fallbackCreateInfo = *pCreateInfo;
             fallbackCreateInfo.oldSwapchain = failedSwapchain;
@@ -966,8 +972,6 @@ namespace {
             // The downstream fallback has consumed the old handle as well.
             // Retire its wrapper now so a later present cannot use a context
             // whose real swapchain has already been replaced.
-            if (pCreateInfo->oldSwapchain)
-                retireSwapchainState(pCreateInfo->oldSwapchain);
             if (fallbackRes == VK_SUCCESS) {
                 retireSwapchainState(failedSwapchain);
                 Layer::ovkDestroySwapchainKHR(device, failedSwapchain, pAllocator);

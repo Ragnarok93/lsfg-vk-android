@@ -1106,11 +1106,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (passthroughResult == VK_SUCCESS
                 || passthroughResult == VK_SUBOPTIMAL_KHR) {
             this->lastGeneratedFrameCount_ = 0;
-            ++this->frameIdx;
+            // This present did not submit a new LSFG source copy. Keep the
+            // logical source/pass index unchanged so the next accepted cycle
+            // reuses the explicit last-source dependency and the correct pass
+            // slot instead of manufacturing a frameIdx-based predecessor.
             Utils::logLimitN(
                 "passRetirement",
                 5,
-                "Pass ring busy; queued source-only present until a slot retires");
+                "Pass ring busy; queued source-only present until a slot retires; "
+                "logical source index unchanged");
         }
         return passthroughResult;
     }
