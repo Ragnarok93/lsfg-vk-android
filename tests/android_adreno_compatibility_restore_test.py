@@ -105,6 +105,26 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         )[1].split("pass.acquireSemaphores.at(i)", 1)[0]
         self.assertIn("if (conf.adaptiveFramegen", deadline)
 
+    def test_adreno_adaptive_commits_pre_admitted_work_after_host_completion(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        generated_start = source.index(
+            "// 4. Generated presentation is opportunistic."
+        )
+        source_start = source.index(
+            "// 5. Present the real game frame", generated_start
+        )
+        generated = source[generated_start:source_start]
+
+        self.assertIn("enforcePostDispatchSyntheticDeadline", generated)
+        self.assertIn(
+            "conf.adaptiveFramegen && !this->conservativeCrossDeviceSync_",
+            generated,
+        )
+        deadline = generated.split(
+            "const uint64_t syntheticAdmissionNowNs = monotonicNowNs();", 1
+        )[1].split("pass.acquireSemaphores.at(i)", 1)[0]
+        self.assertIn("if (enforcePostDispatchSyntheticDeadline", deadline)
+
     def test_adreno_fixed_mode_uses_bounded_generated_acquire_without_changing_xclipse(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated_start = source.index(
