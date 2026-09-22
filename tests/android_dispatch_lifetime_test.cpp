@@ -66,6 +66,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL compatibleSubmit(VkQueue q, uint32_t, cons
 }
 static VKAPI_ATTR VkResult VKAPI_CALL present1(VkQueue q, const VkPresentInfoKHR*) { assert(q == q1); ++presented1; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL present2(VkQueue q, const VkPresentInfoKHR*) { assert(q == q2); ++presented2; return VK_SUCCESS; }
+static VKAPI_ATTR VkResult VKAPI_CALL compatibleCreateCommandPool(
+        VkDevice, const VkCommandPoolCreateInfo*, const VkAllocationCallbacks*, VkCommandPool*) {
+    return VK_SUCCESS;
+}
 static PFN_vkVoidFunction constructionGdpa(VkDevice d, const char* name) {
     if (std::strcmp(name, "vkGetDeviceQueue") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(getQueue);
@@ -89,6 +93,8 @@ static PFN_vkVoidFunction presentationCompatGdpa(VkDevice, const char* name) {
         return reinterpret_cast<PFN_vkVoidFunction>(getQueue2);
     if (std::strcmp(name, "vkQueueSubmit") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(compatibleSubmit);
+    if (std::strcmp(name, "vkCreateCommandPool") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(compatibleCreateCommandPool);
     return nullptr;
 }
 static PFN_vkVoidFunction privateIncompleteGdpa(VkDevice, const char*) {
@@ -160,6 +166,20 @@ int main() {
     assert(privateDifferentKey == q4);
     assert(Layer::queueOwner(q4) == d4);
     eraseDeviceDispatch(d4);
+
+    // The framegen private instance deliberately bypasses the game-instance
+    // device hook. Depending on loader ordering, Volk may therefore query an
+    // untracked private VkDevice. r21's phone log cannot distinguish this from
+    // a tracked passthrough device, so both forms are required to work during
+    // the same recursive backend-setup window.
+    assert(layer_vkGetDeviceProcAddr(d4, "vkQueueSubmit") == nullptr);
+    setenv("DISABLE_LSFG", "1", 1);
+    assert(layer_vkGetDeviceProcAddr(d4, "vkQueueSubmit")
+        == reinterpret_cast<PFN_vkVoidFunction>(compatibleSubmit));
+    assert(layer_vkGetDeviceProcAddr(d4, "vkCreateCommandPool")
+        == reinterpret_cast<PFN_vkVoidFunction>(compatibleCreateCommandPool));
+    unsetenv("DISABLE_LSFG");
+    assert(layer_vkGetDeviceProcAddr(d4, "vkQueueSubmit") == nullptr);
 
     // Actual S20+ r21 failure shape: the private backend device has already
     // been published, but wrapper-gamenative's private-device GDPA exposes
