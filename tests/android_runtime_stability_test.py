@@ -325,9 +325,23 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("else if (!this->conservativeCrossDeviceSync_", dependency)
         self.assertIn("previousPass != nullptr", dependency)
 
-        import_start = source.index("if (framegenSync.batchCompleteFd >= 0)")
-        import_end = source.index("} else {", import_start)
-        imported = source[import_start:import_end]
+        first_batch = source.index("if (framegenSync.batchCompleteFd >= 0)")
+        first_batch_end = source.index("} else {", first_batch)
+        first_batch_block = source[first_batch:first_batch_end]
+
+        # Single-queue Adreno owns the raw sync_file until it signals; it must
+        # not import an unsignaled dependency onto the application's only queue.
+        self.assertIn("conservativePendingBatchCompletePollFd_", first_batch_block)
+        self.assertIn("framegenSync.batchCompleteFd = -1", first_batch_block)
+        self.assertIn("conservativePendingBatchCompleteValid_ = true", first_batch_block)
+
+        # The existing imported-semaphore path remains for the synthetic-queue
+        # and non-conservative/Xclipse paths.
+        later_batch = source.index(
+            "if (framegenSync.batchCompleteFd >= 0)", first_batch + 1
+        )
+        later_batch_end = source.index("} else {", later_batch)
+        imported = source[later_batch:later_batch_end]
         self.assertIn("this->conservativeCrossDeviceSync_", imported)
         self.assertIn("conservativePendingBatchCompleteSemaphore_", imported)
         self.assertIn("conservativePendingBatchCompleteValid_ = true", imported)
