@@ -82,27 +82,36 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait = true", fallback)
         self.assertIn("waitContext", history)
 
-    def test_adreno_without_synthetic_queue_uses_deferred_completion(self) -> None:
+    def test_single_queue_adreno_restores_device_proven_host_completion(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
 
         selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
         selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
         selection = source[selection_start:selection_end]
 
-        self.assertIn("this->deferredAdrenoCompletionEnabled_ =", selection)
-        self.assertIn("this->syntheticQueue_ == VK_NULL_HANDLE", selection)
-        self.assertIn("syncFdHandoffSupported", selection)
-        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
         self.assertIn(
             "this->asyncFramegenCompletionEnabled_ =\n"
             "        !this->conservativeCrossDeviceSync_",
             selection,
             "Xclipse/non-conservative drivers must keep their immediate async path",
         )
-        self.assertIn("deferredAdrenoBatchValid_", header)
-        self.assertIn("runtime stage=adreno-deferred-batch-queued", source)
-        self.assertNotIn("adrenoSingleQueueReadinessPoll", source)
+        self.assertIn(
+            "this->deferredAdrenoCompletionEnabled_ = false;",
+            selection,
+            "single-queue Adreno must not defer private-device generated output across source boundaries",
+        )
+        self.assertNotIn(
+            "this->syntheticQueue_ == VK_NULL_HANDLE\n"
+            "        && syncFdHandoffSupported",
+            selection,
+            "SYNC_FD capability alone is not enough to make deferred output delivery safe on Turnip",
+        )
+
+        generated = source.split("// 2. Tell framegen", 1)[1].split(
+            "// 4. Generated presentation is opportunistic.", 1
+        )[0]
+        self.assertIn("bool requireHostCompletionWait =", generated)
+        self.assertIn("waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)", generated)
 
     def test_adreno_untrained_predictor_uses_generic_one_frame_bootstrap(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
