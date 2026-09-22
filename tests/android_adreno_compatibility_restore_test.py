@@ -192,6 +192,11 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             output_end = source.index("} else {", output_start)
             output_copy = source[output_start:output_end]
 
+            self.assertIn(
+                "adaptiveFlowTimingPool->write(buf2.handle(), 3);",
+                output_copy,
+                "Output-copy transports must close GPU timing after transport",
+            )
             copy_pos = output_copy.index("copy_same_format(")
             final_release_pos = output_copy.rindex("emit_external_barriers(")
             timing_pos = output_copy.index(
