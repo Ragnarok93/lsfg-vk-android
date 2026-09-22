@@ -162,6 +162,11 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("runtimeWaitTimeoutNs()", generated)
         self.assertIn("waitContext", generated)
 
+    def test_runtime_policy_label_matches_split_adreno_topology(self) -> None:
+        policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
+        self.assertIn("opaque-input-host-completion-adreno", policy)
+        self.assertIn("capability-async", policy)
+
     def test_xclipse_async_path_is_not_removed(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn("syncFdHandoffSupported", source)

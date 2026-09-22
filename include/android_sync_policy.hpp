@@ -53,7 +53,9 @@ inline bool requiresConservativeCrossDeviceSync(
 }
 
 inline const char* crossDeviceSyncPolicyName(bool conservative) noexcept {
-    return conservative ? "serialized-adreno" : "capability-async";
+    return conservative
+        ? "opaque-input-host-completion-adreno"
+        : "capability-async";
 }
 
 } // namespace AndroidSyncPolicy
