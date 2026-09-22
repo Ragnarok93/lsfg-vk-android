@@ -1391,7 +1391,25 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 || passthroughResult == VK_SUBOPTIMAL_KHR) {
             this->lastGeneratedFrameCount_ = 0;
 #ifdef __ANDROID__
-            this->resetAdaptiveSourceEpoch(true);
+            if (this->conservativeCrossDeviceSync_) {
+                // A busy pass ring is retirement backpressure, not a source
+                // cadence discontinuity. Resetting the whole Adreno epoch here
+                // restarts the two-source reprime every passthrough and can pin
+                // sourceHistoryWarmupRemaining_ at one forever while deferred
+                // framegen work retires. Preserve cadence/controller state and
+                // request only the single copy needed to reprime the skipped
+                // source before the next generated batch.
+                this->lastDispatchedGeneratedFrameCount_ = 0;
+                this->previousSourceCopySignalValid_ = false;
+                this->sourceHistoryWarmupRemaining_ = std::max(
+                    this->sourceHistoryWarmupRemaining_,
+                    kConservativeSourceReprimeFrames - 1);
+                this->requiresSourceHistoryWarmup_ =
+                    this->sourceHistoryWarmupRemaining_ > 0;
+                this->deadlineBatchDecision_ = {};
+            } else {
+                this->resetAdaptiveSourceEpoch(true);
+            }
 #endif
             Utils::logLimitN(
                 "passRetirement",
