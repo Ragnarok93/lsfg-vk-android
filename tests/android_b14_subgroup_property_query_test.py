@@ -78,8 +78,14 @@ void write(VkPhysicalDeviceProperties2* out, uint32_t size,
 
 void validCore(VkPhysicalDevice, VkPhysicalDeviceProperties2* out) {
     ++coreCalls;
-    write(out, 32, VK_SHADER_STAGE_COMPUTE_BIT,
+    write(out, 128, VK_SHADER_STAGE_COMPUTE_BIT,
         VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT, VK_FALSE);
+}
+
+void xclipseLike(VkPhysicalDevice, VkPhysicalDeviceProperties2* out) {
+    ++coreCalls;
+    write(out, 64, VK_SHADER_STAGE_COMPUTE_BIT,
+        VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT, VK_TRUE);
 }
 
 void missingBallot(VkPhysicalDevice, VkPhysicalDeviceProperties2* out) {
@@ -117,10 +123,8 @@ int main() {
         coreCalls = khrCalls = 0;
         const auto result = b14::querySubgroupProperties(1, validCore, validKhr);
         assert(result.route == b14::SubgroupQueryRoute::Core);
-        // B14 is deliberately fail-closed, so the helper also probes the KHR
-        // alias before retaining the complete core metadata.
-        assert(coreCalls == 1 && khrCalls == 1);
-        assert(!b14::supportsCooperativeMipmaps(result.properties));
+        assert(coreCalls == 1 && khrCalls == 0);
+        assert(b14::supportsCooperativeMipmaps(result.properties));
     }
     {
         coreCalls = khrCalls = 0;
@@ -149,6 +153,12 @@ int main() {
     }
     {
         coreCalls = khrCalls = 0;
+        const auto result = b14::querySubgroupProperties(1, xclipseLike, nullptr);
+        assert(result.route == b14::SubgroupQueryRoute::Core);
+        assert(!b14::supportsCooperativeMipmaps(result.properties));
+    }
+    {
+        coreCalls = khrCalls = 0;
         const auto result = b14::querySubgroupProperties(1, fragmentOnly, nullptr);
         assert(result.route == b14::SubgroupQueryRoute::Core);
         assert(!b14::supportsCooperativeMipmaps(result.properties));
@@ -159,7 +169,7 @@ int main() {
 
 
 class AndroidB14SubgroupPropertyQueryTest(unittest.TestCase):
-    def test_core_and_khr_routes_fail_closed_without_full_subgroup_mapping(self) -> None:
+    def test_s20_profile_is_eligible_while_xclipse_profile_remains_b13(self) -> None:
         compiler = shutil.which("g++") or shutil.which("clang++")
         self.assertIsNotNone(compiler)
         with tempfile.TemporaryDirectory() as tmp:

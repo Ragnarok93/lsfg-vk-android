@@ -156,6 +156,51 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("kConservativeSourceReprimeFrames", failure)
         self.assertIn("kSourceHistoryWarmupFrames", failure)
 
+    def test_adreno_true_source_only_cycle_bypasses_private_ahb_copy(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        bypass_start = source.index("if (conservativePreCopySourceBypass)")
+        private_copy = source.index(
+            "pass.preCopySemaphores.at(0) = Mini::Semaphore", bypass_start
+        )
+        bypass = source[bypass_start:private_copy]
+
+        self.assertIn("Layer::ovkQueuePresentKHR", bypass)
+        self.assertIn("previousSourceCopySignalValid_ = false", bypass)
+        self.assertIn("kConservativeSourceReprimeFrames - 1", bypass)
+        self.assertNotIn("copySwapchainToExternalAhb", bypass)
+        self.assertNotIn("submitAndWaitForAhbHandoff", bypass)
+
+    def test_adreno_reprime_copy_is_queued_without_host_fence_wait(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        handoff_start = source.index("const auto handoffStart")
+        host_fallback = source.index(
+            "submitAndWaitForAhbHandoff", handoff_start
+        )
+        handoff = source[handoff_start:host_fallback]
+
+        self.assertIn("conservativeSourceOnlyWarmup", handoff)
+        self.assertIn("submitAhbHandoff", handoff)
+        self.assertIn("warmupCopyQueuedWithoutHostWait", handoff)
+
+    def test_handoff_metrics_separate_submit_wait_and_cross_frame_dependencies(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "windowHandoffSubmitMs",
+            "windowHandoffFenceWaitMs",
+            "windowHandoffPrevSourceDeps",
+            "windowHandoffBatchDeps",
+        ):
+            self.assertIn(token, header)
+        for token in (
+            "ahb_submit_avg_ms=",
+            "ahb_host_wait_avg_ms=",
+            "ahb_prev_source_deps=",
+            "ahb_batch_deps=",
+        ):
+            self.assertIn(token, source)
+
     def test_generated_compatibility_path_retains_bounded_completion_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated = source.split("// 2. Tell framegen", 1)[1]
