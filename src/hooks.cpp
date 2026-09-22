@@ -148,8 +148,37 @@ namespace {
 
         VkPhysicalDeviceProperties properties{};
         Layer::ovkGetPhysicalDeviceProperties(physicalDevice, &properties);
+
+        VkDriverId driverId = static_cast<VkDriverId>(0);
+        std::string driverName = properties.deviceName;
+        auto getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+            Layer::ovkGetInstanceProcAddr(
+                layerInstance, "vkGetPhysicalDeviceProperties2"));
+        if (getProperties2 == nullptr) {
+            getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+                Layer::ovkGetInstanceProcAddr(
+                    layerInstance, "vkGetPhysicalDeviceProperties2KHR"));
+        }
+        const bool driverPropertiesAvailable =
+            properties.apiVersion >= VK_API_VERSION_1_2
+            || supportsDeviceExtension(
+                physicalDevice, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
+        if (getProperties2 != nullptr && driverPropertiesAvailable) {
+            VkPhysicalDeviceDriverProperties driverProperties{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+            };
+            VkPhysicalDeviceProperties2 properties2{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                .pNext = &driverProperties,
+            };
+            getProperties2(physicalDevice, &properties2);
+            driverId = driverProperties.driverID;
+            if (driverProperties.driverName[0] != '\0')
+                driverName = driverProperties.driverName;
+        }
+
         plan.adreno = AndroidSyncPolicy::requiresConservativeCrossDeviceSync(
-            static_cast<VkDriverId>(0), properties.deviceName);
+            driverId, driverName);
         if (!plan.adreno)
             return plan;
 
