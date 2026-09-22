@@ -1501,6 +1501,59 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             deferredPass.deferredAdrenoOwned = false;
         }
     }
+
+    if (this->pendingSourceValid_) {
+        const VkSemaphore pendingSourceReady =
+            this->pendingSourceReady_.handle();
+        const uint32_t pendingSourceImage =
+            this->pendingSourceImage_;
+        const VkPresentInfoKHR pendingSourcePresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            // The original application's pNext chain is not retained across
+            // calls. Deferred source buffering is therefore enabled only when
+            // the source call had no downstream chain.
+            .pNext = nullptr,
+            .waitSemaphoreCount =
+                pendingSourceReady != VK_NULL_HANDLE ? 1U : 0U,
+            .pWaitSemaphores =
+                pendingSourceReady != VK_NULL_HANDLE
+                    ? &pendingSourceReady
+                    : nullptr,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &pendingSourceImage,
+        };
+        if (pendingSourceReady != VK_NULL_HANDLE) {
+            this->retainPresentWait(
+                pendingSourceImage, this->pendingSourceReady_);
+        }
+        const auto pendingSourceResult =
+            Layer::ovkQueuePresentKHR(queue, &pendingSourcePresentInfo);
+        if (isAdrenoWsiRetirementResult(pendingSourceResult))
+            return pendingSourceResult;
+        if (pendingSourceResult != VK_SUCCESS
+                && pendingSourceResult != VK_SUBOPTIMAL_KHR) {
+            this->runtimeMetrics.windowSourcePresentFailures++;
+            this->runtimeMetrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(
+                pendingSourceResult,
+                "Failed presenting buffered Adreno source frame");
+        }
+
+        if (this->frameIdx < 4) {
+            std::cerr << "lsfg-vk: runtime stage=adreno-pending-source-present"
+                      << " image=" << pendingSourceImage
+                      << " pending_pass=" << this->pendingPassIndex_
+                      << " planned_generated="
+                      << this->pendingGeneratedCount_
+                      << "\n";
+        }
+        this->pendingSourceValid_ = false;
+        this->pendingSourceReady_ = {};
+        this->pendingGeneratedCount_ = 0;
+        this->framegenInFlight_ = false;
+        this->framegenOutputEligible_ = false;
+    }
 #endif
 
     auto& pass = this->passInfos.at(this->frameIdx % 8);
@@ -3677,37 +3730,76 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                           << "\n";
             }
 
-            // Observe any previous completed timing sample, then acknowledge
-            // this real source immediately. No unsignaled framegen dependency
-            // is submitted to the primary queue in this call.
+            // The generated outputs interpolate into this real source, so
+            // presenting the source now would put any deferred synthetic after
+            // the frame it should precede. Buffer one real source boundary while
+            // returning to the guest immediately; the next source call first
+            // gives ready synthetics one opportunity, then presents this source.
             updateAdaptiveFlowGovernor();
             this->lastGeneratedFrameCount_ =
                 deferredDeliveredGeneratedFrameCount;
-            const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
-            const VkPresentInfoKHR deferredSourcePresentInfo{
-                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                .pNext = pNext,
-                .waitSemaphoreCount = 1,
-                .pWaitSemaphores = &sourceReady,
-                .swapchainCount = 1,
-                .pSwapchains = &this->swapchain,
-                .pImageIndices = &presentIdx,
-            };
-            this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
-            const auto deferredSourceResult =
-                Layer::ovkQueuePresentKHR(queue, &deferredSourcePresentInfo);
-            if (isAdrenoWsiRetirementResult(deferredSourceResult))
-                return deferredSourceResult;
-            if (deferredSourceResult != VK_SUCCESS
-                    && deferredSourceResult != VK_SUBOPTIMAL_KHR) {
-                metrics.windowSourcePresentFailures++;
-                metrics.totalSourcePresentFailures++;
-                throw LSFG::vulkan_error(
+
+            if (pNext != nullptr) {
+                // An opaque application present chain cannot be retained safely
+                // across calls. Fail open to the real source and abandon only
+                // this batch's synthetic delivery; keep its batch-complete
+                // lifetime state until the private device releases the AHB pair.
+                this->deferredAdrenoOutputEligible_ = false;
+                this->framegenOutputEligible_ = false;
+                for (int& fd : this->deferredAdrenoOutputReadyFds_) {
+                    if (fd >= 0)
+                        ::close(fd);
+                    fd = -1;
+                }
+
+                const VkSemaphore sourceReady =
+                    pass.preCopySemaphores.at(0).handle();
+                const VkPresentInfoKHR deferredSourcePresentInfo{
+                    .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                    .pNext = pNext,
+                    .waitSemaphoreCount = 1,
+                    .pWaitSemaphores = &sourceReady,
+                    .swapchainCount = 1,
+                    .pSwapchains = &this->swapchain,
+                    .pImageIndices = &presentIdx,
+                };
+                this->retainPresentWait(
+                    presentIdx, pass.preCopySemaphores.at(0));
+                const auto deferredSourceResult =
+                    Layer::ovkQueuePresentKHR(
+                        queue, &deferredSourcePresentInfo);
+                if (isAdrenoWsiRetirementResult(deferredSourceResult))
+                    return deferredSourceResult;
+                if (deferredSourceResult != VK_SUCCESS
+                        && deferredSourceResult != VK_SUBOPTIMAL_KHR) {
+                    metrics.windowSourcePresentFailures++;
+                    metrics.totalSourcePresentFailures++;
+                    throw LSFG::vulkan_error(
+                        deferredSourceResult,
+                        "Failed source present after deferred Adreno pNext fail-open");
+                }
+                return finishSourcePresent(
                     deferredSourceResult,
-                    "Failed source present after deferred Adreno dispatch");
+                    "pre-copy-adreno-deferred-pnext-fail-open");
+            }
+
+            this->pendingSourceValid_ = true;
+            this->pendingSourceImage_ = presentIdx;
+            this->pendingSourceReady_ = pass.preCopySemaphores.at(0);
+            this->pendingPassIndex_ =
+                this->frameIdx % this->passInfos.size();
+            this->pendingGeneratedCount_ = generatedFrameCount;
+            this->framegenInFlight_ = true;
+            this->framegenOutputEligible_ = true;
+            if (firstPresentDiagnostic) {
+                std::cerr
+                    << "lsfg-vk: runtime stage=adreno-deferred-source-buffered"
+                    << " image=" << presentIdx
+                    << " generated=" << generatedFrameCount
+                    << "\n";
             }
             return finishSourcePresent(
-                deferredSourceResult, "pre-copy-adreno-deferred");
+                VK_SUCCESS, "pre-copy-adreno-deferred-buffered");
         }
 
         for (const int fd : framegenSync.outputReadyFds) {
