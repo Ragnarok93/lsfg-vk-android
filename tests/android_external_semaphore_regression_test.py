@@ -88,8 +88,15 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
         wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         producer = wrapper.index("pass.framegenBatchCompleteSemaphore = Mini::Semaphore")
-        consumer = wrapper.index("previousPass->framegenBatchCompleteSemaphore.handle()")
+        retention = wrapper.index(
+            "pass.crossFrameWaitRetentions.emplace_back(\n"
+            "            previousPass->framegenBatchCompleteSemaphore)"
+        )
+        consumer = wrapper.index(
+            "pass.crossFrameWaitRetentions.back().handle()", retention
+        )
         clear = wrapper.index("previousPass->framegenBatchCompleteValid = false", consumer)
+        self.assertLess(retention, consumer)
         self.assertLess(consumer, producer)
         self.assertLess(consumer, clear)
 
