@@ -144,6 +144,52 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("deferredAdrenoBatchCompleteSemaphore_", dependency)
         self.assertIn("consumeDeferredAdrenoBatchComplete", dependency)
 
+    def test_deferred_adreno_buffers_closing_source_until_next_boundary(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "pendingSourceValid_",
+            "pendingSourceImage_",
+            "pendingSourceReady_",
+            "pendingPassIndex_",
+            "pendingGeneratedCount_",
+        ):
+            self.assertIn(token, header)
+
+        deferred_start = source.index("if (this->deferredAdrenoBatchValid_)")
+        pass_start = source.index("auto& pass =", deferred_start)
+        boundary = source[deferred_start:pass_start]
+        self.assertIn("if (this->pendingSourceValid_)", boundary)
+        self.assertIn("pendingSourceImage_", boundary)
+        self.assertIn("pendingSourceReady_.handle()", boundary)
+        self.assertIn("Layer::ovkQueuePresentKHR", boundary)
+
+        queue_start = source.index("runtime stage=adreno-deferred-batch-queued")
+        queue_end = source.index(
+            "if (this->asyncFramegenCompletionEnabled_", queue_start
+        )
+        queued = source[queue_start:queue_end]
+        self.assertIn("pendingSourceValid_ = true", queued)
+        self.assertIn("pendingSourceImage_ = presentIdx", queued)
+        self.assertIn("pendingSourceReady_ = pass.preCopySemaphores.at(0)", queued)
+        self.assertIn('"pre-copy-adreno-deferred-buffered"', queued)
+        self.assertNotIn(
+            "Layer::ovkQueuePresentKHR(queue, &deferredSourcePresentInfo)",
+            queued,
+        )
+
+    def test_deferred_source_buffer_fails_open_when_app_present_chain_cannot_be_retained(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        queue_start = source.index("runtime stage=adreno-deferred-batch-queued")
+        queue_end = source.index(
+            "if (this->asyncFramegenCompletionEnabled_", queue_start
+        )
+        queued = source[queue_start:queue_end]
+        self.assertIn("if (pNext != nullptr)", queued)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", queued)
+        self.assertIn('"pre-copy-adreno-deferred-pnext-fail-open"', queued)
+
     def test_deferred_batch_blocks_pass_recycle_until_real_copy_submissions_retire(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
