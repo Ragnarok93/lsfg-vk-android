@@ -62,6 +62,67 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait = true", fallback)
         self.assertIn("waitContext", history)
 
+    def test_adreno_generated_cycles_restore_opaque_fd_input_handoff_only(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        selection = source.split(
+            "this->conservativeCrossDeviceSync_ =", 1
+        )[1].split("std::cerr << \"lsfg-vk: Android AHB context created", 1)[0]
+        self.assertIn("opaqueFdHandoffSupported", selection)
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_\n"
+            "            ? opaqueFdHandoffSupported",
+            selection,
+        )
+        self.assertIn(
+            "? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
+            selection,
+        )
+        self.assertIn(
+            "!this->conservativeCrossDeviceSync_\n"
+            "        && syncFdHandoffSupported && gameImportSemaphoreFd != nullptr",
+            selection,
+        )
+
+        handoff = source.split(
+            "bool useAsyncHandoff =", 1
+        )[1].split("bool asyncSubmissionIssued", 1)[0]
+        self.assertIn("!conservativeSourceOnlyWarmup", handoff)
+        self.assertIn("!conservativeTrueSourceOnlyCycle", handoff)
+
+    def test_fixed_generated_frames_are_not_dropped_by_adaptive_deadline_policy(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        generated_start = source.index(
+            "// 4. Generated presentation is opportunistic."
+        )
+        source_start = source.index(
+            "// 5. Present the real game frame", generated_start
+        )
+        generated = source[generated_start:source_start]
+
+        deadline = generated.split(
+            "const uint64_t syntheticAdmissionNowNs = monotonicNowNs();", 1
+        )[1].split("pass.acquireSemaphores.at(i)", 1)[0]
+        self.assertIn("if (conf.adaptiveFramegen", deadline)
+
+    def test_adreno_fixed_mode_uses_bounded_generated_acquire_without_changing_xclipse(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        generated_start = source.index(
+            "// 4. Generated presentation is opportunistic."
+        )
+        source_start = source.index(
+            "// 5. Present the real game frame", generated_start
+        )
+        generated = source[generated_start:source_start]
+
+        self.assertIn("generatedAcquireTimeoutNs", generated)
+        self.assertIn(
+            "!conf.adaptiveFramegen && this->conservativeCrossDeviceSync_",
+            generated,
+        )
+        self.assertIn("runtimeWaitTimeoutNs()", generated)
+        self.assertIn(": 0;", generated)
+
     def test_generated_compatibility_path_retains_bounded_completion_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated = source.split("// 2. Tell framegen", 1)[1]
