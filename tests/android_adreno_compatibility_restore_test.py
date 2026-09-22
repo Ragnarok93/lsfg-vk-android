@@ -469,115 +469,49 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             generated,
         )
 
-    def test_adreno_synthetic_queue_is_layer_owned_and_lower_priority(self) -> None:
+    def test_adreno_does_not_rewrite_game_device_queue_creation(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        self.assertNotIn("AdrenoSyntheticQueuePlan", hooks)
+        self.assertNotIn("augmentAdrenoSyntheticQueue", hooks)
+        self.assertNotIn("kAdrenoSyntheticQueuePriority", hooks)
+        self.assertNotIn("queueInfo.queueCount = plan.queueIndex + 1", hooks)
+        self.assertNotIn("adreno-synthetic-queue", hooks)
 
-        plan_start = hooks.index("struct AdrenoSyntheticQueuePlan")
-        plan_end = hooks.index("bool supportsFdSemaphore", plan_start)
-        plan = hooks[plan_start:plan_end]
 
-        self.assertIn("uint32_t queueIndex", plan)
-        self.assertIn("queueInfo.queueCount < family.queueCount", plan)
-        self.assertIn("plan.queueIndex = queueInfo.queueCount", plan)
-        self.assertNotIn(
-            "plan.available = family.queueCount >= 2 && queueInfo.queueCount >= 1",
-            plan,
-            "LSFG must never borrow a queue index already requested by the game",
-        )
-
-        self.assertIn("kAdrenoSyntheticQueuePriority", plan)
-        self.assertIn("kAdrenoSyntheticQueuePriority = 0.25F", hooks)
-        self.assertIn("priorities.push_back(kAdrenoSyntheticQueuePriority)", hooks)
-        self.assertIn("priorities.push_back(kAdrenoSyntheticQueuePriority)", plan)
-        self.assertIn("queueInfo.queueCount = plan.queueIndex + 1", plan)
-
-        post = hooks.split("VkResult myvkCreateDevicePost", 1)[1]
-        self.assertIn(
-            "plan.familyIndex, plan.queueIndex, &syntheticQueue",
-            post,
-        )
-        self.assertNotIn(
-            "plan.familyIndex, 1, &syntheticQueue",
-            post,
-        )
-
-    def test_adreno_synthetic_queue_never_steals_app_owned_queue(self) -> None:
-        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-
-        plan_start = hooks.index("AdrenoSyntheticQueuePlan inspectAdrenoSyntheticQueue")
-        plan_end = hooks.index("bool augmentAdrenoSyntheticQueue", plan_start)
-        plan = hooks[plan_start:plan_end]
-        self.assertIn("uint32_t queueIndex", hooks)
-        self.assertIn("queueInfo.queueCount < family.queueCount", plan)
-        self.assertIn("plan.queueIndex = queueInfo.queueCount", plan)
-        self.assertNotIn(
-            "family.queueCount >= 2 && queueInfo.queueCount >= 1",
-            plan,
-        )
-
-        augment_start = hooks.index("bool augmentAdrenoSyntheticQueue")
-        augment_end = hooks.index("bool supportsFdSemaphore", augment_start)
-        augment = hooks[augment_start:augment_end]
-        self.assertIn("kAdrenoSyntheticQueuePriority", augment)
-        self.assertIn("priorities.push_back", augment)
-        self.assertIn("queueInfo.queueCount = plan.queueIndex + 1", augment)
-
-        post = hooks[hooks.index("VkResult myvkCreateDevicePost"):]
-        self.assertIn("plan.queueIndex, &syntheticQueue", post)
-        self.assertNotIn("plan.familyIndex, 1, &syntheticQueue", post)
-
-    def test_adreno_synthetic_queue_detection_uses_runtime_driver_identity(self) -> None:
-        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        plan_start = hooks.index("AdrenoSyntheticQueuePlan inspectAdrenoSyntheticQueue")
-        plan_end = hooks.index("bool augmentAdrenoSyntheticQueue", plan_start)
-        plan = hooks[plan_start:plan_end]
-
-        self.assertIn("VkPhysicalDeviceDriverProperties", plan)
-        self.assertIn("driverProperties.driverID", plan)
-        self.assertIn("driverProperties.driverName", plan)
-        self.assertIn("requiresConservativeCrossDeviceSync", plan)
-
-    def test_adreno_generated_work_uses_dedicated_same_family_queue_when_available(self) -> None:
+    def test_adreno_device_info_leaves_synthetic_queue_unset(self) -> None:
         hooks_h = (ROOT / "include/hooks.hpp").read_text(encoding="utf-8")
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-
         self.assertIn("VkQueue syntheticQueue{VK_NULL_HANDLE}", hooks_h)
-        self.assertIn("adrenoSyntheticQueueAvailable", hooks_h)
-        self.assertIn("augmentAdrenoSyntheticQueue", hooks)
-        self.assertIn("requiresConservativeCrossDeviceSync", hooks)
-        self.assertIn("queueInfo.queueCount < family.queueCount", hooks)
-        self.assertIn("queueInfo.queueCount = plan.queueIndex + 1", hooks)
-        self.assertIn("vkGetDeviceQueue", hooks)
-        self.assertIn("adreno-synthetic-queue", hooks)
+        self.assertIn("adrenoSyntheticQueueAvailable{false}", hooks_h)
+        self.assertNotIn(".syntheticQueue =", hooks)
+        self.assertNotIn(".adrenoSyntheticQueueAvailable =", hooks)
 
+
+    def test_adreno_driver_detection_remains_in_sync_policy_not_queue_creation(self) -> None:
+        policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        self.assertIn("requiresConservativeCrossDeviceSync", policy)
+        self.assertNotIn("requiresConservativeCrossDeviceSync", hooks)
+
+
+    def test_adreno_generated_work_falls_back_to_primary_queue_only_after_host_completion(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("adrenoHostCompletionFallback", source)
+        self.assertIn("bool requireHostCompletionWait = !this->asyncFramegenCompletionEnabled_", source)
         self.assertIn("generatedWorkQueue", source)
-        self.assertIn(
-            "this->conservativeCrossDeviceSync_ && info.adrenoSyntheticQueueAvailable",
-            source,
-        )
-        self.assertIn("postCopyBuf.submit(generatedWorkQueue", source)
-        self.assertIn("Layer::ovkQueuePresentKHR(generatedPresentQueue", source)
-        self.assertIn("armPassGpuRetirement(generatedWorkQueue)", source)
-
-        # Non-Adreno/Xclipse continues to resolve both generated queues to the
-        # existing queue handles; no capability-async/direct-storage branch is changed.
         self.assertIn(": info.queue.second;", source)
         self.assertIn(": queue;", source)
 
-    def test_adreno_pending_batch_never_blocks_primary_source_queue(self) -> None:
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("conservativePendingBatchCompletePollFd_", header)
-        self.assertIn("poll(", source)
-        self.assertIn("conservativeBatchStillInFlight", source)
-        self.assertIn(
-            "conservativeTrueSourceOnlyCycle || conservativeBatchStillInFlight",
-            source,
-        )
-        self.assertIn('"compat-source-batch-inflight-bypass"', source)
-        self.assertIn("::dup(batchCompleteFd)", source)
+    def test_adreno_host_completion_path_does_not_create_pending_async_batch_state(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        selection_start = source.index("const bool asyncCompletionTopologySupported")
+        selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
+        selection = source[selection_start:selection_end]
+        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
+        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
+        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
+
 
     def test_adreno_surface_loss_is_propagated_without_degraded_translation(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
