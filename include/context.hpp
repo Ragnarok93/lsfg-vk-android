@@ -284,9 +284,23 @@ private:
     bool framegenOutputEligible_{false};
 
     // Qualcomm/Adreno keeps protected source/history handling for zero,
-    // reprime, and source-only cycles. Generated cycles may still use the
-    // capability-driven SYNC_FD completion chain.
+    // reprime, and source-only cycles.
     bool conservativeCrossDeviceSync_{false};
+
+    // Single-queue Adreno cannot safely queue an unsignaled framegen completion
+    // wait ahead of the application's next source work. Export completion FDs,
+    // keep exactly one batch deferred, and consume it only at a later source
+    // boundary after nonblocking readiness proves it cannot head-of-line block.
+    bool deferredAdrenoCompletionEnabled_{false};
+    bool deferredAdrenoBatchValid_{false};
+    std::vector<int> deferredAdrenoOutputReadyFds_;
+    int deferredAdrenoBatchCompleteFd_{-1};
+    size_t deferredAdrenoPassIndex_{0};
+    size_t deferredAdrenoGeneratedCount_{0};
+    uint32_t deferredAdrenoSourceAge_{0};
+    bool deferredAdrenoOutputEligible_{false};
+    Mini::Semaphore deferredAdrenoBatchCompleteSemaphore_;
+    bool deferredAdrenoBatchCompleteReady_{false};
 
     // Adreno can intentionally skip private-device work for one or more
     // source-only cycles. Carry the most recent framegen release dependency
@@ -399,6 +413,7 @@ private:
         Mini::Semaphore framegenInputSemaphore;
         Mini::Semaphore framegenBatchCompleteSemaphore;
         bool framegenBatchCompleteValid{false};
+        bool deferredAdrenoOwned{false};
 #endif
 
         std::vector<Mini::Semaphore> renderSemaphores; // signal when lsfg is done with frame n
