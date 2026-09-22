@@ -910,6 +910,29 @@ int main() {
         const auto safeHint = predictor.safeGenerationHint(3, 33.0);
         assert(safeHint >= 1);
         assert(safeHint <= 3);
+
+        // Deferred Adreno protects the real-source boundary rather than
+        // requiring compute to finish by the first ideal synthetic scanout.
+        // The same measured batch can therefore be source-safe even when it
+        // cannot satisfy the historical prefix-slot hint.
+        DeadlineAdmissionPredictor deferredPredictor;
+        deferredPredictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 16.0,
+            .opticalFlowMs = 18.0,
+            .totalLsfgMs = 28.0,
+            .generationCount = 1,
+            .valid = true,
+        });
+        const auto slotHint =
+            deferredPredictor.safeGenerationHint(1, 33.333);
+        const auto batchHint =
+            deferredPredictor.safeBatchGenerationHint(1, 33.333);
+        assert(slotHint == 0);
+        assert(batchHint == 1);
+
+        const auto tooExpensiveBatchHint =
+            deferredPredictor.safeBatchGenerationHint(1, 28.0);
+        assert(tooExpensiveBatchHint == 0);
     }
 
 
