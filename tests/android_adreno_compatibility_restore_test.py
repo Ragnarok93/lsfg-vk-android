@@ -182,6 +182,32 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             present,
         )
 
+    def test_adreno_gpu_timing_includes_required_output_transport_copy(self) -> None:
+        for relative in (
+            "framegen/v3.1_src/context.cpp",
+            "framegen/v3.1p_src/context.cpp",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            output_start = source.index("if (this->outputCopyRequired) {")
+            output_end = source.index("} else {", output_start)
+            output_copy = source[output_start:output_end]
+
+            copy_pos = output_copy.index("copy_same_format(")
+            final_release_pos = output_copy.rindex("emit_external_barriers(")
+            timing_pos = output_copy.index(
+                "adaptiveFlowTimingPool->write(buf2.handle(), 3);"
+            )
+            self.assertGreater(timing_pos, copy_pos)
+            self.assertGreater(timing_pos, final_release_pos)
+
+            pre_output = source[max(0, output_start - 500):output_start]
+            self.assertIn("!this->outputCopyRequired", pre_output)
+            self.assertIn(
+                "adaptiveFlowTimingPool->write(buf2.handle(), 3);",
+                pre_output,
+                "Direct-storage/Xclipse must keep its existing timing boundary",
+            )
+
     def test_adreno_opaque_export_failure_uses_adreno_reprime_not_xclipse_warmup(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         failure = source.split("if (asyncExportFailed)", 1)[1].split(
