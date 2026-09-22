@@ -686,7 +686,7 @@ PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName)
     // process-established device thunks here. Restore that behavior only while
     // LSFG is synchronously constructing its own backend; normal game/helper
     // devices, including Xclipse, keep exact-device/fail-closed dispatch.
-    if (tracked && !dispatch.presentationDevice) {
+    if (!tracked || !dispatch.presentationDevice) {
         if (auto compatibility =
                 loadKnownGoodPrivateDeviceProc(device, pName))
             return compatibility;
