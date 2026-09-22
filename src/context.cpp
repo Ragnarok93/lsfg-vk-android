@@ -887,14 +887,18 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     }
 
     // prepare render passes
+    bool reuseGameCopyCommandBuffers = false;
+#ifdef __ANDROID__
+    reuseGameCopyCommandBuffers = this->conservativeCrossDeviceSync_;
+#endif
     this->cmdPool = Mini::CommandPool(
-        info.device, info.queue.first, this->conservativeCrossDeviceSync_);
+        info.device, info.queue.first, reuseGameCopyCommandBuffers);
     for (size_t i = 0; i < 8; i++) {
         auto& pass = this->passInfos.at(i);
         pass.renderSemaphores.resize(runtimeMultiplier - 1);
         pass.acquireSemaphores.resize(runtimeMultiplier - 1);
         pass.postCopyBufs.resize(runtimeMultiplier - 1);
-        if (this->conservativeCrossDeviceSync_) {
+        if (reuseGameCopyCommandBuffers) {
             pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
             for (auto& postCopyBuf : pass.postCopyBufs)
                 postCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
