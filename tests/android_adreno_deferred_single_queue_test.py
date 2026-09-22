@@ -102,7 +102,10 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("size_t deferredReadyOutputPrefix = 0", deferred)
         self.assertIn("deferredReadyOutputPrefix < this->deferredAdrenoGeneratedCount_", deferred)
         self.assertIn("const size_t deferredUnreadyOutputCount", deferred)
-        self.assertIn("if (deferredReadyOutputPrefix > 0)", deferred)
+        self.assertIn(
+            "if (deferredReadyOutputPrefix > 0 && deferredPresentationAttempted)",
+            deferred,
+        )
         self.assertIn("i < deferredReadyOutputPrefix", deferred)
         self.assertIn("conservativeBatchStillInFlight = !batchReady", deferred)
         self.assertIn("deferredAdrenoOutputEligible_ = false", deferred)
