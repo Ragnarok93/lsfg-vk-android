@@ -80,7 +80,15 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         )
         self.assertIn(
             "this->asyncFramegenCompletionEnabled_ =\n"
-            "        syncFdHandoffSupported && gameImportSemaphoreFd != nullptr",
+            "        syncFdHandoffSupported\n"
+            "        && gameImportSemaphoreFd != nullptr\n"
+            "        && (!this->conservativeCrossDeviceSync_\n"
+            "            || this->syntheticQueue_ != VK_NULL_HANDLE)",
+            selection,
+        )
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_\n"
+            "            && info.adrenoSyntheticQueueAvailable",
             selection,
         )
         self.assertNotIn(
