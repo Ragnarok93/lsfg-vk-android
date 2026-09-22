@@ -103,7 +103,11 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         deadline = generated.split(
             "const uint64_t syntheticAdmissionNowNs = monotonicNowNs();", 1
         )[1].split("pass.acquireSemaphores.at(i)", 1)[0]
-        self.assertIn("if (conf.adaptiveFramegen", deadline)
+        self.assertIn("enforcePostDispatchSyntheticDeadline", deadline)
+        self.assertIn(
+            "conf.adaptiveFramegen && !this->conservativeCrossDeviceSync_",
+            deadline,
+        )
 
     def test_adreno_adaptive_commits_pre_admitted_work_after_host_completion(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
