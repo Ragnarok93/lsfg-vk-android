@@ -1082,10 +1082,14 @@ bool LsContext::submitPassCompletionFence(RenderPassInfo& pass, VkQueue queue) {
 VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
     const auto conf = Config::snapshot();
+#ifdef __ANDROID__
     const bool adrenoSingleQueueReadinessPoll =
         this->conservativeCrossDeviceSync_
         && this->syntheticQueue_ == VK_NULL_HANDLE
         && this->asyncFramegenCompletionEnabled_;
+#else
+    constexpr bool adrenoSingleQueueReadinessPoll = false;
+#endif
     this->releasePresentWaitRetirements(presentIdx);
     auto& pass = this->passInfos.at(this->frameIdx % 8);
     if (!this->tryRecyclePass(pass)) {
