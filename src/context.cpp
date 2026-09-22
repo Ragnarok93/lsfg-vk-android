@@ -1188,9 +1188,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             }
         }
 
-        bool outputsReady = this->deferredAdrenoOutputEligible_;
+        size_t deferredReadyOutputPrefix = 0;
+        bool deferredOutputPollingValid = this->deferredAdrenoOutputEligible_;
         if (this->deferredAdrenoOutputEligible_) {
-            for (size_t i = 0; i < this->deferredAdrenoGeneratedCount_; ++i) {
+            for (; deferredReadyOutputPrefix < this->deferredAdrenoGeneratedCount_;
+                    ++deferredReadyOutputPrefix) {
+                const size_t i = deferredReadyOutputPrefix;
                 int& outputFd = this->deferredAdrenoOutputReadyFds_.at(i);
                 if (outputFd < 0)
                     continue;
@@ -1210,193 +1213,197 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
                     } catch (const std::exception& e) {
                         this->deferredAdrenoOutputEligible_ = false;
-                        outputsReady = false;
+                        deferredOutputPollingValid = false;
                         std::cerr << "lsfg-vk: deferred Adreno output SYNC_FD import failed: "
                                   << e.what() << "\n";
                         break;
                     }
                 } else if (outputPollResult == 0) {
-                    outputsReady = false;
+                    // Preserve temporal order: a later synthetic must never be
+                    // delivered when an earlier interpolation slot is not ready.
+                    break;
                 } else {
                     ::close(outputFd);
                     outputFd = -1;
                     this->deferredAdrenoOutputEligible_ = false;
-                    outputsReady = false;
+                    deferredOutputPollingValid = false;
                     break;
                 }
             }
         }
 
-        if (!batchReady || !outputsReady) {
+        const size_t deferredUnreadyOutputCount =
+            deferredOutputPollingValid
+                ? this->deferredAdrenoGeneratedCount_ - deferredReadyOutputPrefix
+                : 0;
+        if (!batchReady
+                || deferredReadyOutputPrefix < this->deferredAdrenoGeneratedCount_) {
             ++this->deferredAdrenoSourceAge_;
-            if (this->deferredAdrenoSourceAge_ >= 1
-                    && this->deferredAdrenoOutputEligible_) {
-                this->runtimeMetrics.windowGeneratedLateDrops +=
-                    this->deferredAdrenoGeneratedCount_;
-                this->runtimeMetrics.totalGeneratedLateDrops +=
-                    this->deferredAdrenoGeneratedCount_;
-                if (conf.adaptiveFramegen) {
-                    // A deferred single-queue batch that is still unavailable
-                    // at the next real-source boundary missed its protected
-                    // delivery window. Feed that evidence back into the Adreno
-                    // admission/Flow controllers instead of repeatedly spending
-                    // GPU time on work that will be discarded at delivery.
-                    this->runtimeMetrics.windowGeneratedDeadlineDrops +=
-                        this->deferredAdrenoGeneratedCount_;
-                    this->runtimeMetrics.totalGeneratedDeadlineDrops +=
-                        this->deferredAdrenoGeneratedCount_;
-                    double deliveryMissMs = 0.5;
-                    if (this->runtimeMetrics.hasLastSourcePresent) {
-                        const double sourceBoundaryMs =
-                            std::chrono::duration<double, std::milli>(
-                                deferredBoundaryNow
-                                    - this->runtimeMetrics.lastSourcePresent).count();
-                        if (std::isfinite(sourceBoundaryMs)
-                                && sourceBoundaryMs > 0.0) {
-                            deliveryMissMs = sourceBoundaryMs;
-                        }
+        }
+
+        if (deferredOutputPollingValid && deferredUnreadyOutputCount > 0) {
+            this->runtimeMetrics.windowGeneratedLateDrops +=
+                deferredUnreadyOutputCount;
+            this->runtimeMetrics.totalGeneratedLateDrops +=
+                deferredUnreadyOutputCount;
+            if (conf.adaptiveFramegen) {
+                // The unready temporal suffix missed this real-source boundary.
+                // Train only Adreno's deferred admission feedback; the ready
+                // prefix below remains deliverable without blocking the source.
+                this->runtimeMetrics.windowGeneratedDeadlineDrops +=
+                    deferredUnreadyOutputCount;
+                this->runtimeMetrics.totalGeneratedDeadlineDrops +=
+                    deferredUnreadyOutputCount;
+                double deliveryMissMs = 0.5;
+                if (this->runtimeMetrics.hasLastSourcePresent) {
+                    const double sourceBoundaryMs =
+                        std::chrono::duration<double, std::milli>(
+                            deferredBoundaryNow
+                                - this->runtimeMetrics.lastSourcePresent).count();
+                    if (std::isfinite(sourceBoundaryMs)
+                            && sourceBoundaryMs > 0.0) {
+                        deliveryMissMs = sourceBoundaryMs;
                     }
-                    this->deadlineAdmissionPredictor_.observeDeliveryMiss(
-                        deliveryMissMs);
                 }
-                this->deferredAdrenoOutputEligible_ = false;
-                for (int& fd : this->deferredAdrenoOutputReadyFds_) {
-                    if (fd >= 0)
-                        ::close(fd);
-                    fd = -1;
-                }
+                this->deadlineAdmissionPredictor_.observeDeliveryMiss(
+                    deliveryMissMs);
             }
         }
 
-        if (!batchReady) {
-            conservativeBatchStillInFlight = true;
-        } else {
-            size_t deferredWsiDrops = 0;
-            const bool deferredPresentationAttempted =
-                this->deferredAdrenoOutputEligible_ && outputsReady;
-            if (deferredPresentationAttempted) {
-                for (size_t i = 0; i < this->deferredAdrenoGeneratedCount_; ++i) {
-                    const auto generatedPresentStart = RuntimeMetrics::Clock::now();
-                    deferredPass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
-                    uint32_t imageIdx{};
-                    auto acquireResult = Layer::ovkAcquireNextImageKHR(
-                        info.device, this->swapchain, 0,
-                        deferredPass.acquireSemaphores.at(i).handle(),
-                        VK_NULL_HANDLE, &imageIdx);
-                    if (acquireResult == VK_NOT_READY || acquireResult == VK_TIMEOUT) {
-                        deferredWsiDrops = this->deferredAdrenoGeneratedCount_ - i;
-                        this->runtimeMetrics.windowGeneratedLateDrops += deferredWsiDrops;
-                        this->runtimeMetrics.totalGeneratedLateDrops += deferredWsiDrops;
-                        this->runtimeMetrics.windowGeneratedWsiDrops += deferredWsiDrops;
-                        this->runtimeMetrics.totalGeneratedWsiDrops += deferredWsiDrops;
-                        this->deferredAdrenoOutputEligible_ = false;
-                        break;
-                    }
-                    if (isAdrenoWsiRetirementResult(acquireResult))
-                        return acquireResult;
-                    if (acquireResult != VK_SUCCESS
-                            && acquireResult != VK_SUBOPTIMAL_KHR) {
-                        this->runtimeMetrics.windowGeneratedPresentFailures++;
-                        this->runtimeMetrics.totalGeneratedPresentFailures++;
-                        throw LSFG::vulkan_error(
-                            acquireResult,
-                            "Failed to acquire swapchain image for deferred Adreno frame");
-                    }
-                    this->releasePresentWaitRetirements(imageIdx);
-
-                    deferredPass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
-                    deferredPass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
-                    auto& postCopyBuf = deferredPass.postCopyBufs.at(i);
-                    if (postCopyBuf.getState() == Mini::CommandBufferState::Submitted)
-                        postCopyBuf.reset();
-                    postCopyBuf.begin();
-                    copyExternalAhbToSwapchain(
-                        postCopyBuf.handle(),
-                        this->out_n.at(i).handle(),
-                        this->swapchainImages.at(imageIdx),
-                        this->extent.width, this->extent.height,
-                        info.queue.first);
-                    postCopyBuf.end();
-
-                    std::vector<VkSemaphore> generatedCopyWaits{
-                        deferredPass.acquireSemaphores.at(i).handle()
-                    };
-                    if (deferredPass.renderSemaphores.at(i).handle() != VK_NULL_HANDLE) {
-                        generatedCopyWaits.emplace_back(
-                            deferredPass.renderSemaphores.at(i).handle());
-                    }
-                    postCopyBuf.submit(
-                        info.queue.second,
-                        generatedCopyWaits,
-                        { deferredPass.postCopySemaphores.at(i).handle(),
-                          deferredPass.prevPostCopySemaphores.at(i).handle() });
-
-                    std::vector<VkSemaphore> deferredPresentWaits{
-                        deferredPass.postCopySemaphores.at(i).handle()
-                    };
-                    if (i != 0) {
-                        deferredPresentWaits.emplace_back(
-                            deferredPass.prevPostCopySemaphores.at(i - 1).handle());
-                    }
-                    const VkPresentInfoKHR deferredPresentInfo{
-                        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                        .pNext = nullptr,
-                        .waitSemaphoreCount =
-                            static_cast<uint32_t>(deferredPresentWaits.size()),
-                        .pWaitSemaphores = deferredPresentWaits.data(),
-                        .swapchainCount = 1,
-                        .pSwapchains = &this->swapchain,
-                        .pImageIndices = &imageIdx,
-                    };
-                    this->retainPresentWait(
-                        imageIdx, deferredPass.postCopySemaphores.at(i));
-                    if (i != 0) {
-                        this->retainPresentWait(
-                            imageIdx,
-                            deferredPass.prevPostCopySemaphores.at(i - 1));
-                    }
-                    const auto deferredPresentResult =
-                        Layer::ovkQueuePresentKHR(queue, &deferredPresentInfo);
-                    if (isAdrenoWsiRetirementResult(deferredPresentResult))
-                        return deferredPresentResult;
-                    if (deferredPresentResult != VK_SUCCESS
-                            && deferredPresentResult != VK_SUBOPTIMAL_KHR) {
-                        this->runtimeMetrics.windowGeneratedPresentFailures++;
-                        this->runtimeMetrics.totalGeneratedPresentFailures++;
-                        throw LSFG::vulkan_error(
-                            deferredPresentResult,
-                            "Failed to present deferred Adreno generated frame");
-                    }
-
-                    ++deferredDeliveredGeneratedFrameCount;
-                    ++this->runtimeMetrics.windowGeneratedFrames;
-                    ++this->runtimeMetrics.totalGeneratedFrames;
-                    this->runtimeMetrics.windowGeneratedPresentMs +=
-                        std::chrono::duration<double, std::milli>(
-                            RuntimeMetrics::Clock::now()
-                                - generatedPresentStart).count();
+        size_t deferredWsiDrops = 0;
+        const bool deferredPresentationAttempted =
+            this->deferredAdrenoOutputEligible_
+            && deferredReadyOutputPrefix > 0;
+        const size_t deferredPresentationAttemptedCount =
+            deferredPresentationAttempted ? deferredReadyOutputPrefix : 0;
+        if (deferredReadyOutputPrefix > 0 && deferredPresentationAttempted) {
+            for (size_t i = 0; i < deferredReadyOutputPrefix; ++i) {
+                const auto generatedPresentStart = RuntimeMetrics::Clock::now();
+                deferredPass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
+                uint32_t imageIdx{};
+                auto acquireResult = Layer::ovkAcquireNextImageKHR(
+                    info.device, this->swapchain, 0,
+                    deferredPass.acquireSemaphores.at(i).handle(),
+                    VK_NULL_HANDLE, &imageIdx);
+                if (acquireResult == VK_NOT_READY || acquireResult == VK_TIMEOUT) {
+                    deferredWsiDrops = deferredReadyOutputPrefix - i;
+                    this->runtimeMetrics.windowGeneratedLateDrops += deferredWsiDrops;
+                    this->runtimeMetrics.totalGeneratedLateDrops += deferredWsiDrops;
+                    this->runtimeMetrics.windowGeneratedWsiDrops += deferredWsiDrops;
+                    this->runtimeMetrics.totalGeneratedWsiDrops += deferredWsiDrops;
+                    break;
                 }
-            }
+                if (isAdrenoWsiRetirementResult(acquireResult))
+                    return acquireResult;
+                if (acquireResult != VK_SUCCESS
+                        && acquireResult != VK_SUBOPTIMAL_KHR) {
+                    this->runtimeMetrics.windowGeneratedPresentFailures++;
+                    this->runtimeMetrics.totalGeneratedPresentFailures++;
+                    throw LSFG::vulkan_error(
+                        acquireResult,
+                        "Failed to acquire swapchain image for deferred Adreno frame");
+                }
+                this->releasePresentWaitRetirements(imageIdx);
 
-            if (conf.adaptiveFramegen && deferredPresentationAttempted) {
-                this->generatedPresentationCapacityTracker_.observe(
-                    this->deferredAdrenoGeneratedCount_,
-                    deferredWsiDrops);
-            }
+                deferredPass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
+                deferredPass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
+                auto& postCopyBuf = deferredPass.postCopyBufs.at(i);
+                if (postCopyBuf.getState() == Mini::CommandBufferState::Submitted)
+                    postCopyBuf.reset();
+                postCopyBuf.begin();
+                copyExternalAhbToSwapchain(
+                    postCopyBuf.handle(),
+                    this->out_n.at(i).handle(),
+                    this->swapchainImages.at(imageIdx),
+                    this->extent.width, this->extent.height,
+                    info.queue.first);
+                postCopyBuf.end();
 
-            if (deferredDeliveredGeneratedFrameCount
-                    == this->deferredAdrenoGeneratedCount_) {
-                this->deadlineAdmissionPredictor_.observeDeliverySuccess();
-            }
+                std::vector<VkSemaphore> generatedCopyWaits{
+                    deferredPass.acquireSemaphores.at(i).handle()
+                };
+                if (deferredPass.renderSemaphores.at(i).handle() != VK_NULL_HANDLE) {
+                    generatedCopyWaits.emplace_back(
+                        deferredPass.renderSemaphores.at(i).handle());
+                }
+                postCopyBuf.submit(
+                    info.queue.second,
+                    generatedCopyWaits,
+                    { deferredPass.postCopySemaphores.at(i).handle(),
+                      deferredPass.prevPostCopySemaphores.at(i).handle() });
 
-            for (int& fd : this->deferredAdrenoOutputReadyFds_) {
-                if (fd >= 0)
-                    ::close(fd);
-                fd = -1;
+                std::vector<VkSemaphore> deferredPresentWaits{
+                    deferredPass.postCopySemaphores.at(i).handle()
+                };
+                if (i != 0) {
+                    deferredPresentWaits.emplace_back(
+                        deferredPass.prevPostCopySemaphores.at(i - 1).handle());
+                }
+                const VkPresentInfoKHR deferredPresentInfo{
+                    .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                    .pNext = nullptr,
+                    .waitSemaphoreCount =
+                        static_cast<uint32_t>(deferredPresentWaits.size()),
+                    .pWaitSemaphores = deferredPresentWaits.data(),
+                    .swapchainCount = 1,
+                    .pSwapchains = &this->swapchain,
+                    .pImageIndices = &imageIdx,
+                };
+                this->retainPresentWait(
+                    imageIdx, deferredPass.postCopySemaphores.at(i));
+                if (i != 0) {
+                    this->retainPresentWait(
+                        imageIdx,
+                        deferredPass.prevPostCopySemaphores.at(i - 1));
+                }
+                const auto deferredPresentResult =
+                    Layer::ovkQueuePresentKHR(queue, &deferredPresentInfo);
+                if (isAdrenoWsiRetirementResult(deferredPresentResult))
+                    return deferredPresentResult;
+                if (deferredPresentResult != VK_SUCCESS
+                        && deferredPresentResult != VK_SUBOPTIMAL_KHR) {
+                    this->runtimeMetrics.windowGeneratedPresentFailures++;
+                    this->runtimeMetrics.totalGeneratedPresentFailures++;
+                    throw LSFG::vulkan_error(
+                        deferredPresentResult,
+                        "Failed to present deferred Adreno generated frame");
+                }
+
+                ++deferredDeliveredGeneratedFrameCount;
+                ++this->runtimeMetrics.windowGeneratedFrames;
+                ++this->runtimeMetrics.totalGeneratedFrames;
+                this->runtimeMetrics.windowGeneratedPresentMs +=
+                    std::chrono::duration<double, std::milli>(
+                        RuntimeMetrics::Clock::now()
+                            - generatedPresentStart).count();
             }
+        }
+
+        if (conf.adaptiveFramegen && deferredPresentationAttempted) {
+            this->generatedPresentationCapacityTracker_.observe(
+                deferredPresentationAttemptedCount,
+                deferredWsiDrops);
+        }
+
+        if (deferredDeliveredGeneratedFrameCount
+                == this->deferredAdrenoGeneratedCount_) {
+            this->deadlineAdmissionPredictor_.observeDeliverySuccess();
+        }
+
+        // Deferred output delivery is a one-source-boundary opportunity. Keep
+        // the batch ownership/release state until batchComplete, but never
+        // retry a stale suffix on a later source frame.
+        this->deferredAdrenoOutputEligible_ = false;
+        for (int& fd : this->deferredAdrenoOutputReadyFds_) {
+            if (fd >= 0)
+                ::close(fd);
+            fd = -1;
+        }
+
+        conservativeBatchStillInFlight = !batchReady;
+        if (batchReady) {
             this->deferredAdrenoOutputReadyFds_.clear();
             this->deferredAdrenoBatchValid_ = false;
-            this->deferredAdrenoOutputEligible_ = false;
             this->deferredAdrenoGeneratedCount_ = 0;
             this->deferredAdrenoSourceAge_ = 0;
             deferredPass.deferredAdrenoOwned = false;
