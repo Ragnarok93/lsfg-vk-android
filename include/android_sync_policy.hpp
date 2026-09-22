@@ -32,12 +32,14 @@ inline bool containsAsciiCaseInsensitive(
 }
 
 /// Qualcomm/Adreno drivers use the validated protected source/history policy.
-/// On single-queue Turnip, source input may use a one-shot SYNC_FD handoff, but
-/// generated completion remains on the bounded host-completion path before the
-/// game VkDevice touches output AHardwareBuffers. Cross-boundary deferred output
-/// delivery is not device-proven on Adreno 650 and is intentionally disabled.
-/// Zero-generation, reprime, and true source-only cycles remain source-safe.
-/// This is a driver-family policy, not a device-model allow/deny list.
+/// On the device-proven single-queue Turnip route, the game-device source copy
+/// completes at a host-fence boundary before private framegen dispatch, private
+/// framegen completion is bounded before generated AHB readback, and generated
+/// frames are followed by the real source in the same intercepted present call.
+/// Cross-boundary deferred output delivery and SYNC_FD source input are not part
+/// of this compatibility path. Zero-generation, reprime, and true source-only
+/// cycles remain source-safe. This is a driver-family policy, not a device-model
+/// allow/deny list.
 ///
 /// Samsung/Xclipse, ARM/Mali, and unknown drivers retain their existing fully
 /// capability-driven asynchronous synchronization.
@@ -57,7 +59,7 @@ inline bool requiresConservativeCrossDeviceSync(
 
 inline const char* crossDeviceSyncPolicyName(bool conservative) noexcept {
     return conservative
-        ? "syncfd-input-host-completion-adreno"
+        ? "host-fence-input-host-completion-adreno"
         : "capability-async";
 }
 
