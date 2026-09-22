@@ -332,6 +332,65 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             generated,
         )
 
+    def test_adreno_generated_work_uses_dedicated_same_family_queue_when_available(self) -> None:
+        hooks_h = (ROOT / "include/hooks.hpp").read_text(encoding="utf-8")
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("VkQueue syntheticQueue{VK_NULL_HANDLE}", hooks_h)
+        self.assertIn("adrenoSyntheticQueueAvailable", hooks_h)
+        self.assertIn("augmentAdrenoSyntheticQueue", hooks)
+        self.assertIn("requiresConservativeCrossDeviceSync", hooks)
+        self.assertIn("queueCount >= 2", hooks)
+        self.assertIn("queueCount = 2", hooks)
+        self.assertIn("vkGetDeviceQueue", hooks)
+        self.assertIn("adreno-synthetic-queue", hooks)
+
+        self.assertIn("generatedWorkQueue", source)
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_ && info.adrenoSyntheticQueueAvailable",
+            source,
+        )
+        self.assertIn("postCopyBuf.submit(generatedWorkQueue", source)
+        self.assertIn("Layer::ovkQueuePresentKHR(generatedPresentQueue", source)
+        self.assertIn("armPassGpuRetirement(generatedWorkQueue)", source)
+
+        # Non-Adreno/Xclipse continues to resolve both generated queues to the
+        # existing queue handles; no capability-async/direct-storage branch is changed.
+        self.assertIn(": info.queue.second;", source)
+        self.assertIn(": queue;", source)
+
+    def test_adreno_pending_batch_never_blocks_primary_source_queue(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("conservativePendingBatchCompletePollFd_", header)
+        self.assertIn("poll(", source)
+        self.assertIn("conservativeBatchStillInFlight", source)
+        self.assertIn(
+            "conservativeTrueSourceOnlyCycle || conservativeBatchStillInFlight",
+            source,
+        )
+        self.assertIn('"compat-source-batch-inflight-bypass"', source)
+        self.assertIn("::dup(batchCompleteFd)", source)
+
+    def test_adreno_surface_loss_is_propagated_without_degraded_translation(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("isAdrenoWsiRetirementResult", source)
+
+        helper = source.split("const auto presentCompatibilitySourceOnly", 1)[1].split(
+            "if (conservativeFractionalHistoryGap)", 1
+        )[0]
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_"
+            " && isAdrenoWsiRetirementResult(sourceResult)",
+            helper,
+        )
+        bypass = source.split("if (conservativePreCopySourceBypass)", 1)[1].split(
+            "// Android path:", 1
+        )[0]
+        self.assertIn("isAdrenoWsiRetirementResult(bypassResult)", bypass)
+
     def test_generated_compatibility_path_retains_bounded_completion_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated = source.split("// 2. Tell framegen", 1)[1]
