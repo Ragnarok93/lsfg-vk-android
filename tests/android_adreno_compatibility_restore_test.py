@@ -299,6 +299,39 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertNotIn("presentContextWithCountExportSyncFd", pre_history)
         self.assertNotIn("presentContextWithCount(", pre_history)
 
+    def test_adreno_syncfd_import_failure_transfers_fd_ownership_once(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        generated = source.split(
+            "if (this->asyncFramegenCompletionEnabled_\n"
+            "            && framegenSync.gpuDependenciesExported)", 1
+        )[1].split("// 3. Compatibility/error fallback only.", 1)[0]
+
+        self.assertIn("const int fd = framegenSync.outputReadyFds.at(i);", generated)
+        self.assertIn(
+            "if (this->conservativeCrossDeviceSync_)\n"
+            "                        framegenSync.outputReadyFds.at(i) = -1;",
+            generated,
+        )
+        self.assertIn(
+            "if (!this->conservativeCrossDeviceSync_)\n"
+            "                        framegenSync.outputReadyFds.at(i) = -1;",
+            generated,
+        )
+        self.assertIn(
+            "const int batchCompleteFd = framegenSync.batchCompleteFd;",
+            generated,
+        )
+        self.assertIn(
+            "if (this->conservativeCrossDeviceSync_)\n"
+            "                        framegenSync.batchCompleteFd = -1;",
+            generated,
+        )
+        self.assertIn(
+            "if (!this->conservativeCrossDeviceSync_)\n"
+            "                        framegenSync.batchCompleteFd = -1;",
+            generated,
+        )
+
     def test_generated_compatibility_path_retains_bounded_completion_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated = source.split("// 2. Tell framegen", 1)[1]
