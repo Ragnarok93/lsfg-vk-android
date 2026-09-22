@@ -28,12 +28,29 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("conservativeSourceOnlyWarmup", source)
         self.assertIn("conservativeFractionalHistoryGap", source)
         self.assertIn("conservativeTrueSourceOnlyCycle", source)
+        helper = source.split("const auto presentCompatibilitySourceOnly", 1)[1].split(
+            "if (conservativeSourceOnlyWarmup)", 1
+        )[0]
         warmup = source.split("if (conservativeSourceOnlyWarmup)", 1)[1].split(
             "if (historyOnly)", 1
         )[0]
-        self.assertIn("Layer::ovkQueuePresentKHR", warmup)
+        self.assertIn("Layer::ovkQueuePresentKHR", helper)
+        self.assertIn("presentCompatibilitySourceOnly", warmup)
         self.assertNotIn("presentContextWithCount", warmup)
         self.assertNotIn("presentContextWithCountExportSyncFd", warmup)
+
+    def test_adreno_uses_known_good_single_source_reprime_without_startup_delay(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("kConservativeSourceReprimeFrames = 1", source)
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames",
+            source,
+        )
+        selection = source.split(
+            "this->conservativeCrossDeviceSync_ =", 1
+        )[1].split("std::cerr << \"lsfg-vk: Android AHB context created", 1)[0]
+        self.assertIn("sourceHistoryWarmupRemaining_ = 0", selection)
+        self.assertIn("requiresSourceHistoryWarmup_ = false", selection)
 
     def test_non_async_history_preprocessing_waits_before_ahb_reuse(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
