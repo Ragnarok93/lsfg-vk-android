@@ -113,6 +113,28 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         recycle = source[recycle_start:recycle_end]
         self.assertIn("pass.deferredAdrenoOwned", recycle)
 
+    def test_deferred_outputs_are_invalidated_across_resume_or_config_boundary(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("const bool deferredAdrenoBoundaryDiscontinuity")
+        end = source.index("if (this->deferredAdrenoBatchValid_)", start)
+        guard = source[start:end]
+        self.assertIn("runtimeConfigSignature_", guard)
+        self.assertIn("runtimeDiagnosticConfigSignature(conf)", guard)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", guard)
+        self.assertIn("deferredAdrenoOutputReadyFds_", guard)
+
+    def test_source_only_reset_drops_stale_outputs_but_preserves_batch_release(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("void LsContext::enterSourceOnlyBypass()")
+        bypass = source[start:]
+        self.assertIn("deferredAdrenoOutputEligible_ = false", bypass)
+        self.assertIn("deferredAdrenoOutputReadyFds_", bypass)
+        self.assertNotIn(
+            "deferredAdrenoBatchValid_ = false",
+            bypass[:bypass.index("#endif")],
+            "source-only transition must preserve the in-flight batch release",
+        )
+
     def test_xclipse_immediate_async_path_is_left_intact(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
