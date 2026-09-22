@@ -123,6 +123,21 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("deferredAdrenoOutputEligible_ = false", guard)
         self.assertIn("deferredAdrenoOutputReadyFds_", guard)
 
+    def test_adaptive_epoch_reset_drops_stale_outputs_but_preserves_batch_release(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("void LsContext::resetAdaptiveSourceEpoch(bool resetScheduler)")
+        end = source.index("void LsContext::enterSourceOnlyBypass()", start)
+        reset = source[start:end]
+
+        self.assertIn("deferredAdrenoBatchValid_", reset)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", reset)
+        self.assertIn("deferredAdrenoOutputReadyFds_", reset)
+        self.assertNotIn(
+            "deferredAdrenoBatchValid_ = false",
+            reset,
+            "epoch reset must preserve the private-device batch release dependency",
+        )
+
     def test_source_only_reset_drops_stale_outputs_but_preserves_batch_release(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("void LsContext::enterSourceOnlyBypass()")
