@@ -3927,6 +3927,18 @@ void LsContext::advanceAdaptiveFlowTimingEpoch() {
 }
 
 void LsContext::resetAdaptiveSourceEpoch(bool resetScheduler) {
+    // Any source-timeline epoch change invalidates synthetic pixels produced
+    // against the previous cadence/history. Keep the private-device batch
+    // release alive until it retires so shared AHB reuse remains ordered.
+    if (this->deferredAdrenoBatchValid_) {
+        this->deferredAdrenoOutputEligible_ = false;
+        for (int& fd : this->deferredAdrenoOutputReadyFds_) {
+            if (fd >= 0)
+                ::close(fd);
+            fd = -1;
+        }
+    }
+
     if (resetScheduler)
         this->adaptiveScheduler_.reset();
     this->advanceAdaptiveFlowTimingEpoch();
