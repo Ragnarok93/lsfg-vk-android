@@ -328,15 +328,32 @@ bool loadConstructionQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
             next_vkGetDeviceProcAddr(device, "vkQueuePresentKHR"));
     }
 
-    if (construction.GetDeviceQueue == nullptr
-            && construction.GetDeviceQueue2 == nullptr) {
+    // A private Turnip device can expose the queue getter while still omitting
+    // vkQueueSubmit from the same GDPA table. Queue acquisition alone is not a
+    // usable dispatch: r21 proved that storing such a queue as submit=0 kills
+    // the backend immediately after volkLoadDevice. Fill each missing queue
+    // operation independently from the known-good presentation-device bridge.
+    if ((construction.GetDeviceQueue == nullptr
+            && construction.GetDeviceQueue2 == nullptr)
+            || construction.QueueSubmit == nullptr) {
         DeviceDispatch privateFallback{};
         if (loadKnownGoodPrivateQueueDispatch(device, &privateFallback)) {
-            construction.GetDeviceQueue = privateFallback.GetDeviceQueue;
-            construction.GetDeviceQueue2 = privateFallback.GetDeviceQueue2;
+            if (construction.GetDeviceProcAddr == nullptr)
+                construction.GetDeviceProcAddr = privateFallback.GetDeviceProcAddr;
+            if (construction.GetDeviceQueue == nullptr)
+                construction.GetDeviceQueue = privateFallback.GetDeviceQueue;
+            if (construction.GetDeviceQueue2 == nullptr)
+                construction.GetDeviceQueue2 = privateFallback.GetDeviceQueue2;
+            if (construction.QueueSubmit == nullptr)
+                construction.QueueSubmit = privateFallback.QueueSubmit;
+            if (construction.QueuePresentKHR == nullptr)
+                construction.QueuePresentKHR = privateFallback.QueuePresentKHR;
             std::cerr << "lsfg-vk: construction queue bootstrap"
                       << " device=" << device
-                      << " source=known-good-private-fallback\n";
+                      << " source=known-good-private-fallback"
+                      << " submit="
+                      << reinterpret_cast<void*>(construction.QueueSubmit)
+                      << "\n";
         }
     }
 
