@@ -101,6 +101,65 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             destructor.index("lsfgCtxId.reset()"),
         )
 
+    def test_present_wait_semaphore_lifetime_is_tied_to_swapchain_image_reacquire(self) -> None:
+        """Present wait semaphores must outlive WSI use, not merely a later queue submit fence."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("presentWaitRetirements_", header)
+        self.assertIn("releasePresentWaitRetirements", source)
+        self.assertIn("retainPresentWait", source)
+        self.assertIn("releasePresentWaitRetirements(presentIdx)", source)
+
+        acquire = source.index("Layer::ovkAcquireNextImageKHR")
+        release = source.index("releasePresentWaitRetirements(imageIdx)", acquire)
+        self.assertGreater(release, acquire)
+
+        finish_start = source.index("const auto finishSourcePresent")
+        finish_end = source.index("// Android path:", finish_start)
+        finish = source[finish_start:finish_end]
+        self.assertNotIn(
+            "submitPassCompletionFence(pass, queue)",
+            finish,
+            "A fence submitted after vkQueuePresentKHR cannot prove present-wait lifetime.",
+        )
+
+    def test_cross_frame_wait_semaphores_are_owned_by_the_consuming_pass(self) -> None:
+        """Producer pass reuse cannot destroy semaphores still queued as next-pass waits."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("crossFrameWaitRetentions", header)
+        self.assertIn(
+            "pass.crossFrameWaitRetentions.emplace_back(",
+            source,
+        )
+        recycle_start = source.index("bool LsContext::tryRecyclePass")
+        recycle_end = source.index("bool LsContext::submitPassCompletionFence", recycle_start)
+        recycle = source[recycle_start:recycle_end]
+        self.assertIn("pass.crossFrameWaitRetentions.clear()", recycle)
+
+    def test_busy_pass_does_not_advance_wrapper_temporal_parity(self) -> None:
+        """A source passthrough while the pass ring is busy must not offset AHB/framegen parity."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("if (!this->tryRecyclePass(pass))")
+        end = source.index("#ifdef __ANDROID__", start)
+        busy = source[start:end]
+
+        self.assertIn("resetAdaptiveSourceEpoch(true)", busy)
+        self.assertNotIn("++this->frameIdx", busy)
+
+    def test_adreno_standalone_reprime_preserves_two_input_parity(self) -> None:
+        """Standalone Adreno reset needs two source copies; zero-cycle recovery needs one more."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("kConservativeSourceReprimeFrames = 2", source)
+        self.assertIn(
+            "kConservativeSourceReprimeFrames - 1",
+            source,
+            "A true source-only cycle already contributed the first of the two parity copies.",
+        )
+
     def test_source_timeline_discontinuity_resets_all_adaptive_epoch_state(self) -> None:
         """Regression: source-only discontinuities cannot leave scheduler/capacity history armed."""
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
