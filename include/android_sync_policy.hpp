@@ -31,12 +31,11 @@ inline bool containsAsciiCaseInsensitive(
     return false;
 }
 
-/// Qualcomm/Adreno drivers use a protected source/history compatibility policy:
-/// zero-generation, reprime, and true source-only cycles do not cross into the
-/// private framegen device. Generated cycles may still use capability-gated
-/// SYNC_FD input/output dependencies so expensive framegen completion never
-/// blocks the application's source-present thread. This remains a driver-family
-/// policy, not a device-model allow/deny list.
+/// Qualcomm/Adreno drivers use the validated protected source/history policy:
+/// source handoff may use SYNC_FD, but generated completion remains the bounded
+/// host-visible wait on the single-queue topology proven by S20+/Turnip logs.
+/// Zero-generation, reprime, and true source-only cycles remain source-safe.
+/// This is a driver-family policy, not a device-model allow/deny list.
 ///
 /// Samsung/Xclipse, ARM/Mali, and unknown drivers retain their existing fully
 /// capability-driven asynchronous synchronization.
@@ -56,7 +55,7 @@ inline bool requiresConservativeCrossDeviceSync(
 
 inline const char* crossDeviceSyncPolicyName(bool conservative) noexcept {
     return conservative
-        ? "syncfd-generated-async-adreno"
+        ? "syncfd-input-host-completion-adreno"
         : "capability-async";
 }
 

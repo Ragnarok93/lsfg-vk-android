@@ -119,7 +119,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("!conservativeFractionalHistoryGap", handoff)
         self.assertIn("!conservativeTrueSourceOnlyCycle", handoff)
 
-    def test_adreno_untrained_deadline_predictor_admits_one_bootstrap_probe(self) -> None:
+    def test_adreno_untrained_predictor_uses_generic_one_frame_bootstrap(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         admission_start = source.index("// Active deadline admission")
         admission_end = source.index(
@@ -127,63 +127,34 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         )
         admission = source[admission_start:admission_end]
 
-        self.assertIn("adrenoDeadlineBootstrapProbe", admission)
-        self.assertIn("!this->deadlineAdmissionPredictor_.hasEstimate()", admission)
-        self.assertIn("std::min<std::size_t>(generatedFrameCount, 1)", admission)
-        self.assertIn("deadline_bootstrap_probe", source)
+        self.assertNotIn("adrenoDeadlineBootstrapProbe", admission)
+        self.assertIn("!plannedBatchDecision.valid && generatedFrameCount > 1", admission)
+        self.assertIn("generatedFrameCount = 1", admission)
 
-    def test_adreno_single_queue_polls_output_fds_before_game_queue_submission(self) -> None:
+
+    def test_adreno_single_queue_never_zero_time_polls_generated_outputs(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        completion_start = source.index(
-            "if (this->asyncFramegenCompletionEnabled_\n"
-            "            && framegenSync.gpuDependenciesExported)"
-        )
-        completion_end = source.index(
-            "// 3. Compatibility/error fallback only.", completion_start
-        )
-        completion = source[completion_start:completion_end]
+        present = source[source.index("VkResult LsContext::present"):]
+        self.assertNotIn("adrenoSingleQueueReadinessPoll", present)
+        self.assertNotIn("generated-readiness-drop", present)
+        self.assertNotIn("readyGeneratedFrameCount", present)
+        self.assertIn("waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)", present)
 
-        self.assertIn("adrenoSingleQueueReadinessPoll", completion)
-        self.assertIn("::poll(&outputPoll, 1, 0)", completion)
-        self.assertIn("readyGeneratedFrameCount", completion)
-        self.assertIn("generated-readiness-drop", completion)
-        self.assertIn("conservativePendingBatchCompletePollFd_", completion)
 
-        generated_start = source.index("// 4. Generated presentation is opportunistic.")
-        generated_end = source.index("// 5. Present the real game frame", generated_start)
-        generated = source[generated_start:generated_end]
-        self.assertIn("if (outputReadyWaitValid.at(i))", generated)
 
-    def test_adreno_batch_poll_only_treats_pollin_as_completion(self) -> None:
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("pollfd batchPoll")
-        end = source.index("conservativeBatchStillInFlight", start)
-        block = source[start:end]
 
-        self.assertIn("batchPoll.revents & POLLIN", block)
-        self.assertIn("POLLERR | POLLHUP | POLLNVAL", block)
-        self.assertNotIn("if (pollResult > 0) {\n                batchReady = true;", block)
-
-    def test_adreno_batch_poll_blocks_ahb_reuse_without_queue_wait(self) -> None:
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("bool conservativeBatchStillInFlight = false;")
-        end = source.index("const bool conservativePreCopySourceBypass", start)
-        poll_block = source[start:end]
-
-        self.assertIn("conservativePendingBatchCompletePollFd_", poll_block)
-        self.assertIn("::poll(&batchPoll, 1, 0)", poll_block)
-        self.assertIn("conservativePendingBatchCompleteValid_ = false", poll_block)
-        self.assertIn("conservativePendingBatchCompleteSemaphore_ = {}", poll_block)
-
-    def test_adreno_completion_timeout_does_not_force_swapchain_recreation(self) -> None:
+    def test_adreno_host_completion_timeout_uses_normal_recovery_not_history_loop(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("if (!framegenReady)")
         end = source.index("if (firstPresentDiagnostic)", start)
         timeout = source[start:end]
 
-        self.assertIn("adrenoSingleQueueReadinessPoll", timeout)
-        self.assertIn('"framegen-timeout-source-only"', timeout)
-        self.assertIn("conservativePendingBatchCompleteValid_ = true", timeout)
+        self.assertIn("adrenoHostCompletionFallback", timeout)
+        self.assertIn("conservativePendingBatchCompleteValid_ = false", timeout)
+        self.assertIn('"pre-copy-timeout"', timeout)
+        self.assertNotIn('"framegen-timeout-source-only"', timeout)
+        self.assertNotIn("sourceHistoryWarmupRemaining_", timeout)
+
 
     def test_adreno_adaptive_flow_budget_is_clamped_to_target_cadence(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -542,7 +513,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
     def test_runtime_policy_label_matches_split_adreno_topology(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
-        self.assertIn("syncfd-generated-async-adreno", policy)
+        self.assertIn("syncfd-input-host-completion-adreno", policy)
         self.assertIn("capability-async", policy)
 
     def test_xclipse_async_path_is_not_removed(self) -> None:
