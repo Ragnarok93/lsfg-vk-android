@@ -756,13 +756,22 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->conservativeCrossDeviceSync_ =
         AndroidSyncPolicy::requiresConservativeCrossDeviceSync(
             backendDiagnostics.driverId, backendDiagnostics.driverName);
+    // Source ownership and framegen completion are independent policies.
+    // Qualcomm/Adreno restores the known-good OPAQUE_FD source handoff for
+    // cycles that actually enter framegen, while generated completion remains
+    // on the bounded host wait. Xclipse and other validated drivers keep the
+    // newer capability-driven SYNC_FD path end-to-end.
     this->asyncAhbHandoffEnabled_ =
-        !this->conservativeCrossDeviceSync_
-        && gameGetSemaphoreFd != nullptr
-        && (syncFdHandoffSupported || opaqueFdHandoffSupported);
-    this->asyncAhbHandoffHandleType_ = syncFdHandoffSupported
-        ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
-        : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+        gameGetSemaphoreFd != nullptr
+        && (this->conservativeCrossDeviceSync_
+            ? opaqueFdHandoffSupported
+            : (syncFdHandoffSupported || opaqueFdHandoffSupported));
+    this->asyncAhbHandoffHandleType_ =
+        this->conservativeCrossDeviceSync_
+            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT
+            : (syncFdHandoffSupported
+                ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
+                : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
     this->asyncFramegenCompletionEnabled_ =
         !this->conservativeCrossDeviceSync_
         && syncFdHandoffSupported && gameImportSemaphoreFd != nullptr;
@@ -2334,10 +2343,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.preCopySemaphores.at(1).handle(),
     };
 
-    // Every enabled cycle submits either interpolation or zero-count history
-    // preprocessing. Prefer SYNC_FD for both so the source thread never needs a
-    // host wait in the normal path.
-    bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;
+    // Xclipse keeps the async handoff for every private-history/generation
+    // cycle. On conservative Adreno, use the known-good OPAQUE_FD handoff only
+    // when the cycle actually enters framegen; true source-only/warmup cycles
+    // retain the host-fence path and never export cross-device ownership.
+    bool useAsyncHandoff =
+        this->asyncAhbHandoffEnabled_
+        && (!this->conservativeCrossDeviceSync_
+            || (!conservativeSourceOnlyWarmup
+                && !conservativeTrueSourceOnlyCycle));
     bool asyncSubmissionIssued = false;
     bool asyncExportFailed = false;
     int framegenInputSemaphoreFd = -1;
@@ -2851,7 +2865,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->sourceTimeline_.syntheticDesiredTimeNs(
                 this->currentSourceTimeline_, syntheticFraction);
         const uint64_t syntheticAdmissionNowNs = monotonicNowNs();
-        if (syntheticDesiredTimeNs > 0
+        if (conf.adaptiveFramegen
+                && syntheticDesiredTimeNs > 0
                 && syntheticAdmissionNowNs >= syntheticDesiredTimeNs) {
             const double deliveryLatenessMs =
                 static_cast<double>(
@@ -2877,7 +2892,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
-        auto res = Layer::ovkAcquireNextImageKHR(info.device, this->swapchain, 0,
+        const uint64_t generatedAcquireTimeoutNs =
+            !conf.adaptiveFramegen && this->conservativeCrossDeviceSync_
+                ? runtimeWaitTimeoutNs()
+                : 0;
+        auto res = Layer::ovkAcquireNextImageKHR(
+            info.device, this->swapchain, generatedAcquireTimeoutNs,
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
         if (res == VK_NOT_READY || res == VK_TIMEOUT) {
             // Swapchain-image availability is downstream presentation

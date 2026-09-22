@@ -234,8 +234,9 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
         generated = android_present[generated_start:source_start]
 
-        self.assertIn("this->swapchain, 0,", generated)
+        self.assertIn("generatedAcquireTimeoutNs", generated)
         self.assertIn("syntheticAdmissionNowNs >= syntheticDesiredTimeNs", generated)
+        self.assertIn("if (conf.adaptiveFramegen", generated)
         self.assertIn("stage=generated-deadline-drop", generated)
         self.assertIn("res == VK_NOT_READY || res == VK_TIMEOUT", generated)
         self.assertIn(
@@ -243,7 +244,11 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
         self.assertIn("metrics.windowGeneratedLateDrops", generated)
         self.assertIn("metrics.totalGeneratedLateDrops", generated)
-        self.assertNotIn("runtimeWaitTimeoutNs()", generated)
+        self.assertIn(
+            "!conf.adaptiveFramegen && this->conservativeCrossDeviceSync_",
+            generated,
+        )
+        self.assertIn("runtimeWaitTimeoutNs()", generated)
 
         source_tail = android_present[source_start:]
         self.assertIn(
@@ -307,10 +312,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         desktop_start = source.index("#else", android_start)
         android_present = source[android_start:desktop_start]
 
-        self.assertIn(
-            "bool useAsyncHandoff = this->asyncAhbHandoffEnabled_;",
-            android_present,
-        )
+        self.assertIn("bool useAsyncHandoff =", android_present)
+        self.assertIn("this->asyncAhbHandoffEnabled_", android_present)
+        self.assertIn("!conservativeSourceOnlyWarmup", android_present)
+        self.assertIn("!conservativeTrueSourceOnlyCycle", android_present)
         history_start = android_present.index("if (historyOnly)")
         generation_start = android_present.index(
             "// 2. Tell framegen to generate intermediary frames.", history_start
