@@ -108,6 +108,36 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
 
 
+    def test_adreno_pass_ring_pressure_does_not_restart_reprime_epoch(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("if (!this->tryRecyclePass(pass))")
+        end = source.index("#ifdef __ANDROID__", start + 1)
+        # Include the Android-specific branch immediately following the
+        # successful passthrough present.
+        end = source.index("#endif", end) + len("#endif")
+        pressure = source[start:end]
+
+        self.assertIn("this->conservativeCrossDeviceSync_", pressure)
+        self.assertIn(
+            "kConservativeSourceReprimeFrames - 1",
+            pressure,
+            "Adreno pass pressure should request only the one copy needed to reprime",
+        )
+        self.assertIn("previousSourceCopySignalValid_ = false", pressure)
+        self.assertIn("lastDispatchedGeneratedFrameCount_ = 0", pressure)
+        self.assertIn(
+            "else {\n                this->resetAdaptiveSourceEpoch(true);",
+            pressure,
+            "non-Adreno/Xclipse behavior must keep the existing epoch reset",
+        )
+
+        adreno_branch = pressure.split(
+            "if (this->conservativeCrossDeviceSync_)", 1
+        )[1].split("} else {", 1)[0]
+        self.assertNotIn("resetAdaptiveSourceEpoch", adreno_branch)
+        self.assertNotIn("sourceTimeline_.reset", adreno_branch)
+        self.assertNotIn("adaptiveScheduler_.reset", adreno_branch)
+
     def test_adreno_host_completion_timeout_uses_normal_recovery_not_history_loop(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("if (!framegenReady)")
