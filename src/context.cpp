@@ -775,41 +775,30 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->conservativeCrossDeviceSync_ =
         AndroidSyncPolicy::requiresConservativeCrossDeviceSync(
             backendDiagnostics.driverId, backendDiagnostics.driverName);
-    if (this->conservativeCrossDeviceSync_
-            && info.adrenoSyntheticQueueAvailable
-            && info.syntheticQueue != VK_NULL_HANDLE) {
-        this->syntheticQueue_ = info.syntheticQueue;
-    }
-    // Source ownership and framegen completion are independent policies.
-    // Qualcomm/Adreno keeps the protected source/history topology below:
-    // true source-only, reprime, and fractional zero-generation cycles never
-    // cross into framegen. Generated cycles, however, can safely use the same
-    // one-shot SYNC_FD output-ready + batch-complete dependency chain as other
-    // capable drivers. This removes the source-thread completion wait while
-    // preserving the r11 zero-count/lifetime repair. Xclipse remains on its
-    // existing capability-driven SYNC_FD path unchanged.
+    // Qualcomm/Adreno is a hard compatibility boundary. The newest
+    // device-proven S20+/Turnip topology completes the source upload on the
+    // game device before entering the private framegen device, performs a
+    // bounded private-device completion wait, then presents generated frames
+    // followed by the real source in the same intercepted present call.
+    //
+    // Do not route Adreno through SYNC_FD source input, asynchronous generated
+    // completion, deferred source presentation, or synthetic-queue experiments.
+    // Xclipse/Mali/generic drivers keep their current capability-driven paths.
+    this->syntheticQueue_ = VK_NULL_HANDLE;
     this->asyncAhbHandoffEnabled_ =
-        gameGetSemaphoreFd != nullptr
-        && (this->conservativeCrossDeviceSync_
-            ? syncFdHandoffSupported
-            : (syncFdHandoffSupported || opaqueFdHandoffSupported));
+        !this->conservativeCrossDeviceSync_
+        && gameGetSemaphoreFd != nullptr
+        && (syncFdHandoffSupported || opaqueFdHandoffSupported);
     this->asyncAhbHandoffHandleType_ =
         this->conservativeCrossDeviceSync_
-            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
+            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT
             : (syncFdHandoffSupported
                 ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
                 : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
-    // Preserve the device-proven completion topology. Xclipse/Mali and any
-    // Adreno path with a genuinely independent synthetic queue may consume
-    // exported completion SYNC_FDs asynchronously. Single-queue Qualcomm/Turnip
-    // must complete private-device framegen before the game device touches a
-    // generated AHB; deferring those output dependencies across source
-    // boundaries repeatedly destroyed the guest Vulkan process on Adreno 650.
     this->asyncFramegenCompletionEnabled_ =
-        syncFdHandoffSupported
-        && gameImportSemaphoreFd != nullptr
-        && (!this->conservativeCrossDeviceSync_
-            || this->syntheticQueue_ != VK_NULL_HANDLE);
+        !this->conservativeCrossDeviceSync_
+        && syncFdHandoffSupported
+        && gameImportSemaphoreFd != nullptr;
     this->deferredAdrenoCompletionEnabled_ = false;
 
     // The known-good Qualcomm/Adreno path can generate immediately because the
@@ -2930,16 +2919,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.preCopySemaphores.at(1).handle(),
     };
 
-    // Xclipse keeps the async handoff for every private-history/generation
-    // cycle. Conservative Adreno exports one-shot SYNC_FD only for cycles that
-    // actually generate. Reprime and fractional zero-generation cycles queue a
-    // game-device copy for source-pair parity without crossing into framegen.
+    // Xclipse/generic capability paths may hand source readiness to framegen
+    // with an external semaphore. Adreno never does: generated cycles complete
+    // this game-device source copy through the proven host-fence boundary before
+    // framegen dispatch. Reprime/fractional source-only cycles still queue their
+    // source-pair maintenance copy without entering framegen.
     bool useAsyncHandoff =
-        this->asyncAhbHandoffEnabled_
-        && (!this->conservativeCrossDeviceSync_
-            || (!conservativeSourceOnlyWarmup
-                && !conservativeFractionalHistoryGap
-                && !conservativeTrueSourceOnlyCycle));
+        !this->conservativeCrossDeviceSync_
+        && this->asyncAhbHandoffEnabled_;
     bool asyncSubmissionIssued = false;
     bool asyncExportFailed = false;
     int framegenInputSemaphoreFd = -1;
