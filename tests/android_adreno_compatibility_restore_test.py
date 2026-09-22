@@ -78,14 +78,13 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             "? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT",
             selection,
         )
+        self.assertIn("adrenoSingleQueueReadinessPoll", selection)
         self.assertIn(
-            "this->asyncFramegenCompletionEnabled_ =\n"
-            "        syncFdHandoffSupported\n"
-            "        && gameImportSemaphoreFd != nullptr\n"
-            "        && (!this->conservativeCrossDeviceSync_\n"
-            "            || this->syntheticQueue_ != VK_NULL_HANDLE)",
+            "this->asyncFramegenCompletionEnabled_ =",
             selection,
         )
+        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("this->syntheticQueue_ == VK_NULL_HANDLE", selection)
         self.assertIn(
             "this->conservativeCrossDeviceSync_\n"
             "            && info.adrenoSyntheticQueueAvailable",
@@ -103,6 +102,73 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("!conservativeSourceOnlyWarmup", handoff)
         self.assertIn("!conservativeFractionalHistoryGap", handoff)
         self.assertIn("!conservativeTrueSourceOnlyCycle", handoff)
+
+    def test_adreno_untrained_deadline_predictor_admits_one_bootstrap_probe(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        admission_start = source.index("// Active deadline admission")
+        admission_end = source.index(
+            "const auto& outputCadenceForPresentation", admission_start
+        )
+        admission = source[admission_start:admission_end]
+
+        self.assertIn("adrenoDeadlineBootstrapProbe", admission)
+        self.assertIn("!this->deadlineAdmissionPredictor_.hasEstimate()", admission)
+        self.assertIn("std::min<std::size_t>(generatedFrameCount, 1)", admission)
+        self.assertIn("deadline_bootstrap_probe", source)
+
+    def test_adreno_single_queue_polls_output_fds_before_game_queue_submission(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        completion_start = source.index(
+            "if (this->asyncFramegenCompletionEnabled_\n"
+            "            && framegenSync.gpuDependenciesExported)"
+        )
+        completion_end = source.index(
+            "// 3. Compatibility/error fallback only.", completion_start
+        )
+        completion = source[completion_start:completion_end]
+
+        self.assertIn("adrenoSingleQueueReadinessPoll", completion)
+        self.assertIn("::poll(&outputPoll, 1, 0)", completion)
+        self.assertIn("readyGeneratedFrameCount", completion)
+        self.assertIn("generated-readiness-drop", completion)
+        self.assertIn("conservativePendingBatchCompletePollFd_", completion)
+
+        generated_start = source.index("// 4. Generated presentation is opportunistic.")
+        generated_end = source.index("// 5. Present the real game frame", generated_start)
+        generated = source[generated_start:generated_end]
+        self.assertIn("if (outputReadyWaitValid.at(i))", generated)
+
+    def test_adreno_batch_poll_blocks_ahb_reuse_without_queue_wait(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("bool conservativeBatchStillInFlight = false;")
+        end = source.index("const bool conservativePreCopySourceBypass", start)
+        poll_block = source[start:end]
+
+        self.assertIn("conservativePendingBatchCompletePollFd_", poll_block)
+        self.assertIn("::poll(&batchPoll, 1, 0)", poll_block)
+        self.assertIn("conservativePendingBatchCompleteValid_ = false", poll_block)
+        self.assertIn("conservativePendingBatchCompleteSemaphore_ = {}", poll_block)
+
+    def test_adreno_completion_timeout_does_not_force_swapchain_recreation(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("if (!framegenReady)")
+        end = source.index("if (firstPresentDiagnostic)", start)
+        timeout = source[start:end]
+
+        self.assertIn("adrenoSingleQueueReadinessPoll", timeout)
+        self.assertIn('"framegen-timeout-source-only"', timeout)
+        self.assertIn("conservativePendingBatchCompleteValid_ = true", timeout)
+
+    def test_adreno_adaptive_flow_budget_is_clamped_to_target_cadence(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("const double adaptiveFlowBatchBudgetMs")
+        end = source.index("const auto nextAdaptiveFlowBatch", start)
+        budget = source[start:end]
+
+        self.assertIn("protectedAdrenoTargetBudgetMs", budget)
+        self.assertIn("this->conservativeCrossDeviceSync_", budget)
+        self.assertIn("conf.fpsLimit > 0", budget)
+        self.assertIn("std::min", budget)
 
     def test_fixed_generated_frames_are_not_dropped_by_adaptive_deadline_policy(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
