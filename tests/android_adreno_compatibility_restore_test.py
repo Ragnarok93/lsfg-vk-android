@@ -470,6 +470,42 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             post,
         )
 
+    def test_adreno_synthetic_queue_never_steals_app_owned_queue(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        plan_start = hooks.index("AdrenoSyntheticQueuePlan inspectAdrenoSyntheticQueue")
+        plan_end = hooks.index("bool augmentAdrenoSyntheticQueue", plan_start)
+        plan = hooks[plan_start:plan_end]
+        self.assertIn("uint32_t queueIndex", hooks)
+        self.assertIn("family.queueCount > queueInfo.queueCount", plan)
+        self.assertIn("plan.queueIndex = queueInfo.queueCount", plan)
+        self.assertNotIn(
+            "family.queueCount >= 2 && queueInfo.queueCount >= 1",
+            plan,
+        )
+
+        augment_start = hooks.index("bool augmentAdrenoSyntheticQueue")
+        augment_end = hooks.index("bool supportsFdSemaphore", augment_start)
+        augment = hooks[augment_start:augment_end]
+        self.assertIn("kAdrenoSyntheticQueuePriority", augment)
+        self.assertIn("priorities.push_back", augment)
+        self.assertIn("queueInfo.queueCount = plan.queueIndex + 1", augment)
+
+        post = hooks[hooks.index("VkResult myvkCreateDevicePost"):]
+        self.assertIn("plan.queueIndex, &syntheticQueue", post)
+        self.assertNotIn("plan.familyIndex, 1, &syntheticQueue", post)
+
+    def test_adreno_synthetic_queue_detection_uses_runtime_driver_identity(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        plan_start = hooks.index("AdrenoSyntheticQueuePlan inspectAdrenoSyntheticQueue")
+        plan_end = hooks.index("bool augmentAdrenoSyntheticQueue", plan_start)
+        plan = hooks[plan_start:plan_end]
+
+        self.assertIn("VkPhysicalDeviceDriverProperties", plan)
+        self.assertIn("driverProperties.driverID", plan)
+        self.assertIn("driverProperties.driverName", plan)
+        self.assertIn("requiresConservativeCrossDeviceSync", plan)
+
     def test_adreno_generated_work_uses_dedicated_same_family_queue_when_available(self) -> None:
         hooks_h = (ROOT / "include/hooks.hpp").read_text(encoding="utf-8")
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
