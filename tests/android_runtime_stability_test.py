@@ -272,6 +272,30 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             android_present,
         )
 
+    def test_adreno_async_completion_enforces_post_dispatch_deadline(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        generated_start = source.index("// 4. Generated presentation is opportunistic.")
+        source_start = source.index("// 5. Present the real game frame", generated_start)
+        generated = source[generated_start:source_start]
+
+        self.assertIn(
+            "!this->conservativeCrossDeviceSync_"
+            " || this->asyncFramegenCompletionEnabled_",
+            generated,
+        )
+
+    def test_adreno_game_copy_command_buffers_are_reused(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        pool_header = (ROOT / "include/mini/commandpool.hpp").read_text(encoding="utf-8")
+        pool_source = (ROOT / "src/mini/commandpool.cpp").read_text(encoding="utf-8")
+        command_header = (ROOT / "include/mini/commandbuffer.hpp").read_text(encoding="utf-8")
+
+        self.assertIn("bool enableIndividualReset = false", pool_header)
+        self.assertIn("VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT", pool_source)
+        self.assertIn("void reset();", command_header)
+        self.assertIn("pass.preCopyBuf.reset()", source)
+        self.assertIn("postCopyBuf.reset()", source)
+
     def test_first_source_initializes_both_ahb_inputs(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present = source[source.index("VkResult LsContext::present"):]
