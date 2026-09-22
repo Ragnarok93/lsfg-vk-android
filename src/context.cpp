@@ -2868,7 +2868,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->sourceTimeline_.syntheticDesiredTimeNs(
                 this->currentSourceTimeline_, syntheticFraction);
         const uint64_t syntheticAdmissionNowNs = monotonicNowNs();
-        if (conf.adaptiveFramegen
+        // Async-capable drivers can still reject a synthetic frame after
+        // dispatch without stalling the protected source timeline. On the
+        // conservative Adreno topology, pre-admission is authoritative: once
+        // host completion has already been paid, dropping the completed frame
+        // only wastes work and cannot recover that source time.
+        const bool enforcePostDispatchSyntheticDeadline =
+            conf.adaptiveFramegen && !this->conservativeCrossDeviceSync_;
+        if (enforcePostDispatchSyntheticDeadline
                 && syntheticDesiredTimeNs > 0
                 && syntheticAdmissionNowNs >= syntheticDesiredTimeNs) {
             const double deliveryLatenessMs =
