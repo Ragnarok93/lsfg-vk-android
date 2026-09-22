@@ -116,7 +116,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("this->syntheticQueue_ = VK_NULL_HANDLE;", source)
 
         handoff_start = source.index("// Xclipse/generic capability paths may hand source readiness")
-        handoff_end = source.index("bool asyncSubmissionIssued", handoff_start)
+        handoff_end = source.index("if (useAsyncHandoff)", handoff_start)
         handoff = source[handoff_start:handoff_end]
         self.assertIn(
             "bool useAsyncHandoff =\n"
