@@ -345,10 +345,12 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "deadlineAdmissionPredictor_.observeDeliveryMiss",
             wsi_drop,
         )
+        immediate_guard = source.index("generatedDeadlineObservationEligible")
         observe_start = source.index(
-            "generatedPresentationCapacityTracker_.observe("
+            "generatedPresentationCapacityTracker_.observe(",
+            immediate_guard,
         )
-        observe_prefix = source[max(0, observe_start - 180):observe_start]
+        observe_prefix = source[max(0, observe_start - 220):observe_start]
         self.assertIn("generatedDeadlineObservationEligible", observe_prefix)
 
         self.assertIn("generatedAcquireTimeoutNs", source)
