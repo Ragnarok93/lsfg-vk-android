@@ -96,15 +96,26 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         )
         handoff_decision = android_present[handoff_start:handoff_end]
         self.assertIn("this->asyncAhbHandoffEnabled_", handoff_decision)
-        self.assertIn("!conservativeSourceOnlyWarmup", handoff_decision)
-        self.assertIn("!conservativeTrueSourceOnlyCycle", handoff_decision)
+        self.assertIn(
+            "!this->conservativeCrossDeviceSync_",
+            handoff_decision,
+            "Qualcomm/Adreno must not export source readiness across VkDevices",
+        )
         self.assertNotIn("warmupSourceHistory", handoff_decision)
         self.assertIn(
             "if (!useAsyncHandoff && !asyncSubmissionIssued)",
             android_present,
-            "The bounded host-fence handoff remains only as compatibility/error fallback",
+            "The bounded host-fence handoff must remain available for the Adreno compatibility path",
         )
-        self.assertIn("submitAndWaitForAhbHandoff", android_present)
+        fallback_start = android_present.index(
+            "if (!useAsyncHandoff && !asyncSubmissionIssued)", handoff_start
+        )
+        fallback_end = android_present.index(
+            "if (consumeDeferredAdrenoBatchComplete)", fallback_start
+        )
+        fallback = android_present[fallback_start:fallback_end]
+        self.assertIn("conservativeCopyOnlyHistory", fallback)
+        self.assertIn("submitAndWaitForAhbHandoff", fallback)
 
     def test_generated_ahb_uses_external_ownership_copy_path(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
