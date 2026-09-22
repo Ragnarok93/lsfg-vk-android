@@ -799,20 +799,18 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             : (syncFdHandoffSupported
                 ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
                 : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
-    // Non-conservative drivers (Xclipse/Mali/etc.) retain the existing
-    // immediate capability-async path byte-for-byte in behavior. Single-queue
-    // Adreno instead exports completion SYNC_FDs but defers generated delivery
-    // until a later source boundary proves those FDs ready; this prevents an
-    // unsignaled synthetic wait from entering the primary game queue.
+    // Preserve the device-proven completion topology. Xclipse/Mali and any
+    // Adreno path with a genuinely independent synthetic queue may consume
+    // exported completion SYNC_FDs asynchronously. Single-queue Qualcomm/Turnip
+    // must complete private-device framegen before the game device touches a
+    // generated AHB; deferring those output dependencies across source
+    // boundaries repeatedly destroyed the guest Vulkan process on Adreno 650.
     this->asyncFramegenCompletionEnabled_ =
-        !this->conservativeCrossDeviceSync_
-        && syncFdHandoffSupported
-        && gameImportSemaphoreFd != nullptr;
-    this->deferredAdrenoCompletionEnabled_ =
-        this->conservativeCrossDeviceSync_
-        && this->syntheticQueue_ == VK_NULL_HANDLE
-        && syncFdHandoffSupported
-        && gameImportSemaphoreFd != nullptr;
+        syncFdHandoffSupported
+        && gameImportSemaphoreFd != nullptr
+        && (!this->conservativeCrossDeviceSync_
+            || this->syntheticQueue_ != VK_NULL_HANDLE);
+    this->deferredAdrenoCompletionEnabled_ = false;
 
     // The known-good Qualcomm/Adreno path can generate immediately because the
     // first source upload initializes both AHB inputs. Do not inherit the newer

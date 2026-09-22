@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
-    def test_single_queue_adreno_defers_generated_delivery_to_next_source_boundary(self) -> None:
+    def test_single_queue_adreno_keeps_deferred_delivery_quarantined(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
@@ -20,31 +20,18 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         ):
             self.assertIn(token, header)
 
-        self.assertIn(
-            "this->deferredAdrenoCompletionEnabled_ =",
-            source,
-        )
-        self.assertIn(
-            "this->conservativeCrossDeviceSync_",
-            source,
-        )
-        self.assertIn(
-            "this->syntheticQueue_ == VK_NULL_HANDLE",
-            source,
-        )
-        self.assertIn(
-            "presentContextWithCountExportSyncFd",
-            source,
-        )
-        self.assertIn(
-            "runtime stage=adreno-deferred-batch-queued",
-            source,
-        )
+        selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
+        selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
+        selection = source[selection_start:selection_end]
+        self.assertIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
+        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
+        self.assertIn("presentContextWithCountExportSyncFd", source)
+        self.assertIn("runtime stage=adreno-deferred-batch-queued", source)
         queued_log = source.index("runtime stage=adreno-deferred-batch-queued")
         self.assertIn(
             "if (firstPresentDiagnostic)",
             source[max(0, queued_log - 300):queued_log],
-            "deferred Adreno hot path must not synchronously log every batch",
+            "dormant deferred diagnostics must remain rate-limited if this path is revisited",
         )
 
     def test_deferred_batch_never_places_unsignaled_wait_on_primary_queue(self) -> None:

@@ -89,12 +89,10 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
         selection = source[selection_start:selection_end]
 
-        self.assertIn(
-            "this->asyncFramegenCompletionEnabled_ =\n"
-            "        !this->conservativeCrossDeviceSync_",
-            selection,
-            "Xclipse/non-conservative drivers must keep their immediate async path",
-        )
+        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
+        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
+        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
         self.assertIn(
             "this->deferredAdrenoCompletionEnabled_ = false;",
             selection,
@@ -538,7 +536,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
     def test_runtime_policy_label_matches_split_adreno_topology(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
-        self.assertIn("syncfd-input-deferred-completion-adreno", policy)
+        self.assertIn("syncfd-input-host-completion-adreno", policy)
         self.assertIn("capability-async", policy)
 
     def test_xclipse_async_path_is_not_removed(self) -> None:
