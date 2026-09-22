@@ -799,11 +799,14 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             : (syncFdHandoffSupported
                 ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
                 : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+    const bool adrenoSingleQueueReadinessPoll =
+        this->conservativeCrossDeviceSync_
+        && this->syntheticQueue_ == VK_NULL_HANDLE
+        && syncFdHandoffSupported;
     this->asyncFramegenCompletionEnabled_ =
         syncFdHandoffSupported
-        && gameImportSemaphoreFd != nullptr
-        && (!this->conservativeCrossDeviceSync_
-            || this->syntheticQueue_ != VK_NULL_HANDLE);
+        && (adrenoSingleQueueReadinessPoll
+            || gameImportSemaphoreFd != nullptr);
 
     // The known-good Qualcomm/Adreno path can generate immediately because the
     // first source upload initializes both AHB inputs. Do not inherit the newer
@@ -1079,6 +1082,10 @@ bool LsContext::submitPassCompletionFence(RenderPassInfo& pass, VkQueue queue) {
 VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
     const auto conf = Config::snapshot();
+    const bool adrenoSingleQueueReadinessPoll =
+        this->conservativeCrossDeviceSync_
+        && this->syntheticQueue_ == VK_NULL_HANDLE
+        && this->asyncFramegenCompletionEnabled_;
     this->releasePresentWaitRetirements(presentIdx);
     auto& pass = this->passInfos.at(this->frameIdx % 8);
     if (!this->tryRecyclePass(pass)) {
@@ -1253,12 +1260,26 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // distributed synthetic count whose prefixes can meet their own slots.
     // A rejected opportunity is dropped, never accumulated as catch-up debt.
     this->deadlineBatchDecision_ = {};
+    const bool adrenoDeadlineBootstrapProbe =
+        adrenoSingleQueueReadinessPoll
+        && conf.adaptiveFramegen
+        && generatedFrameCount > 0
+        && !this->deadlineAdmissionPredictor_.hasEstimate();
     if (conf.adaptiveFramegen
             && !sourceHistoryWarmupActive
             && generatedFrameCount > 0
             && this->currentSourceTimeline_.valid) {
         const uint64_t admissionNowNs = monotonicNowNs();
-        if (admissionNowNs > 0) {
+        if (adrenoDeadlineBootstrapProbe) {
+            if (generatedFrameCount > 1) {
+                const size_t rejectedGeneratedFrameCount =
+                    generatedFrameCount - 1;
+                metrics.windowAdmissionRejects += rejectedGeneratedFrameCount;
+                metrics.totalAdmissionRejects += rejectedGeneratedFrameCount;
+            }
+            generatedFrameCount =
+                std::min<std::size_t>(generatedFrameCount, 1);
+        } else if (admissionNowNs > 0) {
             if (this->currentSourceTimeline_.sourceDesiredTimeNs <= admissionNowNs) {
                 metrics.windowGeneratedLateDrops += generatedFrameCount;
                 metrics.totalGeneratedLateDrops += generatedFrameCount;
@@ -1413,7 +1434,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // WSI capacity is a separate downstream constraint from GPU generation
     // capacity. Apply its provisional cap before expensive framegen dispatch;
     // a suppressed slot is consumed and never repaid. Fixed mode is untouched.
-    if (conf.adaptiveFramegen && generatedFrameCount > 0) {
+    if (conf.adaptiveFramegen && generatedFrameCount > 0
+            && !adrenoDeadlineBootstrapProbe) {
         const size_t presentationCappedGeneratedFrameCount =
             this->generatedPresentationCapacityTracker_.limit(
                 generatedFrameCount, presentationCapacityContext);
@@ -1445,14 +1467,32 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->deadlineBatchDecision_ = finalBatchDecision;
     }
     const double adaptiveFlowBatchBudgetMs = [&]() {
+        double budgetMs = 0.0;
         if (conf.adaptiveFramegen
                 && generatedFrameCount > 0
                 && this->deadlineBatchDecision_.valid
                 && this->deadlineBatchDecision_.effectiveUsableBudgetMs > 0.0) {
-            return this->deadlineBatchDecision_.effectiveUsableBudgetMs;
+            budgetMs = this->deadlineBatchDecision_.effectiveUsableBudgetMs;
+        } else {
+            budgetMs = adaptiveFlowFrameBudgetMs(
+                conf, sourceInterval, generatedFrameCount);
         }
-        return adaptiveFlowFrameBudgetMs(
-            conf, sourceInterval, generatedFrameCount);
+
+        const double protectedAdrenoTargetBudgetMs =
+            this->conservativeCrossDeviceSync_
+            && conf.adaptiveFramegen
+            && conf.fpsLimit > 0
+            && generatedFrameCount > 0
+                ? 1000.0
+                    * static_cast<double>(generatedFrameCount + 1)
+                    / static_cast<double>(conf.fpsLimit)
+                : 0.0;
+        if (protectedAdrenoTargetBudgetMs > 0.0) {
+            budgetMs = budgetMs > 0.0
+                ? std::min(budgetMs, protectedAdrenoTargetBudgetMs)
+                : protectedAdrenoTargetBudgetMs;
+        }
+        return budgetMs;
     }();
     const auto nextAdaptiveFlowBatch = [&]() {
         ++this->adaptiveFlowNextBatchId_;
@@ -2085,6 +2125,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << plannedGeneratedFrameCount
                       << " deadline_admitted_generated="
                       << generatedFrameCount
+                      << " deadline_bootstrap_probe="
+                      << (adrenoDeadlineBootstrapProbe ? 1 : 0)
                       << " interpolation_denominator="
                       << interpolationGenerationCount
                       << " deadline_pred_mipmaps_ms="
@@ -2387,6 +2429,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             batchReady = conf.performance
                 ? LSFG_3_1P::waitContext(*this->lsfgCtxId, 0)
                 : LSFG_3_1::waitContext(*this->lsfgCtxId, 0);
+        }
+        if (batchReady) {
+            this->conservativePendingBatchCompleteValid_ = false;
+            this->conservativePendingBatchCompleteSemaphore_ = {};
         }
         conservativeBatchStillInFlight = !batchReady;
     }
@@ -2985,6 +3031,62 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (this->asyncFramegenCompletionEnabled_
             && framegenSync.gpuDependenciesExported) {
         bool importFailed = framegenSync.outputReadyFds.size() != generatedFrameCount;
+        if (adrenoSingleQueueReadinessPoll && !importFailed) {
+            size_t readyGeneratedFrameCount = 0;
+            bool readyPrefix = true;
+            for (size_t i = 0; i < generatedFrameCount; ++i) {
+                int fd = framegenSync.outputReadyFds.at(i);
+                bool outputReady = fd < 0;
+                if (fd >= 0) {
+                    pollfd outputPoll{
+                        .fd = fd,
+                        .events = POLLIN,
+                        .revents = 0,
+                    };
+                    const int pollResult = ::poll(&outputPoll, 1, 0);
+                    outputReady = pollResult > 0
+                        && (outputPoll.revents & POLLIN) != 0;
+                    ::close(fd);
+                    framegenSync.outputReadyFds.at(i) = -1;
+                }
+                if (readyPrefix && outputReady) {
+                    ++readyGeneratedFrameCount;
+                } else {
+                    readyPrefix = false;
+                }
+            }
+
+            if (framegenSync.batchCompleteFd >= 0) {
+                if (this->conservativePendingBatchCompletePollFd_ >= 0)
+                    ::close(this->conservativePendingBatchCompletePollFd_);
+                this->conservativePendingBatchCompletePollFd_ =
+                    framegenSync.batchCompleteFd;
+                framegenSync.batchCompleteFd = -1;
+                this->conservativePendingBatchCompleteSemaphore_ = {};
+                this->conservativePendingBatchCompleteValid_ = true;
+            } else {
+                this->conservativePendingBatchCompleteValid_ = false;
+                this->conservativePendingBatchCompleteSemaphore_ = {};
+            }
+
+            if (readyGeneratedFrameCount < generatedFrameCount) {
+                const size_t droppedGeneratedFrames =
+                    generatedFrameCount - readyGeneratedFrameCount;
+                metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
+                metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
+                metrics.windowGeneratedDeadlineDrops += droppedGeneratedFrames;
+                metrics.totalGeneratedDeadlineDrops += droppedGeneratedFrames;
+                if (firstPresentDiagnostic) {
+                    std::cerr << "lsfg-vk: runtime stage=generated-readiness-drop"
+                              << " planned=" << generatedFrameCount
+                              << " ready=" << readyGeneratedFrameCount
+                              << " dropped=" << droppedGeneratedFrames
+                              << "\n";
+                }
+                generatedFrameCount = readyGeneratedFrameCount;
+            }
+            requireHostCompletionWait = false;
+        } else {
         try {
             if (!importFailed) {
                 for (size_t i = 0; i < generatedFrameCount; ++i) {
@@ -3047,6 +3149,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->asyncFramegenCompletionEnabled_ = false;
             requireHostCompletionWait = true;
         }
+        }
     } else if (this->asyncFramegenCompletionEnabled_
             && framegenSync.hostWaitFallback) {
         requireHostCompletionWait = false;
@@ -3092,6 +3195,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.totalSourcePresentFailures++;
             throw LSFG::vulkan_error(timeoutPresentResult,
                 "Failed to present source frame after framegen timeout");
+        }
+        if (adrenoSingleQueueReadinessPoll) {
+            if (this->conservativePendingBatchCompletePollFd_ >= 0) {
+                ::close(this->conservativePendingBatchCompletePollFd_);
+                this->conservativePendingBatchCompletePollFd_ = -1;
+            }
+            this->conservativePendingBatchCompleteSemaphore_ = {};
+            this->conservativePendingBatchCompleteValid_ = true;
+            this->sourceHistoryWarmupRemaining_ =
+                kConservativeSourceReprimeFrames - 1;
+            this->requiresSourceHistoryWarmup_ = true;
+            return finishSourcePresent(
+                timeoutPresentResult, "framegen-timeout-source-only");
         }
         return finishSourcePresent(VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-timeout");
     }
