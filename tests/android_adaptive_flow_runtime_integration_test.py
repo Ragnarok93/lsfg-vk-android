@@ -310,7 +310,12 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
     def test_rolling_output_tracker_updates_per_completed_source_cycle(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn("lsfgOutputCadenceTracker_.observe", source)
-        self.assertIn("sourceInterval, 1, this->lastGeneratedFrameCount_", source)
+        self.assertIn("cadenceGeneratedFrames", source)
+        self.assertIn("deferredDeliveredGeneratedFrameCount", source)
+        self.assertIn(
+            "sourceInterval, 1, cadenceGeneratedFrames",
+            source,
+        )
         self.assertIn("std::chrono::milliseconds(250), 0, 0", source)
 
     def test_drop_metrics_are_true_per_window_counters(self) -> None:
