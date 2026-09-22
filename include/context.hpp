@@ -468,6 +468,14 @@ private:
         // tracked separately by swapchain-image reacquisition.
         std::shared_ptr<VkFence> completionFence;
         bool completionFenceSubmitted{false};
+
+#ifdef __ANDROID__
+        // Single-queue Adreno deferred output must retire on the real post-copy
+        // submissions that consume output-ready dependencies. An empty submit
+        // after vkQueuePresentKHR is not a valid lifetime anchor for this path.
+        std::vector<std::shared_ptr<VkFence>> postCopyCompletionFences;
+        std::vector<bool> postCopyCompletionFenceSubmitted;
+#endif
         bool completionFenceFailed{false};
     }; // data for a single render pass
 
