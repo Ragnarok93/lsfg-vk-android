@@ -1120,6 +1120,28 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     this->releasePresentWaitRetirements(presentIdx);
 
 #ifdef __ANDROID__
+    const auto deferredBoundaryNow = RuntimeMetrics::Clock::now();
+    const bool deferredAdrenoBoundaryDiscontinuity =
+        this->deferredAdrenoBatchValid_
+        && this->runtimeMetrics.hasLastSourcePresent
+        && std::chrono::duration<double, std::milli>(
+            deferredBoundaryNow - this->runtimeMetrics.lastSourcePresent).count()
+            >= 250.0;
+    const bool deferredAdrenoConfigBoundary =
+        this->deferredAdrenoBatchValid_
+        && this->runtimeConfigSignatureValid_
+        && this->runtimeConfigSignature_
+            != runtimeDiagnosticConfigSignature(conf);
+    if ((deferredAdrenoBoundaryDiscontinuity || deferredAdrenoConfigBoundary)
+            && this->deferredAdrenoOutputEligible_) {
+        this->deferredAdrenoOutputEligible_ = false;
+        for (int& fd : this->deferredAdrenoOutputReadyFds_) {
+            if (fd >= 0)
+                ::close(fd);
+            fd = -1;
+        }
+    }
+
     if (this->deferredAdrenoBatchValid_) {
         auto& deferredPass =
             this->passInfos.at(this->deferredAdrenoPassIndex_ % this->passInfos.size());
@@ -3949,6 +3971,18 @@ void LsContext::resetAdaptiveSourceEpoch(bool resetScheduler) {
 }
 
 void LsContext::enterSourceOnlyBypass() {
+    // Explicit Off/source-only transitions invalidate deferred synthetic output,
+    // but never discard the private-device batch release itself. The latter must
+    // still retire before either shared input AHB can be reused.
+    if (this->deferredAdrenoBatchValid_) {
+        this->deferredAdrenoOutputEligible_ = false;
+        for (int& fd : this->deferredAdrenoOutputReadyFds_) {
+            if (fd >= 0)
+                ::close(fd);
+            fd = -1;
+        }
+    }
+
     this->advanceAdaptiveFlowTimingEpoch();
     this->adaptiveScheduler_.reset();
     this->deadlineAdmissionPredictor_.reset();
