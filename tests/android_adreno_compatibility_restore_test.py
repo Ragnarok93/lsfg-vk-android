@@ -479,8 +479,8 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("adrenoSyntheticQueueAvailable", hooks_h)
         self.assertIn("augmentAdrenoSyntheticQueue", hooks)
         self.assertIn("requiresConservativeCrossDeviceSync", hooks)
-        self.assertIn("queueCount >= 2", hooks)
-        self.assertIn("queueCount = 2", hooks)
+        self.assertIn("queueInfo.queueCount < family.queueCount", hooks)
+        self.assertIn("queueInfo.queueCount = plan.queueIndex + 1", hooks)
         self.assertIn("vkGetDeviceQueue", hooks)
         self.assertIn("adreno-synthetic-queue", hooks)
 

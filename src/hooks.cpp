@@ -125,12 +125,18 @@ namespace {
     }
 
 #ifdef __ANDROID__
+    constexpr float kAdrenoSyntheticQueuePriority = 0.25F;
+
     struct AdrenoSyntheticQueuePlan {
         bool adreno{false};
         bool available{false};
         bool augment{false};
         uint32_t familyIndex{0};
         uint32_t createInfoIndex{0};
+        // Always points beyond the queues requested by the application.
+        // LSFG must never borrow a game-owned VkQueue because queue host access
+        // is externally synchronized by the Vulkan contract.
+        uint32_t queueIndex{0};
     };
 
     AdrenoSyntheticQueuePlan inspectAdrenoSyntheticQueue(
@@ -164,8 +170,14 @@ namespace {
 
             plan.familyIndex = queueInfo.queueFamilyIndex;
             plan.createInfoIndex = i;
-            plan.available = family.queueCount >= 2 && queueInfo.queueCount >= 1;
-            plan.augment = plan.available && queueInfo.queueCount < 2;
+            // Only use capacity the game did not request. If the application
+            // already consumes every queue in this family, fall back to the
+            // source-safe single-queue readiness path instead of stealing one.
+            plan.available =
+                queueInfo.queueCount >= 1
+                && queueInfo.queueCount < family.queueCount;
+            plan.augment = plan.available;
+            plan.queueIndex = queueInfo.queueCount;
             return plan;
         }
         return plan;
@@ -189,8 +201,12 @@ namespace {
         priorities.assign(
             queueInfo.pQueuePriorities,
             queueInfo.pQueuePriorities + queueInfo.queueCount);
-        priorities.resize(2, priorities.empty() ? 1.0F : priorities.front());
-        queueInfo.queueCount = 2;
+        // Synthetic presentation is subordinate to source rendering. The
+        // standard Vulkan queue priority is only a scheduling hint, but a lower
+        // priority materially reduces the chance that Adreno synthetic copies
+        // compete head-to-head with the game's primary graphics queue.
+        priorities.push_back(kAdrenoSyntheticQueuePriority);
+        queueInfo.queueCount = plan.queueIndex + 1;
         queueInfo.pQueuePriorities = priorities.data();
         createInfo.queueCreateInfoCount =
             static_cast<uint32_t>(queueInfos.size());
@@ -342,7 +358,7 @@ namespace {
             std::cerr << "lsfg-vk: init stage=adreno-synthetic-queue-request"
                       << " available=" << (plan.available ? 1 : 0)
                       << " family=" << plan.familyIndex
-                      << " index=1"
+                      << " index=" << plan.queueIndex
                       << " augmented=" << (plan.augment ? 1 : 0)
                       << "\n";
         }
@@ -397,7 +413,7 @@ namespace {
                     physicalDevice, pCreateInfo);
                 if (plan.available) {
                     Layer::ovkGetDeviceQueue(
-                        *pDevice, plan.familyIndex, 1, &syntheticQueue);
+                        *pDevice, plan.familyIndex, plan.queueIndex, &syntheticQueue);
                     if (syntheticQueue != VK_NULL_HANDLE
                             && Layer::ovkSetDeviceLoaderData(
                                 *pDevice, syntheticQueue) == VK_SUCCESS) {
@@ -409,7 +425,7 @@ namespace {
                               << " available="
                               << (adrenoSyntheticQueueAvailable ? 1 : 0)
                               << " family=" << plan.familyIndex
-                              << " index=1\n";
+                              << " index=" << plan.queueIndex << "\n";
                 }
             }
 #endif
