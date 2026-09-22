@@ -1235,6 +1235,30 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     this->deferredAdrenoGeneratedCount_;
                 this->runtimeMetrics.totalGeneratedLateDrops +=
                     this->deferredAdrenoGeneratedCount_;
+                if (conf.adaptiveFramegen) {
+                    // A deferred single-queue batch that is still unavailable
+                    // at the next real-source boundary missed its protected
+                    // delivery window. Feed that evidence back into the Adreno
+                    // admission/Flow controllers instead of repeatedly spending
+                    // GPU time on work that will be discarded at delivery.
+                    this->runtimeMetrics.windowGeneratedDeadlineDrops +=
+                        this->deferredAdrenoGeneratedCount_;
+                    this->runtimeMetrics.totalGeneratedDeadlineDrops +=
+                        this->deferredAdrenoGeneratedCount_;
+                    double deliveryMissMs = 0.5;
+                    if (this->runtimeMetrics.hasLastSourcePresent) {
+                        const double sourceBoundaryMs =
+                            std::chrono::duration<double, std::milli>(
+                                deferredBoundaryNow
+                                    - this->runtimeMetrics.lastSourcePresent).count();
+                        if (std::isfinite(sourceBoundaryMs)
+                                && sourceBoundaryMs > 0.0) {
+                            deliveryMissMs = sourceBoundaryMs;
+                        }
+                    }
+                    this->deadlineAdmissionPredictor_.observeDeliveryMiss(
+                        deliveryMissMs);
+                }
                 this->deferredAdrenoOutputEligible_ = false;
                 for (int& fd : this->deferredAdrenoOutputReadyFds_) {
                     if (fd >= 0)
@@ -1248,7 +1272,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             conservativeBatchStillInFlight = true;
         } else {
             size_t deferredWsiDrops = 0;
-            if (this->deferredAdrenoOutputEligible_ && outputsReady) {
+            const bool deferredPresentationAttempted =
+                this->deferredAdrenoOutputEligible_ && outputsReady;
+            if (deferredPresentationAttempted) {
                 for (size_t i = 0; i < this->deferredAdrenoGeneratedCount_; ++i) {
                     const auto generatedPresentStart = RuntimeMetrics::Clock::now();
                     deferredPass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
@@ -1350,6 +1376,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                             RuntimeMetrics::Clock::now()
                                 - generatedPresentStart).count();
                 }
+            }
+
+            if (conf.adaptiveFramegen && deferredPresentationAttempted) {
+                this->generatedPresentationCapacityTracker_.observe(
+                    this->deferredAdrenoGeneratedCount_,
+                    deferredWsiDrops);
             }
 
             if (deferredDeliveredGeneratedFrameCount
