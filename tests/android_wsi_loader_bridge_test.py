@@ -170,9 +170,11 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
     def test_android_present_chain_uses_distinct_binary_semaphore_signals(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present_start = source.index("VkResult LsContext::present")
-        android_start = source.index("#ifdef __ANDROID__", present_start)
-        desktop_start = source.index("#else", android_start)
-        android = source[android_start:desktop_start]
+        desktop_start = source.index(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization",
+            present_start,
+        )
+        android = source[present_start:desktop_start]
 
         # A Vulkan binary semaphore signal can satisfy only one wait. The
         # generated present and following generated/source present therefore
