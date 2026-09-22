@@ -138,6 +138,16 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         generated = source[generated_start:generated_end]
         self.assertIn("if (outputReadyWaitValid.at(i))", generated)
 
+    def test_adreno_batch_poll_only_treats_pollin_as_completion(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("pollfd batchPoll")
+        end = source.index("conservativeBatchStillInFlight", start)
+        block = source[start:end]
+
+        self.assertIn("batchPoll.revents & POLLIN", block)
+        self.assertIn("POLLERR | POLLHUP | POLLNVAL", block)
+        self.assertNotIn("if (pollResult > 0) {\n                batchReady = true;", block)
+
     def test_adreno_batch_poll_blocks_ahb_reuse_without_queue_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("bool conservativeBatchStillInFlight = false;")

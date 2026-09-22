@@ -2420,11 +2420,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 .revents = 0,
             };
             const int pollResult = ::poll(&batchPoll, 1, 0);
-            if (pollResult > 0) {
+            if (pollResult > 0 && (batchPoll.revents & POLLIN) != 0) {
                 batchReady = true;
                 ::close(this->conservativePendingBatchCompletePollFd_);
                 this->conservativePendingBatchCompletePollFd_ = -1;
-            } else if (pollResult < 0) {
+            } else if (pollResult < 0
+                    || (pollResult > 0
+                        && (batchPoll.revents
+                            & (POLLERR | POLLHUP | POLLNVAL)) != 0)) {
+                // Do not treat an fd error as proof that framegen released the
+                // shared AHB pair. Drop the OS handle and fall back to the
+                // zero-time context completion check below.
                 ::close(this->conservativePendingBatchCompletePollFd_);
                 this->conservativePendingBatchCompletePollFd_ = -1;
             }
