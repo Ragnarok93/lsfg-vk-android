@@ -2520,17 +2520,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
     pass.preCopyBuf.begin();
 
+    const uint64_t sourceCopyIndex =
+        this->conservativeCrossDeviceSync_
+            ? this->conservativeFramegenSourceIndex_
+            : this->frameIdx;
     copySwapchainToExternalAhb(pass.preCopyBuf.handle(),
         this->swapchainImages.at(presentIdx),
-        this->frameIdx % 2 == 0 ? this->frame_0.handle() : this->frame_1.handle(),
+        sourceCopyIndex % 2 == 0 ? this->frame_0.handle() : this->frame_1.handle(),
         this->extent.width, this->extent.height,
-        info.queue.first, this->frameIdx < 2);
+        info.queue.first, sourceCopyIndex < 2);
 
-    // Framegen owns a two-image source pair and some AHB transport modes acquire
-    // both images even during zero-count preprocessing. Define both images on
-    // the first source frame; the second slot is overwritten by the next real
-    // source before interpolation is permitted after the three-frame warmup.
-    if (this->frameIdx == 0) {
+    // Framegen owns a two-image source pair. On Adreno, source-only presents
+    // intentionally do not advance framegen; initialize the second slot against
+    // framegen's own source index rather than the wrapper present count.
+    if (sourceCopyIndex == 0) {
         copySwapchainToExternalAhb(pass.preCopyBuf.handle(),
             this->swapchainImages.at(presentIdx),
             this->frame_1.handle(),
@@ -3027,6 +3030,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             generatedFrameCount, this->asyncAhbHandoffHandleType_,
                 interpolationGenerationCount, adaptiveFlowBatch);
     }
+    if (this->conservativeCrossDeviceSync_)
+        ++this->conservativeFramegenSourceIndex_;
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)

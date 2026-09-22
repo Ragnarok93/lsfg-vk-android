@@ -203,6 +203,10 @@ private:
 
 #ifdef __ANDROID__
     uint64_t runtimeSessionId_{0};
+    // Adreno source-present count can advance while a private framegen batch
+    // remains in flight. Track the input slot consumed by framegen separately
+    // so source-only bypasses cannot flip the shared AHB pair out of parity.
+    uint64_t conservativeFramegenSourceIndex_{0};
     uint64_t runtimeConfigSignature_{0};
     uint64_t configRevision_{0};
     bool runtimeConfigSignatureValid_{false};
