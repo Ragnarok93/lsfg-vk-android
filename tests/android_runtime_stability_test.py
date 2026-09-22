@@ -356,7 +356,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             2,
         )
 
-    def test_zero_generation_history_uses_async_dependency_chain(self) -> None:
+    def test_zero_generation_history_keeps_non_adreno_async_dependency_chain(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present_start = source.index("VkResult LsContext::present")
         desktop_start = source.index(
@@ -365,10 +365,16 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
         android_present = source[present_start:desktop_start]
 
-        self.assertIn("bool useAsyncHandoff =", android_present)
-        self.assertIn("this->asyncAhbHandoffEnabled_", android_present)
-        self.assertIn("!conservativeSourceOnlyWarmup", android_present)
-        self.assertIn("!conservativeTrueSourceOnlyCycle", android_present)
+        handoff_start = android_present.index("bool useAsyncHandoff =")
+        handoff_end = android_present.index("bool asyncSubmissionIssued", handoff_start)
+        handoff = android_present[handoff_start:handoff_end]
+        self.assertIn("this->asyncAhbHandoffEnabled_", handoff)
+        self.assertIn(
+            "!this->conservativeCrossDeviceSync_",
+            handoff,
+            "Xclipse/generic history may stay async, but the Adreno compatibility route must not",
+        )
+
         history_start = android_present.index("if (historyOnly)")
         generation_start = android_present.index(
             "// 2. Tell framegen to generate intermediary frames.", history_start
