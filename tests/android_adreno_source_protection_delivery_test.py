@@ -82,6 +82,36 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn("generated_delivery_confidence=", source)
         self.assertIn("wsi-accepted-only", source)
 
+    def test_deferred_adreno_admission_uses_source_protection_deadline(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("sourceProtectionBatchAdmission", source)
+        self.assertIn("safeBatchGenerationHint", source)
+        self.assertIn("deadline_semantics=", source)
+        self.assertIn('"source-protection"', source)
+        self.assertIn('"synthetic-slot"', source)
+        self.assertIn("compute_ready_budget_ms=", source)
+        self.assertIn("presentation_slot_budget_ms=", source)
+
+        admission_start = source.index("// Active deadline admission")
+        admission_end = source.index(
+            "const auto& outputCadenceForPresentation", admission_start
+        )
+        admission = source[admission_start:admission_end]
+        self.assertIn(
+            "if (sourceProtectionBatchAdmission)",
+            admission,
+        )
+        self.assertIn(
+            "deadlineAdmissionPredictor_.predict(candidate, sourceBudgetMs)",
+            admission,
+        )
+        self.assertIn(
+            "sourceTimeline_.syntheticDesiredTimeNs",
+            admission,
+            "Xclipse/non-deferred admission must keep ideal slot semantics",
+        )
+
     def test_xclipse_capability_async_policy_remains_separate(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(
             encoding="utf-8"
