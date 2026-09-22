@@ -22,6 +22,18 @@
 #include <vector>
 
 #ifdef __ANDROID__
+enum class SourceHistoryInvalidationReason {
+    None,
+    Startup,
+    TimelineDiscontinuity,
+    SyncExportFailure,
+    SyncImportFailure,
+    ContextRecreate,
+    SourcePairMismatch,
+    AbandonedBatch,
+    TrueOwnershipFailure,
+};
+
 struct AdaptiveFlowRuntimeSnapshot {
     bool enabled{false};
     const char* preset{"quality"};
@@ -173,7 +185,10 @@ private:
     void retainPresentWait(uint32_t imageIdx, const Mini::Semaphore& semaphore);
 #ifdef __ANDROID__
     void advanceAdaptiveFlowTimingEpoch();
-    void resetAdaptiveSourceEpoch(bool resetScheduler);
+    void resetAdaptiveSourceEpoch(
+        bool resetScheduler,
+        SourceHistoryInvalidationReason reason =
+            SourceHistoryInvalidationReason::TimelineDiscontinuity);
 #endif
     VkSwapchainKHR swapchain;
     std::vector<VkImage> swapchainImages;
@@ -269,6 +284,10 @@ private:
     uint32_t sourceHistoryWarmupRemaining_{kSourceHistoryWarmupFrames};
     bool requiresSourceHistoryWarmup_{true};
     bool previousSourceCopySignalValid_{false};
+    SourceHistoryInvalidationReason lastHistoryInvalidationReason_{
+        SourceHistoryInvalidationReason::Startup};
+    SourceHistoryInvalidationReason lastHistoryReprimeReason_{
+        SourceHistoryInvalidationReason::Startup};
 
     // Queue-target 1 delivery for Android: the application's real frame is
     // acknowledged this call, but displayed on the next source boundary so the
@@ -324,11 +343,27 @@ private:
         bool hasLastSourcePresent{false};
 
         uint64_t windowSourceFrames{0};
+        // Legacy generated-frame counters remain WSI-accepted counts for
+        // compatibility. The stage counters below make that distinction explicit.
         uint64_t windowGeneratedFrames{0};
+        uint64_t windowGeneratedDispatched{0};
+        uint64_t windowGeneratedCompleted{0};
+        uint64_t windowGeneratedCopySubmitted{0};
+        uint64_t windowGeneratedWsiSubmitted{0};
+        uint64_t windowGeneratedWsiAccepted{0};
+        uint64_t windowGeneratedDisplayConfirmed{0};
+        uint64_t windowGeneratedDisplayUnknown{0};
         uint64_t windowSourcePresentFailures{0};
         uint64_t windowGeneratedPresentFailures{0};
         uint64_t totalSourceFrames{0};
         uint64_t totalGeneratedFrames{0};
+        uint64_t totalGeneratedDispatched{0};
+        uint64_t totalGeneratedCompleted{0};
+        uint64_t totalGeneratedCopySubmitted{0};
+        uint64_t totalGeneratedWsiSubmitted{0};
+        uint64_t totalGeneratedWsiAccepted{0};
+        uint64_t totalGeneratedDisplayConfirmed{0};
+        uint64_t totalGeneratedDisplayUnknown{0};
         uint64_t totalSourcePresentFailures{0};
         uint64_t totalGeneratedPresentFailures{0};
 
