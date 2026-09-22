@@ -48,6 +48,9 @@ namespace Mini {
         /// @throws std::logic_error if the command buffer is in Empty state
         /// @throws LSFG::vulkan_error if beginning the command buffer fails.
         ///
+        /// Reset a completed submitted command buffer for re-recording.
+        void reset();
+
         void begin();
 
         ///
@@ -88,6 +91,8 @@ namespace Mini {
     private:
         std::shared_ptr<CommandBufferState> state;
         std::shared_ptr<VkCommandBuffer> commandBuffer;
+        VkDevice device{VK_NULL_HANDLE};
+        PFN_vkResetCommandBuffer resetCommandBuffer{nullptr};
     };
 
 }

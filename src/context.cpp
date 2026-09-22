@@ -887,12 +887,18 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     }
 
     // prepare render passes
-    this->cmdPool = Mini::CommandPool(info.device, info.queue.first);
+    this->cmdPool = Mini::CommandPool(
+        info.device, info.queue.first, this->conservativeCrossDeviceSync_);
     for (size_t i = 0; i < 8; i++) {
         auto& pass = this->passInfos.at(i);
         pass.renderSemaphores.resize(runtimeMultiplier - 1);
         pass.acquireSemaphores.resize(runtimeMultiplier - 1);
         pass.postCopyBufs.resize(runtimeMultiplier - 1);
+        if (this->conservativeCrossDeviceSync_) {
+            pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
+            for (auto& postCopyBuf : pass.postCopyBufs)
+                postCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
+        }
         pass.postCopySemaphores.resize(runtimeMultiplier - 1);
         pass.prevPostCopySemaphores.resize(runtimeMultiplier - 1);
 
@@ -2378,7 +2384,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // must refresh temporal history instead of entering the Off/source-only path.
     pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
     pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
-    pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
+    if (this->conservativeCrossDeviceSync_) {
+        if (pass.preCopyBuf.getState() == Mini::CommandBufferState::Submitted)
+            pass.preCopyBuf.reset();
+    } else {
+        pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
+    }
     pass.preCopyBuf.begin();
 
     copySwapchainToExternalAhb(pass.preCopyBuf.handle(),
@@ -2981,13 +2992,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->sourceTimeline_.syntheticDesiredTimeNs(
                 this->currentSourceTimeline_, syntheticFraction);
         const uint64_t syntheticAdmissionNowNs = monotonicNowNs();
-        // Async-capable drivers can still reject a synthetic frame after
-        // dispatch without stalling the protected source timeline. On the
-        // conservative Adreno topology, pre-admission is authoritative: once
-        // host completion has already been paid, dropping the completed frame
-        // only wastes work and cannot recover that source time.
+        // Post-dispatch rejection is source-safe whenever completion is GPU-side.
+        // Xclipse retains its existing path. Adreno joins it only while the r12
+        // SYNC_FD completion chain is active; host-fallback Adreno keeps the
+        // conservative pre-admission behavior.
         const bool enforcePostDispatchSyntheticDeadline =
-            conf.adaptiveFramegen && !this->conservativeCrossDeviceSync_;
+            conf.adaptiveFramegen
+            && (!this->conservativeCrossDeviceSync_ || this->asyncFramegenCompletionEnabled_);
         if (enforcePostDispatchSyntheticDeadline
                 && syntheticDesiredTimeNs > 0
                 && syntheticAdmissionNowNs >= syntheticDesiredTimeNs) {
@@ -3016,7 +3027,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
         const uint64_t generatedAcquireTimeoutNs =
-            !conf.adaptiveFramegen && this->conservativeCrossDeviceSync_
+            !conf.adaptiveFramegen && this->conservativeCrossDeviceSync_ && !this->asyncFramegenCompletionEnabled_
                 ? runtimeWaitTimeoutNs()
                 : 0;
         auto res = Layer::ovkAcquireNextImageKHR(
@@ -3051,22 +3062,28 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
-        pass.postCopyBufs.at(i) = Mini::CommandBuffer(info.device, this->cmdPool);
-        pass.postCopyBufs.at(i).begin();
+        auto& postCopyBuf = pass.postCopyBufs.at(i);
+        if (this->conservativeCrossDeviceSync_) {
+            if (postCopyBuf.getState() == Mini::CommandBufferState::Submitted)
+                postCopyBuf.reset();
+        } else {
+            postCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
+        }
+        postCopyBuf.begin();
 
-        copyExternalAhbToSwapchain(pass.postCopyBufs.at(i).handle(),
+        copyExternalAhbToSwapchain(postCopyBuf.handle(),
             this->out_n.at(i).handle(),
             this->swapchainImages.at(imageIdx),
             this->extent.width, this->extent.height,
             info.queue.first);
 
-        pass.postCopyBufs.at(i).end();
+        postCopyBuf.end();
         std::vector<VkSemaphore> generatedCopyWaits{
             pass.acquireSemaphores.at(i).handle()
         };
         if (outputReadyWaitValid.at(i))
             generatedCopyWaits.emplace_back(pass.renderSemaphores.at(i).handle());
-        pass.postCopyBufs.at(i).submit(info.queue.second,
+        postCopyBuf.submit(info.queue.second,
             generatedCopyWaits,
             { pass.postCopySemaphores.at(i).handle(),
               pass.prevPostCopySemaphores.at(i).handle() });
