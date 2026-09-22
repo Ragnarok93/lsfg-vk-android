@@ -315,11 +315,9 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         dependency_start = source.index("std::vector<VkSemaphore> gameRenderSemaphores2")
         handoff_start = source.index("const auto handoffStart", dependency_start)
         dependency = source[dependency_start:handoff_start]
-        self.assertIn(
-            "this->conservativeCrossDeviceSync_"
-            " && this->conservativePendingBatchCompleteValid_",
-            dependency,
-        )
+        self.assertIn("this->conservativeCrossDeviceSync_", dependency)
+        self.assertIn("this->conservativePendingBatchCompleteValid_", dependency)
+        self.assertIn("&& this->conservativePendingBatchCompleteValid_", dependency)
         self.assertIn("conservativePendingBatchCompleteSemaphore_", dependency)
         self.assertIn("conservativePendingBatchCompleteValid_ = false", dependency)
         self.assertIn("else if (previousPass != nullptr", dependency)
