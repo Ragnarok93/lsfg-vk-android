@@ -833,7 +833,12 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         && gameImportSemaphoreFd != nullptr
         && (!this->conservativeCrossDeviceSync_
             || this->syntheticQueue_ != VK_NULL_HANDLE);
-    this->deferredAdrenoCompletionEnabled_ = false;
+    this->deferredAdrenoCompletionEnabled_ =
+        this->conservativeCrossDeviceSync_
+        && this->syntheticQueue_ == VK_NULL_HANDLE
+        && syncFdHandoffSupported
+        && gameGetSemaphoreFd != nullptr
+        && gameImportSemaphoreFd != nullptr;
 
     // The known-good Qualcomm/Adreno path can generate immediately because the
     // first source upload initializes both AHB inputs. Do not inherit the newer
@@ -960,23 +965,40 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
             .flags = 0,
         };
-        VkFence fence = VK_NULL_HANDLE;
-        const auto fenceResult = createCompletionFence(
-            info.device, &fenceInfo, nullptr, &fence);
-        if (fenceResult != VK_SUCCESS || fence == VK_NULL_HANDLE) {
-            throw LSFG::vulkan_error(
-                fenceResult == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : fenceResult,
-                "Failed to create pass-retirement fence");
+        const auto createOwnedCompletionFence = [&]() {
+            VkFence fence = VK_NULL_HANDLE;
+            const auto fenceResult = createCompletionFence(
+                info.device, &fenceInfo, nullptr, &fence);
+            if (fenceResult != VK_SUCCESS || fence == VK_NULL_HANDLE) {
+                throw LSFG::vulkan_error(
+                    fenceResult == VK_SUCCESS
+                        ? VK_ERROR_INITIALIZATION_FAILED
+                        : fenceResult,
+                    "Failed to create pass-retirement fence");
+            }
+            return std::shared_ptr<VkFence>(
+                new VkFence(fence),
+                [device = info.device, destroyCompletionFence](
+                        VkFence* ownedFence) {
+                    if (ownedFence != nullptr) {
+                        if (*ownedFence != VK_NULL_HANDLE)
+                            destroyCompletionFence(
+                                device, *ownedFence, nullptr);
+                        delete ownedFence;
+                    }
+                });
+        };
+
+        pass.completionFence = createOwnedCompletionFence();
+#ifdef __ANDROID__
+        if (this->deferredAdrenoCompletionEnabled_) {
+            pass.postCopyCompletionFences.resize(runtimeMultiplier - 1);
+            pass.postCopyCompletionFenceSubmitted.assign(
+                runtimeMultiplier - 1, false);
+            for (auto& postCopyFence : pass.postCopyCompletionFences)
+                postCopyFence = createOwnedCompletionFence();
         }
-        pass.completionFence = std::shared_ptr<VkFence>(
-            new VkFence(fence),
-            [device = info.device, destroyCompletionFence](VkFence* ownedFence) {
-                if (ownedFence != nullptr) {
-                    if (*ownedFence != VK_NULL_HANDLE)
-                        destroyCompletionFence(device, *ownedFence, nullptr);
-                    delete ownedFence;
-                }
-            });
+#endif
     }
 }
 
@@ -1042,44 +1064,65 @@ bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
     if (pass.deferredAdrenoOwned)
         return false;
 #endif
-    if (!pass.completionFenceSubmitted) {
-        if (!pass.completionFenceFailed)
-            pass.crossFrameWaitRetentions.clear();
-        return !pass.completionFenceFailed;
-    }
     if (pass.completionFenceFailed
-            || pass.completionFence == nullptr
             || this->completionWaitFences_ == nullptr
             || this->completionResetFences_ == nullptr)
         return false;
 
-    const VkFence fence = *pass.completionFence;
-    const auto waitResult = this->completionWaitFences_(
-        this->device_, 1, &fence, VK_TRUE, 0);
-    if (waitResult != VK_SUCCESS) {
-        if (waitResult != VK_TIMEOUT && waitResult != VK_NOT_READY) {
-            Utils::logLimitN(
-                "passRetirement",
-                5,
-                "Pass completion fence query failed: "
-                    + std::to_string(waitResult));
+    const auto waitAndResetFence =
+        [&](const std::shared_ptr<VkFence>& owner) -> bool {
+            if (owner == nullptr) {
+                pass.completionFenceFailed = true;
+                return false;
+            }
+
+            const VkFence fence = *owner;
+            const auto waitResult = this->completionWaitFences_(
+                this->device_, 1, &fence, VK_TRUE, 0);
+            if (waitResult != VK_SUCCESS) {
+                if (waitResult != VK_TIMEOUT && waitResult != VK_NOT_READY) {
+                    Utils::logLimitN(
+                        "passRetirement",
+                        5,
+                        "Pass completion fence query failed: "
+                            + std::to_string(waitResult));
+                }
+                return false;
+            }
+
+            const auto resetResult = this->completionResetFences_(
+                this->device_, 1, &fence);
+            if (resetResult != VK_SUCCESS) {
+                pass.completionFenceFailed = true;
+                Utils::logLimitN(
+                    "passRetirement",
+                    5,
+                    "Pass completion fence reset failed: "
+                        + std::to_string(resetResult));
+                return false;
+            }
+            return true;
+        };
+
+    if (pass.completionFenceSubmitted) {
+        if (!waitAndResetFence(pass.completionFence))
+            return false;
+        pass.completionFenceSubmitted = false;
+    }
+
+#ifdef __ANDROID__
+    for (size_t i = 0;
+            i < pass.postCopyCompletionFenceSubmitted.size(); ++i) {
+        if (!pass.postCopyCompletionFenceSubmitted.at(i))
+            continue;
+        if (i >= pass.postCopyCompletionFences.size()
+                || !waitAndResetFence(pass.postCopyCompletionFences.at(i))) {
+            return false;
         }
-        return false;
+        pass.postCopyCompletionFenceSubmitted.at(i) = false;
     }
+#endif
 
-    const auto resetResult = this->completionResetFences_(
-        this->device_, 1, &fence);
-    if (resetResult != VK_SUCCESS) {
-        pass.completionFenceFailed = true;
-        Utils::logLimitN(
-            "passRetirement",
-            5,
-            "Pass completion fence reset failed: "
-                + std::to_string(resetResult));
-        return false;
-    }
-
-    pass.completionFenceSubmitted = false;
     pass.crossFrameWaitRetentions.clear();
 #ifdef __ANDROID__
     pass.framegenBatchCompleteValid = false;
@@ -1353,11 +1396,25 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     generatedCopyWaits.emplace_back(
                         deferredPass.renderSemaphores.at(i).handle());
                 }
+                if (i >= deferredPass.postCopyCompletionFences.size()
+                        || deferredPass.postCopyCompletionFences.at(i) == nullptr
+                        || deferredPass.postCopyCompletionFenceSubmitted.at(i)) {
+                    this->deferredAdrenoOutputEligible_ = false;
+                    this->lastHistoryInvalidationReason_ =
+                        SourceHistoryInvalidationReason::TrueOwnershipFailure;
+                    this->lastHistoryReprimeReason_ =
+                        SourceHistoryInvalidationReason::TrueOwnershipFailure;
+                    throw LSFG::vulkan_error(
+                        VK_ERROR_INITIALIZATION_FAILED,
+                        "Deferred Adreno post-copy retirement fence unavailable");
+                }
                 postCopyBuf.submit(
                     info.queue.second,
                     generatedCopyWaits,
                     { deferredPass.postCopySemaphores.at(i).handle(),
-                      deferredPass.prevPostCopySemaphores.at(i).handle() });
+                      deferredPass.prevPostCopySemaphores.at(i).handle() },
+                    *deferredPass.postCopyCompletionFences.at(i));
+                deferredPass.postCopyCompletionFenceSubmitted.at(i) = true;
                 this->runtimeMetrics.windowGeneratedCopySubmitted++;
                 this->runtimeMetrics.totalGeneratedCopySubmitted++;
 
@@ -1442,7 +1499,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->deferredAdrenoGeneratedCount_ = 0;
             this->deferredAdrenoSourceAge_ = 0;
             deferredPass.deferredAdrenoOwned = false;
-            this->submitPassCompletionFence(deferredPass, info.queue.second);
         }
     }
 #endif
