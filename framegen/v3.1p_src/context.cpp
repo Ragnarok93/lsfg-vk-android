@@ -639,8 +639,15 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
 #endif
 
 #ifdef __ANDROID__
-        if (adaptiveFlowTimingPool != nullptr && pass + 1 == generationCount)
+        // Direct-storage already ends at the generation shader, so preserve its
+        // established timing boundary exactly. Output-copy transports (Adreno's
+        // direct-input-copy-output path) must include the required local->shared
+        // AHB transport and final EXTERNAL release in the measured LSFG cost.
+        if (adaptiveFlowTimingPool != nullptr
+                && pass + 1 == generationCount
+                && !this->outputCopyRequired) {
             adaptiveFlowTimingPool->write(buf2.handle(), 3);
+        }
 
         if (this->outputCopyRequired) {
             auto& localOut = presentGenerate->getOutImages().at(pass);
@@ -667,6 +674,10 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
                     barriers, vk, this->inImg_1, VK_ACCESS_2_SHADER_READ_BIT);
             }
             emit_external_barriers(buf2, barriers);
+            if (adaptiveFlowTimingPool != nullptr
+                    && pass + 1 == generationCount) {
+                adaptiveFlowTimingPool->write(buf2.handle(), 3);
+            }
         } else {
             std::vector<VkImageMemoryBarrier2> releaseBarriers;
             releaseBarriers.reserve(pass + 1 == generationCount ? 3 : 1);
