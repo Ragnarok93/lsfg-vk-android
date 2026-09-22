@@ -143,7 +143,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         """A source passthrough while the pass ring is busy must not offset AHB/framegen parity."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("if (!this->tryRecyclePass(pass))")
-        end = source.index("#ifdef __ANDROID__", start)
+        end = source.index("return passthroughResult;", start)
         busy = source[start:end]
 
         self.assertIn("resetAdaptiveSourceEpoch(true)", busy)
