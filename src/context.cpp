@@ -513,10 +513,23 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
         VkQueue queue, const std::vector<VkSemaphore>& waitSemaphores,
         const std::vector<VkSemaphore>& signalSemaphores,
         VkFence fence, PFN_vkResetFences resetFences,
-        PFN_vkWaitForFences waitForFences) {
+        PFN_vkWaitForFences waitForFences,
+        double* submitMs = nullptr, double* waitMs = nullptr) {
+    const auto submitStart = std::chrono::steady_clock::now();
     submitAhbHandoff(device, commandBuffer, queue, waitSemaphores,
         signalSemaphores, fence, resetFences);
+    const auto submitEnd = std::chrono::steady_clock::now();
+    const auto waitStart = submitEnd;
     waitForAhbHandoff(device, fence, waitForFences);
+    const auto waitEnd = std::chrono::steady_clock::now();
+    if (submitMs != nullptr) {
+        *submitMs += std::chrono::duration<double, std::milli>(
+            submitEnd - submitStart).count();
+    }
+    if (waitMs != nullptr) {
+        *waitMs += std::chrono::duration<double, std::milli>(
+            waitEnd - waitStart).count();
+    }
 }
 
 #endif
@@ -1866,12 +1879,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowAdaptiveDiscontinuities = 0;
             metrics.windowAsyncHandoffs = 0;
             metrics.windowSyncHandoffs = 0;
+            metrics.windowHandoffPrevSourceDeps = 0;
+            metrics.windowHandoffBatchDeps = 0;
             metrics.windowDeadlineShadowOpportunities = 0;
             metrics.windowDeadlineShadowWouldAdmit = 0;
             metrics.windowDeadlineShadowWouldReject = 0;
             metrics.windowCycleMs = 0.0;
             metrics.windowCycleMaxMs = 0.0;
             metrics.windowHandoffMs = 0.0;
+            metrics.windowHandoffSubmitMs = 0.0;
+            metrics.windowHandoffFenceWaitMs = 0.0;
             metrics.windowDispatchMs = 0.0;
             metrics.windowWaitIdleMs = 0.0;
             metrics.windowGeneratedPresentMs = 0.0;
@@ -1917,6 +1934,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.lastWindowTargetFps = conf.fpsLimit;
             const double cycleAvgMs = sourceCount > 0.0 ? metrics.windowCycleMs / sourceCount : 0.0;
             const double handoffAvgMs = sourceCount > 0.0 ? metrics.windowHandoffMs / sourceCount : 0.0;
+            const double handoffSubmitAvgMs = sourceCount > 0.0
+                ? metrics.windowHandoffSubmitMs / sourceCount : 0.0;
+            const double handoffFenceWaitAvgMs = sourceCount > 0.0
+                ? metrics.windowHandoffFenceWaitMs / sourceCount : 0.0;
             const double dispatchAvgMs = sourceCount > 0.0 ? metrics.windowDispatchMs / sourceCount : 0.0;
             const double waitIdleAvgMs = sourceCount > 0.0 ? metrics.windowWaitIdleMs / sourceCount : 0.0;
             const double generatedPresentAvgMs = generatedCount > 0.0
@@ -1993,6 +2014,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " cycle_avg_ms=" << cycleAvgMs
                       << " cycle_max_ms=" << metrics.windowCycleMaxMs
                       << " ahb_handoff_avg_ms=" << handoffAvgMs
+                      << " ahb_submit_avg_ms=" << handoffSubmitAvgMs
+                      << " ahb_host_wait_avg_ms=" << handoffFenceWaitAvgMs
+                      << " ahb_prev_source_deps=" << metrics.windowHandoffPrevSourceDeps
+                      << " ahb_batch_deps=" << metrics.windowHandoffBatchDeps
                       << " ahb_async_handoffs=" << metrics.windowAsyncHandoffs
                       << " ahb_async_handoffs_total=" << metrics.totalAsyncHandoffs
                       << " ahb_sync_handoffs=" << metrics.windowSyncHandoffs
@@ -2254,12 +2279,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowAdaptiveDiscontinuities = 0;
             metrics.windowAsyncHandoffs = 0;
             metrics.windowSyncHandoffs = 0;
+            metrics.windowHandoffPrevSourceDeps = 0;
+            metrics.windowHandoffBatchDeps = 0;
             metrics.windowDeadlineShadowOpportunities = 0;
             metrics.windowDeadlineShadowWouldAdmit = 0;
             metrics.windowDeadlineShadowWouldReject = 0;
             metrics.windowCycleMs = 0.0;
             metrics.windowCycleMaxMs = 0.0;
             metrics.windowHandoffMs = 0.0;
+            metrics.windowHandoffSubmitMs = 0.0;
+            metrics.windowHandoffFenceWaitMs = 0.0;
             metrics.windowDispatchMs = 0.0;
             metrics.windowWaitIdleMs = 0.0;
             metrics.windowGeneratedPresentMs = 0.0;
@@ -2286,6 +2315,58 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "Pass GPU completion fence unavailable; this slot will remain source-only");
         }
     };
+
+    const bool conservativePreCopySourceBypass =
+        this->conservativeCrossDeviceSync_
+        && conservativeTrueSourceOnlyCycle;
+    if (conservativePreCopySourceBypass) {
+        this->lastDispatchedGeneratedFrameCount_ = 0;
+        this->lastGeneratedFrameCount_ = 0;
+        this->previousSourceCopySignalValid_ = false;
+        this->sourceHistoryWarmupRemaining_ =
+            kConservativeSourceReprimeFrames - 1;
+        this->requiresSourceHistoryWarmup_ = true;
+        updateAdaptiveFlowGovernor();
+        metrics.windowAdaptiveZeroGenerationCycles++;
+        metrics.totalAdaptiveZeroGenerationCycles++;
+
+        VkPresentTimeGOOGLE bypassPresentTime{};
+        VkPresentTimesInfoGOOGLE bypassPresentTimes{};
+        const VkPresentInfoKHR bypassPresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = adaptivePresentPNext(
+                pNext,
+                this->currentSourceTimeline_.sourceDesiredTimeNs,
+                bypassPresentTime, bypassPresentTimes),
+            .waitSemaphoreCount =
+                static_cast<uint32_t>(gameRenderSemaphores.size()),
+            .pWaitSemaphores = gameRenderSemaphores.empty()
+                ? nullptr : gameRenderSemaphores.data(),
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        const auto bypassResult =
+            Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo);
+        if (bypassResult != VK_SUCCESS
+                && bypassResult != VK_SUBOPTIMAL_KHR) {
+            metrics.windowSourcePresentFailures++;
+            metrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(
+                bypassResult, "Failed protected Adreno source-only present");
+        }
+        if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset) {
+            std::cerr << "lsfg-vk: runtime stage=compat-source-precopy-bypass"
+                      << " generated=0"
+                      << " planned=" << plannedGeneratedFrameCount
+                      << " admitted=" << generatedFrameCount
+                      << " history_warmup_remaining="
+                      << this->sourceHistoryWarmupRemaining_
+                      << "\n";
+        }
+        return finishSourcePresent(
+            bypassResult, "game-render-precopy-bypass");
+    }
 
     // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
     // validated presentation sequence and EXTERNAL ownership barriers intact.
@@ -2324,12 +2405,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (this->frameIdx > 0)
         previousPass = &this->passInfos.at((this->frameIdx - 1) % 8);
     if (this->previousSourceCopySignalValid_ && previousPass != nullptr) {
+        metrics.windowHandoffPrevSourceDeps++;
         pass.crossFrameWaitRetentions.emplace_back(
             previousPass->preCopySemaphores.at(1));
         gameRenderSemaphores2.emplace_back(
             pass.crossFrameWaitRetentions.back().handle());
     }
     if (previousPass != nullptr && previousPass->framegenBatchCompleteValid) {
+        metrics.windowHandoffBatchDeps++;
         pass.crossFrameWaitRetentions.emplace_back(
             previousPass->framegenBatchCompleteSemaphore);
         gameRenderSemaphores2.emplace_back(
@@ -2373,9 +2456,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     if (useAsyncHandoff) {
+        const auto asyncSubmitStart = RuntimeMetrics::Clock::now();
         submitAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
             VK_NULL_HANDLE, nullptr);
+        metrics.windowHandoffSubmitMs +=
+            std::chrono::duration<double, std::milli>(
+                RuntimeMetrics::Clock::now() - asyncSubmitStart).count();
         asyncSubmissionIssued = true;
         if (consumePreviousBatchComplete && previousPass != nullptr)
             previousPass->framegenBatchCompleteValid = false;
@@ -2404,15 +2491,31 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    bool warmupCopyQueuedWithoutHostWait = false;
     if (!useAsyncHandoff && !asyncSubmissionIssued) {
-        submitAndWaitForAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
-            gameRenderSemaphores2, preCopySignals,
-            *this->ahbHandoffFence, this->resetHandoffFences,
-            this->waitHandoffFences);
+        if (conservativeSourceOnlyWarmup) {
+            const auto warmupSubmitStart = RuntimeMetrics::Clock::now();
+            submitAhbHandoff(
+                info.device, pass.preCopyBuf, info.queue.second,
+                gameRenderSemaphores2, preCopySignals,
+                VK_NULL_HANDLE, nullptr);
+            metrics.windowHandoffSubmitMs +=
+                std::chrono::duration<double, std::milli>(
+                    RuntimeMetrics::Clock::now() - warmupSubmitStart).count();
+            warmupCopyQueuedWithoutHostWait = true;
+        } else {
+            submitAndWaitForAhbHandoff(
+                info.device, pass.preCopyBuf, info.queue.second,
+                gameRenderSemaphores2, preCopySignals,
+                *this->ahbHandoffFence, this->resetHandoffFences,
+                this->waitHandoffFences,
+                &metrics.windowHandoffSubmitMs,
+                &metrics.windowHandoffFenceWaitMs);
+            metrics.windowSyncHandoffs++;
+            metrics.totalSyncHandoffs++;
+        }
         if (consumePreviousBatchComplete && previousPass != nullptr)
             previousPass->framegenBatchCompleteValid = false;
-        metrics.windowSyncHandoffs++;
-        metrics.totalSyncHandoffs++;
     }
     this->previousSourceCopySignalValid_ = true;
     metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
@@ -2421,7 +2524,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready mode="
                   << (useAsyncHandoff
                         ? handoffTypeName(this->asyncAhbHandoffHandleType_)
-                        : "host-fence")
+                        : (warmupCopyQueuedWithoutHostWait
+                            ? "queued-warmup-copy"
+                            : "host-fence"))
                   << "\n";
     }
 
@@ -2516,22 +2621,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.totalAdaptiveZeroGenerationCycles++;
         return presentCompatibilitySourceOnly(
             "compat-source-warmup", "pre-copy-compat-warmup");
-    }
-
-    if (conservativeTrueSourceOnlyCycle) {
-        this->lastDispatchedGeneratedFrameCount_ = 0;
-        this->lastGeneratedFrameCount_ = 0;
-        pass.framegenBatchCompleteValid = false;
-        this->sourceHistoryWarmupRemaining_ =
-            this->conservativeCrossDeviceSync_
-                ? kConservativeSourceReprimeFrames - 1
-                : kSourceHistoryWarmupFrames;
-        this->requiresSourceHistoryWarmup_ = true;
-        updateAdaptiveFlowGovernor();
-        metrics.windowAdaptiveZeroGenerationCycles++;
-        metrics.totalAdaptiveZeroGenerationCycles++;
-        return presentCompatibilitySourceOnly(
-            "compat-source-only", "pre-copy-compat-source-only");
     }
 
     if (historyOnly) {

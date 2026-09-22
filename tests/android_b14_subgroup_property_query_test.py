@@ -79,13 +79,13 @@ void write(VkPhysicalDeviceProperties2* out, uint32_t size,
 void validCore(VkPhysicalDevice, VkPhysicalDeviceProperties2* out) {
     ++coreCalls;
     write(out, 128, VK_SHADER_STAGE_COMPUTE_BIT,
-        VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT, VK_FALSE);
+        static_cast<VkSubgroupFeatureFlags>(0x67fU), VK_FALSE);
 }
 
 void xclipseLike(VkPhysicalDevice, VkPhysicalDeviceProperties2* out) {
     ++coreCalls;
-    write(out, 64, VK_SHADER_STAGE_COMPUTE_BIT,
-        VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT, VK_TRUE);
+    write(out, 64, static_cast<VkShaderStageFlags>(0x3d3fU),
+        static_cast<VkSubgroupFeatureFlags>(0x6ffU), VK_TRUE);
 }
 
 void missingBallot(VkPhysicalDevice, VkPhysicalDeviceProperties2* out) {

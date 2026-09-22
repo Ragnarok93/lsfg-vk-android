@@ -322,6 +322,8 @@ private:
         uint64_t windowSyncHandoffs{0};
         uint64_t totalSyncHandoffs{0};
         uint64_t totalAsyncFallbacks{0};
+        uint64_t windowHandoffPrevSourceDeps{0};
+        uint64_t windowHandoffBatchDeps{0};
         uint64_t windowGeneratedLateDrops{0};
         uint64_t totalGeneratedLateDrops{0};
         uint64_t windowAdmissionRejects{0};
@@ -341,6 +343,8 @@ private:
         double windowCycleMs{0.0};
         double windowCycleMaxMs{0.0};
         double windowHandoffMs{0.0};
+        double windowHandoffSubmitMs{0.0};
+        double windowHandoffFenceWaitMs{0.0};
         double windowDispatchMs{0.0};
         double windowWaitIdleMs{0.0};
         double windowGeneratedPresentMs{0.0};

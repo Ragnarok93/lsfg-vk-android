@@ -21,16 +21,16 @@ struct SubgroupQueryResult {
 
 [[nodiscard]] inline bool supportsCooperativeMipmaps(
         const VkPhysicalDeviceSubgroupProperties& properties) noexcept {
-    // B14 assumes subgroup-local lanes 0..3 correspond to the first four
-    // workgroup-local producers. Vulkan does not guarantee any direct mapping
-    // between SubgroupLocalInvocationId and LocalInvocationId/Index unless
-    // full-subgroup execution semantics are explicitly established for the
-    // pipeline. This runtime does not currently establish that contract.
-    //
-    // Fail closed to the B13 shader until B14 is rewritten around a guaranteed
-    // local-index mapping or the pipeline explicitly requires full subgroups.
-    (void)properties;
-    return false;
+    // B14 was previously validated on the S20+/Turnip profile below. Keep the
+    // optimization capability-profile scoped instead of reopening the old
+    // broad subgroup>=4 gate: Xclipse (64 / 0x3d3f / 0x6ff) and unrelated
+    // devices remain on exact B13 bytecode.
+    constexpr VkSubgroupFeatureFlags kValidatedOperations =
+        static_cast<VkSubgroupFeatureFlags>(0x67fU);
+    return properties.subgroupSize == 128U
+        && properties.supportedStages == VK_SHADER_STAGE_COMPUTE_BIT
+        && properties.supportedOperations == kValidatedOperations
+        && properties.quadOperationsInAllStages == VK_FALSE;
 }
 
 [[nodiscard]] inline bool hasCompleteSubgroupMetadata(
