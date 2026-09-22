@@ -110,12 +110,11 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             "const uint64_t syntheticAdmissionNowNs = monotonicNowNs();", 1
         )[1].split("pass.acquireSemaphores.at(i)", 1)[0]
         self.assertIn("enforcePostDispatchSyntheticDeadline", deadline)
-        self.assertIn(
-            "conf.adaptiveFramegen && !this->conservativeCrossDeviceSync_",
-            deadline,
-        )
+        self.assertIn("conf.adaptiveFramegen", deadline)
+        self.assertIn("!this->conservativeCrossDeviceSync_", deadline)
+        self.assertIn("this->asyncFramegenCompletionEnabled_", deadline)
 
-    def test_adreno_adaptive_commits_pre_admitted_work_after_host_completion(self) -> None:
+    def test_adreno_async_completion_restores_post_dispatch_deadline_drop(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated_start = source.index(
             "// 4. Generated presentation is opportunistic."
@@ -126,8 +125,10 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         generated = source[generated_start:source_start]
 
         self.assertIn("enforcePostDispatchSyntheticDeadline", generated)
+        self.assertIn("conf.adaptiveFramegen", generated)
         self.assertIn(
-            "conf.adaptiveFramegen && !this->conservativeCrossDeviceSync_",
+            "!this->conservativeCrossDeviceSync_"
+            " || this->asyncFramegenCompletionEnabled_",
             generated,
         )
         deadline = generated.split(
@@ -135,7 +136,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         )[1].split("pass.acquireSemaphores.at(i)", 1)[0]
         self.assertIn("if (enforcePostDispatchSyntheticDeadline", deadline)
 
-    def test_adreno_fixed_mode_uses_bounded_generated_acquire_without_changing_xclipse(self) -> None:
+    def test_adreno_async_completion_keeps_fixed_generated_acquire_nonblocking(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated_start = source.index(
             "// 4. Generated presentation is opportunistic."
@@ -147,11 +148,39 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
         self.assertIn("generatedAcquireTimeoutNs", generated)
         self.assertIn(
-            "!conf.adaptiveFramegen && this->conservativeCrossDeviceSync_",
+            "!conf.adaptiveFramegen && this->conservativeCrossDeviceSync_"
+            " && !this->asyncFramegenCompletionEnabled_",
             generated,
         )
         self.assertIn("runtimeWaitTimeoutNs()", generated)
         self.assertIn(": 0;", generated)
+
+    def test_adreno_reuses_game_device_copy_command_buffers_without_changing_xclipse(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        pool_header = (ROOT / "include/mini/commandpool.hpp").read_text(encoding="utf-8")
+        pool_source = (ROOT / "src/mini/commandpool.cpp").read_text(encoding="utf-8")
+        command_header = (ROOT / "include/mini/commandbuffer.hpp").read_text(encoding="utf-8")
+        command_source = (ROOT / "src/mini/commandbuffer.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("bool enableIndividualReset = false", pool_header)
+        self.assertIn("VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT", pool_source)
+        self.assertIn("void reset();", command_header)
+        self.assertIn("Unable to reset command buffer", command_source)
+
+        constructor = source[source.index("// prepare render passes"):source.index("LsContext::~LsContext()")]
+        self.assertIn("this->conservativeCrossDeviceSync_", constructor)
+        self.assertIn("pass.preCopyBuf = Mini::CommandBuffer", constructor)
+        self.assertIn("for (auto& postCopyBuf : pass.postCopyBufs)", constructor)
+
+        present = source[source.index("VkResult LsContext::present"):]
+        self.assertIn("if (this->conservativeCrossDeviceSync_)", present)
+        self.assertIn("pass.preCopyBuf.reset()", present)
+        self.assertIn("postCopyBuf.reset()", present)
+        self.assertIn(
+            "else {\n"
+            "        pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);",
+            present,
+        )
 
     def test_adreno_opaque_export_failure_uses_adreno_reprime_not_xclipse_warmup(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")

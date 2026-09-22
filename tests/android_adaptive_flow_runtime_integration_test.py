@@ -348,7 +348,8 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
 
         self.assertIn("generatedAcquireTimeoutNs", source)
         self.assertIn(
-            "!conf.adaptiveFramegen && this->conservativeCrossDeviceSync_",
+            "!conf.adaptiveFramegen && this->conservativeCrossDeviceSync_"
+            " && !this->asyncFramegenCompletionEnabled_",
             source,
         )
         self.assertIn(

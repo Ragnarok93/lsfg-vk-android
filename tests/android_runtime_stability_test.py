@@ -245,7 +245,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("metrics.windowGeneratedLateDrops", generated)
         self.assertIn("metrics.totalGeneratedLateDrops", generated)
         self.assertIn(
-            "!conf.adaptiveFramegen && this->conservativeCrossDeviceSync_",
+            "!conf.adaptiveFramegen && this->conservativeCrossDeviceSync_"
+            " && !this->asyncFramegenCompletionEnabled_",
             generated,
         )
         self.assertIn("runtimeWaitTimeoutNs()", generated)
