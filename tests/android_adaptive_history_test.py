@@ -199,8 +199,16 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
     def test_source_only_bypass_remains_lifecycle_reset(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
-        self.assertIn("sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames", bypass)
-        self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames",
+            bypass,
+        )
+        self.assertIn("kSourceHistoryWarmupFrames", bypass)
+        self.assertIn(
+            "requiresSourceHistoryWarmup_ =\n"
+            "        this->sourceHistoryWarmupRemaining_ > 0",
+            bypass,
+        )
         self.assertIn("previousSourceCopySignalValid_ = false", bypass)
         self.assertIn("adaptiveScheduler_.reset()", bypass)
         self.assertIn("deadlineAdmissionPredictor_.reset()", bypass)
