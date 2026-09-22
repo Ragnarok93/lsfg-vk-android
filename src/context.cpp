@@ -3339,10 +3339,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             deferredAdrenoBatchQueuedThisCycle = true;
             requireHostCompletionWait = false;
 
-            std::cerr << "lsfg-vk: runtime stage=adreno-deferred-batch-queued"
-                      << " generated=" << generatedFrameCount
-                      << " pass=" << this->deferredAdrenoPassIndex_
-                      << "\n";
+            if (firstPresentDiagnostic) {
+                std::cerr << "lsfg-vk: runtime stage=adreno-deferred-batch-queued"
+                          << " generated=" << generatedFrameCount
+                          << " pass=" << this->deferredAdrenoPassIndex_
+                          << "\n";
+            }
 
             // Observe any previous completed timing sample, then acknowledge
             // this real source immediately. No unsignaled framegen dependency

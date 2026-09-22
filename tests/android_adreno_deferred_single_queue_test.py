@@ -40,6 +40,12 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
             "runtime stage=adreno-deferred-batch-queued",
             source,
         )
+        queued_log = source.index("runtime stage=adreno-deferred-batch-queued")
+        self.assertIn(
+            "if (firstPresentDiagnostic)",
+            source[max(0, queued_log - 300):queued_log],
+            "deferred Adreno hot path must not synchronously log every batch",
+        )
 
     def test_deferred_batch_never_places_unsignaled_wait_on_primary_queue(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
