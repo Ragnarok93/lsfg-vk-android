@@ -2437,7 +2437,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         gameRenderSemaphores2.emplace_back(
             pass.crossFrameWaitRetentions.back().handle());
         consumeConservativeBatchComplete = true;
-    } else if (previousPass != nullptr
+    } else if (!this->conservativeCrossDeviceSync_
+            && previousPass != nullptr
             && previousPass->framegenBatchCompleteValid) {
         metrics.windowHandoffBatchDeps++;
         pass.crossFrameWaitRetentions.emplace_back(
