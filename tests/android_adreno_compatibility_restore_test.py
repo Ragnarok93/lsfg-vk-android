@@ -456,7 +456,8 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         )
 
         self.assertIn("kAdrenoSyntheticQueuePriority", plan)
-        self.assertIn("0.25F", plan)
+        self.assertIn("kAdrenoSyntheticQueuePriority = 0.25F", hooks)
+        self.assertIn("priorities.push_back(kAdrenoSyntheticQueuePriority)", hooks)
         self.assertIn("priorities.push_back(kAdrenoSyntheticQueuePriority)", plan)
         self.assertIn("queueInfo.queueCount = plan.queueIndex + 1", plan)
 
@@ -477,7 +478,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         plan_end = hooks.index("bool augmentAdrenoSyntheticQueue", plan_start)
         plan = hooks[plan_start:plan_end]
         self.assertIn("uint32_t queueIndex", hooks)
-        self.assertIn("family.queueCount > queueInfo.queueCount", plan)
+        self.assertIn("queueInfo.queueCount < family.queueCount", plan)
         self.assertIn("plan.queueIndex = queueInfo.queueCount", plan)
         self.assertNotIn(
             "family.queueCount >= 2 && queueInfo.queueCount >= 1",
