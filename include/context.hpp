@@ -8,6 +8,7 @@
 #endif
 
 #include "hooks.hpp"
+#include "android_sync_policy.hpp"
 #include "adaptive_scheduler.hpp"
 #include "adaptive_flow_controller.hpp"
 #include "mini/commandbuffer.hpp"
@@ -304,6 +305,8 @@ private:
 
     // Qualcomm/Adreno keeps protected source/history handling for zero,
     // reprime, and source-only cycles.
+    AndroidSyncPolicy::FramegenCompatibilityPath compatibilityPath_{
+        AndroidSyncPolicy::FramegenCompatibilityPath::Generic};
     bool conservativeCrossDeviceSync_{false};
 
     // Single-queue Adreno cannot safely queue an unsignaled framegen completion
@@ -316,6 +319,7 @@ private:
     int deferredAdrenoBatchCompleteFd_{-1};
     size_t deferredAdrenoPassIndex_{0};
     size_t deferredAdrenoGeneratedCount_{0};
+    uint64_t deferredAdrenoBatchId_{0};
     uint32_t deferredAdrenoSourceAge_{0};
     bool deferredAdrenoOutputEligible_{false};
     Mini::Semaphore deferredAdrenoBatchCompleteSemaphore_;

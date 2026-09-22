@@ -31,6 +31,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <array>
 #include <cmath>
@@ -154,6 +155,14 @@ uint64_t nextRuntimeConfigRevision() {
     if (revision == 0)
         revision = nextRevision.fetch_add(1, std::memory_order_relaxed);
     return revision;
+}
+
+bool shouldTraceBatch(uint64_t batchId) {
+    static const bool traceEveryBatch = [] {
+        const char* value = std::getenv("LSFG_VK_BATCH_TRACE");
+        return value != nullptr && std::string_view(value) == "1";
+    }();
+    return traceEveryBatch || batchId <= 8 || batchId % 120 == 0;
 }
 
 uint64_t runtimeDiagnosticConfigSignature(
@@ -795,9 +804,17 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     const bool opaqueFdHandoffSupported =
         info.androidOpaqueFdSemaphoreSupported
         && backendDiagnostics.externalSemaphoreOpaqueFd;
+    VkPhysicalDeviceProperties gameDeviceProperties{};
+    Layer::ovkGetPhysicalDeviceProperties(
+        info.physicalDevice, &gameDeviceProperties);
+    this->compatibilityPath_ =
+        AndroidSyncPolicy::selectFramegenCompatibilityPath(
+            backendDiagnostics.driverId,
+            backendDiagnostics.driverName,
+            gameDeviceProperties.deviceName);
     this->conservativeCrossDeviceSync_ =
-        AndroidSyncPolicy::requiresConservativeCrossDeviceSync(
-            backendDiagnostics.driverId, backendDiagnostics.driverName);
+        this->compatibilityPath_
+            == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood;
     if (this->conservativeCrossDeviceSync_
             && info.adrenoSyntheticQueueAvailable
             && info.syntheticQueue != VK_NULL_HANDLE) {
@@ -839,6 +856,53 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         && syncFdHandoffSupported
         && gameGetSemaphoreFd != nullptr
         && gameImportSemaphoreFd != nullptr;
+
+    const bool xclipseCompatibilityPath =
+        this->compatibilityPath_
+            == AndroidSyncPolicy::FramegenCompatibilityPath::XclipseCurrent;
+    const char* compatibilityCompletion =
+        this->asyncFramegenCompletionEnabled_
+            ? "sync-fd"
+            : (this->deferredAdrenoCompletionEnabled_
+                ? "deferred-sync-fd"
+                : "host-wait");
+    const char* compatibilityPresentation =
+        this->compatibilityPath_
+                == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood
+            ? "generated-before-buffered-source"
+            : (xclipseCompatibilityPath ? "xclipse-current" : "capability-current");
+    const char* compatibilityRetirement =
+        this->compatibilityPath_
+                == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood
+            ? "batch-syncfd+real-copy-fence+wsi-reacquire"
+            : (xclipseCompatibilityPath ? "xclipse-current" : "capability-current");
+
+    std::cerr << "lsfg-vk: LSFG compatibility path:"
+              << " gpu=\"" << gameDeviceProperties.deviceName << "\""
+              << " vendor="
+              << AndroidSyncPolicy::compatibilityVendorName(
+                    this->compatibilityPath_)
+              << " path="
+              << AndroidSyncPolicy::compatibilityPathName(
+                    this->compatibilityPath_)
+              << " completion=" << compatibilityCompletion
+              << " handoff="
+              << (this->asyncAhbHandoffEnabled_
+                    ? handoffTypeName(this->asyncAhbHandoffHandleType_)
+                    : "host-fence")
+              << " presentation=" << compatibilityPresentation
+              << " retirement=" << compatibilityRetirement
+              << " queue_topology="
+              << (this->syntheticQueue_ != VK_NULL_HANDLE
+                    ? "split-graphics"
+                    : "single-graphics")
+              << " source_queue=application-present"
+              << " generated_queue="
+              << (this->syntheticQueue_ != VK_NULL_HANDLE
+                    ? "synthetic-graphics"
+                    : "application-present")
+              << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
+              << '\n';
 
     // The known-good Qualcomm/Adreno path can generate immediately because the
     // first source upload initializes both AHB inputs. Do not inherit the newer
@@ -1207,6 +1271,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     if (this->deferredAdrenoBatchValid_) {
+        const uint64_t deferredBatchId = this->deferredAdrenoBatchId_;
+        const uint32_t deferredSourceAge = this->deferredAdrenoSourceAge_;
         auto& deferredPass =
             this->passInfos.at(this->deferredAdrenoPassIndex_ % this->passInfos.size());
         bool batchReady = this->deferredAdrenoBatchCompleteReady_;
@@ -1500,6 +1566,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->deferredAdrenoSourceAge_ = 0;
             deferredPass.deferredAdrenoOwned = false;
         }
+
+        if (shouldTraceBatch(deferredBatchId)) {
+            std::cerr << "lsfg-vk: runtime stage=adreno-batch-delivery"
+                      << " batch_id=" << deferredBatchId
+                      << " private_complete=" << (batchReady ? 1 : 0)
+                      << " output_ready=" << deferredReadyOutputPrefix
+                      << " copy_submitted=" << deferredDeliveredGeneratedFrameCount
+                      << " wsi_submitted=" << deferredDeliveredGeneratedFrameCount
+                      << " wsi_accepted=" << deferredDeliveredGeneratedFrameCount
+                      << " late_dropped=" << deferredUnreadyOutputCount
+                      << " source_age=" << deferredSourceAge
+                      << '\n';
+        }
+        if (batchReady)
+            this->deferredAdrenoBatchId_ = 0;
     }
 
     if (this->pendingSourceValid_) {
@@ -2111,8 +2192,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             && timing.batchId > 0;
         const bool timingFresh = timingSessionMatches
             && timing.batchId > this->adaptiveFlowLastObservedBatchId_;
-        if (timingFresh)
+        if (timingFresh) {
             this->adaptiveFlowLastObservedBatchId_ = timing.batchId;
+            if (shouldTraceBatch(timing.batchId)) {
+                std::cerr << "lsfg-vk: runtime stage=framegen-gpu-timing"
+                          << " batch_id=" << timing.batchId
+                          << " mipmaps_ms=" << timing.mipmapsMs
+                          << " flow_end_ms=" << timing.opticalFlowMs
+                          << " frame_interpolation_end_ms=" << timing.totalLsfgMs
+                          << " generation_count=" << timing.generationCount
+                          << '\n';
+            }
+        }
         const bool timingUsable = timingFresh && !timing.transitionActive;
         const bool generatedWorkSample =
             timingUsable && timing.generationCount > 0;
@@ -3649,6 +3740,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
                   << (conf.performance ? "performance" : "quality")
+                  << " batch_id=" << adaptiveFlowBatch.batchId
                   << " generated=" << generatedFrameCount
                   << " handoff=" << (useAsyncHandoff
                         ? handoffTypeName(this->asyncAhbHandoffHandleType_)
@@ -3712,6 +3804,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             framegenSync.batchCompleteFd = -1;
             this->deferredAdrenoPassIndex_ = this->frameIdx % this->passInfos.size();
             this->deferredAdrenoGeneratedCount_ = generatedFrameCount;
+            this->deferredAdrenoBatchId_ = framegenSync.batchId;
             this->deferredAdrenoSourceAge_ = 0;
             this->deferredAdrenoOutputEligible_ = true;
             this->deferredAdrenoBatchCompleteReady_ =
@@ -3725,6 +3818,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
             if (firstPresentDiagnostic) {
                 std::cerr << "lsfg-vk: runtime stage=adreno-deferred-batch-queued"
+                          << " batch_id=" << this->deferredAdrenoBatchId_
                           << " generated=" << generatedFrameCount
                           << " pass=" << this->deferredAdrenoPassIndex_
                           << "\n";

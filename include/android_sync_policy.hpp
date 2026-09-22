@@ -6,6 +6,12 @@
 
 namespace AndroidSyncPolicy {
 
+enum class FramegenCompatibilityPath {
+    AdrenoLatestKnownGood,
+    XclipseCurrent,
+    Generic,
+};
+
 constexpr char asciiLower(char ch) noexcept {
     return ch >= 'A' && ch <= 'Z'
         ? static_cast<char>(ch - 'A' + 'a')
@@ -42,18 +48,65 @@ inline bool containsAsciiCaseInsensitive(
 ///
 /// Samsung/Xclipse, ARM/Mali, and unknown drivers retain their existing fully
 /// capability-driven asynchronous synchronization.
-inline bool requiresConservativeCrossDeviceSync(
-        VkDriverId driverId, std::string_view driverName) noexcept {
+inline FramegenCompatibilityPath selectFramegenCompatibilityPath(
+        VkDriverId driverId, std::string_view driverName,
+        std::string_view deviceName = {}) noexcept {
     if (driverId == VK_DRIVER_ID_MESA_TURNIP
             || driverId == VK_DRIVER_ID_QUALCOMM_PROPRIETARY) {
-        return true;
+        return FramegenCompatibilityPath::AdrenoLatestKnownGood;
     }
 
     // VkPhysicalDeviceDriverProperties can be unavailable on older stacks.
     // Fall back to the reported driver/device name only in that case.
-    return containsAsciiCaseInsensitive(driverName, "turnip")
-        || containsAsciiCaseInsensitive(driverName, "qualcomm")
-        || containsAsciiCaseInsensitive(driverName, "adreno");
+    if (containsAsciiCaseInsensitive(driverName, "turnip")
+            || containsAsciiCaseInsensitive(driverName, "qualcomm")
+            || containsAsciiCaseInsensitive(driverName, "adreno")
+            || containsAsciiCaseInsensitive(deviceName, "qualcomm")
+            || containsAsciiCaseInsensitive(deviceName, "adreno")) {
+        return FramegenCompatibilityPath::AdrenoLatestKnownGood;
+    }
+
+    if (driverId == VK_DRIVER_ID_SAMSUNG_PROPRIETARY
+            || containsAsciiCaseInsensitive(driverName, "xclipse")
+            || containsAsciiCaseInsensitive(driverName, "samsung")
+            || containsAsciiCaseInsensitive(deviceName, "xclipse")
+            || containsAsciiCaseInsensitive(deviceName, "samsung")) {
+        return FramegenCompatibilityPath::XclipseCurrent;
+    }
+
+    return FramegenCompatibilityPath::Generic;
+}
+
+inline bool requiresConservativeCrossDeviceSync(
+        VkDriverId driverId, std::string_view driverName) noexcept {
+    return selectFramegenCompatibilityPath(driverId, driverName)
+        == FramegenCompatibilityPath::AdrenoLatestKnownGood;
+}
+
+inline const char* compatibilityPathName(
+        FramegenCompatibilityPath path) noexcept {
+    switch (path) {
+    case FramegenCompatibilityPath::AdrenoLatestKnownGood:
+        return "adreno-latest-known-good";
+    case FramegenCompatibilityPath::XclipseCurrent:
+        return "xclipse-current";
+    case FramegenCompatibilityPath::Generic:
+        return "generic-capability";
+    }
+    return "generic-capability";
+}
+
+inline const char* compatibilityVendorName(
+        FramegenCompatibilityPath path) noexcept {
+    switch (path) {
+    case FramegenCompatibilityPath::AdrenoLatestKnownGood:
+        return "Qualcomm";
+    case FramegenCompatibilityPath::XclipseCurrent:
+        return "Samsung";
+    case FramegenCompatibilityPath::Generic:
+        return "other";
+    }
+    return "other";
 }
 
 inline const char* crossDeviceSyncPolicyName(bool conservative) noexcept {

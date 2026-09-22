@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include <iostream>
 #include <fstream>
@@ -50,6 +51,7 @@ namespace Layer {
 namespace {
 
     constexpr size_t kAndroidResidentMaxMultiplier = 4;
+    std::atomic<uint64_t> nextSwapchainGeneration{1};
 
     size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 #ifdef __ANDROID__
@@ -914,6 +916,19 @@ namespace {
                 &imageCount, swapchainImages.data());
             if (res != VK_SUCCESS)
                 throw LSFG::vulkan_error(res, "Failed to get swapchain images");
+
+            const uint64_t swapchainGeneration =
+                nextSwapchainGeneration.fetch_add(1, std::memory_order_relaxed);
+            std::cerr << "lsfg-vk: init stage=present-contract"
+                      << " swapchain_generation=" << swapchainGeneration
+                      << " requested_present_mode=" << pCreateInfo->presentMode
+                      << " wrapper_override_present_mode=" << configuredPresentMode
+                      << " chosen_present_mode=" << createInfo.presentMode
+                      << " actual_create_info_present_mode=" << createInfo.presentMode
+                      << " image_count=" << imageCount
+                      << " source_queue=application-present"
+                      << " generated_queue=compatibility-selected"
+                      << '\n';
 
             // Retire the old LSFG bookkeeping only after the replacement Vulkan
             // swapchain is known-good. If downstream creation fails, the old

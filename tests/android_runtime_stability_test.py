@@ -146,7 +146,9 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         end = source.index("return passthroughResult;", start)
         busy = source[start:end]
 
-        self.assertIn("resetAdaptiveSourceEpoch(true)", busy)
+        self.assertIn("if (this->conservativeCrossDeviceSync_)", busy)
+        self.assertIn("SourceHistoryInvalidationReason::SourcePairMismatch", busy)
+        self.assertRegex(busy, r"resetAdaptiveSourceEpoch\(\s*true")
         self.assertNotIn("++this->frameIdx", busy)
 
     def test_adreno_standalone_reprime_preserves_two_input_parity(self) -> None:

@@ -3,7 +3,9 @@
 #include <cassert>
 
 int main() {
+    using AndroidSyncPolicy::FramegenCompatibilityPath;
     using AndroidSyncPolicy::requiresConservativeCrossDeviceSync;
+    using AndroidSyncPolicy::selectFramegenCompatibilityPath;
 
     assert(requiresConservativeCrossDeviceSync(
         VK_DRIVER_ID_MESA_TURNIP, "Turnip"));
@@ -23,6 +25,22 @@ int main() {
         VK_DRIVER_ID_ARM_PROPRIETARY, "ARM Mali"));
     assert(!requiresConservativeCrossDeviceSync(
         static_cast<VkDriverId>(0), "Unknown Vulkan GPU"));
+
+    assert(selectFramegenCompatibilityPath(
+        VK_DRIVER_ID_MESA_TURNIP, "Turnip")
+        == FramegenCompatibilityPath::AdrenoLatestKnownGood);
+    assert(selectFramegenCompatibilityPath(
+        VK_DRIVER_ID_SAMSUNG_PROPRIETARY, "Samsung Xclipse")
+        == FramegenCompatibilityPath::XclipseCurrent);
+    assert(selectFramegenCompatibilityPath(
+        static_cast<VkDriverId>(0), "unknown", "Adreno 650")
+        == FramegenCompatibilityPath::AdrenoLatestKnownGood);
+    assert(selectFramegenCompatibilityPath(
+        static_cast<VkDriverId>(0), "unknown", "Xclipse 940")
+        == FramegenCompatibilityPath::XclipseCurrent);
+    assert(selectFramegenCompatibilityPath(
+        static_cast<VkDriverId>(0), "unknown", "Generic GPU")
+        == FramegenCompatibilityPath::Generic);
 
     return 0;
 }

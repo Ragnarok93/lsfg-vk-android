@@ -280,6 +280,7 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         size_t interpolationGenerationCount,
         const LSFG::AdaptiveFlowBatchMetadata& adaptiveFlowBatch) {
     LSFG::AndroidFrameSyncFds exportedSync{};
+    exportedSync.batchId = adaptiveFlowBatch.batchId;
 
 #ifdef __ANDROID__
     const size_t completedWindow =

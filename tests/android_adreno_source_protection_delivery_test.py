@@ -10,7 +10,7 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn("conservativeAdaptiveHistoryGap", source)
-        start = source.index("const bool conservativeAdaptiveHistoryGap")
+        start = source.index("const bool conservativeAdmissionRejectedHistoryGap")
         end = source.index("this->lastGeneratedFrameCount_", start)
         classification = source[start:end]
 
@@ -102,9 +102,9 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
             "if (sourceProtectionBatchAdmission)",
             admission,
         )
-        self.assertIn(
-            "deadlineAdmissionPredictor_.predict(candidate, sourceBudgetMs)",
+        self.assertRegex(
             admission,
+            r"deadlineAdmissionPredictor_\.predict\(\s*candidate,\s*sourceBudgetMs\)",
         )
         self.assertIn(
             "sourceTimeline_.syntheticDesiredTimeNs",
