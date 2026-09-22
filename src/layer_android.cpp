@@ -116,6 +116,7 @@ std::unordered_map<VkDevice, DeviceDispatch> deviceDispatchTables;
 std::unordered_map<VkQueue, DeviceDispatch> queueDispatchTables;
 std::unordered_map<VkCommandBuffer, DeviceDispatch> commandBufferDispatchTables;
 std::shared_mutex deviceDispatchMutex;
+PFN_vkGetDeviceProcAddr knownGoodPrivateGetDeviceProcAddr{};
 PFN_vkGetDeviceQueue knownGoodPrivateGetDeviceQueue{};
 PFN_vkGetDeviceQueue2 knownGoodPrivateGetDeviceQueue2{};
 
@@ -127,14 +128,64 @@ bool recursiveBackendSetupActive() {
 bool loadKnownGoodPrivateQueueDispatch(VkDevice device, DeviceDispatch* dispatch) {
     if (!recursiveBackendSetupActive() || device == VK_NULL_HANDLE || dispatch == nullptr)
         return false;
-    std::shared_lock lock(deviceDispatchMutex);
-    if (knownGoodPrivateGetDeviceQueue == nullptr
-            && knownGoodPrivateGetDeviceQueue2 == nullptr)
+
+    PFN_vkGetDeviceProcAddr compatibilityGdpa{};
+    PFN_vkGetDeviceQueue compatibilityGetQueue{};
+    PFN_vkGetDeviceQueue2 compatibilityGetQueue2{};
+    {
+        std::shared_lock lock(deviceDispatchMutex);
+        compatibilityGdpa = knownGoodPrivateGetDeviceProcAddr;
+        compatibilityGetQueue = knownGoodPrivateGetDeviceQueue;
+        compatibilityGetQueue2 = knownGoodPrivateGetDeviceQueue2;
+    }
+
+    if (compatibilityGdpa == nullptr
+            && compatibilityGetQueue == nullptr
+            && compatibilityGetQueue2 == nullptr)
         return false;
+
     dispatch->device = device;
-    dispatch->GetDeviceQueue = knownGoodPrivateGetDeviceQueue;
-    dispatch->GetDeviceQueue2 = knownGoodPrivateGetDeviceQueue2;
-    return true;
+    dispatch->GetDeviceProcAddr = compatibilityGdpa;
+    dispatch->GetDeviceQueue = compatibilityGetQueue;
+    dispatch->GetDeviceQueue2 = compatibilityGetQueue2;
+
+    // The known-good S20+ path used the presentation-device GDPA as the
+    // process-level compatibility bridge for the private framegen device.
+    // Reconstruct only the queue operations needed to make an acquired private
+    // queue usable; generic Volk loads use the same GDPA through
+    // layer_vkGetDeviceProcAddr below.
+    if (compatibilityGdpa != nullptr) {
+        if (dispatch->GetDeviceQueue == nullptr) {
+            dispatch->GetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
+                compatibilityGdpa(device, "vkGetDeviceQueue"));
+        }
+        if (dispatch->GetDeviceQueue2 == nullptr) {
+            dispatch->GetDeviceQueue2 = reinterpret_cast<PFN_vkGetDeviceQueue2>(
+                compatibilityGdpa(device, "vkGetDeviceQueue2"));
+        }
+        dispatch->QueueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
+            compatibilityGdpa(device, "vkQueueSubmit"));
+        dispatch->QueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(
+            compatibilityGdpa(device, "vkQueuePresentKHR"));
+    }
+    return dispatch->GetDeviceQueue || dispatch->GetDeviceQueue2;
+}
+
+PFN_vkVoidFunction loadKnownGoodPrivateDeviceProc(
+        VkDevice device, const char* name) {
+    if (!recursiveBackendSetupActive()
+            || device == VK_NULL_HANDLE
+            || name == nullptr)
+        return nullptr;
+
+    PFN_vkGetDeviceProcAddr compatibilityGdpa{};
+    {
+        std::shared_lock lock(deviceDispatchMutex);
+        compatibilityGdpa = knownGoodPrivateGetDeviceProcAddr;
+    }
+    return compatibilityGdpa
+        ? compatibilityGdpa(device, name)
+        : nullptr;
 }
 
 bool loadDeviceDispatch(VkDevice device, DeviceDispatch* dispatch) {
@@ -172,6 +223,8 @@ void storeDeviceDispatch(VkDevice device, const DeviceDispatch& dispatch) {
     std::unique_lock lock(deviceDispatchMutex);
     deviceDispatchTables[device] = ownedDispatch;
     if (ownedDispatch.presentationDevice) {
+        if (ownedDispatch.GetDeviceProcAddr)
+            knownGoodPrivateGetDeviceProcAddr = ownedDispatch.GetDeviceProcAddr;
         if (ownedDispatch.GetDeviceQueue)
             knownGoodPrivateGetDeviceQueue = ownedDispatch.GetDeviceQueue;
         if (ownedDispatch.GetDeviceQueue2)
@@ -604,7 +657,24 @@ PFN_vkVoidFunction layer_vkGetDeviceProcAddr(VkDevice device, const char* pName)
             return nullptr;
         return it->second;
     }
-    return downstream ? downstream(device, pName) : nullptr;
+    PFN_vkVoidFunction resolved =
+        downstream ? downstream(device, pName) : nullptr;
+    if (resolved != nullptr)
+        return resolved;
+
+    // LSFG's private framegen device is intentionally non-presentation. On
+    // wrapper-gamenative/Turnip A6xx its private-device GDPA can return NULL for
+    // core commands that Volk must load (notably vkQueueSubmit). The known-good
+    // S20+ implementation and the A6xx compatibility fork both relied on
+    // process-established device thunks here. Restore that behavior only while
+    // LSFG is synchronously constructing its own backend; normal game/helper
+    // devices, including Xclipse, keep exact-device/fail-closed dispatch.
+    if (tracked && !dispatch.presentationDevice) {
+        if (auto compatibility =
+                loadKnownGoodPrivateDeviceProc(device, pName))
+            return compatibility;
+    }
+    return nullptr;
 }
 
 namespace Layer {
@@ -802,8 +872,26 @@ void ovkGetDeviceQueue(VkDevice a, uint32_t b, uint32_t c, VkQueue* d) {
         if (loadConstructionQueueDispatch(a, &bootstrap)
                 && bootstrap.GetDeviceQueue != nullptr) {
             getQueue = bootstrap.GetDeviceQueue;
-            if (!tracked)
+            if (!tracked) {
                 dispatch = bootstrap;
+            } else if (recursiveBackendSetupActive()
+                    && !dispatch.presentationDevice) {
+                // Keep the private device as the exact owner, but fill holes
+                // in the queue-level dispatch from the same compatibility
+                // bridge used by Volk. This prevents the r21 S20+ state where
+                // queue acquisition succeeded but the queue was stored with
+                // submit=0.
+                if (dispatch.GetDeviceProcAddr == nullptr)
+                    dispatch.GetDeviceProcAddr = bootstrap.GetDeviceProcAddr;
+                if (dispatch.GetDeviceQueue == nullptr)
+                    dispatch.GetDeviceQueue = bootstrap.GetDeviceQueue;
+                if (dispatch.GetDeviceQueue2 == nullptr)
+                    dispatch.GetDeviceQueue2 = bootstrap.GetDeviceQueue2;
+                if (dispatch.QueueSubmit == nullptr)
+                    dispatch.QueueSubmit = bootstrap.QueueSubmit;
+                if (dispatch.QueuePresentKHR == nullptr)
+                    dispatch.QueuePresentKHR = bootstrap.QueuePresentKHR;
+            }
         }
     }
 
@@ -826,8 +914,21 @@ void ovkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, VkQueue
         if (loadConstructionQueueDispatch(device, &bootstrap)
                 && bootstrap.GetDeviceQueue2 != nullptr) {
             getQueue2 = bootstrap.GetDeviceQueue2;
-            if (!tracked)
+            if (!tracked) {
                 owner = bootstrap;
+            } else if (recursiveBackendSetupActive()
+                    && !owner.presentationDevice) {
+                if (owner.GetDeviceProcAddr == nullptr)
+                    owner.GetDeviceProcAddr = bootstrap.GetDeviceProcAddr;
+                if (owner.GetDeviceQueue == nullptr)
+                    owner.GetDeviceQueue = bootstrap.GetDeviceQueue;
+                if (owner.GetDeviceQueue2 == nullptr)
+                    owner.GetDeviceQueue2 = bootstrap.GetDeviceQueue2;
+                if (owner.QueueSubmit == nullptr)
+                    owner.QueueSubmit = bootstrap.QueueSubmit;
+                if (owner.QueuePresentKHR == nullptr)
+                    owner.QueuePresentKHR = bootstrap.QueuePresentKHR;
+            }
         }
     }
 
