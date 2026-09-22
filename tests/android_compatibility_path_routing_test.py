@@ -49,6 +49,22 @@ class AndroidCompatibilityPathRoutingTest(unittest.TestCase):
             r"behavior_changed=.*AdrenoLatestKnownGood",
         )
 
+    def test_adreno_uses_device_proven_same_call_contract(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
+        selection_end = source.index("const bool xclipseCompatibilityPath", selection_start)
+        selection = source[selection_start:selection_end]
+        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
+        self.assertIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
+        self.assertIn('"generated-before-source-same-call"', source)
+        self.assertIn('"host-completion+real-copy-fence+wsi-reacquire"', source)
+        self.assertIn("this->sourceHistoryWarmupRemaining_ = 1;", source)
+        self.assertNotIn(
+            '? "generated-before-buffered-source"',
+            source,
+        )
+
     def test_batch_sequence_id_crosses_private_and_delivery_paths(self) -> None:
         backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(
             encoding="utf-8"

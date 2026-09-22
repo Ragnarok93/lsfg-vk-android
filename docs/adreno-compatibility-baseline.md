@@ -50,11 +50,13 @@ The repaired Adreno route keeps the proven baseline's observable invariants:
    history without a concrete discontinuity or ownership failure;
 5. output AHBs are copied into game-device WSI images before presentation.
 
-It replaces only the source-critical completion topology. Single-queue Adreno
-exports one-shot output-ready and batch-complete SYNC_FDs, buffers at most one
-source boundary to preserve temporal order, checks readiness without blocking,
-and gives synthetic output one delivery opportunity at the next source
-boundary. An unready suffix is dropped before the real source is presented.
+The r24 deferred experiment was invalidated by the September 22 S20+ capture.
+It retained the first application source image and returned success without a
+downstream source present. The application then submitted images 1 through 5;
+when batch 1 became privately complete at source age 4, the layer unloaded and
+the guest render process exited. Adreno therefore returns to the exact
+device-proven host-fence/host-completion/same-call presentation topology. No
+application source image or present wait is retained across calls.
 
 Later correctness repairs remain in force:
 
@@ -72,7 +74,7 @@ The selector is explicit:
 
 | Path | Policy |
 | --- | --- |
-| `adreno-latest-known-good` | Restored Adreno history/presentation contract with deferred single-queue completion and the later lifetime fixes. |
+| `adreno-latest-known-good` | Device-proven host-fence handoff, bounded host completion, and generated-then-source presentation in the same intercepted call; later lifetime fixes remain active. |
 | `xclipse-current` | Existing capability-driven asynchronous Xclipse behavior, unchanged. |
 | `generic-capability` | Existing generic capability path. |
 
@@ -101,3 +103,11 @@ capture; `framegen-gpu-timing` and `adreno-batch-delivery` can then be joined by
 
 Deterministic host tests and Android builds are necessary gates, but they do not
 substitute for the S20+ and S25 FE runs above.
+
+## Invalidated r24 route
+
+Runtime `gamenative-adaptive-2302f56ec75eaf20529484a4630fafed5e19585b-r24`
+is a rejected Adreno route. Its `deferred-sync-fd` completion and
+`generated-before-buffered-source` policy must not be re-enabled on
+Qualcomm/Turnip. The compatibility selector now hard-disables that route while
+leaving the Xclipse capability path unchanged.

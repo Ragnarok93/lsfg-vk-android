@@ -821,41 +821,32 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         this->syntheticQueue_ = info.syntheticQueue;
     }
     // Source ownership and framegen completion are independent policies.
-    // Qualcomm/Adreno keeps the protected source/history topology below:
-    // true source-only, reprime, and fractional zero-generation cycles never
-    // cross into framegen. Generated cycles, however, can safely use the same
-    // one-shot SYNC_FD output-ready + batch-complete dependency chain as other
-    // capable drivers. This removes the source-thread completion wait while
-    // preserving the r11 zero-count/lifetime repair. Xclipse remains on its
-    // existing capability-driven SYNC_FD path unchanged.
+    // The validated Adreno 650/Turnip baseline used a host-fence source handoff,
+    // completed private-device framegen before reading generated AHBs, and
+    // forwarded generated + source WSI presents in the same intercepted call.
+    // Do not retain an application swapchain image or present wait across calls:
+    // the r24 deferred source-buffer route exhausted the six-image swapchain and
+    // terminated the guest render process on its first generated batch.
+    //
+    // Xclipse and generic drivers keep their existing capability-driven
+    // asynchronous handoff/completion route unchanged.
     this->asyncAhbHandoffEnabled_ =
-        gameGetSemaphoreFd != nullptr
-        && (this->conservativeCrossDeviceSync_
-            ? syncFdHandoffSupported
-            : (syncFdHandoffSupported || opaqueFdHandoffSupported));
-    this->asyncAhbHandoffHandleType_ =
-        this->conservativeCrossDeviceSync_
-            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
-            : (syncFdHandoffSupported
-                ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
-                : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
-    // Preserve the device-proven completion topology. Xclipse/Mali and any
-    // Adreno path with a genuinely independent synthetic queue may consume
-    // exported completion SYNC_FDs asynchronously. Single-queue Qualcomm/Turnip
-    // must complete private-device framegen before the game device touches a
-    // generated AHB; deferring those output dependencies across source
-    // boundaries repeatedly destroyed the guest Vulkan process on Adreno 650.
-    this->asyncFramegenCompletionEnabled_ =
-        syncFdHandoffSupported
-        && gameImportSemaphoreFd != nullptr
-        && (!this->conservativeCrossDeviceSync_
-            || this->syntheticQueue_ != VK_NULL_HANDLE);
-    this->deferredAdrenoCompletionEnabled_ =
-        this->conservativeCrossDeviceSync_
-        && this->syntheticQueue_ == VK_NULL_HANDLE
-        && syncFdHandoffSupported
+        !this->conservativeCrossDeviceSync_
         && gameGetSemaphoreFd != nullptr
+        && (syncFdHandoffSupported || opaqueFdHandoffSupported);
+    this->asyncAhbHandoffHandleType_ =
+        syncFdHandoffSupported
+            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
+            : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    this->asyncFramegenCompletionEnabled_ =
+        !this->conservativeCrossDeviceSync_
+        && syncFdHandoffSupported
         && gameImportSemaphoreFd != nullptr;
+    // Rejected Adreno experiment: never select deferred completion/source
+    // buffering on the device-proven compatibility path. The dormant code stays
+    // isolated for lifetime-audit reference, but no compatibility selector can
+    // route Qualcomm/Turnip into it.
+    this->deferredAdrenoCompletionEnabled_ = false;
 
     const bool xclipseCompatibilityPath =
         this->compatibilityPath_
@@ -869,12 +860,12 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     const char* compatibilityPresentation =
         this->compatibilityPath_
                 == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood
-            ? "generated-before-buffered-source"
+            ? "generated-before-source-same-call"
             : (xclipseCompatibilityPath ? "xclipse-current" : "capability-current");
     const char* compatibilityRetirement =
         this->compatibilityPath_
                 == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood
-            ? "batch-syncfd+real-copy-fence+wsi-reacquire"
+            ? "host-completion+real-copy-fence+wsi-reacquire"
             : (xclipseCompatibilityPath ? "xclipse-current" : "capability-current");
 
     std::cerr << "lsfg-vk: LSFG compatibility path:"
@@ -904,12 +895,13 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
               << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
               << '\n';
 
-    // The known-good Qualcomm/Adreno path can generate immediately because the
-    // first source upload initializes both AHB inputs. Do not inherit the newer
-    // four-cycle private-history startup warmup on this compatibility path.
+    // Match the device-proven baseline: establish one real-source history
+    // boundary before the first Adreno interpolation dispatch. This source is
+    // presented normally in the same call; it is never buffered for a later
+    // intercepted present.
     if (this->conservativeCrossDeviceSync_) {
-        this->sourceHistoryWarmupRemaining_ = 0;
-        this->requiresSourceHistoryWarmup_ = false;
+        this->sourceHistoryWarmupRemaining_ = 1;
+        this->requiresSourceHistoryWarmup_ = true;
     }
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId

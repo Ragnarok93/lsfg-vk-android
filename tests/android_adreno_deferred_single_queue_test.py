@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
-    def test_single_queue_adreno_enables_deferred_delivery_only_with_safe_syncfd_capabilities(self) -> None:
+    def test_single_queue_adreno_rejects_deferred_delivery_and_uses_device_proven_fallback(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
@@ -21,15 +21,24 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
             self.assertIn(token, header)
 
         selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
-        selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
+        selection_end = source.index("// Match the device-proven baseline", selection_start)
         selection = source[selection_start:selection_end]
-        self.assertIn("this->deferredAdrenoCompletionEnabled_ =", selection)
-        self.assertIn("this->conservativeCrossDeviceSync_", selection)
-        self.assertIn("this->syntheticQueue_ == VK_NULL_HANDLE", selection)
-        self.assertIn("syncFdHandoffSupported", selection)
-        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
-        self.assertNotIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
-        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
+        self.assertIn(
+            "!this->conservativeCrossDeviceSync_",
+            selection,
+        )
+        self.assertIn(
+            "this->deferredAdrenoCompletionEnabled_ = false;",
+            selection,
+        )
+        self.assertNotIn(
+            "this->syntheticQueue_ == VK_NULL_HANDLE",
+            selection,
+        )
+        self.assertNotIn(
+            "gameImportSemaphoreFd != nullptr;\n    this->deferredAdrenoCompletionEnabled_ =\n",
+            selection,
+        )
         self.assertIn("presentContextWithCountExportSyncFd", source)
         self.assertIn("runtime stage=adreno-deferred-batch-queued", source)
         queued_log = source.index("runtime stage=adreno-deferred-batch-queued")
@@ -246,7 +255,7 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
-        selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
+        selection_end = source.index("// Match the device-proven baseline", selection_start)
         selection = source[selection_start:selection_end]
         self.assertIn("!this->conservativeCrossDeviceSync_", selection)
 
