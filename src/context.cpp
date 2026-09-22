@@ -82,6 +82,8 @@ size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 }
 
 #ifdef __ANDROID__
+constexpr uint32_t kConservativeSourceReprimeFrames = 1;
+
 uint64_t runtimeWaitTimeoutNs() {
     constexpr uint64_t defaultMs = 250;
     constexpr uint64_t maxMs = 5000;
@@ -763,6 +765,14 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->asyncFramegenCompletionEnabled_ =
         !this->conservativeCrossDeviceSync_
         && syncFdHandoffSupported && gameImportSemaphoreFd != nullptr;
+
+    // The known-good Qualcomm/Adreno path can generate immediately because the
+    // first source upload initializes both AHB inputs. Do not inherit the newer
+    // four-cycle private-history startup warmup on this compatibility path.
+    if (this->conservativeCrossDeviceSync_) {
+        this->sourceHistoryWarmupRemaining_ = 0;
+        this->requiresSourceHistoryWarmup_ = false;
+    }
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
               << ", mode=" << LSFG::ahbTransportModeName(ahbTransportMode)
@@ -2461,7 +2471,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->lastDispatchedGeneratedFrameCount_ = 0;
         this->lastGeneratedFrameCount_ = 0;
         pass.framegenBatchCompleteValid = false;
-        this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
+        this->sourceHistoryWarmupRemaining_ =
+            this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames
+                                               : kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
@@ -3101,8 +3113,11 @@ void LsContext::resetAdaptiveSourceEpoch(bool resetScheduler) {
     this->currentSourceTimeline_ = {};
     this->adaptivePresentPeriodNs_ = 0;
 
-    this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
-    this->requiresSourceHistoryWarmup_ = true;
+    this->sourceHistoryWarmupRemaining_ =
+        this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames
+                                           : kSourceHistoryWarmupFrames;
+    this->requiresSourceHistoryWarmup_ =
+        this->sourceHistoryWarmupRemaining_ > 0;
     this->lastGeneratedFrameCount_ = 0;
     this->lastDispatchedGeneratedFrameCount_ = 0;
 
@@ -3145,8 +3160,11 @@ void LsContext::enterSourceOnlyBypass() {
     this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
     this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
     this->lastGeneratedFrameCount_ = 0;
-    this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
-    this->requiresSourceHistoryWarmup_ = true;
+    this->sourceHistoryWarmupRemaining_ =
+        this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames
+                                           : kSourceHistoryWarmupFrames;
+    this->requiresSourceHistoryWarmup_ =
+        this->sourceHistoryWarmupRemaining_ > 0;
     this->lastDispatchedGeneratedFrameCount_ = 0;
     this->previousSourceCopySignalValid_ = false;
     this->generatedPresentationCapacityTracker_.reset();
