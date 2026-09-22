@@ -1,4 +1,5 @@
 #include "hooks.hpp"
+#include "android_sync_policy.hpp"
 #include "common/exception.hpp"
 #include "config/config.hpp"
 #include "utils/utils.hpp"
@@ -124,6 +125,79 @@ namespace {
     }
 
 #ifdef __ANDROID__
+    struct AdrenoSyntheticQueuePlan {
+        bool adreno{false};
+        bool available{false};
+        bool augment{false};
+        uint32_t familyIndex{0};
+        uint32_t createInfoIndex{0};
+    };
+
+    AdrenoSyntheticQueuePlan inspectAdrenoSyntheticQueue(
+            VkPhysicalDevice physicalDevice,
+            const VkDeviceCreateInfo* pCreateInfo) {
+        AdrenoSyntheticQueuePlan plan{};
+        if (pCreateInfo == nullptr)
+            return plan;
+
+        VkPhysicalDeviceProperties properties{};
+        Layer::ovkGetPhysicalDeviceProperties(physicalDevice, &properties);
+        plan.adreno = AndroidSyncPolicy::requiresConservativeCrossDeviceSync(
+            static_cast<VkDriverId>(0), properties.deviceName);
+        if (!plan.adreno)
+            return plan;
+
+        uint32_t familyCount{};
+        Layer::ovkGetPhysicalDeviceQueueFamilyProperties(
+            physicalDevice, &familyCount, nullptr);
+        std::vector<VkQueueFamilyProperties> families(familyCount);
+        Layer::ovkGetPhysicalDeviceQueueFamilyProperties(
+            physicalDevice, &familyCount, families.data());
+
+        for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; ++i) {
+            const auto& queueInfo = pCreateInfo->pQueueCreateInfos[i];
+            if (queueInfo.queueFamilyIndex >= families.size())
+                continue;
+            const auto& family = families[queueInfo.queueFamilyIndex];
+            if ((family.queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0)
+                continue;
+
+            plan.familyIndex = queueInfo.queueFamilyIndex;
+            plan.createInfoIndex = i;
+            plan.available = family.queueCount >= 2 && queueInfo.queueCount >= 1;
+            plan.augment = plan.available && queueInfo.queueCount < 2;
+            return plan;
+        }
+        return plan;
+    }
+
+    bool augmentAdrenoSyntheticQueue(
+            VkPhysicalDevice physicalDevice,
+            const VkDeviceCreateInfo* pCreateInfo,
+            VkDeviceCreateInfo& createInfo,
+            std::vector<VkDeviceQueueCreateInfo>& queueInfos,
+            std::vector<float>& priorities) {
+        const auto plan = inspectAdrenoSyntheticQueue(
+            physicalDevice, pCreateInfo);
+        if (!plan.available || !plan.augment)
+            return plan.available;
+
+        queueInfos.assign(
+            pCreateInfo->pQueueCreateInfos,
+            pCreateInfo->pQueueCreateInfos + pCreateInfo->queueCreateInfoCount);
+        auto& queueInfo = queueInfos.at(plan.createInfoIndex);
+        priorities.assign(
+            queueInfo.pQueuePriorities,
+            queueInfo.pQueuePriorities + queueInfo.queueCount);
+        priorities.resize(2, priorities.empty() ? 1.0F : priorities.front());
+        queueInfo.queueCount = 2;
+        queueInfo.pQueuePriorities = priorities.data();
+        createInfo.queueCreateInfoCount =
+            static_cast<uint32_t>(queueInfos.size());
+        createInfo.pQueueCreateInfos = queueInfos.data();
+        return true;
+    }
+
     bool supportsFdSemaphore(VkPhysicalDevice physicalDevice,
             VkExternalSemaphoreHandleTypeFlagBits handleType) {
         if (!supportsDeviceExtension(
@@ -255,6 +329,24 @@ namespace {
         VkDeviceCreateInfo createInfo = *pCreateInfo;
         createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
         createInfo.ppEnabledExtensionNames = extensions.data();
+#ifdef __ANDROID__
+        std::vector<VkDeviceQueueCreateInfo> adrenoQueueInfos;
+        std::vector<float> adrenoQueuePriorities;
+        const bool adrenoSyntheticQueueRequested =
+            augmentAdrenoSyntheticQueue(
+                physicalDevice, pCreateInfo, createInfo,
+                adrenoQueueInfos, adrenoQueuePriorities);
+        if (adrenoSyntheticQueueRequested) {
+            const auto plan = inspectAdrenoSyntheticQueue(
+                physicalDevice, pCreateInfo);
+            std::cerr << "lsfg-vk: init stage=adreno-synthetic-queue-request"
+                      << " available=" << (plan.available ? 1 : 0)
+                      << " family=" << plan.familyIndex
+                      << " index=1"
+                      << " augmented=" << (plan.augment ? 1 : 0)
+                      << "\n";
+        }
+#endif
         auto res = Layer::ovkCreateDevice(physicalDevice, &createInfo, pAllocator, pDevice);
         if (res == VK_ERROR_EXTENSION_NOT_PRESENT)
             throw std::runtime_error(
@@ -295,12 +387,40 @@ namespace {
                 "Physical-device ID properties unavailable; LSFG will fail open for this device.");
         }
         try {
+            const auto primaryQueue =
+                Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT);
+            VkQueue syntheticQueue = VK_NULL_HANDLE;
+            bool adrenoSyntheticQueueAvailable = false;
+#ifdef __ANDROID__
+            if (androidAhbSupported) {
+                const auto plan = inspectAdrenoSyntheticQueue(
+                    physicalDevice, pCreateInfo);
+                if (plan.available) {
+                    Layer::ovkGetDeviceQueue(
+                        *pDevice, plan.familyIndex, 1, &syntheticQueue);
+                    if (syntheticQueue != VK_NULL_HANDLE
+                            && Layer::ovkSetDeviceLoaderData(
+                                *pDevice, syntheticQueue) == VK_SUCCESS) {
+                        adrenoSyntheticQueueAvailable = true;
+                    } else {
+                        syntheticQueue = VK_NULL_HANDLE;
+                    }
+                    std::cerr << "lsfg-vk: init stage=adreno-synthetic-queue"
+                              << " available="
+                              << (adrenoSyntheticQueueAvailable ? 1 : 0)
+                              << " family=" << plan.familyIndex
+                              << " index=1\n";
+                }
+            }
+#endif
             auto deviceInfo = std::make_shared<DeviceInfo>(DeviceInfo {
                 .device = *pDevice,
                 .physicalDevice = physicalDevice,
                 .identity = identity.value_or(LSFG::DeviceIdentity{}),
                 .identityValid = identity.has_value(),
-                .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
+                .queue = primaryQueue,
+                .syntheticQueue = syntheticQueue,
+                .adrenoSyntheticQueueAvailable = adrenoSyntheticQueueAvailable,
                 .androidAhbSupported = androidAhbSupported,
                 .androidOpaqueFdSemaphoreSupported = androidOpaqueFdSemaphoreSupported,
                 .androidSyncFdSemaphoreSupported = androidSyncFdSemaphoreSupported,

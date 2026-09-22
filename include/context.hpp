@@ -289,6 +289,8 @@ private:
     // until the next source copy actually reuses the shared AHB pair.
     Mini::Semaphore conservativePendingBatchCompleteSemaphore_;
     bool conservativePendingBatchCompleteValid_{false};
+    int conservativePendingBatchCompletePollFd_{-1};
+    VkQueue syntheticQueue_{VK_NULL_HANDLE};
 
     // Optional fast path only. Prefer one-shot SYNC_FD on Android, retain
     // OPAQUE_FD compatibility, and fall back to the established host fence.

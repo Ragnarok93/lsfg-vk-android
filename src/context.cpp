@@ -13,6 +13,7 @@
 #include <android/log.h>
 #include <time.h>
 #include <unistd.h>
+#include <poll.h>
 #endif
 
 #include <vulkan/vulkan_core.h>
@@ -83,6 +84,11 @@ size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 
 #ifdef __ANDROID__
 constexpr uint32_t kConservativeSourceReprimeFrames = 2;
+
+bool isAdrenoWsiRetirementResult(VkResult result) noexcept {
+    return result == VK_ERROR_OUT_OF_DATE_KHR
+        || result == VK_ERROR_SURFACE_LOST_KHR;
+}
 
 uint64_t runtimeWaitTimeoutNs() {
     constexpr uint64_t defaultMs = 250;
@@ -769,6 +775,11 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->conservativeCrossDeviceSync_ =
         AndroidSyncPolicy::requiresConservativeCrossDeviceSync(
             backendDiagnostics.driverId, backendDiagnostics.driverName);
+    if (this->conservativeCrossDeviceSync_
+            && info.adrenoSyntheticQueueAvailable
+            && info.syntheticQueue != VK_NULL_HANDLE) {
+        this->syntheticQueue_ = info.syntheticQueue;
+    }
     // Source ownership and framegen completion are independent policies.
     // Qualcomm/Adreno keeps the protected source/history topology below:
     // true source-only, reprime, and fractional zero-generation cycles never
@@ -789,7 +800,10 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                 ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
                 : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
     this->asyncFramegenCompletionEnabled_ =
-        syncFdHandoffSupported && gameImportSemaphoreFd != nullptr;
+        syncFdHandoffSupported
+        && gameImportSemaphoreFd != nullptr
+        && (!this->conservativeCrossDeviceSync_
+            || this->syntheticQueue_ != VK_NULL_HANDLE);
 
     // The known-good Qualcomm/Adreno path can generate immediately because the
     // first source upload initializes both AHB inputs. Do not inherit the newer
@@ -812,6 +826,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
               << ", sync_policy="
               << AndroidSyncPolicy::crossDeviceSyncPolicyName(
                     this->conservativeCrossDeviceSync_)
+              << ", synthetic_queue="
+              << (this->syntheticQueue_ != VK_NULL_HANDLE ? 1 : 0)
               << ")\n";
 
 #else
@@ -931,6 +947,22 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 }
 
 LsContext::~LsContext() {
+#ifdef __ANDROID__
+    if (this->conservativePendingBatchCompletePollFd_ >= 0) {
+        ::close(this->conservativePendingBatchCompletePollFd_);
+        this->conservativePendingBatchCompletePollFd_ = -1;
+    }
+    if (this->waitQueueIdle_ != nullptr
+            && this->syntheticQueue_ != VK_NULL_HANDLE
+            && this->syntheticQueue_ != this->queue_) {
+        const auto syntheticWaitResult =
+            this->waitQueueIdle_(this->syntheticQueue_);
+        if (syntheticWaitResult != VK_SUCCESS) {
+            std::cerr << "lsfg-vk: synthetic queueWaitIdle failed result="
+                      << syntheticWaitResult << "\n";
+        }
+    }
+#endif
     // All pass command buffers and semaphores may still be referenced by the
     // game/WSI queue. This is teardown-only synchronization: it is never used
     // on the present hot path.
@@ -2319,8 +2351,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return result;
     };
 
-    const auto armPassGpuRetirement = [&]() {
-        if (!this->submitPassCompletionFence(pass, info.queue.second)) {
+    const auto armPassGpuRetirement = [&](VkQueue retirementQueue = VK_NULL_HANDLE) {
+        const VkQueue targetQueue = retirementQueue != VK_NULL_HANDLE
+            ? retirementQueue
+            : info.queue.second;
+        if (!this->submitPassCompletionFence(pass, targetQueue)) {
             Utils::logLimitN(
                 "passRetirement",
                 5,
@@ -2328,9 +2363,37 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     };
 
+    bool conservativeBatchStillInFlight = false;
+    if (this->conservativeCrossDeviceSync_
+            && this->conservativePendingBatchCompleteValid_) {
+        bool batchReady = false;
+        if (this->conservativePendingBatchCompletePollFd_ >= 0) {
+            pollfd batchPoll{
+                .fd = this->conservativePendingBatchCompletePollFd_,
+                .events = POLLIN,
+                .revents = 0,
+            };
+            const int pollResult = ::poll(&batchPoll, 1, 0);
+            if (pollResult > 0) {
+                batchReady = true;
+                ::close(this->conservativePendingBatchCompletePollFd_);
+                this->conservativePendingBatchCompletePollFd_ = -1;
+            } else if (pollResult < 0) {
+                ::close(this->conservativePendingBatchCompletePollFd_);
+                this->conservativePendingBatchCompletePollFd_ = -1;
+            }
+        }
+        if (!batchReady && this->conservativePendingBatchCompletePollFd_ < 0) {
+            batchReady = conf.performance
+                ? LSFG_3_1P::waitContext(*this->lsfgCtxId, 0)
+                : LSFG_3_1::waitContext(*this->lsfgCtxId, 0);
+        }
+        conservativeBatchStillInFlight = !batchReady;
+    }
+
     const bool conservativePreCopySourceBypass =
         this->conservativeCrossDeviceSync_
-        && conservativeTrueSourceOnlyCycle;
+        && (conservativeTrueSourceOnlyCycle || conservativeBatchStillInFlight);
     if (conservativePreCopySourceBypass) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
         this->lastGeneratedFrameCount_ = 0;
@@ -2360,6 +2423,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         };
         const auto bypassResult =
             Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo);
+        if (this->conservativeCrossDeviceSync_
+                && isAdrenoWsiRetirementResult(bypassResult))
+            return bypassResult;
         if (bypassResult != VK_SUCCESS
                 && bypassResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
@@ -2368,7 +2434,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 bypassResult, "Failed protected Adreno source-only present");
         }
         if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset) {
-            std::cerr << "lsfg-vk: runtime stage=compat-source-precopy-bypass"
+            std::cerr << "lsfg-vk: runtime stage="
+                      << (conservativeBatchStillInFlight
+                            ? "compat-source-batch-inflight-bypass"
+                            : "compat-source-precopy-bypass")
                       << " generated=0"
                       << " planned=" << plannedGeneratedFrameCount
                       << " admitted=" << generatedFrameCount
@@ -2494,6 +2563,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 RuntimeMetrics::Clock::now() - asyncSubmitStart).count();
         asyncSubmissionIssued = true;
         if (consumeConservativeBatchComplete) {
+            if (this->conservativePendingBatchCompletePollFd_ >= 0) {
+                ::close(this->conservativePendingBatchCompletePollFd_);
+                this->conservativePendingBatchCompletePollFd_ = -1;
+            }
             this->conservativePendingBatchCompleteValid_ = false;
             this->conservativePendingBatchCompleteSemaphore_ = {};
         }
@@ -2551,6 +2624,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.totalSyncHandoffs++;
         }
         if (consumeConservativeBatchComplete) {
+            if (this->conservativePendingBatchCompletePollFd_ >= 0) {
+                ::close(this->conservativePendingBatchCompletePollFd_);
+                this->conservativePendingBatchCompletePollFd_ = -1;
+            }
             this->conservativePendingBatchCompleteValid_ = false;
             this->conservativePendingBatchCompleteSemaphore_ = {};
         }
@@ -2628,6 +2705,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
         const auto sourceResult =
             Layer::ovkQueuePresentKHR(queue, &sourcePresentInfo);
+        if (this->conservativeCrossDeviceSync_
+                && isAdrenoWsiRetirementResult(sourceResult))
+            return sourceResult;
         if (sourceResult != VK_SUCCESS
                 && sourceResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
@@ -2928,6 +3008,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 }
                 if (framegenSync.batchCompleteFd >= 0) {
                     const int batchCompleteFd = framegenSync.batchCompleteFd;
+                    int batchCompletePollFd = -1;
+                    if (this->conservativeCrossDeviceSync_)
+                        batchCompletePollFd = ::dup(batchCompleteFd);
                     if (this->conservativeCrossDeviceSync_)
                         framegenSync.batchCompleteFd = -1;
                     pass.framegenBatchCompleteSemaphore = Mini::Semaphore(
@@ -2937,6 +3020,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         framegenSync.batchCompleteFd = -1;
                     pass.framegenBatchCompleteValid = true;
                     if (this->conservativeCrossDeviceSync_) {
+                        if (this->conservativePendingBatchCompletePollFd_ >= 0)
+                            ::close(this->conservativePendingBatchCompletePollFd_);
+                        this->conservativePendingBatchCompletePollFd_ =
+                            batchCompletePollFd;
+                        batchCompletePollFd = -1;
                         this->conservativePendingBatchCompleteSemaphore_ =
                             pass.framegenBatchCompleteSemaphore;
                         this->conservativePendingBatchCompleteValid_ = true;
@@ -3015,6 +3103,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << "\n";
     updateAdaptiveFlowGovernor();
 
+    const bool useAdrenoSyntheticQueue =
+        this->conservativeCrossDeviceSync_
+        && info.adrenoSyntheticQueueAvailable
+        && this->syntheticQueue_ != VK_NULL_HANDLE;
+    const VkQueue generatedWorkQueue = useAdrenoSyntheticQueue
+        ? this->syntheticQueue_
+        : info.queue.second;
+    const VkQueue generatedPresentQueue = useAdrenoSyntheticQueue
+        ? this->syntheticQueue_
+        : queue;
+
     // 4. Generated presentation is opportunistic. Never wait for a synthetic
     // swapchain image: if WSI has no image immediately available, drop this and
     // the remaining synthetic opportunities so the real source present can be
@@ -3092,6 +3191,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             }
             break;
         }
+        if (this->conservativeCrossDeviceSync_
+                && isAdrenoWsiRetirementResult(res))
+            return res;
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowGeneratedPresentFailures++;
             metrics.totalGeneratedPresentFailures++;
@@ -3122,7 +3224,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         };
         if (outputReadyWaitValid.at(i))
             generatedCopyWaits.emplace_back(pass.renderSemaphores.at(i).handle());
-        postCopyBuf.submit(info.queue.second,
+        postCopyBuf.submit(generatedWorkQueue,
             generatedCopyWaits,
             { pass.postCopySemaphores.at(i).handle(),
               pass.prevPostCopySemaphores.at(i).handle() });
@@ -3151,7 +3253,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (i != 0)
             this->retainPresentWait(
                 imageIdx, pass.prevPostCopySemaphores.at(i - 1));
-        res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
+        res = Layer::ovkQueuePresentKHR(generatedPresentQueue, &presentInfo);
+        if (this->conservativeCrossDeviceSync_
+                && isAdrenoWsiRetirementResult(res))
+            return res;
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowGeneratedPresentFailures++;
             metrics.totalGeneratedPresentFailures++;
@@ -3204,7 +3309,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .pSwapchains = &this->swapchain,
         .pImageIndices = &presentIdx,
     };
-    armPassGpuRetirement();
+    armPassGpuRetirement(
+        queuedGeneratedFrameCount > 0 ? generatedWorkQueue : VK_NULL_HANDLE);
     if (queuedGeneratedFrameCount > 0) {
         this->retainPresentWait(
             presentIdx,
@@ -3212,7 +3318,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     } else {
         this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
     }
-    auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);
+    const VkQueue finalSourcePresentQueue =
+        queuedGeneratedFrameCount > 0 && useAdrenoSyntheticQueue
+            ? generatedPresentQueue
+            : queue;
+    auto res = Layer::ovkQueuePresentKHR(
+        finalSourcePresentQueue, &finalPresentInfo);
+    if (this->conservativeCrossDeviceSync_
+            && isAdrenoWsiRetirementResult(res))
+        return res;
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
         metrics.windowSourcePresentFailures++;
         metrics.totalSourcePresentFailures++;

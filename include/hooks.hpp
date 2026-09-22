@@ -17,6 +17,10 @@ namespace Hooks {
         LSFG::DeviceIdentity identity{};
         bool identityValid{false};
         std::pair<uint32_t, VkQueue> queue; // graphics family
+        // Qualcomm/Adreno only: a second queue from the same graphics family
+        // keeps synthetic waits off the application's render/present queue.
+        VkQueue syntheticQueue{VK_NULL_HANDLE};
+        bool adrenoSyntheticQueueAvailable{false};
         bool androidAhbSupported{true};
         // Optional Android cross-device semaphore transports. False for both
         // preserves the established synchronous AHB fence handoff.
