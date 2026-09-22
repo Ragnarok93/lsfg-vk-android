@@ -372,16 +372,18 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
         self.assertIn("conservativeFractionalHistoryGap", pre_history)
         self.assertIn("queuedCopyWithoutHostWait", pre_history)
+        self.assertIn("conservativeAdaptiveHistoryGap", pre_history)
         self.assertIn(
             'presentCompatibilitySourceOnly(\n'
-            '            "compat-fractional-history-copy"',
+            '            "compat-adaptive-history-copy"',
             pre_history,
         )
-        fractional = pre_history.split(
-            "if (conservativeFractionalHistoryGap)", 1
+        gap = pre_history.split(
+            "if (conservativeAdaptiveHistoryGap)", 1
         )[1]
-        self.assertNotIn("presentContextWithCount(", fractional)
-        self.assertNotIn("presentContextWithCountExportSyncFd(", fractional)
+        self.assertIn("conservativeFractionalHistoryGap", gap)
+        self.assertNotIn("presentContextWithCount(", gap)
+        self.assertNotIn("presentContextWithCountExportSyncFd(", gap)
 
     def test_handoff_metrics_separate_submit_wait_and_cross_frame_dependencies(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
@@ -418,13 +420,13 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
     def test_adreno_async_completion_does_not_reopen_zero_count_framegen(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        fractional = source.index("if (conservativeFractionalHistoryGap)")
-        warmup = source.index("if (conservativeSourceOnlyWarmup)", fractional)
+        adaptive_gap = source.index("if (conservativeAdaptiveHistoryGap)")
+        warmup = source.index("if (conservativeSourceOnlyWarmup)", adaptive_gap)
         history = source.index("if (historyOnly)", warmup)
 
-        self.assertLess(fractional, history)
+        self.assertLess(adaptive_gap, history)
         self.assertLess(warmup, history)
-        pre_history = source[fractional:history]
+        pre_history = source[adaptive_gap:history]
         self.assertIn("presentCompatibilitySourceOnly", pre_history)
         self.assertNotIn("presentContextWithCountExportSyncFd", pre_history)
         self.assertNotIn("presentContextWithCount(", pre_history)
