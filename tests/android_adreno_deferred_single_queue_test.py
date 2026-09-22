@@ -23,8 +23,22 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
         selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
         selection = source[selection_start:selection_end]
+        self.assertIn(
+            "this->asyncAhbHandoffEnabled_ =\n"
+            "        !this->conservativeCrossDeviceSync_",
+            selection,
+        )
+        self.assertIn(
+            "this->asyncFramegenCompletionEnabled_ =\n"
+            "        !this->conservativeCrossDeviceSync_",
+            selection,
+        )
         self.assertIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
-        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
+        self.assertNotIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
+        self.assertIn("this->syntheticQueue_ = VK_NULL_HANDLE;", source)
+
+        # Keep the implementation dormant until it is deliberately removed;
+        # merely having the helper code in-tree must never make it selectable.
         self.assertIn("presentContextWithCountExportSyncFd", source)
         self.assertIn("runtime stage=adreno-deferred-batch-queued", source)
         queued_log = source.index("runtime stage=adreno-deferred-batch-queued")
