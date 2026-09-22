@@ -62,7 +62,23 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait = true", fallback)
         self.assertIn("waitContext", history)
 
-    def test_adreno_generated_cycles_use_sync_fd_input_and_completion(self) -> None:
+    def test_adreno_without_synthetic_queue_uses_known_good_host_completion(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
+        selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
+        selection = source[selection_start:selection_end]
+
+        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
+        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
+        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
+        self.assertNotIn("adrenoSingleQueueReadinessPoll", selection)
+
+        present_start = source.index("VkResult LsContext::present")
+        present = source[present_start:]
+        self.assertNotIn("generated-readiness-drop", present)
+        self.assertNotIn("adrenoSingleQueueReadinessPoll", present)
+        self.assertIn("bool requireHostCompletionWait = !this->asyncFramegenCompletionEnabled_", present)
+
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         selection = source.split(
@@ -392,6 +408,20 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             "ahb_batch_deps=",
         ):
             self.assertIn(token, source)
+
+    def test_xclipse_async_completion_gate_is_unchanged(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
+        selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
+        selection = source[selection_start:selection_end]
+
+        self.assertIn(
+            "!this->conservativeCrossDeviceSync_",
+            selection,
+            "non-conservative/Xclipse must retain capability-driven async completion",
+        )
+        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
 
     def test_adreno_async_completion_does_not_reopen_zero_count_framegen(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
