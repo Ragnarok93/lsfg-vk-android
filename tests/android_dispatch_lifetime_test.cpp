@@ -56,6 +56,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL submit1(VkQueue q, uint32_t, const VkSubmi
 static VKAPI_ATTR VkResult VKAPI_CALL submit2(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q2); ++submitted2; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL submit3(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q3); ++submitted3; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL submit4(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) { assert(q == q4); ++submitted4; return VK_SUCCESS; }
+// Models the known-good wrapper thunk: it was obtained from the presentation
+// device but remains valid for another logical device on the same wrapped ICD.
+static VKAPI_ATTR VkResult VKAPI_CALL compatibleSubmit(VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) {
+    assert(q == q1 || q == q4);
+    if (q == q1) ++submitted1;
+    else ++submitted4;
+    return VK_SUCCESS;
+}
 static VKAPI_ATTR VkResult VKAPI_CALL present1(VkQueue q, const VkPresentInfoKHR*) { assert(q == q1); ++presented1; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL present2(VkQueue q, const VkPresentInfoKHR*) { assert(q == q2); ++presented2; return VK_SUCCESS; }
 static PFN_vkVoidFunction constructionGdpa(VkDevice d, const char* name) {
@@ -72,6 +80,18 @@ static PFN_vkVoidFunction constructionGdpa(VkDevice d, const char* name) {
 static PFN_vkVoidFunction constructionGdpaNoQueue(VkDevice d, const char* name) {
     if (std::strcmp(name, "vkQueueSubmit") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(d == d3 ? submit3 : submit2);
+    return nullptr;
+}
+static PFN_vkVoidFunction presentationCompatGdpa(VkDevice, const char* name) {
+    if (std::strcmp(name, "vkGetDeviceQueue") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(getQueue);
+    if (std::strcmp(name, "vkGetDeviceQueue2") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(getQueue2);
+    if (std::strcmp(name, "vkQueueSubmit") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(compatibleSubmit);
+    return nullptr;
+}
+static PFN_vkVoidFunction privateIncompleteGdpa(VkDevice, const char*) {
     return nullptr;
 }
 static VKAPI_ATTR VkResult VKAPI_CALL createSem(VkDevice, const VkSemaphoreCreateInfo*, const VkAllocationCallbacks*, VkSemaphore* s) {
@@ -104,9 +124,10 @@ int main() {
     // fail closed unless LSFG is inside its own recursive backend setup window.
     DeviceDispatch bootstrap{};
     bootstrap.device = d1;
+    bootstrap.GetDeviceProcAddr = presentationCompatGdpa;
     bootstrap.GetDeviceQueue = getQueue;
     bootstrap.GetDeviceQueue2 = getQueue2;
-    bootstrap.QueueSubmit = submit1;
+    bootstrap.QueueSubmit = compatibleSubmit;
     bootstrap.presentationDevice = true;
     storeDeviceDispatch(d1, bootstrap);
     {
@@ -140,18 +161,31 @@ int main() {
     assert(Layer::queueOwner(q4) == d4);
     eraseDeviceDispatch(d4);
 
-    // Actual S20+ failure shape: vkCreateDevice has returned and the private
-    // passthrough device is already published, but its exact GDPA did not expose
-    // vkGetDeviceQueue. volkLoadDevice then calls our queue wrapper. Bootstrap
-    // the getter only; queue submit ownership must remain the exact private device.
+    // Actual S20+ r21 failure shape: the private backend device has already
+    // been published, but wrapper-gamenative's private-device GDPA exposes
+    // neither vkGetDeviceQueue nor vkQueueSubmit. volkLoadDevice queries this
+    // incomplete table and the acquired private queue was logged submit=0x0.
+    //
+    // During LSFG's own recursive backend setup only, restore the known-good
+    // A6xx behavior by borrowing missing core thunks from the already-proven
+    // presentation-device dispatch. The private VkDevice/VkQueue remain the
+    // owner; ordinary unknown/helper devices must still fail closed.
     DeviceDispatch privatePublished{};
     privatePublished.device = d4;
-    privatePublished.QueueSubmit = submit4;
+    privatePublished.GetDeviceProcAddr = privateIncompleteGdpa;
     storeDeviceDispatch(d4, privatePublished);
+
+    assert(layer_vkGetDeviceProcAddr(d4, "vkQueueSubmit") == nullptr);
     setenv("DISABLE_LSFG", "1", 1);
+    assert(layer_vkGetDeviceProcAddr(d4, "vkQueueSubmit")
+        == reinterpret_cast<PFN_vkVoidFunction>(compatibleSubmit));
+    assert(layer_vkGetDeviceProcAddr(d4, "vkGetDeviceQueue")
+        == reinterpret_cast<PFN_vkVoidFunction>(&Layer::ovkGetDeviceQueue));
+
     VkQueue publishedPrivateQueue{};
     Layer::ovkGetDeviceQueue(d4, 0, 0, &publishedPrivateQueue);
     unsetenv("DISABLE_LSFG");
+
     assert(publishedPrivateQueue == q4);
     assert(Layer::queueOwner(q4) == d4);
     assert(Layer::ovkQueueSubmit(q4, 0, nullptr, {}) == VK_SUCCESS);
