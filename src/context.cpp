@@ -1602,6 +1602,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         conf.multiplier > 1
             ? static_cast<size_t>(conf.multiplier - 1)
             : 0;
+    const bool sourceProtectionBatchAdmission =
+        this->conservativeCrossDeviceSync_
+        && this->deferredAdrenoCompletionEnabled_;
+    const char* deadlineSemantics =
+        sourceProtectionBatchAdmission
+            ? "source-protection"
+            : "synthetic-slot";
+    double computeReadyBudgetMs = 0.0;
+    double presentationSlotBudgetMs = 0.0;
 
     // Capacity feedback is advisory and comes from the previous measured GPU
     // cost/timeline. It may accelerate one scheduler level only after repeated
@@ -1624,8 +1633,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && capacityIntervalMs > 0.0
         && this->deadlineAdmissionPredictor_.hasEstimate();
     const size_t safeGenerationHint = safeGenerationHintValid
-        ? this->deadlineAdmissionPredictor_.safeGenerationHint(
-            maxAdaptiveGeneratedFrames, capacityIntervalMs)
+        ? (sourceProtectionBatchAdmission
+            ? this->deadlineAdmissionPredictor_.safeBatchGenerationHint(
+                maxAdaptiveGeneratedFrames, capacityIntervalMs)
+            : this->deadlineAdmissionPredictor_.safeGenerationHint(
+                maxAdaptiveGeneratedFrames, capacityIntervalMs))
         : 0;
     this->adaptiveScheduler_.setSafeGenerationHint(
         safeGenerationHint,
@@ -1731,6 +1743,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     static_cast<double>(
                         this->currentSourceTimeline_.sourceDesiredTimeNs - admissionNowNs)
                     / 1'000'000.0;
+                computeReadyBudgetMs = sourceBudgetMs;
                 const auto plannedBatchDecision =
                     this->deadlineAdmissionPredictor_.predict(
                         generatedFrameCount, sourceBudgetMs);
@@ -1762,6 +1775,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                                 ? static_cast<double>(slotDeadlineNs - admissionNowNs)
                                     / 1'000'000.0
                                 : 0.0;
+                        if (slot == 0)
+                            presentationSlotBudgetMs = slotBudgetMs;
                         const auto slotDecision =
                             this->deadlineAdmissionPredictor_.predict(
                                 slot + 1, slotBudgetMs);
@@ -1779,38 +1794,57 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     }
 
                     size_t admittedGeneratedFrameCount = 0;
-                    for (size_t candidate = generatedFrameCount;
-                            candidate > 0; --candidate) {
-                        bool candidateFits = true;
-                        for (size_t slot = 0; slot < candidate; ++slot) {
-                            // Admission occurs before dispatch. Evaluate each
-                            // candidate using the spacing it would actually use
-                            // so a 2 -> 1 reduction tests a midpoint rather than
-                            // retaining a prefix-biased 1/3 position.
-                            const double interpolationFraction =
-                                static_cast<double>(slot + 1)
-                                / static_cast<double>(candidate + 1);
-                            const uint64_t slotDeadlineNs =
-                                this->sourceTimeline_.syntheticDesiredTimeNs(
-                                    this->currentSourceTimeline_,
-                                    interpolationFraction);
-                            const double slotBudgetMs =
-                                slotDeadlineNs > admissionNowNs
-                                    ? static_cast<double>(
-                                        slotDeadlineNs - admissionNowNs)
-                                        / 1'000'000.0
-                                    : 0.0;
-                            const auto slotDecision =
+                    if (sourceProtectionBatchAdmission) {
+                        // Deferred single-queue Adreno protects the next real
+                        // source boundary. Ideal interpolation timestamps are
+                        // presentation slots, not private-device completion
+                        // deadlines. Test complete candidate batches against the
+                        // remaining source-owned budget.
+                        for (size_t candidate = generatedFrameCount;
+                                candidate > 0; --candidate) {
+                            const auto batchDecision =
                                 this->deadlineAdmissionPredictor_.predict(
-                                    slot + 1, slotBudgetMs);
-                            if (!slotDecision.valid || !slotDecision.wouldAdmit) {
-                                candidateFits = false;
+                                    candidate, sourceBudgetMs);
+                            if (batchDecision.valid
+                                    && batchDecision.wouldAdmit) {
+                                admittedGeneratedFrameCount = candidate;
                                 break;
                             }
                         }
-                        if (candidateFits) {
-                            admittedGeneratedFrameCount = candidate;
-                            break;
+                    } else {
+                        for (size_t candidate = generatedFrameCount;
+                                candidate > 0; --candidate) {
+                            bool candidateFits = true;
+                            for (size_t slot = 0; slot < candidate; ++slot) {
+                                // Existing Xclipse/capability-async policy:
+                                // every generated prefix must still meet the
+                                // ideal slot it owns.
+                                const double interpolationFraction =
+                                    static_cast<double>(slot + 1)
+                                    / static_cast<double>(candidate + 1);
+                                const uint64_t slotDeadlineNs =
+                                    this->sourceTimeline_.syntheticDesiredTimeNs(
+                                        this->currentSourceTimeline_,
+                                        interpolationFraction);
+                                const double slotBudgetMs =
+                                    slotDeadlineNs > admissionNowNs
+                                        ? static_cast<double>(
+                                            slotDeadlineNs - admissionNowNs)
+                                            / 1'000'000.0
+                                        : 0.0;
+                                const auto slotDecision =
+                                    this->deadlineAdmissionPredictor_.predict(
+                                        slot + 1, slotBudgetMs);
+                                if (!slotDecision.valid
+                                        || !slotDecision.wouldAdmit) {
+                                    candidateFits = false;
+                                    break;
+                                }
+                            }
+                            if (candidateFits) {
+                                admittedGeneratedFrameCount = candidate;
+                                break;
+                            }
                         }
                     }
 
@@ -2635,6 +2669,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->currentSourceTimeline_.sourceIndex
                       << " deadline_admission_valid="
                       << (this->deadlineBatchDecision_.valid ? 1 : 0)
+                      << " deadline_semantics=" << deadlineSemantics
+                      << " compute_ready_budget_ms=" << computeReadyBudgetMs
+                      << " presentation_slot_budget_ms="
+                      << presentationSlotBudgetMs
                       << " deadline_planned_generated="
                       << plannedGeneratedFrameCount
                       << " deadline_admitted_generated="
@@ -2789,7 +2827,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "presentation_cap=%zu presentation_duty=%.3f wsi_reject_ratio=%.3f "
                 "cycle_avg_ms=%.3f cycle_max_ms=%.3f handoff_ms=%.3f dispatch_ms=%.3f "
                 "wait_ms=%.3f source_interval_ms=%.3f source_interval_max_ms=%.3f "
-                "deadline_error_ms=%.3f rebases=%llu planned=%zu admitted=%zu "
+                "deadline_error_ms=%.3f rebases=%llu "
+                "deadline_semantics=%s compute_ready_budget_ms=%.3f "
+                "presentation_slot_budget_ms=%.3f planned=%zu admitted=%zu "
                 "pred_total_ms=%.3f reserve_ms=%.3f effective_budget_ms=%.3f "
                 "wanted=%.3f cost_limit=%zu final_generated=%zu history_only=%llu "
                 "flow_active=%.3f flow_gpu=%.1f flow_output_fps=%.3f "
@@ -2817,6 +2857,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 metrics.windowSourceIntervalMaxMs,
                 sourceDeadlineErrorAvgMs,
                 static_cast<unsigned long long>(metrics.windowSourceTimelineRebases),
+                deadlineSemantics,
+                computeReadyBudgetMs,
+                presentationSlotBudgetMs,
                 plannedGeneratedFrameCount,
                 generatedFrameCount,
                 this->deadlineBatchDecision_.predictedTotalLsfgMs,
