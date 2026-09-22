@@ -85,6 +85,29 @@ size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 #ifdef __ANDROID__
 constexpr uint32_t kConservativeSourceReprimeFrames = 2;
 
+const char* sourceHistoryInvalidationReasonName(
+        SourceHistoryInvalidationReason reason) noexcept {
+    switch (reason) {
+        case SourceHistoryInvalidationReason::None: return "none";
+        case SourceHistoryInvalidationReason::Startup: return "startup";
+        case SourceHistoryInvalidationReason::TimelineDiscontinuity:
+            return "timeline_discontinuity";
+        case SourceHistoryInvalidationReason::SyncExportFailure:
+            return "sync_export_failure";
+        case SourceHistoryInvalidationReason::SyncImportFailure:
+            return "sync_import_failure";
+        case SourceHistoryInvalidationReason::ContextRecreate:
+            return "context_recreate";
+        case SourceHistoryInvalidationReason::SourcePairMismatch:
+            return "source_pair_mismatch";
+        case SourceHistoryInvalidationReason::AbandonedBatch:
+            return "abandoned_batch";
+        case SourceHistoryInvalidationReason::TrueOwnershipFailure:
+            return "true_ownership_failure";
+    }
+    return "unknown";
+}
+
 bool isAdrenoWsiRetirementResult(VkResult result) noexcept {
     return result == VK_ERROR_OUT_OF_DATE_KHR
         || result == VK_ERROR_SURFACE_LOST_KHR;
@@ -1443,9 +1466,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     kConservativeSourceReprimeFrames - 1);
                 this->requiresSourceHistoryWarmup_ =
                     this->sourceHistoryWarmupRemaining_ > 0;
+                this->lastHistoryInvalidationReason_ =
+                    SourceHistoryInvalidationReason::SourcePairMismatch;
+                this->lastHistoryReprimeReason_ =
+                    SourceHistoryInvalidationReason::SourcePairMismatch;
                 this->deadlineBatchDecision_ = {};
             } else {
-                this->resetAdaptiveSourceEpoch(true);
+                this->resetAdaptiveSourceEpoch(
+                true, SourceHistoryInvalidationReason::TimelineDiscontinuity);
             }
 #endif
             Utils::logLimitN(
@@ -1551,7 +1579,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // The scheduler already consumed this discontinuity and cleared its
         // own cadence state. Reset every dependent controller without
         // overwriting the scheduler telemetry used for this cycle's logs.
-        this->resetAdaptiveSourceEpoch(false);
+        this->resetAdaptiveSourceEpoch(
+            false, SourceHistoryInvalidationReason::TimelineDiscontinuity);
         this->lsfgOutputCadenceTracker_.configure(
             conf.adaptiveFramegen && conf.fpsLimit > 0,
             conf.adaptiveFramegen ? conf.fpsLimit : 0);
@@ -1566,7 +1595,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // the scheduler. Consume the source interval and force a clean
             // epoch rather than letting stale demand/capacity state leak
             // across a suspend or translation-layer discontinuity.
-            this->resetAdaptiveSourceEpoch(true);
+            this->resetAdaptiveSourceEpoch(
+                true, SourceHistoryInvalidationReason::TimelineDiscontinuity);
             this->lsfgOutputCadenceTracker_.configure(
                 conf.adaptiveFramegen && conf.fpsLimit > 0,
                 conf.adaptiveFramegen ? conf.fpsLimit : 0);
@@ -1870,17 +1900,39 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             ? AndroidFrameCycleMode::HistoryOnly
             : AndroidFrameCycleMode::Generate;
 
-    // Fractional Adaptive LSFG intentionally creates zero-generation gaps.
-    // Those gaps must still advance temporal history, even on the conservative
-    // Adreno path. True zero-demand/admission-drop cycles and startup history
-    // warmup remain source-only so they cannot force unnecessary private-device
-    // ownership work onto the protected source timeline.
+    // Ordinary Adaptive zero-generation intervals are cadence/admission
+    // events, not ownership failures. Preserve the source pair for fractional
+    // gaps, zero-demand intervals, and rejected synthetic opportunities.
+    const bool conservativeAdmissionRejectedHistoryGap =
+        this->conservativeCrossDeviceSync_
+        && conf.adaptiveFramegen
+        && !sourceHistoryWarmupActive
+        && !sourceTimelineDiscontinuity
+        && plannedGeneratedFrameCount > 0
+        && generatedFrameCount == 0;
     const bool conservativeFractionalHistoryGap =
         this->conservativeCrossDeviceSync_
         && conf.adaptiveFramegen
         && !sourceHistoryWarmupActive
+        && !sourceTimelineDiscontinuity
         && plannedGeneratedFrameCount == 0
         && adaptiveTelemetry.wantedGeneratedFrames > 0.0;
+    const bool conservativeZeroDemandHistoryGap =
+        this->conservativeCrossDeviceSync_
+        && conf.adaptiveFramegen
+        && !sourceHistoryWarmupActive
+        && !sourceTimelineDiscontinuity
+        && plannedGeneratedFrameCount == 0
+        && adaptiveTelemetry.wantedGeneratedFrames <= 0.0;
+    const bool conservativeAdaptiveHistoryGap =
+        this->conservativeCrossDeviceSync_
+        && conf.adaptiveFramegen
+        && !sourceHistoryWarmupActive
+        && !sourceTimelineDiscontinuity
+        && generatedFrameCount == 0
+        && (conservativeAdmissionRejectedHistoryGap
+            || conservativeFractionalHistoryGap
+            || conservativeZeroDemandHistoryGap);
     const bool conservativeSourceOnlyWarmup =
         this->conservativeCrossDeviceSync_
         && sourceHistoryWarmupActive;
@@ -1888,7 +1940,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->conservativeCrossDeviceSync_
         && historyOnly
         && !conservativeSourceOnlyWarmup
-        && !conservativeFractionalHistoryGap;
+        && !conservativeAdaptiveHistoryGap;
 
     this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
 
@@ -2794,6 +2846,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->sourceHistoryWarmupRemaining_ =
             kConservativeSourceReprimeFrames - 1;
         this->requiresSourceHistoryWarmup_ = true;
+        this->lastHistoryInvalidationReason_ =
+            SourceHistoryInvalidationReason::SourcePairMismatch;
+        this->lastHistoryReprimeReason_ =
+            SourceHistoryInvalidationReason::SourcePairMismatch;
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
@@ -2938,7 +2994,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->asyncAhbHandoffEnabled_
         && (!this->conservativeCrossDeviceSync_
             || (!conservativeSourceOnlyWarmup
-                && !conservativeFractionalHistoryGap
+                && !conservativeAdaptiveHistoryGap
                 && !conservativeTrueSourceOnlyCycle));
     bool asyncSubmissionIssued = false;
     bool asyncExportFailed = false;
@@ -3008,7 +3064,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (!useAsyncHandoff && !asyncSubmissionIssued) {
         const bool conservativeCopyOnlyHistory =
             conservativeSourceOnlyWarmup
-            || conservativeFractionalHistoryGap;
+            || conservativeAdaptiveHistoryGap;
         if (conservativeCopyOnlyHistory) {
             const auto copyOnlySubmitStart = RuntimeMetrics::Clock::now();
             submitAhbHandoff(
@@ -3065,6 +3121,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ? kConservativeSourceReprimeFrames
                 : kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
+        this->lastHistoryInvalidationReason_ =
+            SourceHistoryInvalidationReason::SyncExportFailure;
+        this->lastHistoryReprimeReason_ =
+            SourceHistoryInvalidationReason::SyncExportFailure;
         this->lastGeneratedFrameCount_ = 0;
         const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
         const VkPresentInfoKHR failOpenPresentInfo{
@@ -3138,22 +3198,34 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(sourceResult, sourceWait);
     };
 
-    if (conservativeFractionalHistoryGap) {
-        // The source pair is the only temporal state Adreno needs to preserve
-        // across a fractional zero-generation cadence slot. The copy is queued
-        // on the game device and the source present waits it GPU-side; do not
-        // host-wait and do not run zero-count framegen preprocessing. The next
-        // generated cycle waits the previous copy signal before updating the
-        // opposite AHB slot, yielding two consecutive real source frames.
+    if (conservativeAdaptiveHistoryGap) {
+        // Admission rejection and fractional/zero-demand cadence gaps are
+        // consumed opportunities. Keep the source-pair copy chain coherent,
+        // do not enter private framegen, and do not request a reprime.
+        const char* historyGapReason =
+            conservativeAdmissionRejectedHistoryGap
+                ? "admission_reject"
+                : (conservativeFractionalHistoryGap
+                    ? "fractional_gap"
+                    : "zero_demand");
         this->lastDispatchedGeneratedFrameCount_ = 0;
         this->lastGeneratedFrameCount_ = 0;
         pass.framegenBatchCompleteValid = false;
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
+        if (firstPresentDiagnostic || conservativeAdmissionRejectedHistoryGap) {
+            std::cerr << "lsfg-vk: runtime stage=compat-adaptive-history-gap"
+                      << " history_gap_reason=" << historyGapReason
+                      << " history_invalidation_reason=none"
+                      << " history_reprime_reason=none"
+                      << " planned=" << plannedGeneratedFrameCount
+                      << " admitted=" << generatedFrameCount
+                      << "\n";
+        }
         return presentCompatibilitySourceOnly(
-            "compat-fractional-history-copy",
-            "pre-copy-compat-fractional-history");
+            "compat-adaptive-history-copy",
+            "pre-copy-compat-adaptive-history");
     }
 
     if (conservativeSourceOnlyWarmup) {
@@ -3992,7 +4064,9 @@ void LsContext::advanceAdaptiveFlowTimingEpoch() {
     this->adaptiveFlowGenerationCount_ = 0;
 }
 
-void LsContext::resetAdaptiveSourceEpoch(bool resetScheduler) {
+void LsContext::resetAdaptiveSourceEpoch(
+        bool resetScheduler,
+        SourceHistoryInvalidationReason reason) {
     // Any source-timeline epoch change invalidates synthetic pixels produced
     // against the previous cadence/history. Keep the private-device batch
     // release alive until it retires so shared AHB reuse remains ordered.
@@ -4021,6 +4095,8 @@ void LsContext::resetAdaptiveSourceEpoch(bool resetScheduler) {
                                            : kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ =
         this->sourceHistoryWarmupRemaining_ > 0;
+    this->lastHistoryInvalidationReason_ = reason;
+    this->lastHistoryReprimeReason_ = reason;
     this->lastGeneratedFrameCount_ = 0;
     this->lastDispatchedGeneratedFrameCount_ = 0;
 
@@ -4080,6 +4156,10 @@ void LsContext::enterSourceOnlyBypass() {
                                            : kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ =
         this->sourceHistoryWarmupRemaining_ > 0;
+    this->lastHistoryInvalidationReason_ =
+        SourceHistoryInvalidationReason::ContextRecreate;
+    this->lastHistoryReprimeReason_ =
+        SourceHistoryInvalidationReason::ContextRecreate;
     this->lastDispatchedGeneratedFrameCount_ = 0;
     this->previousSourceCopySignalValid_ = false;
     this->generatedPresentationCapacityTracker_.reset();
