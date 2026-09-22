@@ -1257,6 +1257,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             deferredOutputPollingValid
                 ? this->deferredAdrenoGeneratedCount_ - deferredReadyOutputPrefix
                 : 0;
+        if (deferredReadyOutputPrefix > 0) {
+            this->runtimeMetrics.windowGeneratedCompleted +=
+                deferredReadyOutputPrefix;
+            this->runtimeMetrics.totalGeneratedCompleted +=
+                deferredReadyOutputPrefix;
+        }
         if (!batchReady
                 || deferredReadyOutputPrefix < this->deferredAdrenoGeneratedCount_) {
             ++this->deferredAdrenoSourceAge_;
@@ -1352,6 +1358,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     generatedCopyWaits,
                     { deferredPass.postCopySemaphores.at(i).handle(),
                       deferredPass.prevPostCopySemaphores.at(i).handle() });
+                this->runtimeMetrics.windowGeneratedCopySubmitted++;
+                this->runtimeMetrics.totalGeneratedCopySubmitted++;
 
                 std::vector<VkSemaphore> deferredPresentWaits{
                     deferredPass.postCopySemaphores.at(i).handle()
@@ -1377,6 +1385,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         imageIdx,
                         deferredPass.prevPostCopySemaphores.at(i - 1));
                 }
+                this->runtimeMetrics.windowGeneratedWsiSubmitted++;
+                this->runtimeMetrics.totalGeneratedWsiSubmitted++;
                 const auto deferredPresentResult =
                     Layer::ovkQueuePresentKHR(queue, &deferredPresentInfo);
                 if (isAdrenoWsiRetirementResult(deferredPresentResult))
@@ -1393,6 +1403,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ++deferredDeliveredGeneratedFrameCount;
                 ++this->runtimeMetrics.windowGeneratedFrames;
                 ++this->runtimeMetrics.totalGeneratedFrames;
+                ++this->runtimeMetrics.windowGeneratedWsiAccepted;
+                ++this->runtimeMetrics.totalGeneratedWsiAccepted;
+                ++this->runtimeMetrics.windowGeneratedDisplayUnknown;
+                ++this->runtimeMetrics.totalGeneratedDisplayUnknown;
                 this->runtimeMetrics.windowGeneratedPresentMs +=
                     std::chrono::duration<double, std::milli>(
                         RuntimeMetrics::Clock::now()
@@ -2339,6 +2353,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowStart = cycleEnd;
             metrics.windowSourceFrames = 0;
             metrics.windowGeneratedFrames = 0;
+            metrics.windowGeneratedDispatched = 0;
+            metrics.windowGeneratedCompleted = 0;
+            metrics.windowGeneratedCopySubmitted = 0;
+            metrics.windowGeneratedWsiSubmitted = 0;
+            metrics.windowGeneratedWsiAccepted = 0;
+            metrics.windowGeneratedDisplayConfirmed = 0;
+            metrics.windowGeneratedDisplayUnknown = 0;
             metrics.windowGeneratedLateDrops = 0;
             metrics.windowAdmissionRejects = 0;
             metrics.windowGeneratedDeadlineDrops = 0;
@@ -2407,6 +2428,48 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const double sourceFps = sourceCount / elapsedSeconds;
             const double generatedFps = generatedCount / elapsedSeconds;
             const double outputFps = (sourceCount + generatedCount) / elapsedSeconds;
+            const char* generatedDeliveryConfidence =
+                metrics.windowGeneratedDisplayConfirmed > 0
+                    ? "display-confirmed"
+                    : (metrics.windowGeneratedWsiAccepted > 0
+                        ? "wsi-accepted-only"
+                        : "none");
+            std::cerr << "lsfg-vk: delivery-metrics"
+                      << " generated_dispatched=" << metrics.windowGeneratedDispatched
+                      << " generated_completed=" << metrics.windowGeneratedCompleted
+                      << " generated_copy_submitted=" << metrics.windowGeneratedCopySubmitted
+                      << " generated_wsi_submitted=" << metrics.windowGeneratedWsiSubmitted
+                      << " generated_wsi_accepted=" << metrics.windowGeneratedWsiAccepted
+                      << " generated_display_confirmed=" << metrics.windowGeneratedDisplayConfirmed
+                      << " generated_display_unknown=" << metrics.windowGeneratedDisplayUnknown
+                      << " generated_delivery_confidence=" << generatedDeliveryConfidence
+                      << " history_invalidation_reason="
+                      << sourceHistoryInvalidationReasonName(
+                            this->lastHistoryInvalidationReason_)
+                      << " history_reprime_reason="
+                      << sourceHistoryInvalidationReasonName(
+                            this->lastHistoryReprimeReason_)
+                      << "\n";
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_DELIVERY",
+                "generated_dispatched=%llu generated_completed=%llu "
+                "generated_copy_submitted=%llu generated_wsi_submitted=%llu "
+                "generated_wsi_accepted=%llu generated_display_confirmed=%llu "
+                "generated_display_unknown=%llu generated_delivery_confidence=%s "
+                "history_invalidation_reason=%s history_reprime_reason=%s",
+                static_cast<unsigned long long>(metrics.windowGeneratedDispatched),
+                static_cast<unsigned long long>(metrics.windowGeneratedCompleted),
+                static_cast<unsigned long long>(metrics.windowGeneratedCopySubmitted),
+                static_cast<unsigned long long>(metrics.windowGeneratedWsiSubmitted),
+                static_cast<unsigned long long>(metrics.windowGeneratedWsiAccepted),
+                static_cast<unsigned long long>(metrics.windowGeneratedDisplayConfirmed),
+                static_cast<unsigned long long>(metrics.windowGeneratedDisplayUnknown),
+                generatedDeliveryConfidence,
+                sourceHistoryInvalidationReasonName(
+                    this->lastHistoryInvalidationReason_),
+                sourceHistoryInvalidationReasonName(
+                    this->lastHistoryReprimeReason_));
             metrics.lastWindowOutputFps = outputFps;
             metrics.lastWindowOutputFpsValid = sourceCount > 0.0;
             metrics.lastWindowAdaptiveFramegen = conf.adaptiveFramegen;
@@ -2744,6 +2807,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowStart = cycleEnd;
             metrics.windowSourceFrames = 0;
             metrics.windowGeneratedFrames = 0;
+            metrics.windowGeneratedDispatched = 0;
+            metrics.windowGeneratedCompleted = 0;
+            metrics.windowGeneratedCopySubmitted = 0;
+            metrics.windowGeneratedWsiSubmitted = 0;
+            metrics.windowGeneratedWsiAccepted = 0;
+            metrics.windowGeneratedDisplayConfirmed = 0;
+            metrics.windowGeneratedDisplayUnknown = 0;
             metrics.windowGeneratedLateDrops = 0;
             metrics.windowAdmissionRejects = 0;
             metrics.windowGeneratedDeadlineDrops = 0;
@@ -3458,6 +3528,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
     if (this->conservativeCrossDeviceSync_)
         ++this->conservativeFramegenSourceIndex_;
+    metrics.windowGeneratedDispatched += generatedFrameCount;
+    metrics.totalGeneratedDispatched += generatedFrameCount;
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)
@@ -3643,6 +3715,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - waitIdleStart).count();
     }
+    if (requireHostCompletionWait && framegenReady) {
+        metrics.windowGeneratedCompleted += generatedFrameCount;
+        metrics.totalGeneratedCompleted += generatedFrameCount;
+    }
     if (!framegenReady) {
         const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
         this->lastGeneratedFrameCount_ = 0;
@@ -3807,6 +3883,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             generatedCopyWaits,
             { pass.postCopySemaphores.at(i).handle(),
               pass.prevPostCopySemaphores.at(i).handle() });
+        metrics.windowGeneratedCopySubmitted++;
+        metrics.totalGeneratedCopySubmitted++;
 
         std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
         if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());
@@ -3832,6 +3910,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (i != 0)
             this->retainPresentWait(
                 imageIdx, pass.prevPostCopySemaphores.at(i - 1));
+        metrics.windowGeneratedWsiSubmitted++;
+        metrics.totalGeneratedWsiSubmitted++;
         res = Layer::ovkQueuePresentKHR(generatedPresentQueue, &presentInfo);
         if (this->conservativeCrossDeviceSync_
                 && isAdrenoWsiRetirementResult(res))
@@ -3844,6 +3924,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         queuedGeneratedFrameCount++;
         metrics.windowGeneratedFrames++;
         metrics.totalGeneratedFrames++;
+        metrics.windowGeneratedWsiAccepted++;
+        metrics.totalGeneratedWsiAccepted++;
+        metrics.windowGeneratedDisplayUnknown++;
+        metrics.totalGeneratedDisplayUnknown++;
         metrics.windowGeneratedPresentMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - generatedPresentStart).count();
         if (firstPresentDiagnostic && i == 0) {
