@@ -770,12 +770,13 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         AndroidSyncPolicy::requiresConservativeCrossDeviceSync(
             backendDiagnostics.driverId, backendDiagnostics.driverName);
     // Source ownership and framegen completion are independent policies.
-    // Qualcomm/Adreno may use one-shot SYNC_FD for the game-device -> framegen
-    // source handoff on cycles that actually generate, but completion remains
-    // on the bounded host wait. This removes the game-render/pre-copy CPU wait
-    // without reopening the async-completion lifetime path that regressed
-    // Adreno. Xclipse and other validated drivers retain their existing
-    // capability-driven SYNC_FD path end-to-end.
+    // Qualcomm/Adreno keeps the protected source/history topology below:
+    // true source-only, reprime, and fractional zero-generation cycles never
+    // cross into framegen. Generated cycles, however, can safely use the same
+    // one-shot SYNC_FD output-ready + batch-complete dependency chain as other
+    // capable drivers. This removes the source-thread completion wait while
+    // preserving the r11 zero-count/lifetime repair. Xclipse remains on its
+    // existing capability-driven SYNC_FD path unchanged.
     this->asyncAhbHandoffEnabled_ =
         gameGetSemaphoreFd != nullptr
         && (this->conservativeCrossDeviceSync_
@@ -788,8 +789,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                 ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
                 : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
     this->asyncFramegenCompletionEnabled_ =
-        !this->conservativeCrossDeviceSync_
-        && syncFdHandoffSupported && gameImportSemaphoreFd != nullptr;
+        syncFdHandoffSupported && gameImportSemaphoreFd != nullptr;
 
     // The known-good Qualcomm/Adreno path can generate immediately because the
     // first source upload initializes both AHB inputs. Do not inherit the newer

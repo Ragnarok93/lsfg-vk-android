@@ -31,13 +31,15 @@ inline bool containsAsciiCaseInsensitive(
     return false;
 }
 
-/// Qualcomm/Adreno drivers use the compatibility path until the complete
-/// cross-device SYNC_FD + AHardwareBuffer lifetime chain is validated on them.
-/// This is a driver-family policy, not a device-model allow/deny list.
+/// Qualcomm/Adreno drivers use a protected source/history compatibility policy:
+/// zero-generation, reprime, and true source-only cycles do not cross into the
+/// private framegen device. Generated cycles may still use capability-gated
+/// SYNC_FD input/output dependencies so expensive framegen completion never
+/// blocks the application's source-present thread. This remains a driver-family
+/// policy, not a device-model allow/deny list.
 ///
-/// Samsung/Xclipse, ARM/Mali, and unknown drivers retain capability-driven
-/// asynchronous synchronization so the compatibility repair does not become a
-/// global performance rollback.
+/// Samsung/Xclipse, ARM/Mali, and unknown drivers retain their existing fully
+/// capability-driven asynchronous synchronization.
 inline bool requiresConservativeCrossDeviceSync(
         VkDriverId driverId, std::string_view driverName) noexcept {
     if (driverId == VK_DRIVER_ID_MESA_TURNIP
@@ -54,7 +56,7 @@ inline bool requiresConservativeCrossDeviceSync(
 
 inline const char* crossDeviceSyncPolicyName(bool conservative) noexcept {
     return conservative
-        ? "syncfd-input-host-completion-adreno"
+        ? "syncfd-generated-async-adreno"
         : "capability-async";
 }
 

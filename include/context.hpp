@@ -279,8 +279,9 @@ private:
     bool framegenInFlight_{false};
     bool framegenOutputEligible_{false};
 
-    // Qualcomm/Adreno currently uses the proven serialized cross-device AHB
-    // ownership path. Other drivers keep the capability-driven async path.
+    // Qualcomm/Adreno keeps protected source/history handling for zero,
+    // reprime, and source-only cycles. Generated cycles may still use the
+    // capability-driven SYNC_FD completion chain.
     bool conservativeCrossDeviceSync_{false};
 
     // Optional fast path only. Prefer one-shot SYNC_FD on Android, retain
