@@ -57,7 +57,7 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("poll(&batchPoll, 1, 0)", deferred)
         self.assertIn("poll(&outputPoll, 1, 0)", deferred)
         self.assertIn("deferredAdrenoOutputEligible_ = false", deferred)
-        self.assertIn("conservativeBatchStillInFlight = true", deferred)
+        self.assertIn("conservativeBatchStillInFlight = !batchReady", deferred)
         self.assertNotIn("waitContext(*this->lsfgCtxId, runtimeWaitTimeoutNs()", deferred)
 
     def test_late_batch_drops_synthetics_but_keeps_source_immediate(self) -> None:
