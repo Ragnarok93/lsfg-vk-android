@@ -2427,7 +2427,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     if (asyncExportFailed) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
-        this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
+        this->sourceHistoryWarmupRemaining_ =
+            this->conservativeCrossDeviceSync_
+                ? kConservativeSourceReprimeFrames
+                : kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
         this->lastGeneratedFrameCount_ = 0;
         const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();

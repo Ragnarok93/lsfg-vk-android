@@ -123,6 +123,15 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("runtimeWaitTimeoutNs()", generated)
         self.assertIn(": 0;", generated)
 
+    def test_adreno_opaque_export_failure_uses_adreno_reprime_not_xclipse_warmup(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        failure = source.split("if (asyncExportFailed)", 1)[1].split(
+            "const VkSemaphore sourceReady", 1
+        )[0]
+        self.assertIn("this->conservativeCrossDeviceSync_", failure)
+        self.assertIn("kConservativeSourceReprimeFrames", failure)
+        self.assertIn("kSourceHistoryWarmupFrames", failure)
+
     def test_generated_compatibility_path_retains_bounded_completion_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated = source.split("// 2. Tell framegen", 1)[1]
