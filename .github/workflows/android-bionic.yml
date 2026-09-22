@@ -45,7 +45,9 @@ jobs:
           python3 tests/android_wsi_provenance_test.py
           python3 tests/android_runtime_stability_test.py
           python3 tests/android_adreno_compatibility_restore_test.py
+          python3 tests/android_adreno_source_protection_delivery_test.py
           python3 tests/android_adreno_deferred_single_queue_test.py
+          python3 tests/android_compatibility_path_routing_test.py
           python3 tests/android_suspend_timeout_guard_test.py
           python3 tests/android_adaptive_history_test.py
           python3 tests/android_adaptive_flow_runtime_integration_test.py

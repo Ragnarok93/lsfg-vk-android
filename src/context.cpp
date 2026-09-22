@@ -31,6 +31,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <array>
 #include <cmath>
@@ -85,6 +86,29 @@ size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 #ifdef __ANDROID__
 constexpr uint32_t kConservativeSourceReprimeFrames = 2;
 
+const char* sourceHistoryInvalidationReasonName(
+        SourceHistoryInvalidationReason reason) noexcept {
+    switch (reason) {
+        case SourceHistoryInvalidationReason::None: return "none";
+        case SourceHistoryInvalidationReason::Startup: return "startup";
+        case SourceHistoryInvalidationReason::TimelineDiscontinuity:
+            return "timeline_discontinuity";
+        case SourceHistoryInvalidationReason::SyncExportFailure:
+            return "sync_export_failure";
+        case SourceHistoryInvalidationReason::SyncImportFailure:
+            return "sync_import_failure";
+        case SourceHistoryInvalidationReason::ContextRecreate:
+            return "context_recreate";
+        case SourceHistoryInvalidationReason::SourcePairMismatch:
+            return "source_pair_mismatch";
+        case SourceHistoryInvalidationReason::AbandonedBatch:
+            return "abandoned_batch";
+        case SourceHistoryInvalidationReason::TrueOwnershipFailure:
+            return "true_ownership_failure";
+    }
+    return "unknown";
+}
+
 bool isAdrenoWsiRetirementResult(VkResult result) noexcept {
     return result == VK_ERROR_OUT_OF_DATE_KHR
         || result == VK_ERROR_SURFACE_LOST_KHR;
@@ -131,6 +155,14 @@ uint64_t nextRuntimeConfigRevision() {
     if (revision == 0)
         revision = nextRevision.fetch_add(1, std::memory_order_relaxed);
     return revision;
+}
+
+bool shouldTraceBatch(uint64_t batchId) {
+    static const bool traceEveryBatch = [] {
+        const char* value = std::getenv("LSFG_VK_BATCH_TRACE");
+        return value != nullptr && std::string_view(value) == "1";
+    }();
+    return traceEveryBatch || batchId <= 8 || batchId % 120 == 0;
 }
 
 uint64_t runtimeDiagnosticConfigSignature(
@@ -772,52 +804,104 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     const bool opaqueFdHandoffSupported =
         info.androidOpaqueFdSemaphoreSupported
         && backendDiagnostics.externalSemaphoreOpaqueFd;
+    VkPhysicalDeviceProperties gameDeviceProperties{};
+    Layer::ovkGetPhysicalDeviceProperties(
+        info.physicalDevice, &gameDeviceProperties);
+    this->compatibilityPath_ =
+        AndroidSyncPolicy::selectFramegenCompatibilityPath(
+            backendDiagnostics.driverId,
+            backendDiagnostics.driverName,
+            gameDeviceProperties.deviceName);
     this->conservativeCrossDeviceSync_ =
-        AndroidSyncPolicy::requiresConservativeCrossDeviceSync(
-            backendDiagnostics.driverId, backendDiagnostics.driverName);
+        this->compatibilityPath_
+            == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood;
     if (this->conservativeCrossDeviceSync_
             && info.adrenoSyntheticQueueAvailable
             && info.syntheticQueue != VK_NULL_HANDLE) {
         this->syntheticQueue_ = info.syntheticQueue;
     }
     // Source ownership and framegen completion are independent policies.
-    // Qualcomm/Adreno keeps the protected source/history topology below:
-    // true source-only, reprime, and fractional zero-generation cycles never
-    // cross into framegen. Generated cycles, however, can safely use the same
-    // one-shot SYNC_FD output-ready + batch-complete dependency chain as other
-    // capable drivers. This removes the source-thread completion wait while
-    // preserving the r11 zero-count/lifetime repair. Xclipse remains on its
-    // existing capability-driven SYNC_FD path unchanged.
+    // The validated Adreno 650/Turnip baseline used a host-fence source handoff,
+    // completed private-device framegen before reading generated AHBs, and
+    // forwarded generated + source WSI presents in the same intercepted call.
+    // Do not retain an application swapchain image or present wait across calls:
+    // the r24 deferred source-buffer route exhausted the six-image swapchain and
+    // terminated the guest render process on its first generated batch.
+    //
+    // Xclipse and generic drivers keep their existing capability-driven
+    // asynchronous handoff/completion route unchanged.
     this->asyncAhbHandoffEnabled_ =
-        gameGetSemaphoreFd != nullptr
-        && (this->conservativeCrossDeviceSync_
-            ? syncFdHandoffSupported
-            : (syncFdHandoffSupported || opaqueFdHandoffSupported));
+        !this->conservativeCrossDeviceSync_
+        && gameGetSemaphoreFd != nullptr
+        && (syncFdHandoffSupported || opaqueFdHandoffSupported);
     this->asyncAhbHandoffHandleType_ =
-        this->conservativeCrossDeviceSync_
-            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
-            : (syncFdHandoffSupported
-                ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
-                : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
-    // Preserve the device-proven completion topology. Xclipse/Mali and any
-    // Adreno path with a genuinely independent synthetic queue may consume
-    // exported completion SYNC_FDs asynchronously. Single-queue Qualcomm/Turnip
-    // must complete private-device framegen before the game device touches a
-    // generated AHB; deferring those output dependencies across source
-    // boundaries repeatedly destroyed the guest Vulkan process on Adreno 650.
-    this->asyncFramegenCompletionEnabled_ =
         syncFdHandoffSupported
-        && gameImportSemaphoreFd != nullptr
-        && (!this->conservativeCrossDeviceSync_
-            || this->syntheticQueue_ != VK_NULL_HANDLE);
+            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
+            : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    this->asyncFramegenCompletionEnabled_ =
+        !this->conservativeCrossDeviceSync_
+        && syncFdHandoffSupported
+        && gameImportSemaphoreFd != nullptr;
+    // Rejected Adreno experiment: never select deferred completion/source
+    // buffering on the device-proven compatibility path. The dormant code stays
+    // isolated for lifetime-audit reference, but no compatibility selector can
+    // route Qualcomm/Turnip into it.
     this->deferredAdrenoCompletionEnabled_ = false;
 
-    // The known-good Qualcomm/Adreno path can generate immediately because the
-    // first source upload initializes both AHB inputs. Do not inherit the newer
-    // four-cycle private-history startup warmup on this compatibility path.
+    const bool xclipseCompatibilityPath =
+        this->compatibilityPath_
+            == AndroidSyncPolicy::FramegenCompatibilityPath::XclipseCurrent;
+    const char* compatibilityCompletion =
+        this->asyncFramegenCompletionEnabled_
+            ? "sync-fd"
+            : (this->deferredAdrenoCompletionEnabled_
+                ? "deferred-sync-fd"
+                : "host-wait");
+    const char* compatibilityPresentation =
+        this->compatibilityPath_
+                == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood
+            ? "generated-before-source-same-call"
+            : (xclipseCompatibilityPath ? "xclipse-current" : "capability-current");
+    const char* compatibilityRetirement =
+        this->compatibilityPath_
+                == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood
+            ? "host-completion+real-copy-fence+wsi-reacquire"
+            : (xclipseCompatibilityPath ? "xclipse-current" : "capability-current");
+
+    std::cerr << "lsfg-vk: LSFG compatibility path:"
+              << " gpu=\"" << gameDeviceProperties.deviceName << "\""
+              << " vendor="
+              << AndroidSyncPolicy::compatibilityVendorName(
+                    this->compatibilityPath_)
+              << " path="
+              << AndroidSyncPolicy::compatibilityPathName(
+                    this->compatibilityPath_)
+              << " completion=" << compatibilityCompletion
+              << " handoff="
+              << (this->asyncAhbHandoffEnabled_
+                    ? handoffTypeName(this->asyncAhbHandoffHandleType_)
+                    : "host-fence")
+              << " presentation=" << compatibilityPresentation
+              << " retirement=" << compatibilityRetirement
+              << " queue_topology="
+              << (this->syntheticQueue_ != VK_NULL_HANDLE
+                    ? "split-graphics"
+                    : "single-graphics")
+              << " source_queue=application-present"
+              << " generated_queue="
+              << (this->syntheticQueue_ != VK_NULL_HANDLE
+                    ? "synthetic-graphics"
+                    : "application-present")
+              << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
+              << '\n';
+
+    // Match the device-proven baseline: establish one real-source history
+    // boundary before the first Adreno interpolation dispatch. This source is
+    // presented normally in the same call; it is never buffered for a later
+    // intercepted present.
     if (this->conservativeCrossDeviceSync_) {
-        this->sourceHistoryWarmupRemaining_ = 0;
-        this->requiresSourceHistoryWarmup_ = false;
+        this->sourceHistoryWarmupRemaining_ = 1;
+        this->requiresSourceHistoryWarmup_ = true;
     }
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
@@ -937,23 +1021,40 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
             .flags = 0,
         };
-        VkFence fence = VK_NULL_HANDLE;
-        const auto fenceResult = createCompletionFence(
-            info.device, &fenceInfo, nullptr, &fence);
-        if (fenceResult != VK_SUCCESS || fence == VK_NULL_HANDLE) {
-            throw LSFG::vulkan_error(
-                fenceResult == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : fenceResult,
-                "Failed to create pass-retirement fence");
+        const auto createOwnedCompletionFence = [&]() {
+            VkFence fence = VK_NULL_HANDLE;
+            const auto fenceResult = createCompletionFence(
+                info.device, &fenceInfo, nullptr, &fence);
+            if (fenceResult != VK_SUCCESS || fence == VK_NULL_HANDLE) {
+                throw LSFG::vulkan_error(
+                    fenceResult == VK_SUCCESS
+                        ? VK_ERROR_INITIALIZATION_FAILED
+                        : fenceResult,
+                    "Failed to create pass-retirement fence");
+            }
+            return std::shared_ptr<VkFence>(
+                new VkFence(fence),
+                [device = info.device, destroyCompletionFence](
+                        VkFence* ownedFence) {
+                    if (ownedFence != nullptr) {
+                        if (*ownedFence != VK_NULL_HANDLE)
+                            destroyCompletionFence(
+                                device, *ownedFence, nullptr);
+                        delete ownedFence;
+                    }
+                });
+        };
+
+        pass.completionFence = createOwnedCompletionFence();
+#ifdef __ANDROID__
+        if (this->deferredAdrenoCompletionEnabled_) {
+            pass.postCopyCompletionFences.resize(runtimeMultiplier - 1);
+            pass.postCopyCompletionFenceSubmitted.assign(
+                runtimeMultiplier - 1, false);
+            for (auto& postCopyFence : pass.postCopyCompletionFences)
+                postCopyFence = createOwnedCompletionFence();
         }
-        pass.completionFence = std::shared_ptr<VkFence>(
-            new VkFence(fence),
-            [device = info.device, destroyCompletionFence](VkFence* ownedFence) {
-                if (ownedFence != nullptr) {
-                    if (*ownedFence != VK_NULL_HANDLE)
-                        destroyCompletionFence(device, *ownedFence, nullptr);
-                    delete ownedFence;
-                }
-            });
+#endif
     }
 }
 
@@ -1019,44 +1120,65 @@ bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
     if (pass.deferredAdrenoOwned)
         return false;
 #endif
-    if (!pass.completionFenceSubmitted) {
-        if (!pass.completionFenceFailed)
-            pass.crossFrameWaitRetentions.clear();
-        return !pass.completionFenceFailed;
-    }
     if (pass.completionFenceFailed
-            || pass.completionFence == nullptr
             || this->completionWaitFences_ == nullptr
             || this->completionResetFences_ == nullptr)
         return false;
 
-    const VkFence fence = *pass.completionFence;
-    const auto waitResult = this->completionWaitFences_(
-        this->device_, 1, &fence, VK_TRUE, 0);
-    if (waitResult != VK_SUCCESS) {
-        if (waitResult != VK_TIMEOUT && waitResult != VK_NOT_READY) {
-            Utils::logLimitN(
-                "passRetirement",
-                5,
-                "Pass completion fence query failed: "
-                    + std::to_string(waitResult));
+    const auto waitAndResetFence =
+        [&](const std::shared_ptr<VkFence>& owner) -> bool {
+            if (owner == nullptr) {
+                pass.completionFenceFailed = true;
+                return false;
+            }
+
+            const VkFence fence = *owner;
+            const auto waitResult = this->completionWaitFences_(
+                this->device_, 1, &fence, VK_TRUE, 0);
+            if (waitResult != VK_SUCCESS) {
+                if (waitResult != VK_TIMEOUT && waitResult != VK_NOT_READY) {
+                    Utils::logLimitN(
+                        "passRetirement",
+                        5,
+                        "Pass completion fence query failed: "
+                            + std::to_string(waitResult));
+                }
+                return false;
+            }
+
+            const auto resetResult = this->completionResetFences_(
+                this->device_, 1, &fence);
+            if (resetResult != VK_SUCCESS) {
+                pass.completionFenceFailed = true;
+                Utils::logLimitN(
+                    "passRetirement",
+                    5,
+                    "Pass completion fence reset failed: "
+                        + std::to_string(resetResult));
+                return false;
+            }
+            return true;
+        };
+
+    if (pass.completionFenceSubmitted) {
+        if (!waitAndResetFence(pass.completionFence))
+            return false;
+        pass.completionFenceSubmitted = false;
+    }
+
+#ifdef __ANDROID__
+    for (size_t i = 0;
+            i < pass.postCopyCompletionFenceSubmitted.size(); ++i) {
+        if (!pass.postCopyCompletionFenceSubmitted.at(i))
+            continue;
+        if (i >= pass.postCopyCompletionFences.size()
+                || !waitAndResetFence(pass.postCopyCompletionFences.at(i))) {
+            return false;
         }
-        return false;
+        pass.postCopyCompletionFenceSubmitted.at(i) = false;
     }
+#endif
 
-    const auto resetResult = this->completionResetFences_(
-        this->device_, 1, &fence);
-    if (resetResult != VK_SUCCESS) {
-        pass.completionFenceFailed = true;
-        Utils::logLimitN(
-            "passRetirement",
-            5,
-            "Pass completion fence reset failed: "
-                + std::to_string(resetResult));
-        return false;
-    }
-
-    pass.completionFenceSubmitted = false;
     pass.crossFrameWaitRetentions.clear();
 #ifdef __ANDROID__
     pass.framegenBatchCompleteValid = false;
@@ -1141,6 +1263,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     if (this->deferredAdrenoBatchValid_) {
+        const uint64_t deferredBatchId = this->deferredAdrenoBatchId_;
+        const uint32_t deferredSourceAge = this->deferredAdrenoSourceAge_;
         auto& deferredPass =
             this->passInfos.at(this->deferredAdrenoPassIndex_ % this->passInfos.size());
         bool batchReady = this->deferredAdrenoBatchCompleteReady_;
@@ -1234,6 +1358,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             deferredOutputPollingValid
                 ? this->deferredAdrenoGeneratedCount_ - deferredReadyOutputPrefix
                 : 0;
+        if (deferredReadyOutputPrefix > 0) {
+            this->runtimeMetrics.windowGeneratedCompleted +=
+                deferredReadyOutputPrefix;
+            this->runtimeMetrics.totalGeneratedCompleted +=
+                deferredReadyOutputPrefix;
+        }
         if (!batchReady
                 || deferredReadyOutputPrefix < this->deferredAdrenoGeneratedCount_) {
             ++this->deferredAdrenoSourceAge_;
@@ -1324,11 +1454,27 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     generatedCopyWaits.emplace_back(
                         deferredPass.renderSemaphores.at(i).handle());
                 }
+                if (i >= deferredPass.postCopyCompletionFences.size()
+                        || deferredPass.postCopyCompletionFences.at(i) == nullptr
+                        || deferredPass.postCopyCompletionFenceSubmitted.at(i)) {
+                    this->deferredAdrenoOutputEligible_ = false;
+                    this->lastHistoryInvalidationReason_ =
+                        SourceHistoryInvalidationReason::TrueOwnershipFailure;
+                    this->lastHistoryReprimeReason_ =
+                        SourceHistoryInvalidationReason::TrueOwnershipFailure;
+                    throw LSFG::vulkan_error(
+                        VK_ERROR_INITIALIZATION_FAILED,
+                        "Deferred Adreno post-copy retirement fence unavailable");
+                }
                 postCopyBuf.submit(
                     info.queue.second,
                     generatedCopyWaits,
                     { deferredPass.postCopySemaphores.at(i).handle(),
-                      deferredPass.prevPostCopySemaphores.at(i).handle() });
+                      deferredPass.prevPostCopySemaphores.at(i).handle() },
+                    *deferredPass.postCopyCompletionFences.at(i));
+                deferredPass.postCopyCompletionFenceSubmitted.at(i) = true;
+                this->runtimeMetrics.windowGeneratedCopySubmitted++;
+                this->runtimeMetrics.totalGeneratedCopySubmitted++;
 
                 std::vector<VkSemaphore> deferredPresentWaits{
                     deferredPass.postCopySemaphores.at(i).handle()
@@ -1354,6 +1500,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         imageIdx,
                         deferredPass.prevPostCopySemaphores.at(i - 1));
                 }
+                this->runtimeMetrics.windowGeneratedWsiSubmitted++;
+                this->runtimeMetrics.totalGeneratedWsiSubmitted++;
                 const auto deferredPresentResult =
                     Layer::ovkQueuePresentKHR(queue, &deferredPresentInfo);
                 if (isAdrenoWsiRetirementResult(deferredPresentResult))
@@ -1370,6 +1518,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ++deferredDeliveredGeneratedFrameCount;
                 ++this->runtimeMetrics.windowGeneratedFrames;
                 ++this->runtimeMetrics.totalGeneratedFrames;
+                ++this->runtimeMetrics.windowGeneratedWsiAccepted;
+                ++this->runtimeMetrics.totalGeneratedWsiAccepted;
+                ++this->runtimeMetrics.windowGeneratedDisplayUnknown;
+                ++this->runtimeMetrics.totalGeneratedDisplayUnknown;
                 this->runtimeMetrics.windowGeneratedPresentMs +=
                     std::chrono::duration<double, std::milli>(
                         RuntimeMetrics::Clock::now()
@@ -1405,8 +1557,75 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->deferredAdrenoGeneratedCount_ = 0;
             this->deferredAdrenoSourceAge_ = 0;
             deferredPass.deferredAdrenoOwned = false;
-            this->submitPassCompletionFence(deferredPass, info.queue.second);
         }
+
+        if (shouldTraceBatch(deferredBatchId)) {
+            std::cerr << "lsfg-vk: runtime stage=adreno-batch-delivery"
+                      << " batch_id=" << deferredBatchId
+                      << " private_complete=" << (batchReady ? 1 : 0)
+                      << " output_ready=" << deferredReadyOutputPrefix
+                      << " copy_submitted=" << deferredDeliveredGeneratedFrameCount
+                      << " wsi_submitted=" << deferredDeliveredGeneratedFrameCount
+                      << " wsi_accepted=" << deferredDeliveredGeneratedFrameCount
+                      << " late_dropped=" << deferredUnreadyOutputCount
+                      << " source_age=" << deferredSourceAge
+                      << '\n';
+        }
+        if (batchReady)
+            this->deferredAdrenoBatchId_ = 0;
+    }
+
+    if (this->pendingSourceValid_) {
+        const VkSemaphore pendingSourceReady =
+            this->pendingSourceReady_.handle();
+        const uint32_t pendingSourceImage =
+            this->pendingSourceImage_;
+        const VkPresentInfoKHR pendingSourcePresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            // The original application's pNext chain is not retained across
+            // calls. Deferred source buffering is therefore enabled only when
+            // the source call had no downstream chain.
+            .pNext = nullptr,
+            .waitSemaphoreCount =
+                pendingSourceReady != VK_NULL_HANDLE ? 1U : 0U,
+            .pWaitSemaphores =
+                pendingSourceReady != VK_NULL_HANDLE
+                    ? &pendingSourceReady
+                    : nullptr,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &pendingSourceImage,
+        };
+        if (pendingSourceReady != VK_NULL_HANDLE) {
+            this->retainPresentWait(
+                pendingSourceImage, this->pendingSourceReady_);
+        }
+        const auto pendingSourceResult =
+            Layer::ovkQueuePresentKHR(queue, &pendingSourcePresentInfo);
+        if (isAdrenoWsiRetirementResult(pendingSourceResult))
+            return pendingSourceResult;
+        if (pendingSourceResult != VK_SUCCESS
+                && pendingSourceResult != VK_SUBOPTIMAL_KHR) {
+            this->runtimeMetrics.windowSourcePresentFailures++;
+            this->runtimeMetrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(
+                pendingSourceResult,
+                "Failed presenting buffered Adreno source frame");
+        }
+
+        if (this->frameIdx < 4) {
+            std::cerr << "lsfg-vk: runtime stage=adreno-pending-source-present"
+                      << " image=" << pendingSourceImage
+                      << " pending_pass=" << this->pendingPassIndex_
+                      << " planned_generated="
+                      << this->pendingGeneratedCount_
+                      << "\n";
+        }
+        this->pendingSourceValid_ = false;
+        this->pendingSourceReady_ = {};
+        this->pendingGeneratedCount_ = 0;
+        this->framegenInFlight_ = false;
+        this->framegenOutputEligible_ = false;
     }
 #endif
 
@@ -1443,9 +1662,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     kConservativeSourceReprimeFrames - 1);
                 this->requiresSourceHistoryWarmup_ =
                     this->sourceHistoryWarmupRemaining_ > 0;
+                this->lastHistoryInvalidationReason_ =
+                    SourceHistoryInvalidationReason::SourcePairMismatch;
+                this->lastHistoryReprimeReason_ =
+                    SourceHistoryInvalidationReason::SourcePairMismatch;
                 this->deadlineBatchDecision_ = {};
             } else {
-                this->resetAdaptiveSourceEpoch(true);
+                this->resetAdaptiveSourceEpoch(
+                true, SourceHistoryInvalidationReason::TimelineDiscontinuity);
             }
 #endif
             Utils::logLimitN(
@@ -1504,6 +1728,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         conf.multiplier > 1
             ? static_cast<size_t>(conf.multiplier - 1)
             : 0;
+    const bool sourceProtectionBatchAdmission =
+        this->conservativeCrossDeviceSync_
+        && this->deferredAdrenoCompletionEnabled_;
+    const char* deadlineSemantics =
+        sourceProtectionBatchAdmission
+            ? "source-protection"
+            : "synthetic-slot";
+    double computeReadyBudgetMs = 0.0;
+    double presentationSlotBudgetMs = 0.0;
 
     // Capacity feedback is advisory and comes from the previous measured GPU
     // cost/timeline. It may accelerate one scheduler level only after repeated
@@ -1526,8 +1759,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && capacityIntervalMs > 0.0
         && this->deadlineAdmissionPredictor_.hasEstimate();
     const size_t safeGenerationHint = safeGenerationHintValid
-        ? this->deadlineAdmissionPredictor_.safeGenerationHint(
-            maxAdaptiveGeneratedFrames, capacityIntervalMs)
+        ? (sourceProtectionBatchAdmission
+            ? this->deadlineAdmissionPredictor_.safeBatchGenerationHint(
+                maxAdaptiveGeneratedFrames, capacityIntervalMs)
+            : this->deadlineAdmissionPredictor_.safeGenerationHint(
+                maxAdaptiveGeneratedFrames, capacityIntervalMs))
         : 0;
     this->adaptiveScheduler_.setSafeGenerationHint(
         safeGenerationHint,
@@ -1551,7 +1787,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // The scheduler already consumed this discontinuity and cleared its
         // own cadence state. Reset every dependent controller without
         // overwriting the scheduler telemetry used for this cycle's logs.
-        this->resetAdaptiveSourceEpoch(false);
+        this->resetAdaptiveSourceEpoch(
+            false, SourceHistoryInvalidationReason::TimelineDiscontinuity);
         this->lsfgOutputCadenceTracker_.configure(
             conf.adaptiveFramegen && conf.fpsLimit > 0,
             conf.adaptiveFramegen ? conf.fpsLimit : 0);
@@ -1566,7 +1803,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // the scheduler. Consume the source interval and force a clean
             // epoch rather than letting stale demand/capacity state leak
             // across a suspend or translation-layer discontinuity.
-            this->resetAdaptiveSourceEpoch(true);
+            this->resetAdaptiveSourceEpoch(
+                true, SourceHistoryInvalidationReason::TimelineDiscontinuity);
             this->lsfgOutputCadenceTracker_.configure(
                 conf.adaptiveFramegen && conf.fpsLimit > 0,
                 conf.adaptiveFramegen ? conf.fpsLimit : 0);
@@ -1631,6 +1869,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     static_cast<double>(
                         this->currentSourceTimeline_.sourceDesiredTimeNs - admissionNowNs)
                     / 1'000'000.0;
+                computeReadyBudgetMs = sourceBudgetMs;
                 const auto plannedBatchDecision =
                     this->deadlineAdmissionPredictor_.predict(
                         generatedFrameCount, sourceBudgetMs);
@@ -1662,6 +1901,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                                 ? static_cast<double>(slotDeadlineNs - admissionNowNs)
                                     / 1'000'000.0
                                 : 0.0;
+                        if (slot == 0)
+                            presentationSlotBudgetMs = slotBudgetMs;
                         const auto slotDecision =
                             this->deadlineAdmissionPredictor_.predict(
                                 slot + 1, slotBudgetMs);
@@ -1679,38 +1920,57 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     }
 
                     size_t admittedGeneratedFrameCount = 0;
-                    for (size_t candidate = generatedFrameCount;
-                            candidate > 0; --candidate) {
-                        bool candidateFits = true;
-                        for (size_t slot = 0; slot < candidate; ++slot) {
-                            // Admission occurs before dispatch. Evaluate each
-                            // candidate using the spacing it would actually use
-                            // so a 2 -> 1 reduction tests a midpoint rather than
-                            // retaining a prefix-biased 1/3 position.
-                            const double interpolationFraction =
-                                static_cast<double>(slot + 1)
-                                / static_cast<double>(candidate + 1);
-                            const uint64_t slotDeadlineNs =
-                                this->sourceTimeline_.syntheticDesiredTimeNs(
-                                    this->currentSourceTimeline_,
-                                    interpolationFraction);
-                            const double slotBudgetMs =
-                                slotDeadlineNs > admissionNowNs
-                                    ? static_cast<double>(
-                                        slotDeadlineNs - admissionNowNs)
-                                        / 1'000'000.0
-                                    : 0.0;
-                            const auto slotDecision =
+                    if (sourceProtectionBatchAdmission) {
+                        // Deferred single-queue Adreno protects the next real
+                        // source boundary. Ideal interpolation timestamps are
+                        // presentation slots, not private-device completion
+                        // deadlines. Test complete candidate batches against the
+                        // remaining source-owned budget.
+                        for (size_t candidate = generatedFrameCount;
+                                candidate > 0; --candidate) {
+                            const auto batchDecision =
                                 this->deadlineAdmissionPredictor_.predict(
-                                    slot + 1, slotBudgetMs);
-                            if (!slotDecision.valid || !slotDecision.wouldAdmit) {
-                                candidateFits = false;
+                                    candidate, sourceBudgetMs);
+                            if (batchDecision.valid
+                                    && batchDecision.wouldAdmit) {
+                                admittedGeneratedFrameCount = candidate;
                                 break;
                             }
                         }
-                        if (candidateFits) {
-                            admittedGeneratedFrameCount = candidate;
-                            break;
+                    } else {
+                        for (size_t candidate = generatedFrameCount;
+                                candidate > 0; --candidate) {
+                            bool candidateFits = true;
+                            for (size_t slot = 0; slot < candidate; ++slot) {
+                                // Existing Xclipse/capability-async policy:
+                                // every generated prefix must still meet the
+                                // ideal slot it owns.
+                                const double interpolationFraction =
+                                    static_cast<double>(slot + 1)
+                                    / static_cast<double>(candidate + 1);
+                                const uint64_t slotDeadlineNs =
+                                    this->sourceTimeline_.syntheticDesiredTimeNs(
+                                        this->currentSourceTimeline_,
+                                        interpolationFraction);
+                                const double slotBudgetMs =
+                                    slotDeadlineNs > admissionNowNs
+                                        ? static_cast<double>(
+                                            slotDeadlineNs - admissionNowNs)
+                                            / 1'000'000.0
+                                        : 0.0;
+                                const auto slotDecision =
+                                    this->deadlineAdmissionPredictor_.predict(
+                                        slot + 1, slotBudgetMs);
+                                if (!slotDecision.valid
+                                        || !slotDecision.wouldAdmit) {
+                                    candidateFits = false;
+                                    break;
+                                }
+                            }
+                            if (candidateFits) {
+                                admittedGeneratedFrameCount = candidate;
+                                break;
+                            }
                         }
                     }
 
@@ -1870,17 +2130,39 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             ? AndroidFrameCycleMode::HistoryOnly
             : AndroidFrameCycleMode::Generate;
 
-    // Fractional Adaptive LSFG intentionally creates zero-generation gaps.
-    // Those gaps must still advance temporal history, even on the conservative
-    // Adreno path. True zero-demand/admission-drop cycles and startup history
-    // warmup remain source-only so they cannot force unnecessary private-device
-    // ownership work onto the protected source timeline.
+    // Ordinary Adaptive zero-generation intervals are cadence/admission
+    // events, not ownership failures. Preserve the source pair for fractional
+    // gaps, zero-demand intervals, and rejected synthetic opportunities.
+    const bool conservativeAdmissionRejectedHistoryGap =
+        this->conservativeCrossDeviceSync_
+        && conf.adaptiveFramegen
+        && !sourceHistoryWarmupActive
+        && !sourceTimelineDiscontinuity
+        && plannedGeneratedFrameCount > 0
+        && generatedFrameCount == 0;
     const bool conservativeFractionalHistoryGap =
         this->conservativeCrossDeviceSync_
         && conf.adaptiveFramegen
         && !sourceHistoryWarmupActive
+        && !sourceTimelineDiscontinuity
         && plannedGeneratedFrameCount == 0
         && adaptiveTelemetry.wantedGeneratedFrames > 0.0;
+    const bool conservativeZeroDemandHistoryGap =
+        this->conservativeCrossDeviceSync_
+        && conf.adaptiveFramegen
+        && !sourceHistoryWarmupActive
+        && !sourceTimelineDiscontinuity
+        && plannedGeneratedFrameCount == 0
+        && adaptiveTelemetry.wantedGeneratedFrames <= 0.0;
+    const bool conservativeAdaptiveHistoryGap =
+        this->conservativeCrossDeviceSync_
+        && conf.adaptiveFramegen
+        && !sourceHistoryWarmupActive
+        && !sourceTimelineDiscontinuity
+        && generatedFrameCount == 0
+        && (conservativeAdmissionRejectedHistoryGap
+            || conservativeFractionalHistoryGap
+            || conservativeZeroDemandHistoryGap);
     const bool conservativeSourceOnlyWarmup =
         this->conservativeCrossDeviceSync_
         && sourceHistoryWarmupActive;
@@ -1888,7 +2170,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->conservativeCrossDeviceSync_
         && historyOnly
         && !conservativeSourceOnlyWarmup
-        && !conservativeFractionalHistoryGap;
+        && !conservativeAdaptiveHistoryGap;
 
     this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
 
@@ -1902,8 +2184,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             && timing.batchId > 0;
         const bool timingFresh = timingSessionMatches
             && timing.batchId > this->adaptiveFlowLastObservedBatchId_;
-        if (timingFresh)
+        if (timingFresh) {
             this->adaptiveFlowLastObservedBatchId_ = timing.batchId;
+            if (shouldTraceBatch(timing.batchId)) {
+                std::cerr << "lsfg-vk: runtime stage=framegen-gpu-timing"
+                          << " batch_id=" << timing.batchId
+                          << " mipmaps_ms=" << timing.mipmapsMs
+                          << " flow_end_ms=" << timing.opticalFlowMs
+                          << " frame_interpolation_end_ms=" << timing.totalLsfgMs
+                          << " generation_count=" << timing.generationCount
+                          << '\n';
+            }
+        }
         const bool timingUsable = timingFresh && !timing.transitionActive;
         const bool generatedWorkSample =
             timingUsable && timing.generationCount > 0;
@@ -2287,6 +2579,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowStart = cycleEnd;
             metrics.windowSourceFrames = 0;
             metrics.windowGeneratedFrames = 0;
+            metrics.windowGeneratedDispatched = 0;
+            metrics.windowGeneratedCompleted = 0;
+            metrics.windowGeneratedCopySubmitted = 0;
+            metrics.windowGeneratedWsiSubmitted = 0;
+            metrics.windowGeneratedWsiAccepted = 0;
+            metrics.windowGeneratedDisplayConfirmed = 0;
+            metrics.windowGeneratedDisplayUnknown = 0;
             metrics.windowGeneratedLateDrops = 0;
             metrics.windowAdmissionRejects = 0;
             metrics.windowGeneratedDeadlineDrops = 0;
@@ -2355,6 +2654,48 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const double sourceFps = sourceCount / elapsedSeconds;
             const double generatedFps = generatedCount / elapsedSeconds;
             const double outputFps = (sourceCount + generatedCount) / elapsedSeconds;
+            const char* generatedDeliveryConfidence =
+                metrics.windowGeneratedDisplayConfirmed > 0
+                    ? "display-confirmed"
+                    : (metrics.windowGeneratedWsiAccepted > 0
+                        ? "wsi-accepted-only"
+                        : "none");
+            std::cerr << "lsfg-vk: delivery-metrics"
+                      << " generated_dispatched=" << metrics.windowGeneratedDispatched
+                      << " generated_completed=" << metrics.windowGeneratedCompleted
+                      << " generated_copy_submitted=" << metrics.windowGeneratedCopySubmitted
+                      << " generated_wsi_submitted=" << metrics.windowGeneratedWsiSubmitted
+                      << " generated_wsi_accepted=" << metrics.windowGeneratedWsiAccepted
+                      << " generated_display_confirmed=" << metrics.windowGeneratedDisplayConfirmed
+                      << " generated_display_unknown=" << metrics.windowGeneratedDisplayUnknown
+                      << " generated_delivery_confidence=" << generatedDeliveryConfidence
+                      << " history_invalidation_reason="
+                      << sourceHistoryInvalidationReasonName(
+                            this->lastHistoryInvalidationReason_)
+                      << " history_reprime_reason="
+                      << sourceHistoryInvalidationReasonName(
+                            this->lastHistoryReprimeReason_)
+                      << "\n";
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_DELIVERY",
+                "generated_dispatched=%llu generated_completed=%llu "
+                "generated_copy_submitted=%llu generated_wsi_submitted=%llu "
+                "generated_wsi_accepted=%llu generated_display_confirmed=%llu "
+                "generated_display_unknown=%llu generated_delivery_confidence=%s "
+                "history_invalidation_reason=%s history_reprime_reason=%s",
+                static_cast<unsigned long long>(metrics.windowGeneratedDispatched),
+                static_cast<unsigned long long>(metrics.windowGeneratedCompleted),
+                static_cast<unsigned long long>(metrics.windowGeneratedCopySubmitted),
+                static_cast<unsigned long long>(metrics.windowGeneratedWsiSubmitted),
+                static_cast<unsigned long long>(metrics.windowGeneratedWsiAccepted),
+                static_cast<unsigned long long>(metrics.windowGeneratedDisplayConfirmed),
+                static_cast<unsigned long long>(metrics.windowGeneratedDisplayUnknown),
+                generatedDeliveryConfidence,
+                sourceHistoryInvalidationReasonName(
+                    this->lastHistoryInvalidationReason_),
+                sourceHistoryInvalidationReasonName(
+                    this->lastHistoryReprimeReason_));
             metrics.lastWindowOutputFps = outputFps;
             metrics.lastWindowOutputFpsValid = sourceCount > 0.0;
             metrics.lastWindowAdaptiveFramegen = conf.adaptiveFramegen;
@@ -2464,6 +2805,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->currentSourceTimeline_.sourceIndex
                       << " deadline_admission_valid="
                       << (this->deadlineBatchDecision_.valid ? 1 : 0)
+                      << " deadline_semantics=" << deadlineSemantics
+                      << " compute_ready_budget_ms=" << computeReadyBudgetMs
+                      << " presentation_slot_budget_ms="
+                      << presentationSlotBudgetMs
                       << " deadline_planned_generated="
                       << plannedGeneratedFrameCount
                       << " deadline_admitted_generated="
@@ -2618,7 +2963,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "presentation_cap=%zu presentation_duty=%.3f wsi_reject_ratio=%.3f "
                 "cycle_avg_ms=%.3f cycle_max_ms=%.3f handoff_ms=%.3f dispatch_ms=%.3f "
                 "wait_ms=%.3f source_interval_ms=%.3f source_interval_max_ms=%.3f "
-                "deadline_error_ms=%.3f rebases=%llu planned=%zu admitted=%zu "
+                "deadline_error_ms=%.3f rebases=%llu "
+                "deadline_semantics=%s compute_ready_budget_ms=%.3f "
+                "presentation_slot_budget_ms=%.3f planned=%zu admitted=%zu "
                 "pred_total_ms=%.3f reserve_ms=%.3f effective_budget_ms=%.3f "
                 "wanted=%.3f cost_limit=%zu final_generated=%zu history_only=%llu "
                 "flow_active=%.3f flow_gpu=%.1f flow_output_fps=%.3f "
@@ -2646,6 +2993,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 metrics.windowSourceIntervalMaxMs,
                 sourceDeadlineErrorAvgMs,
                 static_cast<unsigned long long>(metrics.windowSourceTimelineRebases),
+                deadlineSemantics,
+                computeReadyBudgetMs,
+                presentationSlotBudgetMs,
                 plannedGeneratedFrameCount,
                 generatedFrameCount,
                 this->deadlineBatchDecision_.predictedTotalLsfgMs,
@@ -2692,6 +3042,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowStart = cycleEnd;
             metrics.windowSourceFrames = 0;
             metrics.windowGeneratedFrames = 0;
+            metrics.windowGeneratedDispatched = 0;
+            metrics.windowGeneratedCompleted = 0;
+            metrics.windowGeneratedCopySubmitted = 0;
+            metrics.windowGeneratedWsiSubmitted = 0;
+            metrics.windowGeneratedWsiAccepted = 0;
+            metrics.windowGeneratedDisplayConfirmed = 0;
+            metrics.windowGeneratedDisplayUnknown = 0;
             metrics.windowGeneratedLateDrops = 0;
             metrics.windowAdmissionRejects = 0;
             metrics.windowGeneratedDeadlineDrops = 0;
@@ -2794,6 +3151,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->sourceHistoryWarmupRemaining_ =
             kConservativeSourceReprimeFrames - 1;
         this->requiresSourceHistoryWarmup_ = true;
+        this->lastHistoryInvalidationReason_ =
+            SourceHistoryInvalidationReason::SourcePairMismatch;
+        this->lastHistoryReprimeReason_ =
+            SourceHistoryInvalidationReason::SourcePairMismatch;
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
@@ -2938,7 +3299,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->asyncAhbHandoffEnabled_
         && (!this->conservativeCrossDeviceSync_
             || (!conservativeSourceOnlyWarmup
-                && !conservativeFractionalHistoryGap
+                && !conservativeAdaptiveHistoryGap
                 && !conservativeTrueSourceOnlyCycle));
     bool asyncSubmissionIssued = false;
     bool asyncExportFailed = false;
@@ -3008,7 +3369,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (!useAsyncHandoff && !asyncSubmissionIssued) {
         const bool conservativeCopyOnlyHistory =
             conservativeSourceOnlyWarmup
-            || conservativeFractionalHistoryGap;
+            || conservativeAdaptiveHistoryGap;
         if (conservativeCopyOnlyHistory) {
             const auto copyOnlySubmitStart = RuntimeMetrics::Clock::now();
             submitAhbHandoff(
@@ -3065,6 +3426,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ? kConservativeSourceReprimeFrames
                 : kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
+        this->lastHistoryInvalidationReason_ =
+            SourceHistoryInvalidationReason::SyncExportFailure;
+        this->lastHistoryReprimeReason_ =
+            SourceHistoryInvalidationReason::SyncExportFailure;
         this->lastGeneratedFrameCount_ = 0;
         const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
         const VkPresentInfoKHR failOpenPresentInfo{
@@ -3138,22 +3503,34 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(sourceResult, sourceWait);
     };
 
-    if (conservativeFractionalHistoryGap) {
-        // The source pair is the only temporal state Adreno needs to preserve
-        // across a fractional zero-generation cadence slot. The copy is queued
-        // on the game device and the source present waits it GPU-side; do not
-        // host-wait and do not run zero-count framegen preprocessing. The next
-        // generated cycle waits the previous copy signal before updating the
-        // opposite AHB slot, yielding two consecutive real source frames.
+    if (conservativeAdaptiveHistoryGap) {
+        // Admission rejection and fractional/zero-demand cadence gaps are
+        // consumed opportunities. Keep the source-pair copy chain coherent,
+        // do not enter private framegen, and do not request a reprime.
+        const char* historyGapReason =
+            conservativeAdmissionRejectedHistoryGap
+                ? "admission_reject"
+                : (conservativeFractionalHistoryGap
+                    ? "fractional_gap"
+                    : "zero_demand");
         this->lastDispatchedGeneratedFrameCount_ = 0;
         this->lastGeneratedFrameCount_ = 0;
         pass.framegenBatchCompleteValid = false;
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
+        if (firstPresentDiagnostic || conservativeAdmissionRejectedHistoryGap) {
+            std::cerr << "lsfg-vk: runtime stage=compat-adaptive-history-gap"
+                      << " history_gap_reason=" << historyGapReason
+                      << " history_invalidation_reason=none"
+                      << " history_reprime_reason=none"
+                      << " planned=" << plannedGeneratedFrameCount
+                      << " admitted=" << generatedFrameCount
+                      << "\n";
+        }
         return presentCompatibilitySourceOnly(
-            "compat-fractional-history-copy",
-            "pre-copy-compat-fractional-history");
+            "compat-adaptive-history-copy",
+            "pre-copy-compat-adaptive-history");
     }
 
     if (conservativeSourceOnlyWarmup) {
@@ -3355,6 +3732,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (firstPresentDiagnostic) {
         std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin mode="
                   << (conf.performance ? "performance" : "quality")
+                  << " batch_id=" << adaptiveFlowBatch.batchId
                   << " generated=" << generatedFrameCount
                   << " handoff=" << (useAsyncHandoff
                         ? handoffTypeName(this->asyncAhbHandoffHandleType_)
@@ -3386,6 +3764,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
     if (this->conservativeCrossDeviceSync_)
         ++this->conservativeFramegenSourceIndex_;
+    metrics.windowGeneratedDispatched += generatedFrameCount;
+    metrics.totalGeneratedDispatched += generatedFrameCount;
     metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
         RuntimeMetrics::Clock::now() - dispatchStart).count();
     if (firstPresentDiagnostic)
@@ -3416,6 +3796,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             framegenSync.batchCompleteFd = -1;
             this->deferredAdrenoPassIndex_ = this->frameIdx % this->passInfos.size();
             this->deferredAdrenoGeneratedCount_ = generatedFrameCount;
+            this->deferredAdrenoBatchId_ = framegenSync.batchId;
             this->deferredAdrenoSourceAge_ = 0;
             this->deferredAdrenoOutputEligible_ = true;
             this->deferredAdrenoBatchCompleteReady_ =
@@ -3429,42 +3810,82 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
             if (firstPresentDiagnostic) {
                 std::cerr << "lsfg-vk: runtime stage=adreno-deferred-batch-queued"
+                          << " batch_id=" << this->deferredAdrenoBatchId_
                           << " generated=" << generatedFrameCount
                           << " pass=" << this->deferredAdrenoPassIndex_
                           << "\n";
             }
 
-            // Observe any previous completed timing sample, then acknowledge
-            // this real source immediately. No unsignaled framegen dependency
-            // is submitted to the primary queue in this call.
+            // The generated outputs interpolate into this real source, so
+            // presenting the source now would put any deferred synthetic after
+            // the frame it should precede. Buffer one real source boundary while
+            // returning to the guest immediately; the next source call first
+            // gives ready synthetics one opportunity, then presents this source.
             updateAdaptiveFlowGovernor();
             this->lastGeneratedFrameCount_ =
                 deferredDeliveredGeneratedFrameCount;
-            const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
-            const VkPresentInfoKHR deferredSourcePresentInfo{
-                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                .pNext = pNext,
-                .waitSemaphoreCount = 1,
-                .pWaitSemaphores = &sourceReady,
-                .swapchainCount = 1,
-                .pSwapchains = &this->swapchain,
-                .pImageIndices = &presentIdx,
-            };
-            this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
-            const auto deferredSourceResult =
-                Layer::ovkQueuePresentKHR(queue, &deferredSourcePresentInfo);
-            if (isAdrenoWsiRetirementResult(deferredSourceResult))
-                return deferredSourceResult;
-            if (deferredSourceResult != VK_SUCCESS
-                    && deferredSourceResult != VK_SUBOPTIMAL_KHR) {
-                metrics.windowSourcePresentFailures++;
-                metrics.totalSourcePresentFailures++;
-                throw LSFG::vulkan_error(
+
+            if (pNext != nullptr) {
+                // An opaque application present chain cannot be retained safely
+                // across calls. Fail open to the real source and abandon only
+                // this batch's synthetic delivery; keep its batch-complete
+                // lifetime state until the private device releases the AHB pair.
+                this->deferredAdrenoOutputEligible_ = false;
+                this->framegenOutputEligible_ = false;
+                for (int& fd : this->deferredAdrenoOutputReadyFds_) {
+                    if (fd >= 0)
+                        ::close(fd);
+                    fd = -1;
+                }
+
+                const VkSemaphore sourceReady =
+                    pass.preCopySemaphores.at(0).handle();
+                const VkPresentInfoKHR deferredSourcePresentInfo{
+                    .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                    .pNext = pNext,
+                    .waitSemaphoreCount = 1,
+                    .pWaitSemaphores = &sourceReady,
+                    .swapchainCount = 1,
+                    .pSwapchains = &this->swapchain,
+                    .pImageIndices = &presentIdx,
+                };
+                this->retainPresentWait(
+                    presentIdx, pass.preCopySemaphores.at(0));
+                const auto deferredSourceResult =
+                    Layer::ovkQueuePresentKHR(
+                        queue, &deferredSourcePresentInfo);
+                if (isAdrenoWsiRetirementResult(deferredSourceResult))
+                    return deferredSourceResult;
+                if (deferredSourceResult != VK_SUCCESS
+                        && deferredSourceResult != VK_SUBOPTIMAL_KHR) {
+                    metrics.windowSourcePresentFailures++;
+                    metrics.totalSourcePresentFailures++;
+                    throw LSFG::vulkan_error(
+                        deferredSourceResult,
+                        "Failed source present after deferred Adreno pNext fail-open");
+                }
+                return finishSourcePresent(
                     deferredSourceResult,
-                    "Failed source present after deferred Adreno dispatch");
+                    "pre-copy-adreno-deferred-pnext-fail-open");
+            }
+
+            this->pendingSourceValid_ = true;
+            this->pendingSourceImage_ = presentIdx;
+            this->pendingSourceReady_ = pass.preCopySemaphores.at(0);
+            this->pendingPassIndex_ =
+                this->frameIdx % this->passInfos.size();
+            this->pendingGeneratedCount_ = generatedFrameCount;
+            this->framegenInFlight_ = true;
+            this->framegenOutputEligible_ = true;
+            if (firstPresentDiagnostic) {
+                std::cerr
+                    << "lsfg-vk: runtime stage=adreno-deferred-source-buffered"
+                    << " image=" << presentIdx
+                    << " generated=" << generatedFrameCount
+                    << "\n";
             }
             return finishSourcePresent(
-                deferredSourceResult, "pre-copy-adreno-deferred");
+                VK_SUCCESS, "pre-copy-adreno-deferred-buffered");
         }
 
         for (const int fd : framegenSync.outputReadyFds) {
@@ -3570,6 +3991,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
         metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - waitIdleStart).count();
+    }
+    if (requireHostCompletionWait && framegenReady) {
+        metrics.windowGeneratedCompleted += generatedFrameCount;
+        metrics.totalGeneratedCompleted += generatedFrameCount;
     }
     if (!framegenReady) {
         const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
@@ -3735,6 +4160,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             generatedCopyWaits,
             { pass.postCopySemaphores.at(i).handle(),
               pass.prevPostCopySemaphores.at(i).handle() });
+        metrics.windowGeneratedCopySubmitted++;
+        metrics.totalGeneratedCopySubmitted++;
 
         std::vector<VkSemaphore> waitSemaphores{ pass.postCopySemaphores.at(i).handle() };
         if (i != 0) waitSemaphores.emplace_back(pass.prevPostCopySemaphores.at(i - 1).handle());
@@ -3760,6 +4187,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (i != 0)
             this->retainPresentWait(
                 imageIdx, pass.prevPostCopySemaphores.at(i - 1));
+        metrics.windowGeneratedWsiSubmitted++;
+        metrics.totalGeneratedWsiSubmitted++;
         res = Layer::ovkQueuePresentKHR(generatedPresentQueue, &presentInfo);
         if (this->conservativeCrossDeviceSync_
                 && isAdrenoWsiRetirementResult(res))
@@ -3772,6 +4201,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         queuedGeneratedFrameCount++;
         metrics.windowGeneratedFrames++;
         metrics.totalGeneratedFrames++;
+        metrics.windowGeneratedWsiAccepted++;
+        metrics.totalGeneratedWsiAccepted++;
+        metrics.windowGeneratedDisplayUnknown++;
+        metrics.totalGeneratedDisplayUnknown++;
         metrics.windowGeneratedPresentMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - generatedPresentStart).count();
         if (firstPresentDiagnostic && i == 0) {
@@ -3992,7 +4425,9 @@ void LsContext::advanceAdaptiveFlowTimingEpoch() {
     this->adaptiveFlowGenerationCount_ = 0;
 }
 
-void LsContext::resetAdaptiveSourceEpoch(bool resetScheduler) {
+void LsContext::resetAdaptiveSourceEpoch(
+        bool resetScheduler,
+        SourceHistoryInvalidationReason reason) {
     // Any source-timeline epoch change invalidates synthetic pixels produced
     // against the previous cadence/history. Keep the private-device batch
     // release alive until it retires so shared AHB reuse remains ordered.
@@ -4021,6 +4456,8 @@ void LsContext::resetAdaptiveSourceEpoch(bool resetScheduler) {
                                            : kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ =
         this->sourceHistoryWarmupRemaining_ > 0;
+    this->lastHistoryInvalidationReason_ = reason;
+    this->lastHistoryReprimeReason_ = reason;
     this->lastGeneratedFrameCount_ = 0;
     this->lastDispatchedGeneratedFrameCount_ = 0;
 
@@ -4080,6 +4517,10 @@ void LsContext::enterSourceOnlyBypass() {
                                            : kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ =
         this->sourceHistoryWarmupRemaining_ > 0;
+    this->lastHistoryInvalidationReason_ =
+        SourceHistoryInvalidationReason::ContextRecreate;
+    this->lastHistoryReprimeReason_ =
+        SourceHistoryInvalidationReason::ContextRecreate;
     this->lastDispatchedGeneratedFrameCount_ = 0;
     this->previousSourceCopySignalValid_ = false;
     this->generatedPresentationCapacityTracker_.reset();

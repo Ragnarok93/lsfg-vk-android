@@ -54,6 +54,7 @@ struct AdaptiveFlowGpuTiming {
 struct AndroidFrameSyncFds {
     std::vector<int> outputReadyFds;
     int batchCompleteFd{-1};
+    uint64_t batchId{0};
     bool gpuDependenciesExported{false};
     bool hostWaitFallback{false};
 };
