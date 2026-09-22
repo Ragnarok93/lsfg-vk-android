@@ -226,12 +226,15 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "                && !this->currentSourceTimeline_.valid",
             source,
         )
+        # Non-Adreno drivers retain the full four-cycle private-history flush,
+        # while the serialized Qualcomm/Adreno path uses a single protected
+        # source reprime. Both reset paths must remain present.
+        self.assertGreaterEqual(source.count("kSourceHistoryWarmupFrames"), 4)
         self.assertGreaterEqual(
-            source.count(
-                "sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames"
-            ),
+            source.count("kConservativeSourceReprimeFrames"),
             3,
         )
+        self.assertIn("this->conservativeCrossDeviceSync_", source)
         self.assertGreaterEqual(
             source.count("deadlineAdmissionPredictor_.reset()"),
             2,
@@ -381,8 +384,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("source-direct-present", source[present_start:handoff_start])
 
 
-    def test_generation_resumes_only_after_full_source_history_flush(self) -> None:
-        """Startup and bypass flush the contaminated first sample plus all three temporal slots."""
+    def test_generation_resumes_with_driver_appropriate_history_reprime(self) -> None:
+        """Async drivers keep full history flush; serialized Adreno uses one source reprime."""
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
@@ -399,10 +402,15 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("requiresSourceHistoryWarmup_{true}", header)
         bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
         self.assertIn(
-            "sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames",
+            "this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames",
             bypass,
         )
-        self.assertIn("requiresSourceHistoryWarmup_ = true", bypass)
+        self.assertIn("kSourceHistoryWarmupFrames", bypass)
+        self.assertIn(
+            "requiresSourceHistoryWarmup_ =\n"
+            "        this->sourceHistoryWarmupRemaining_ > 0",
+            bypass,
+        )
         self.assertIn("previousSourceCopySignalValid_ = false", bypass)
 
         self.assertIn("const bool sourceHistoryWarmupActive", source)
