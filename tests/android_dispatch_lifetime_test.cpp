@@ -136,6 +136,21 @@ int main() {
     bootstrap.QueueSubmit = compatibleSubmit;
     bootstrap.presentationDevice = true;
     storeDeviceDispatch(d1, bootstrap);
+
+    // Compatibility must never override a valid exact-device result. This is
+    // the protected behavior for capable private-device dispatch paths such as
+    // Xclipse: exact GDPA wins even while the LSFG backend setup guard is active.
+    DeviceDispatch exactPrivate{};
+    exactPrivate.device = d2;
+    exactPrivate.GetDeviceProcAddr = constructionGdpa;
+    exactPrivate.QueueSubmit = submit2;
+    storeDeviceDispatch(d2, exactPrivate);
+    setenv("DISABLE_LSFG", "1", 1);
+    assert(layer_vkGetDeviceProcAddr(d2, "vkQueueSubmit")
+        == reinterpret_cast<PFN_vkVoidFunction>(submit2));
+    unsetenv("DISABLE_LSFG");
+    eraseDeviceDispatch(d2);
+
     {
         DeviceConstructionScope construction(constructionGdpaNoQueue);
         VkQueue unresolved{};
