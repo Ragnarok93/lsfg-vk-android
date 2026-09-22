@@ -284,6 +284,12 @@ private:
     // capability-driven SYNC_FD completion chain.
     bool conservativeCrossDeviceSync_{false};
 
+    // Adreno can intentionally skip private-device work for one or more
+    // source-only cycles. Carry the most recent framegen release dependency
+    // until the next source copy actually reuses the shared AHB pair.
+    Mini::Semaphore conservativePendingBatchCompleteSemaphore_;
+    bool conservativePendingBatchCompleteValid_{false};
+
     // Optional fast path only. Prefer one-shot SYNC_FD on Android, retain
     // OPAQUE_FD compatibility, and fall back to the established host fence.
     bool asyncAhbHandoffEnabled_{false};

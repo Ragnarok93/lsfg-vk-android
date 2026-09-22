@@ -2428,7 +2428,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         gameRenderSemaphores2.emplace_back(
             pass.crossFrameWaitRetentions.back().handle());
     }
-    if (previousPass != nullptr && previousPass->framegenBatchCompleteValid) {
+    bool consumeConservativeBatchComplete = false;
+    if (this->conservativeCrossDeviceSync_
+            && this->conservativePendingBatchCompleteValid_) {
+        metrics.windowHandoffBatchDeps++;
+        pass.crossFrameWaitRetentions.emplace_back(
+            this->conservativePendingBatchCompleteSemaphore_);
+        gameRenderSemaphores2.emplace_back(
+            pass.crossFrameWaitRetentions.back().handle());
+        consumeConservativeBatchComplete = true;
+    } else if (previousPass != nullptr
+            && previousPass->framegenBatchCompleteValid) {
         metrics.windowHandoffBatchDeps++;
         pass.crossFrameWaitRetentions.emplace_back(
             previousPass->framegenBatchCompleteSemaphore);
@@ -2482,6 +2492,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - asyncSubmitStart).count();
         asyncSubmissionIssued = true;
+        if (consumeConservativeBatchComplete) {
+            this->conservativePendingBatchCompleteValid_ = false;
+            this->conservativePendingBatchCompleteSemaphore_ = {};
+        }
         if (consumePreviousBatchComplete && previousPass != nullptr)
             previousPass->framegenBatchCompleteValid = false;
 
@@ -2534,6 +2548,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 &metrics.windowHandoffFenceWaitMs);
             metrics.windowSyncHandoffs++;
             metrics.totalSyncHandoffs++;
+        }
+        if (consumeConservativeBatchComplete) {
+            this->conservativePendingBatchCompleteValid_ = false;
+            this->conservativePendingBatchCompleteSemaphore_ = {};
         }
         if (consumePreviousBatchComplete && previousPass != nullptr)
             previousPass->framegenBatchCompleteValid = false;
@@ -2906,6 +2924,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
                     framegenSync.batchCompleteFd = -1;
                     pass.framegenBatchCompleteValid = true;
+                    if (this->conservativeCrossDeviceSync_) {
+                        this->conservativePendingBatchCompleteSemaphore_ =
+                            pass.framegenBatchCompleteSemaphore;
+                        this->conservativePendingBatchCompleteValid_ = true;
+                    }
                 } else {
                     pass.framegenBatchCompleteValid = false;
                 }
