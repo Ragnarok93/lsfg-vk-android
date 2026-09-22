@@ -300,55 +300,27 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("pass.preCopyBuf.reset()", source)
         self.assertIn("postCopyBuf.reset()", source)
 
-    def test_adreno_batch_complete_survives_source_only_bypass(self) -> None:
+    def test_adreno_deferred_batch_survives_source_only_boundaries(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("conservativePendingBatchCompleteSemaphore_", header)
-        self.assertIn("conservativePendingBatchCompleteValid_", header)
+        self.assertIn("deferredAdrenoBatchValid_", header)
+        self.assertIn("deferredAdrenoBatchCompleteFd_", header)
+        self.assertIn("deferredAdrenoPassIndex_", header)
 
-        bypass_start = source.index("if (conservativePreCopySourceBypass)")
-        bypass_end = source.index("// Android path: AHardwareBuffer exchange", bypass_start)
-        bypass = source[bypass_start:bypass_end]
-        self.assertNotIn(
-            "conservativePendingBatchCompleteValid_ = false",
-            bypass,
-            "A no-copy source bypass must carry the outstanding framegen release dependency",
-        )
+        start = source.index("if (this->deferredAdrenoBatchValid_)")
+        end = source.index("const bool conservativePreCopySourceBypass", start)
+        deferred = source[start:end]
+        self.assertIn("poll(&batchPoll, 1, 0)", deferred)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", deferred)
+        self.assertIn("deferredAdrenoBatchCompleteReady_", deferred)
 
         dependency_start = source.index("std::vector<VkSemaphore> gameRenderSemaphores2")
-        dependency_end = source.index(
-            "this->previousSourceCopySignalValid_ = true", dependency_start
-        )
+        dependency_end = source.index("const auto handoffStart", dependency_start)
         dependency = source[dependency_start:dependency_end]
-        self.assertIn("this->conservativeCrossDeviceSync_", dependency)
-        self.assertIn("this->conservativePendingBatchCompleteValid_", dependency)
-        self.assertIn("&& this->conservativePendingBatchCompleteValid_", dependency)
-        self.assertIn("conservativePendingBatchCompleteSemaphore_", dependency)
-        self.assertIn("conservativePendingBatchCompleteValid_ = false", dependency)
-        self.assertIn("else if (!this->conservativeCrossDeviceSync_", dependency)
-        self.assertIn("previousPass != nullptr", dependency)
-
-        first_batch = source.index("if (framegenSync.batchCompleteFd >= 0)")
-        first_batch_end = source.index("} else {", first_batch)
-        first_batch_block = source[first_batch:first_batch_end]
-
-        # Single-queue Adreno owns the raw sync_file until it signals; it must
-        # not import an unsignaled dependency onto the application's only queue.
-        self.assertIn("conservativePendingBatchCompletePollFd_", first_batch_block)
-        self.assertIn("framegenSync.batchCompleteFd = -1", first_batch_block)
-        self.assertIn("conservativePendingBatchCompleteValid_ = true", first_batch_block)
-
-        # The existing imported-semaphore path remains for the synthetic-queue
-        # and non-conservative/Xclipse paths.
-        later_batch = source.index(
-            "if (framegenSync.batchCompleteFd >= 0)", first_batch + 1
-        )
-        later_batch_end = source.index("} else {", later_batch)
-        imported = source[later_batch:later_batch_end]
-        self.assertIn("this->conservativeCrossDeviceSync_", imported)
-        self.assertIn("conservativePendingBatchCompleteSemaphore_", imported)
-        self.assertIn("conservativePendingBatchCompleteValid_ = true", imported)
+        self.assertIn("deferredAdrenoBatchCompleteReady_", dependency)
+        self.assertIn("deferredAdrenoBatchCompleteSemaphore_", dependency)
+        self.assertIn("consumeDeferredAdrenoBatchComplete", dependency)
 
     def test_first_framegen_source_initializes_both_ahb_inputs(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
