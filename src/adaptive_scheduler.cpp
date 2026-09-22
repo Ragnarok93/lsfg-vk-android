@@ -265,6 +265,26 @@ std::size_t DeadlineAdmissionPredictor::safeGenerationHint(
     return 0;
 }
 
+std::size_t DeadlineAdmissionPredictor::safeBatchGenerationHint(
+        std::size_t maxGenerationCount,
+        double sourceProtectionBudgetMs) const {
+    if (!hasEstimate_
+            || maxGenerationCount == 0
+            || !(sourceProtectionBudgetMs > 0.0)
+            || !std::isfinite(sourceProtectionBudgetMs)) {
+        return 0;
+    }
+
+    for (std::size_t candidate = maxGenerationCount;
+            candidate > 0; --candidate) {
+        const auto decision = predict(
+            candidate, sourceProtectionBudgetMs);
+        if (decision.valid && decision.wouldAdmit)
+            return candidate;
+    }
+    return 0;
+}
+
 void DeadlineAdmissionPredictor::reset() {
     hasEstimate_ = false;
     mipmapsMs_ = 0.0;
