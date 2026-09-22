@@ -86,7 +86,9 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         )
 
         present = source.split("VkResult LsContext::present", 1)[1]
-        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        android_present = present.split(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization", 1
+        )[0]
         self.assertIn("this->asyncAhbHandoffEnabled_", android_present)
         handoff_start = android_present.index("bool useAsyncHandoff =")
         handoff_end = android_present.index(
@@ -107,7 +109,9 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
     def test_generated_ahb_uses_external_ownership_copy_path(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present = source.split("VkResult LsContext::present", 1)[1]
-        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        android_present = present.split(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization", 1
+        )[0]
         self.assertIn("copyExternalAhbToSwapchain", android_present)
         self.assertNotIn(
             "Utils::copyImage(",
@@ -192,7 +196,9 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
     def test_android_first_present_has_one_shot_framegen_stage_diagnostics(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present = source.split("VkResult LsContext::present", 1)[1]
-        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        android_present = present.split(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization", 1
+        )[0]
         self.assertIn("const bool firstPresentDiagnostic = this->frameIdx == 0;", android_present)
         for marker in (
             "runtime stage=first-present-enter",
