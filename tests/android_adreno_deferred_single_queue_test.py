@@ -92,6 +92,26 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("generatedPresentationCapacityTracker_.observe(", deferred)
         self.assertIn("if (conf.adaptiveFramegen && deferredPresentationAttempted)", deferred)
 
+    def test_deferred_adreno_delivers_ready_temporal_prefix_without_waiting_for_batch_complete(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        start = source.index("if (this->deferredAdrenoBatchValid_)")
+        end = source.index("const bool conservativePreCopySourceBypass", start)
+        deferred = source[start:end]
+
+        self.assertIn("size_t deferredReadyOutputPrefix = 0", deferred)
+        self.assertIn("deferredReadyOutputPrefix < this->deferredAdrenoGeneratedCount_", deferred)
+        self.assertIn("const size_t deferredUnreadyOutputCount", deferred)
+        self.assertIn("if (deferredReadyOutputPrefix > 0)", deferred)
+        self.assertIn("i < deferredReadyOutputPrefix", deferred)
+        self.assertIn("conservativeBatchStillInFlight = !batchReady", deferred)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", deferred)
+        self.assertNotIn(
+            "this->deferredAdrenoOutputEligible_ && outputsReady",
+            deferred,
+            "Adreno deferred delivery must not remain all-or-nothing",
+        )
+
     def test_ready_deferred_batch_delivers_before_current_source_and_retires_pass(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
