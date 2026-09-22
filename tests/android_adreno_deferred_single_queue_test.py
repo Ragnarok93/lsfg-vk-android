@@ -80,6 +80,18 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo)", bypass)
         self.assertNotIn("waitContext(", bypass)
 
+    def test_deferred_wsi_rejection_trains_adreno_presentation_capacity(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        start = source.index("if (this->deferredAdrenoBatchValid_)")
+        end = source.index("const bool conservativePreCopySourceBypass", start)
+        deferred = source[start:end]
+
+        self.assertIn("deferredPresentationAttempted", deferred)
+        self.assertIn("deferredWsiDrops", deferred)
+        self.assertIn("generatedPresentationCapacityTracker_.observe(", deferred)
+        self.assertIn("if (conf.adaptiveFramegen && deferredPresentationAttempted)", deferred)
+
     def test_ready_deferred_batch_delivers_before_current_source_and_retires_pass(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
