@@ -350,15 +350,16 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("conservativePendingBatchCompleteSemaphore_", imported)
         self.assertIn("conservativePendingBatchCompleteValid_ = true", imported)
 
-    def test_first_source_initializes_both_ahb_inputs(self) -> None:
+    def test_first_framegen_source_initializes_both_ahb_inputs(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present = source[source.index("VkResult LsContext::present"):]
         first_copy = present.index("copySwapchainToExternalAhb")
-        duplicate = present.index("if (this->frameIdx == 0)", first_copy)
+        duplicate = present.index("if (sourceCopyIndex == 0)", first_copy)
         second_copy = present.index("copySwapchainToExternalAhb", duplicate)
         self.assertLess(first_copy, duplicate)
         self.assertLess(duplicate, second_copy)
         self.assertIn("this->frame_1.handle()", present[second_copy:second_copy + 400])
+        self.assertIn("conservativeFramegenSourceIndex_", present[:first_copy])
 
     def test_fixed_and_adaptive_discontinuities_rebuild_history(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
