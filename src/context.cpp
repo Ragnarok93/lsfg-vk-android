@@ -2913,17 +2913,28 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     const int fd = framegenSync.outputReadyFds.at(i);
                     if (fd < 0)
                         continue;
+                    // Mini::Semaphore consumes/closes a SYNC_FD when import
+                    // fails. On the Adreno compatibility path transfer ownership
+                    // before import so fallback cleanup cannot double-close a
+                    // descriptor that the constructor already consumed.
+                    if (this->conservativeCrossDeviceSync_)
+                        framegenSync.outputReadyFds.at(i) = -1;
                     pass.renderSemaphores.at(i) = Mini::Semaphore(
                         info.device, fd,
                         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
-                    framegenSync.outputReadyFds.at(i) = -1;
+                    if (!this->conservativeCrossDeviceSync_)
+                        framegenSync.outputReadyFds.at(i) = -1;
                     outputReadyWaitValid.at(i) = true;
                 }
                 if (framegenSync.batchCompleteFd >= 0) {
+                    const int batchCompleteFd = framegenSync.batchCompleteFd;
+                    if (this->conservativeCrossDeviceSync_)
+                        framegenSync.batchCompleteFd = -1;
                     pass.framegenBatchCompleteSemaphore = Mini::Semaphore(
-                        info.device, framegenSync.batchCompleteFd,
+                        info.device, batchCompleteFd,
                         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
-                    framegenSync.batchCompleteFd = -1;
+                    if (!this->conservativeCrossDeviceSync_)
+                        framegenSync.batchCompleteFd = -1;
                     pass.framegenBatchCompleteValid = true;
                     if (this->conservativeCrossDeviceSync_) {
                         this->conservativePendingBatchCompleteSemaphore_ =
