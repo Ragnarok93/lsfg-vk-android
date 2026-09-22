@@ -89,27 +89,56 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
         selection = source[selection_start:selection_end]
 
-        self.assertIn("syncFdHandoffSupported", selection)
-        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
-        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
-        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
         self.assertIn(
-            "this->deferredAdrenoCompletionEnabled_ = false;",
+            "this->asyncAhbHandoffEnabled_ =\n"
+            "        !this->conservativeCrossDeviceSync_",
             selection,
-            "single-queue Adreno must not defer private-device generated output across source boundaries",
+            "Adreno must not export source readiness into the private framegen device",
         )
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_\n"
+            "            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
+            selection,
+            "Adreno's -1 input fd must remain an absent input semaphore, not SYNC_FD -1",
+        )
+        self.assertIn(
+            "this->asyncFramegenCompletionEnabled_ =\n"
+            "        !this->conservativeCrossDeviceSync_",
+            selection,
+            "Adreno must retain bounded private-device completion before output AHB readback",
+        )
+        self.assertIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
         self.assertNotIn(
-            "this->syntheticQueue_ == VK_NULL_HANDLE\n"
-            "        && syncFdHandoffSupported",
+            "this->syntheticQueue_ != VK_NULL_HANDLE",
             selection,
-            "SYNC_FD capability alone is not enough to make deferred output delivery safe on Turnip",
+            "a hypothetical synthetic queue must not reopen an unproven Adreno completion path",
         )
+        self.assertIn("this->syntheticQueue_ = VK_NULL_HANDLE;", source)
+
+        handoff_start = source.index("// Xclipse/generic capability paths may hand source readiness")
+        handoff_end = source.index("bool asyncSubmissionIssued", handoff_start)
+        handoff = source[handoff_start:handoff_end]
+        self.assertIn(
+            "bool useAsyncHandoff =\n"
+            "        !this->conservativeCrossDeviceSync_\n"
+            "        && this->asyncAhbHandoffEnabled_;",
+            handoff,
+        )
+        self.assertIn("int framegenInputSemaphoreFd = -1;", handoff)
 
         generated = source.split("// 2. Tell framegen", 1)[1].split(
             "// 4. Generated presentation is opportunistic.", 1
         )[0]
         self.assertIn("bool requireHostCompletionWait =", generated)
         self.assertIn("waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)", generated)
+
+        generated_present = source.index("// 4. Generated presentation is opportunistic.")
+        source_present = source.index("// 5. Present the real game frame", generated_present)
+        self.assertLess(
+            generated_present,
+            source_present,
+            "Adreno must keep generated-then-source delivery inside the same intercepted call",
+        )
 
     def test_adreno_untrained_predictor_uses_generic_one_frame_bootstrap(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -536,7 +565,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
     def test_runtime_policy_label_matches_split_adreno_topology(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
-        self.assertIn("syncfd-input-host-completion-adreno", policy)
+        self.assertIn("host-fence-input-host-completion-adreno", policy)
         self.assertIn("capability-async", policy)
 
     def test_xclipse_async_path_is_not_removed(self) -> None:
