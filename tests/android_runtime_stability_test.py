@@ -296,6 +296,41 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("pass.preCopyBuf.reset()", source)
         self.assertIn("postCopyBuf.reset()", source)
 
+    def test_adreno_batch_complete_survives_source_only_bypass(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("conservativePendingBatchCompleteSemaphore_", header)
+        self.assertIn("conservativePendingBatchCompleteValid_", header)
+
+        bypass_start = source.index("if (conservativePreCopySourceBypass)")
+        bypass_end = source.index("// Android path: AHardwareBuffer exchange", bypass_start)
+        bypass = source[bypass_start:bypass_end]
+        self.assertNotIn(
+            "conservativePendingBatchCompleteValid_ = false",
+            bypass,
+            "A no-copy source bypass must carry the outstanding framegen release dependency",
+        )
+
+        dependency_start = source.index("std::vector<VkSemaphore> gameRenderSemaphores2")
+        handoff_start = source.index("const auto handoffStart", dependency_start)
+        dependency = source[dependency_start:handoff_start]
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_"
+            " && this->conservativePendingBatchCompleteValid_",
+            dependency,
+        )
+        self.assertIn("conservativePendingBatchCompleteSemaphore_", dependency)
+        self.assertIn("conservativePendingBatchCompleteValid_ = false", dependency)
+        self.assertIn("else if (previousPass != nullptr", dependency)
+
+        import_start = source.index("if (framegenSync.batchCompleteFd >= 0)")
+        import_end = source.index("} else {", import_start)
+        imported = source[import_start:import_end]
+        self.assertIn("this->conservativeCrossDeviceSync_", imported)
+        self.assertIn("conservativePendingBatchCompleteSemaphore_", imported)
+        self.assertIn("conservativePendingBatchCompleteValid_ = true", imported)
+
     def test_first_source_initializes_both_ahb_inputs(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present = source[source.index("VkResult LsContext::present"):]
