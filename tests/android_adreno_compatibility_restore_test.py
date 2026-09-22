@@ -439,6 +439,37 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             generated,
         )
 
+    def test_adreno_synthetic_queue_is_layer_owned_and_lower_priority(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        plan_start = hooks.index("struct AdrenoSyntheticQueuePlan")
+        plan_end = hooks.index("bool supportsFdSemaphore", plan_start)
+        plan = hooks[plan_start:plan_end]
+
+        self.assertIn("uint32_t queueIndex", plan)
+        self.assertIn("queueInfo.queueCount < family.queueCount", plan)
+        self.assertIn("plan.queueIndex = queueInfo.queueCount", plan)
+        self.assertNotIn(
+            "plan.available = family.queueCount >= 2 && queueInfo.queueCount >= 1",
+            plan,
+            "LSFG must never borrow a queue index already requested by the game",
+        )
+
+        self.assertIn("kAdrenoSyntheticQueuePriority", plan)
+        self.assertIn("0.25F", plan)
+        self.assertIn("priorities.push_back(kAdrenoSyntheticQueuePriority)", plan)
+        self.assertIn("queueInfo.queueCount = plan.queueIndex + 1", plan)
+
+        post = hooks.split("VkResult myvkCreateDevicePost", 1)[1]
+        self.assertIn(
+            "plan.familyIndex, plan.queueIndex, &syntheticQueue",
+            post,
+        )
+        self.assertNotIn(
+            "plan.familyIndex, 1, &syntheticQueue",
+            post,
+        )
+
     def test_adreno_generated_work_uses_dedicated_same_family_queue_when_available(self) -> None:
         hooks_h = (ROOT / "include/hooks.hpp").read_text(encoding="utf-8")
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
