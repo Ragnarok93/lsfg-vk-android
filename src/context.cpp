@@ -1555,9 +1555,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    // On protected Adreno, a cadence/source discontinuity may mark the
+    // private source pair stale while Adaptive currently wants no generated
+    // frames. Do not spend copy/reprime work until generation demand actually
+    // returns. The stale-history requirement remains latched, so the first
+    // nonzero-demand cycle still performs the full conservative reprime before
+    // entering framegen. Non-Adreno/Xclipse behavior is unchanged.
+    const bool deferConservativeWarmupUntilGenerationDemand =
+        this->conservativeCrossDeviceSync_
+        && conf.adaptiveFramegen
+        && plannedGeneratedFrameCount == 0;
     const bool sourceHistoryWarmupActive =
         this->requiresSourceHistoryWarmup_
-        && this->sourceHistoryWarmupRemaining_ > 0;
+        && this->sourceHistoryWarmupRemaining_ > 0
+        && !deferConservativeWarmupUntilGenerationDemand;
 
     // Active deadline admission: generation is subordinate to the protected
     // source timeline. Use measured GPU cost to choose the largest evenly
