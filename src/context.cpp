@@ -2423,8 +2423,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         };
         const auto bypassResult =
             Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo);
-        if (this->conservativeCrossDeviceSync_
-                && isAdrenoWsiRetirementResult(bypassResult))
+        if (this->conservativeCrossDeviceSync_ && isAdrenoWsiRetirementResult(bypassResult))
             return bypassResult;
         if (bypassResult != VK_SUCCESS
                 && bypassResult != VK_SUBOPTIMAL_KHR) {
@@ -2705,8 +2704,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
         const auto sourceResult =
             Layer::ovkQueuePresentKHR(queue, &sourcePresentInfo);
-        if (this->conservativeCrossDeviceSync_
-                && isAdrenoWsiRetirementResult(sourceResult))
+        if (this->conservativeCrossDeviceSync_ && isAdrenoWsiRetirementResult(sourceResult))
             return sourceResult;
         if (sourceResult != VK_SUCCESS
                 && sourceResult != VK_SUBOPTIMAL_KHR) {
@@ -3104,8 +3102,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     updateAdaptiveFlowGovernor();
 
     const bool useAdrenoSyntheticQueue =
-        this->conservativeCrossDeviceSync_
-        && info.adrenoSyntheticQueueAvailable
+        this->conservativeCrossDeviceSync_ && info.adrenoSyntheticQueueAvailable
         && this->syntheticQueue_ != VK_NULL_HANDLE;
     const VkQueue generatedWorkQueue = useAdrenoSyntheticQueue
         ? this->syntheticQueue_
@@ -3309,8 +3306,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .pSwapchains = &this->swapchain,
         .pImageIndices = &presentIdx,
     };
-    armPassGpuRetirement(
-        queuedGeneratedFrameCount > 0 ? generatedWorkQueue : VK_NULL_HANDLE);
+    if (queuedGeneratedFrameCount > 0)
+        armPassGpuRetirement(generatedWorkQueue);
+    else
+        armPassGpuRetirement();
     if (queuedGeneratedFrameCount > 0) {
         this->retainPresentWait(
             presentIdx,
