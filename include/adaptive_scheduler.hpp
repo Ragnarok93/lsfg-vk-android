@@ -105,6 +105,11 @@ public:
     /// hint only; per-cycle admission remains authoritative.
     [[nodiscard]] std::size_t safeGenerationHint(
         std::size_t maxGenerationCount, double sourceIntervalMs) const;
+    /// Deferred/source-protected execution may complete generated work any time
+    /// before the next real-source boundary. Unlike safeGenerationHint(), this
+    /// does not reinterpret ideal interpolation slots as compute deadlines.
+    [[nodiscard]] std::size_t safeBatchGenerationHint(
+        std::size_t maxGenerationCount, double sourceProtectionBudgetMs) const;
     [[nodiscard]] bool hasEstimate() const { return hasEstimate_; }
     void reset();
 
