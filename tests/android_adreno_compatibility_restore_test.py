@@ -62,62 +62,27 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait = true", fallback)
         self.assertIn("waitContext", history)
 
-    def test_adreno_without_synthetic_queue_uses_known_good_host_completion(self) -> None:
+    def test_adreno_without_synthetic_queue_uses_deferred_completion(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+
         selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
         selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
         selection = source[selection_start:selection_end]
 
-        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
-        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
-        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
-        self.assertNotIn("adrenoSingleQueueReadinessPoll", selection)
-
-        present_start = source.index("VkResult LsContext::present")
-        present = source[present_start:]
-        self.assertNotIn("generated-readiness-drop", present)
-        self.assertNotIn("adrenoSingleQueueReadinessPoll", present)
-        self.assertIn("bool requireHostCompletionWait = !this->asyncFramegenCompletionEnabled_", present)
-
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-
-        selection = source.split(
-            "this->conservativeCrossDeviceSync_ =", 1
-        )[1].split("std::cerr << \"lsfg-vk: Android AHB context created", 1)[0]
-        self.assertIn("syncFdHandoffSupported", selection)
-        self.assertIn(
-            "this->conservativeCrossDeviceSync_\n"
-            "            ? syncFdHandoffSupported",
-            selection,
-        )
-        self.assertIn(
-            "? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT",
-            selection,
-        )
-        self.assertIn("adrenoSingleQueueReadinessPoll", selection)
-        self.assertIn(
-            "this->asyncFramegenCompletionEnabled_ =",
-            selection,
-        )
-        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("this->deferredAdrenoCompletionEnabled_ =", selection)
         self.assertIn("this->syntheticQueue_ == VK_NULL_HANDLE", selection)
+        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
         self.assertIn(
-            "this->conservativeCrossDeviceSync_\n"
-            "            && info.adrenoSyntheticQueueAvailable",
-            selection,
-        )
-        self.assertNotIn(
             "this->asyncFramegenCompletionEnabled_ =\n"
             "        !this->conservativeCrossDeviceSync_",
             selection,
+            "Xclipse/non-conservative drivers must keep their immediate async path",
         )
-
-        handoff = source.split(
-            "bool useAsyncHandoff =", 1
-        )[1].split("bool asyncSubmissionIssued", 1)[0]
-        self.assertIn("!conservativeSourceOnlyWarmup", handoff)
-        self.assertIn("!conservativeFractionalHistoryGap", handoff)
-        self.assertIn("!conservativeTrueSourceOnlyCycle", handoff)
+        self.assertIn("deferredAdrenoBatchValid_", header)
+        self.assertIn("runtime stage=adreno-deferred-batch-queued", source)
+        self.assertNotIn("adrenoSingleQueueReadinessPoll", source)
 
     def test_adreno_untrained_predictor_uses_generic_one_frame_bootstrap(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -465,24 +430,26 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertNotIn("requiresConservativeCrossDeviceSync", hooks)
 
 
-    def test_adreno_generated_work_falls_back_to_primary_queue_only_after_host_completion(self) -> None:
+    def test_adreno_deferred_export_failure_keeps_bounded_host_fallback(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn("adrenoHostCompletionFallback", source)
-        self.assertIn("bool requireHostCompletionWait = !this->asyncFramegenCompletionEnabled_", source)
+        generated = source.split("// 2. Tell framegen", 1)[1]
+        self.assertIn("deferredAdrenoCompletionEnabled_", generated)
+        self.assertIn("framegenSync.hostWaitFallback", generated)
+        self.assertIn("requireHostCompletionWait = true", generated)
+        self.assertIn("runtimeWaitTimeoutNs()", generated)
+        self.assertIn("waitContext", generated)
         self.assertIn("generatedWorkQueue", source)
         self.assertIn(": info.queue.second;", source)
-        self.assertIn(": queue;", source)
 
-
-    def test_adreno_host_completion_path_does_not_create_pending_async_batch_state(self) -> None:
+    def test_deferred_adreno_state_is_separate_from_abandoned_pending_source_stack(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        selection_start = source.index("const bool asyncCompletionTopologySupported")
-        selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
-        selection = source[selection_start:selection_end]
-        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
-        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
-        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
-
+        self.assertIn("deferredAdrenoBatchValid_", header)
+        self.assertIn("deferredAdrenoOutputReadyFds_", header)
+        self.assertIn("deferredAdrenoBatchCompleteFd_", header)
+        self.assertIn("runtime stage=adreno-deferred-batch-queued", source)
+        self.assertNotIn("adrenoSingleQueueReadinessPoll", source)
+        self.assertNotIn("generated-readiness-drop", source)
 
     def test_adreno_surface_loss_is_propagated_without_degraded_translation(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -501,19 +468,18 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         )[0]
         self.assertIn("isAdrenoWsiRetirementResult(bypassResult)", bypass)
 
-    def test_generated_compatibility_path_retains_bounded_completion_wait(self) -> None:
+    def test_generated_compatibility_path_retains_bounded_completion_fallback(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated = source.split("// 2. Tell framegen", 1)[1]
-        self.assertIn(
-            "bool requireHostCompletionWait = !this->asyncFramegenCompletionEnabled_",
-            generated,
-        )
+        self.assertIn("bool requireHostCompletionWait =", generated)
+        self.assertIn("!this->deferredAdrenoCompletionEnabled_", generated)
+        self.assertIn("requireHostCompletionWait = true", generated)
         self.assertIn("runtimeWaitTimeoutNs()", generated)
         self.assertIn("waitContext", generated)
 
     def test_runtime_policy_label_matches_split_adreno_topology(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
-        self.assertIn("syncfd-input-host-completion-adreno", policy)
+        self.assertIn("syncfd-input-deferred-completion-adreno", policy)
         self.assertIn("capability-async", policy)
 
     def test_xclipse_async_path_is_not_removed(self) -> None:
