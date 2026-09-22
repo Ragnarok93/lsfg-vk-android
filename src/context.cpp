@@ -1432,8 +1432,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // WSI capacity is a separate downstream constraint from GPU generation
     // capacity. Apply its provisional cap before expensive framegen dispatch;
     // a suppressed slot is consumed and never repaid. Fixed mode is untouched.
-    if (conf.adaptiveFramegen && generatedFrameCount > 0
-            && !adrenoDeadlineBootstrapProbe) {
+    if (conf.adaptiveFramegen && generatedFrameCount > 0) {
         const size_t presentationCappedGeneratedFrameCount =
             this->generatedPresentationCapacityTracker_.limit(
                 generatedFrameCount, presentationCapacityContext);
@@ -2123,8 +2122,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << plannedGeneratedFrameCount
                       << " deadline_admitted_generated="
                       << generatedFrameCount
-                      << " deadline_bootstrap_probe="
-                      << (adrenoDeadlineBootstrapProbe ? 1 : 0)
+                      << " deadline_bootstrap_probe=0"
                       << " interpolation_denominator="
                       << interpolationGenerationCount
                       << " deadline_pred_mipmaps_ms="
