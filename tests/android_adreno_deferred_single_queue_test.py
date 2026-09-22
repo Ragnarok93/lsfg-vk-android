@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
-    def test_single_queue_adreno_keeps_deferred_delivery_quarantined(self) -> None:
+    def test_single_queue_adreno_enables_deferred_delivery_only_with_safe_syncfd_capabilities(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
@@ -23,7 +23,12 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
         selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
         selection = source[selection_start:selection_end]
-        self.assertIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
+        self.assertIn("this->deferredAdrenoCompletionEnabled_ =", selection)
+        self.assertIn("this->conservativeCrossDeviceSync_", selection)
+        self.assertIn("this->syntheticQueue_ == VK_NULL_HANDLE", selection)
+        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
+        self.assertNotIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
         self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
         self.assertIn("presentContextWithCountExportSyncFd", source)
         self.assertIn("runtime stage=adreno-deferred-batch-queued", source)
@@ -116,7 +121,15 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("releasePresentWaitRetirements(imageIdx)", deferred)
         self.assertIn("copyExternalAhbToSwapchain", deferred)
         self.assertIn("Layer::ovkQueuePresentKHR(queue, &deferredPresentInfo)", deferred)
-        self.assertIn("submitPassCompletionFence(deferredPass, info.queue.second)", deferred)
+        self.assertIn("postCopyCompletionFences", header)
+        self.assertIn("postCopyCompletionFenceSubmitted", header)
+        self.assertIn("*deferredPass.postCopyCompletionFences.at(i)", deferred)
+        self.assertIn("deferredPass.postCopyCompletionFenceSubmitted.at(i) = true", deferred)
+        self.assertNotIn(
+            "submitPassCompletionFence(deferredPass, info.queue.second)",
+            deferred,
+            "deferred Adreno retirement must be anchored to real consuming submits",
+        )
         self.assertIn("deferredPass.deferredAdrenoOwned = false", deferred)
 
     def test_source_ahb_reuse_waits_ready_batch_dependency_without_host_wait(self) -> None:
@@ -131,12 +144,20 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("deferredAdrenoBatchCompleteSemaphore_", dependency)
         self.assertIn("consumeDeferredAdrenoBatchComplete", dependency)
 
-    def test_deferred_batch_blocks_pass_recycle_until_retired(self) -> None:
+    def test_deferred_batch_blocks_pass_recycle_until_real_copy_submissions_retire(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         recycle_start = source.index("bool LsContext::tryRecyclePass")
         recycle_end = source.index("bool LsContext::submitPassCompletionFence", recycle_start)
         recycle = source[recycle_start:recycle_end]
+
+        self.assertIn("postCopyCompletionFences", header)
+        self.assertIn("postCopyCompletionFenceSubmitted", header)
         self.assertIn("pass.deferredAdrenoOwned", recycle)
+        self.assertIn("pass.postCopyCompletionFenceSubmitted", recycle)
+        self.assertIn("pass.postCopyCompletionFences", recycle)
+        self.assertIn("VK_TRUE, 0", recycle)
+        self.assertIn("completionResetFences_", recycle)
 
     def test_deferred_outputs_are_invalidated_across_resume_or_config_boundary(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -150,7 +171,7 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
 
     def test_adaptive_epoch_reset_drops_stale_outputs_but_preserves_batch_release(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("void LsContext::resetAdaptiveSourceEpoch(bool resetScheduler)")
+        start = source.index("void LsContext::resetAdaptiveSourceEpoch(")
         end = source.index("void LsContext::enterSourceOnlyBypass()", start)
         reset = source[start:end]
 
