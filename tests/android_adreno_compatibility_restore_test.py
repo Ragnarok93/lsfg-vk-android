@@ -306,6 +306,29 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("kConservativeSourceReprimeFrames", failure)
         self.assertIn("kSourceHistoryWarmupFrames", failure)
 
+    def test_adreno_ahb_source_slot_tracks_framegen_not_source_present_count(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("conservativeFramegenSourceIndex_", header)
+        self.assertIn("const uint64_t sourceCopyIndex =", source)
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_\n"
+            "            ? this->conservativeFramegenSourceIndex_\n"
+            "            : this->frameIdx",
+            source,
+        )
+        self.assertIn("sourceCopyIndex % 2 == 0", source)
+        self.assertIn("sourceCopyIndex < 2", source)
+        self.assertIn("if (sourceCopyIndex == 0)", source)
+        self.assertIn("++this->conservativeFramegenSourceIndex_", source)
+
+        bypass_start = source.index("if (conservativePreCopySourceBypass)")
+        bypass_end = source.index("// Android path: AHardwareBuffer exchange", bypass_start)
+        bypass = source[bypass_start:bypass_end]
+        self.assertNotIn("conservativeFramegenSourceIndex_++", bypass)
+        self.assertNotIn("++this->conservativeFramegenSourceIndex_", bypass)
+
     def test_adreno_true_source_only_cycle_bypasses_private_ahb_copy(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         bypass_start = source.index("if (conservativePreCopySourceBypass)")
