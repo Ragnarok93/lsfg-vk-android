@@ -21,10 +21,9 @@ struct SubgroupQueryResult {
 
 [[nodiscard]] inline bool supportsCooperativeMipmaps(
         const VkPhysicalDeviceSubgroupProperties& properties) noexcept {
-    // B14 was previously validated on the S20+/Turnip profile below. Keep the
-    // optimization capability-profile scoped instead of reopening the old
-    // broad subgroup>=4 gate: Xclipse (64 / 0x3d3f / 0x6ff) and unrelated
-    // devices remain on exact B13 bytecode.
+    // B14 is enabled only for the previously validated subgroup-128 Android
+    // capability profile instead of reopening the old broad subgroup>=4 gate.
+    // Every other capability tuple remains on exact B13 bytecode.
     constexpr VkSubgroupFeatureFlags kValidatedOperations =
         static_cast<VkSubgroupFeatureFlags>(0x67fU);
     return properties.subgroupSize == 128U
