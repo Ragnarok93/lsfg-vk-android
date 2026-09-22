@@ -62,20 +62,20 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait = true", fallback)
         self.assertIn("waitContext", history)
 
-    def test_adreno_generated_cycles_restore_opaque_fd_input_handoff_only(self) -> None:
+    def test_adreno_generated_cycles_use_sync_fd_input_but_keep_host_completion(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         selection = source.split(
             "this->conservativeCrossDeviceSync_ =", 1
         )[1].split("std::cerr << \"lsfg-vk: Android AHB context created", 1)[0]
-        self.assertIn("opaqueFdHandoffSupported", selection)
+        self.assertIn("syncFdHandoffSupported", selection)
         self.assertIn(
             "this->conservativeCrossDeviceSync_\n"
-            "            ? opaqueFdHandoffSupported",
+            "            ? syncFdHandoffSupported",
             selection,
         )
         self.assertIn(
-            "? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
+            "? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT",
             selection,
         )
         self.assertIn(
@@ -88,6 +88,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             "bool useAsyncHandoff =", 1
         )[1].split("bool asyncSubmissionIssued", 1)[0]
         self.assertIn("!conservativeSourceOnlyWarmup", handoff)
+        self.assertIn("!conservativeFractionalHistoryGap", handoff)
         self.assertIn("!conservativeTrueSourceOnlyCycle", handoff)
 
     def test_fixed_generated_frames_are_not_dropped_by_adaptive_deadline_policy(self) -> None:
@@ -180,7 +181,26 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
         self.assertIn("conservativeSourceOnlyWarmup", handoff)
         self.assertIn("submitAhbHandoff", handoff)
-        self.assertIn("warmupCopyQueuedWithoutHostWait", handoff)
+        self.assertIn("queuedCopyWithoutHostWait", handoff)
+
+    def test_adreno_fractional_gap_queues_copy_without_zero_count_framegen(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        handoff_start = source.index("const auto handoffStart")
+        history_start = source.index("if (historyOnly)", handoff_start)
+        pre_history = source[handoff_start:history_start]
+
+        self.assertIn("conservativeFractionalHistoryGap", pre_history)
+        self.assertIn("queuedCopyWithoutHostWait", pre_history)
+        self.assertIn(
+            'presentCompatibilitySourceOnly(\n'
+            '            "compat-fractional-history-copy"',
+            pre_history,
+        )
+        fractional = pre_history.split(
+            "if (conservativeFractionalHistoryGap)", 1
+        )[1]
+        self.assertNotIn("presentContextWithCount(", fractional)
+        self.assertNotIn("presentContextWithCountExportSyncFd(", fractional)
 
     def test_handoff_metrics_separate_submit_wait_and_cross_frame_dependencies(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
@@ -213,7 +233,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
     def test_runtime_policy_label_matches_split_adreno_topology(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
-        self.assertIn("opaque-input-host-completion-adreno", policy)
+        self.assertIn("syncfd-input-host-completion-adreno", policy)
         self.assertIn("capability-async", policy)
 
     def test_xclipse_async_path_is_not_removed(self) -> None:
