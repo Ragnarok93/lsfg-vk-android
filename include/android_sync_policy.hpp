@@ -54,7 +54,7 @@ inline bool requiresConservativeCrossDeviceSync(
 
 inline const char* crossDeviceSyncPolicyName(bool conservative) noexcept {
     return conservative
-        ? "opaque-input-host-completion-adreno"
+        ? "syncfd-input-host-completion-adreno"
         : "capability-async";
 }
 

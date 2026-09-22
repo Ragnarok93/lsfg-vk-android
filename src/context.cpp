@@ -770,18 +770,20 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         AndroidSyncPolicy::requiresConservativeCrossDeviceSync(
             backendDiagnostics.driverId, backendDiagnostics.driverName);
     // Source ownership and framegen completion are independent policies.
-    // Qualcomm/Adreno restores the known-good OPAQUE_FD source handoff for
-    // cycles that actually enter framegen, while generated completion remains
-    // on the bounded host wait. Xclipse and other validated drivers keep the
-    // newer capability-driven SYNC_FD path end-to-end.
+    // Qualcomm/Adreno may use one-shot SYNC_FD for the game-device -> framegen
+    // source handoff on cycles that actually generate, but completion remains
+    // on the bounded host wait. This removes the game-render/pre-copy CPU wait
+    // without reopening the async-completion lifetime path that regressed
+    // Adreno. Xclipse and other validated drivers retain their existing
+    // capability-driven SYNC_FD path end-to-end.
     this->asyncAhbHandoffEnabled_ =
         gameGetSemaphoreFd != nullptr
         && (this->conservativeCrossDeviceSync_
-            ? opaqueFdHandoffSupported
+            ? syncFdHandoffSupported
             : (syncFdHandoffSupported || opaqueFdHandoffSupported));
     this->asyncAhbHandoffHandleType_ =
         this->conservativeCrossDeviceSync_
-            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT
+            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
             : (syncFdHandoffSupported
                 ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
                 : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
@@ -2427,13 +2429,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     };
 
     // Xclipse keeps the async handoff for every private-history/generation
-    // cycle. On conservative Adreno, use the known-good OPAQUE_FD handoff only
-    // when the cycle actually enters framegen; true source-only/warmup cycles
-    // retain the host-fence path and never export cross-device ownership.
+    // cycle. Conservative Adreno exports one-shot SYNC_FD only for cycles that
+    // actually generate. Reprime and fractional zero-generation cycles queue a
+    // game-device copy for source-pair parity without crossing into framegen.
     bool useAsyncHandoff =
         this->asyncAhbHandoffEnabled_
         && (!this->conservativeCrossDeviceSync_
             || (!conservativeSourceOnlyWarmup
+                && !conservativeFractionalHistoryGap
                 && !conservativeTrueSourceOnlyCycle));
     bool asyncSubmissionIssued = false;
     bool asyncExportFailed = false;
@@ -2491,18 +2494,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    bool warmupCopyQueuedWithoutHostWait = false;
+    bool queuedCopyWithoutHostWait = false;
     if (!useAsyncHandoff && !asyncSubmissionIssued) {
-        if (conservativeSourceOnlyWarmup) {
-            const auto warmupSubmitStart = RuntimeMetrics::Clock::now();
+        const bool conservativeCopyOnlyHistory =
+            conservativeSourceOnlyWarmup
+            || conservativeFractionalHistoryGap;
+        if (conservativeCopyOnlyHistory) {
+            const auto copyOnlySubmitStart = RuntimeMetrics::Clock::now();
             submitAhbHandoff(
                 info.device, pass.preCopyBuf, info.queue.second,
                 gameRenderSemaphores2, preCopySignals,
                 VK_NULL_HANDLE, nullptr);
             metrics.windowHandoffSubmitMs +=
                 std::chrono::duration<double, std::milli>(
-                    RuntimeMetrics::Clock::now() - warmupSubmitStart).count();
-            warmupCopyQueuedWithoutHostWait = true;
+                    RuntimeMetrics::Clock::now() - copyOnlySubmitStart).count();
+            queuedCopyWithoutHostWait = true;
         } else {
             submitAndWaitForAhbHandoff(
                 info.device, pass.preCopyBuf, info.queue.second,
@@ -2524,8 +2530,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready mode="
                   << (useAsyncHandoff
                         ? handoffTypeName(this->asyncAhbHandoffHandleType_)
-                        : (warmupCopyQueuedWithoutHostWait
-                            ? "queued-warmup-copy"
+                        : (queuedCopyWithoutHostWait
+                            ? "queued-copy"
                             : "host-fence"))
                   << "\n";
     }
@@ -2607,6 +2613,24 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
         return finishSourcePresent(sourceResult, sourceWait);
     };
+
+    if (conservativeFractionalHistoryGap) {
+        // The source pair is the only temporal state Adreno needs to preserve
+        // across a fractional zero-generation cadence slot. The copy is queued
+        // on the game device and the source present waits it GPU-side; do not
+        // host-wait and do not run zero-count framegen preprocessing. The next
+        // generated cycle waits the previous copy signal before updating the
+        // opposite AHB slot, yielding two consecutive real source frames.
+        this->lastDispatchedGeneratedFrameCount_ = 0;
+        this->lastGeneratedFrameCount_ = 0;
+        pass.framegenBatchCompleteValid = false;
+        updateAdaptiveFlowGovernor();
+        metrics.windowAdaptiveZeroGenerationCycles++;
+        metrics.totalAdaptiveZeroGenerationCycles++;
+        return presentCompatibilitySourceOnly(
+            "compat-fractional-history-copy",
+            "pre-copy-compat-fractional-history");
+    }
 
     if (conservativeSourceOnlyWarmup) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
