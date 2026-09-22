@@ -181,9 +181,12 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
 
     def test_cross_device_framegen_completion_is_bounded_without_device_wait_idle(self) -> None:
         wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        android_start = wrapper.index("#ifdef __ANDROID__", wrapper.index("VkResult LsContext::present"))
-        desktop_start = wrapper.index("#else", android_start)
-        android_present = wrapper[android_start:desktop_start]
+        present_start = wrapper.index("VkResult LsContext::present")
+        desktop_start = wrapper.index(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization",
+            present_start,
+        )
+        android_present = wrapper[present_start:desktop_start]
         self.assertIn("submitAndWaitForAhbHandoff", android_present)
         self.assertIn("waitContext", android_present)
         self.assertIn("runtimeWaitTimeoutNs()", android_present)
@@ -221,11 +224,12 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
 
     def test_generated_wsi_acquire_is_opportunistic_and_source_safe(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        android_start = source.index(
-            "#ifdef __ANDROID__", source.index("VkResult LsContext::present")
+        present_start = source.index("VkResult LsContext::present")
+        desktop_start = source.index(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization",
+            present_start,
         )
-        desktop_start = source.index("#else", android_start)
-        android_present = source[android_start:desktop_start]
+        android_present = source[present_start:desktop_start]
         generated_start = android_present.index(
             "// 4. Generated presentation is opportunistic."
         )
@@ -381,11 +385,12 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
 
     def test_zero_generation_history_uses_async_dependency_chain(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        android_start = source.index(
-            "#ifdef __ANDROID__", source.index("VkResult LsContext::present")
+        present_start = source.index("VkResult LsContext::present")
+        desktop_start = source.index(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization",
+            present_start,
         )
-        desktop_start = source.index("#else", android_start)
-        android_present = source[android_start:desktop_start]
+        android_present = source[present_start:desktop_start]
 
         self.assertIn("bool useAsyncHandoff =", android_present)
         self.assertIn("this->asyncAhbHandoffEnabled_", android_present)
