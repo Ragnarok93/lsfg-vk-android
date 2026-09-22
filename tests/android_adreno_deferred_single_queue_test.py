@@ -68,6 +68,9 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         deferred = source[start:end]
 
         self.assertIn("windowGeneratedLateDrops", deferred)
+        self.assertIn("windowGeneratedDeadlineDrops", deferred)
+        self.assertIn("totalGeneratedDeadlineDrops", deferred)
+        self.assertIn("deadlineAdmissionPredictor_.observeDeliveryMiss", deferred)
         self.assertIn("deferredAdrenoSourceAge_", deferred)
         self.assertIn("deferredAdrenoOutputEligible_ = false", deferred)
 
