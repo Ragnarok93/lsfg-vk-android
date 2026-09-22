@@ -799,14 +799,20 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             : (syncFdHandoffSupported
                 ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
                 : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
-    const bool adrenoSingleQueueReadinessPoll =
-        this->conservativeCrossDeviceSync_
-        && this->syntheticQueue_ == VK_NULL_HANDLE
-        && syncFdHandoffSupported;
+    // A generated completion dependency may only be queued asynchronously on
+    // Adreno when the layer actually owns a distinct synthetic queue. On the
+    // single-queue S20+/Turnip topology, a zero-time readiness poll immediately
+    // after dispatch can never represent completion and historically drops every
+    // generated frame. Fall back there to the proven bounded host completion
+    // wait while keeping the fast SYNC_FD source handoff. Non-conservative
+    // drivers (Xclipse/Mali/etc.) retain their existing capability-async path.
+    const bool asyncCompletionTopologySupported =
+        !this->conservativeCrossDeviceSync_
+        || this->syntheticQueue_ != VK_NULL_HANDLE;
     this->asyncFramegenCompletionEnabled_ =
         syncFdHandoffSupported
-        && (adrenoSingleQueueReadinessPoll
-            || gameImportSemaphoreFd != nullptr);
+        && gameImportSemaphoreFd != nullptr
+        && asyncCompletionTopologySupported;
 
     // The known-good Qualcomm/Adreno path can generate immediately because the
     // first source upload initializes both AHB inputs. Do not inherit the newer
@@ -1083,12 +1089,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
     const auto conf = Config::snapshot();
 #ifdef __ANDROID__
-    const bool adrenoSingleQueueReadinessPoll =
+    const bool adrenoHostCompletionFallback =
         this->conservativeCrossDeviceSync_
         && this->syntheticQueue_ == VK_NULL_HANDLE
-        && this->asyncFramegenCompletionEnabled_;
+        && !this->asyncFramegenCompletionEnabled_;
 #else
-    constexpr bool adrenoSingleQueueReadinessPoll = false;
+    constexpr bool adrenoHostCompletionFallback = false;
 #endif
     this->releasePresentWaitRetirements(presentIdx);
     auto& pass = this->passInfos.at(this->frameIdx % 8);
@@ -1264,26 +1270,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // distributed synthetic count whose prefixes can meet their own slots.
     // A rejected opportunity is dropped, never accumulated as catch-up debt.
     this->deadlineBatchDecision_ = {};
-    const bool adrenoDeadlineBootstrapProbe =
-        adrenoSingleQueueReadinessPoll
-        && conf.adaptiveFramegen
-        && generatedFrameCount > 0
-        && !this->deadlineAdmissionPredictor_.hasEstimate();
+    // The historical Adreno scheduler does not need a synthetic readiness
+    // bootstrap. Cost estimates are learned from completed batches below.
     if (conf.adaptiveFramegen
             && !sourceHistoryWarmupActive
             && generatedFrameCount > 0
             && this->currentSourceTimeline_.valid) {
         const uint64_t admissionNowNs = monotonicNowNs();
-        if (adrenoDeadlineBootstrapProbe) {
-            if (generatedFrameCount > 1) {
-                const size_t rejectedGeneratedFrameCount =
-                    generatedFrameCount - 1;
-                metrics.windowAdmissionRejects += rejectedGeneratedFrameCount;
-                metrics.totalAdmissionRejects += rejectedGeneratedFrameCount;
-            }
-            generatedFrameCount =
-                std::min<std::size_t>(generatedFrameCount, 1);
-        } else if (admissionNowNs > 0) {
+        if (admissionNowNs > 0) {
             if (this->currentSourceTimeline_.sourceDesiredTimeNs <= admissionNowNs) {
                 metrics.windowGeneratedLateDrops += generatedFrameCount;
                 metrics.totalGeneratedLateDrops += generatedFrameCount;
@@ -3046,62 +3040,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (this->asyncFramegenCompletionEnabled_
             && framegenSync.gpuDependenciesExported) {
         bool importFailed = framegenSync.outputReadyFds.size() != generatedFrameCount;
-        if (adrenoSingleQueueReadinessPoll && !importFailed) {
-            size_t readyGeneratedFrameCount = 0;
-            bool readyPrefix = true;
-            for (size_t i = 0; i < generatedFrameCount; ++i) {
-                int fd = framegenSync.outputReadyFds.at(i);
-                bool outputReady = fd < 0;
-                if (fd >= 0) {
-                    pollfd outputPoll{
-                        .fd = fd,
-                        .events = POLLIN,
-                        .revents = 0,
-                    };
-                    const int pollResult = ::poll(&outputPoll, 1, 0);
-                    outputReady = pollResult > 0
-                        && (outputPoll.revents & POLLIN) != 0;
-                    ::close(fd);
-                    framegenSync.outputReadyFds.at(i) = -1;
-                }
-                if (readyPrefix && outputReady) {
-                    ++readyGeneratedFrameCount;
-                } else {
-                    readyPrefix = false;
-                }
-            }
-
-            if (framegenSync.batchCompleteFd >= 0) {
-                if (this->conservativePendingBatchCompletePollFd_ >= 0)
-                    ::close(this->conservativePendingBatchCompletePollFd_);
-                this->conservativePendingBatchCompletePollFd_ =
-                    framegenSync.batchCompleteFd;
-                framegenSync.batchCompleteFd = -1;
-                this->conservativePendingBatchCompleteSemaphore_ = {};
-                this->conservativePendingBatchCompleteValid_ = true;
-            } else {
-                this->conservativePendingBatchCompleteValid_ = false;
-                this->conservativePendingBatchCompleteSemaphore_ = {};
-            }
-
-            if (readyGeneratedFrameCount < generatedFrameCount) {
-                const size_t droppedGeneratedFrames =
-                    generatedFrameCount - readyGeneratedFrameCount;
-                metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
-                metrics.totalGeneratedLateDrops += droppedGeneratedFrames;
-                metrics.windowGeneratedDeadlineDrops += droppedGeneratedFrames;
-                metrics.totalGeneratedDeadlineDrops += droppedGeneratedFrames;
-                if (firstPresentDiagnostic) {
-                    std::cerr << "lsfg-vk: runtime stage=generated-readiness-drop"
-                              << " planned=" << generatedFrameCount
-                              << " ready=" << readyGeneratedFrameCount
-                              << " dropped=" << droppedGeneratedFrames
-                              << "\n";
-                }
-                generatedFrameCount = readyGeneratedFrameCount;
-            }
-            requireHostCompletionWait = false;
-        } else {
         try {
             if (!importFailed) {
                 for (size_t i = 0; i < generatedFrameCount; ++i) {
@@ -3164,7 +3102,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->asyncFramegenCompletionEnabled_ = false;
             requireHostCompletionWait = true;
         }
-        }
     } else if (this->asyncFramegenCompletionEnabled_
             && framegenSync.hostWaitFallback) {
         requireHostCompletionWait = false;
@@ -3211,18 +3148,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             throw LSFG::vulkan_error(timeoutPresentResult,
                 "Failed to present source frame after framegen timeout");
         }
-        if (adrenoSingleQueueReadinessPoll) {
-            if (this->conservativePendingBatchCompletePollFd_ >= 0) {
-                ::close(this->conservativePendingBatchCompletePollFd_);
-                this->conservativePendingBatchCompletePollFd_ = -1;
-            }
+        if (adrenoHostCompletionFallback) {
+            // Preserve the last valid source pair and request normal context
+            // recreation on a genuine bounded completion timeout. Do not enter
+            // the broken single-queue "batch still in flight" history loop.
+            this->conservativePendingBatchCompleteValid_ = false;
             this->conservativePendingBatchCompleteSemaphore_ = {};
-            this->conservativePendingBatchCompleteValid_ = true;
-            this->sourceHistoryWarmupRemaining_ =
-                kConservativeSourceReprimeFrames - 1;
-            this->requiresSourceHistoryWarmup_ = true;
-            return finishSourcePresent(
-                timeoutPresentResult, "framegen-timeout-source-only");
         }
         return finishSourcePresent(VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-timeout");
     }
