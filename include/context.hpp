@@ -169,12 +169,18 @@ public:
     LsContext& operator=(LsContext&&) = default;
     ~LsContext();
 private:
+    void releasePresentWaitRetirements(uint32_t imageIdx);
+    void retainPresentWait(uint32_t imageIdx, const Mini::Semaphore& semaphore);
 #ifdef __ANDROID__
     void advanceAdaptiveFlowTimingEpoch();
     void resetAdaptiveSourceEpoch(bool resetScheduler);
 #endif
     VkSwapchainKHR swapchain;
     std::vector<VkImage> swapchainImages;
+    // Binary semaphores passed to vkQueuePresentKHR remain owned here until
+    // the associated swapchain image is acquired again. A later queue-submit
+    // fence does not prove that the presentation engine has released them.
+    std::vector<std::vector<Mini::Semaphore>> presentWaitRetirements_;
     VkExtent2D extent;
 
     // The pass ring owns resources submitted to the game's queue. Retain the
@@ -386,8 +392,13 @@ private:
         std::vector<Mini::Semaphore> postCopySemaphores; // signal when postCopyBuf is done
         std::vector<Mini::Semaphore> prevPostCopySemaphores; // signal for previous postCopyBuf
 
-        // Signaled by an empty submit queued after the final source present.
-        // A slot is never overwritten until this fence is complete.
+        // Copies of producer-owned semaphores consumed by this pass's queue
+        // submissions. They stay alive until this pass's GPU completion fence
+        // proves those waits have executed.
+        std::vector<Mini::Semaphore> crossFrameWaitRetentions;
+
+        // GPU-submit retirement only. Present-wait semaphore lifetime is
+        // tracked separately by swapchain-image reacquisition.
         std::shared_ptr<VkFence> completionFence;
         bool completionFenceSubmitted{false};
         bool completionFenceFailed{false};

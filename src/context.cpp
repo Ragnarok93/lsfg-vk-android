@@ -82,7 +82,7 @@ size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 }
 
 #ifdef __ANDROID__
-constexpr uint32_t kConservativeSourceReprimeFrames = 1;
+constexpr uint32_t kConservativeSourceReprimeFrames = 2;
 
 uint64_t runtimeWaitTimeoutNs() {
     constexpr uint64_t defaultMs = 250;
@@ -526,6 +526,7 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages)
         : swapchain(swapchain), swapchainImages(swapchainImages),
+          presentWaitRetirements_(swapchainImages.size()),
           extent(extent), device_(info.device), queue_(info.queue.second) {
     // get updated configuration
     auto conf = Config::snapshot();
@@ -914,9 +915,25 @@ LsContext::~LsContext() {
     this->lsfgCtxId.reset();
 }
 
+void LsContext::releasePresentWaitRetirements(uint32_t imageIdx) {
+    if (imageIdx < this->presentWaitRetirements_.size())
+        this->presentWaitRetirements_.at(imageIdx).clear();
+}
+
+void LsContext::retainPresentWait(
+        uint32_t imageIdx, const Mini::Semaphore& semaphore) {
+    if (imageIdx >= this->presentWaitRetirements_.size()
+            || semaphore.handle() == VK_NULL_HANDLE)
+        return;
+    this->presentWaitRetirements_.at(imageIdx).emplace_back(semaphore);
+}
+
 bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
-    if (!pass.completionFenceSubmitted)
+    if (!pass.completionFenceSubmitted) {
+        if (!pass.completionFenceFailed)
+            pass.crossFrameWaitRetentions.clear();
         return !pass.completionFenceFailed;
+    }
     if (pass.completionFenceFailed
             || pass.completionFence == nullptr
             || this->completionWaitFences_ == nullptr
@@ -950,6 +967,7 @@ bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
     }
 
     pass.completionFenceSubmitted = false;
+    pass.crossFrameWaitRetentions.clear();
 #ifdef __ANDROID__
     pass.framegenBatchCompleteValid = false;
 #endif
@@ -962,8 +980,10 @@ bool LsContext::submitPassCompletionFence(RenderPassInfo& pass, VkQueue queue) {
             || pass.completionFenceFailed)
         return false;
 
-    // An empty submit is ordered after the copy submits and the queue-present
-    // operation. It retires the slot without a device-wide idle wait.
+    // This fence is queued after the pass's game-device submissions and before
+    // the final source present. It proves command-buffer/acquire/cross-frame
+    // wait consumption only. vkQueuePresentKHR wait semaphores are retired
+    // separately when their swapchain image is acquired again.
     const VkSubmitInfo submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 0,
@@ -993,6 +1013,7 @@ bool LsContext::submitPassCompletionFence(RenderPassInfo& pass, VkQueue queue) {
 VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
     const auto conf = Config::snapshot();
+    this->releasePresentWaitRetirements(presentIdx);
     auto& pass = this->passInfos.at(this->frameIdx % 8);
     if (!this->tryRecyclePass(pass)) {
         const VkPresentInfoKHR passthroughPresentInfo{
@@ -1010,7 +1031,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (passthroughResult == VK_SUCCESS
                 || passthroughResult == VK_SUBOPTIMAL_KHR) {
             this->lastGeneratedFrameCount_ = 0;
-            ++this->frameIdx;
+#ifdef __ANDROID__
+            this->resetAdaptiveSourceEpoch(true);
+#endif
             Utils::logLimitN(
                 "passRetirement",
                 5,
@@ -1853,13 +1876,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceDeadlineSamples = 0;
             metrics.windowSourceTimelineRebases = 0;
         }
-        if (!this->submitPassCompletionFence(pass, queue)) {
-            Utils::logLimitN(
-                "passRetirement",
-                5,
-                "Pass completion fence unavailable; this slot will remain source-only");
-        }
-
         if (!excludeCurrentCycleFromTimingMetrics) {
             metrics.windowCycleMs += cycleMs;
             if (cycleMs > metrics.windowCycleMaxMs)
@@ -2253,6 +2269,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return result;
     };
 
+    const auto armPassGpuRetirement = [&]() {
+        if (!this->submitPassCompletionFence(pass, info.queue.second)) {
+            Utils::logLimitN(
+                "passRetirement",
+                5,
+                "Pass GPU completion fence unavailable; this slot will remain source-only");
+        }
+    };
+
     // Android path: AHardwareBuffer exchange between two VkDevices. Keep the
     // validated presentation sequence and EXTERNAL ownership barriers intact.
 
@@ -2289,12 +2314,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     bool consumePreviousBatchComplete = false;
     if (this->frameIdx > 0)
         previousPass = &this->passInfos.at((this->frameIdx - 1) % 8);
-    if (this->previousSourceCopySignalValid_ && previousPass != nullptr)
+    if (this->previousSourceCopySignalValid_ && previousPass != nullptr) {
+        pass.crossFrameWaitRetentions.emplace_back(
+            previousPass->preCopySemaphores.at(1));
         gameRenderSemaphores2.emplace_back(
-            previousPass->preCopySemaphores.at(1).handle());
+            pass.crossFrameWaitRetentions.back().handle());
+    }
     if (previousPass != nullptr && previousPass->framegenBatchCompleteValid) {
+        pass.crossFrameWaitRetentions.emplace_back(
+            previousPass->framegenBatchCompleteSemaphore);
         gameRenderSemaphores2.emplace_back(
-            previousPass->framegenBatchCompleteSemaphore.handle());
+            pass.crossFrameWaitRetentions.back().handle());
         consumePreviousBatchComplete = true;
     }
 
@@ -2396,6 +2426,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pSwapchains = &this->swapchain,
             .pImageIndices = &presentIdx,
         };
+        armPassGpuRetirement();
+        this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
         const auto failOpenResult =
             Layer::ovkQueuePresentKHR(queue, &failOpenPresentInfo);
         if (failOpenResult != VK_SUCCESS
@@ -2430,6 +2462,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pSwapchains = &this->swapchain,
             .pImageIndices = &presentIdx,
         };
+        armPassGpuRetirement();
+        this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
         const auto sourceResult =
             Layer::ovkQueuePresentKHR(queue, &sourcePresentInfo);
         if (sourceResult != VK_SUCCESS
@@ -2472,8 +2506,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->lastGeneratedFrameCount_ = 0;
         pass.framegenBatchCompleteValid = false;
         this->sourceHistoryWarmupRemaining_ =
-            this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames
-                                               : kSourceHistoryWarmupFrames;
+            this->conservativeCrossDeviceSync_
+                ? kConservativeSourceReprimeFrames - 1
+                : kSourceHistoryWarmupFrames;
         this->requiresSourceHistoryWarmup_ = true;
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
@@ -2584,6 +2619,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     .pSwapchains = &this->swapchain,
                     .pImageIndices = &presentIdx,
                 };
+                armPassGpuRetirement();
+                this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
                 const auto timeoutResult =
                     Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
                 if (timeoutResult != VK_SUCCESS
@@ -2625,6 +2662,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pSwapchains = &this->swapchain,
             .pImageIndices = &presentIdx,
         };
+        armPassGpuRetirement();
+        this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
         const auto adaptiveSourceResult = Layer::ovkQueuePresentKHR(
             queue, &adaptiveSourcePresentInfo);
         if (adaptiveSourceResult != VK_SUCCESS
@@ -2779,6 +2818,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pSwapchains = &this->swapchain,
             .pImageIndices = &presentIdx,
         };
+        armPassGpuRetirement();
+        this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
         const auto timeoutPresentResult = Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
         if (timeoutPresentResult != VK_SUCCESS && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
@@ -2863,6 +2904,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.totalGeneratedPresentFailures++;
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");
         }
+        this->releasePresentWaitRetirements(imageIdx);
 
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
@@ -2906,6 +2948,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pSwapchains = &this->swapchain,
             .pImageIndices = &imageIdx,
         };
+        this->retainPresentWait(imageIdx, pass.postCopySemaphores.at(i));
+        if (i != 0)
+            this->retainPresentWait(
+                imageIdx, pass.prevPostCopySemaphores.at(i - 1));
         res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowGeneratedPresentFailures++;
@@ -2959,6 +3005,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .pSwapchains = &this->swapchain,
         .pImageIndices = &presentIdx,
     };
+    armPassGpuRetirement();
+    if (queuedGeneratedFrameCount > 0) {
+        this->retainPresentWait(
+            presentIdx,
+            pass.prevPostCopySemaphores.at(queuedGeneratedFrameCount - 1));
+    } else {
+        this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
+    }
     auto res = Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
         metrics.windowSourcePresentFailures++;
@@ -2990,9 +3044,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     pass.preCopyBuf.end();
 
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
-    if (this->frameIdx > 0)
-        gameRenderSemaphores2.emplace_back(this->passInfos.at((this->frameIdx - 1) % 8)
-            .preCopySemaphores.at(1).handle());
+    if (this->frameIdx > 0) {
+        pass.crossFrameWaitRetentions.emplace_back(
+            this->passInfos.at((this->frameIdx - 1) % 8).preCopySemaphores.at(1));
+        gameRenderSemaphores2.emplace_back(
+            pass.crossFrameWaitRetentions.back().handle());
+    }
     pass.preCopyBuf.submit(info.queue.second,
         gameRenderSemaphores2,
         { pass.preCopySemaphores.at(0).handle(),
@@ -3020,6 +3077,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");
+        this->releasePresentWaitRetirements(imageIdx);
 
         // 4. copy output image to swapchain image
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
@@ -3054,6 +3112,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pSwapchains = &this->swapchain,
             .pImageIndices = &imageIdx,
         };
+        this->retainPresentWait(imageIdx, pass.postCopySemaphores.at(i));
+        if (i != 0)
+            this->retainPresentWait(
+                imageIdx, pass.prevPostCopySemaphores.at(i - 1));
         res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
             throw LSFG::vulkan_error(res, "Failed to present swapchain image");
@@ -3070,11 +3132,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .pSwapchains = &this->swapchain,
         .pImageIndices = &presentIdx,
     };
+    this->submitPassCompletionFence(pass, info.queue.second);
+    this->retainPresentWait(
+        presentIdx,
+        pass.prevPostCopySemaphores.at(conf.multiplier - 1 - 1));
     auto res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
         throw LSFG::vulkan_error(res, "Failed to present swapchain image");
 
-    this->submitPassCompletionFence(pass, queue);
     this->frameIdx++;
     return res;
 #endif

@@ -39,9 +39,10 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertNotIn("presentContextWithCount", warmup)
         self.assertNotIn("presentContextWithCountExportSyncFd", warmup)
 
-    def test_adreno_uses_known_good_single_source_reprime_without_startup_delay(self) -> None:
+    def test_adreno_uses_parity_safe_source_reprime_without_startup_delay(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn("kConservativeSourceReprimeFrames = 1", source)
+        self.assertIn("kConservativeSourceReprimeFrames = 2", source)
+        self.assertIn("kConservativeSourceReprimeFrames - 1", source)
         self.assertIn(
             "this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames",
             source,
