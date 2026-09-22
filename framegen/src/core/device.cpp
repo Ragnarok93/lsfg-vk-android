@@ -283,6 +283,9 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
 
     this->diagnostics.apiVersion = properties.apiVersion;
     this->diagnostics.driverVersion = properties.driverVersion;
+    this->diagnostics.driverId = hasDriverProperties
+        ? driverProperties.driverID
+        : static_cast<VkDriverId>(0);
     this->diagnostics.identity = selectedIdentity;
     this->diagnostics.driverName = hasDriverProperties && driverProperties.driverName[0] != '\0'
         ? driverProperties.driverName
@@ -326,7 +329,8 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
 #endif
 
     std::cerr << "lsfg-vk: backend driver=\"" << this->diagnostics.driverName
-              << "\" ahb_mode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
+              << "\" driver_id=" << static_cast<uint32_t>(this->diagnostics.driverId)
+              << " ahb_mode=" << LSFG::ahbTransportModeName(this->diagnostics.ahbTransportMode)
               << " externalSemaphoreOpaqueFd="
               << (this->diagnostics.externalSemaphoreOpaqueFd ? 1 : 0)
               << " externalSemaphoreSyncFd="

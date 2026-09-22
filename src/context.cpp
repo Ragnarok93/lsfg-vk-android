@@ -1,4 +1,5 @@
 #include "context.hpp"
+#include "android_sync_policy.hpp"
 #include "config/config.hpp"
 #include "common/exception.hpp"
 #include "extract/extract.hpp"
@@ -749,14 +750,19 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     const bool opaqueFdHandoffSupported =
         info.androidOpaqueFdSemaphoreSupported
         && backendDiagnostics.externalSemaphoreOpaqueFd;
+    this->conservativeCrossDeviceSync_ =
+        AndroidSyncPolicy::requiresConservativeCrossDeviceSync(
+            backendDiagnostics.driverId, backendDiagnostics.driverName);
     this->asyncAhbHandoffEnabled_ =
-        gameGetSemaphoreFd != nullptr
+        !this->conservativeCrossDeviceSync_
+        && gameGetSemaphoreFd != nullptr
         && (syncFdHandoffSupported || opaqueFdHandoffSupported);
     this->asyncAhbHandoffHandleType_ = syncFdHandoffSupported
         ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
         : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
     this->asyncFramegenCompletionEnabled_ =
-        syncFdHandoffSupported && gameImportSemaphoreFd != nullptr;
+        !this->conservativeCrossDeviceSync_
+        && syncFdHandoffSupported && gameImportSemaphoreFd != nullptr;
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
               << ", mode=" << LSFG::ahbTransportModeName(ahbTransportMode)
@@ -768,6 +774,9 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     : "host-fence")
               << ", completion="
               << (this->asyncFramegenCompletionEnabled_ ? "sync-fd" : "host-wait")
+              << ", sync_policy="
+              << AndroidSyncPolicy::crossDeviceSyncPolicyName(
+                    this->conservativeCrossDeviceSync_)
               << ")\n";
 
 #else
@@ -1382,6 +1391,27 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         historyOnly
             ? AndroidFrameCycleMode::HistoryOnly
             : AndroidFrameCycleMode::Generate;
+
+    // Fractional Adaptive LSFG intentionally creates zero-generation gaps.
+    // Those gaps must still advance temporal history, even on the conservative
+    // Adreno path. True zero-demand/admission-drop cycles and startup history
+    // warmup remain source-only so they cannot force unnecessary private-device
+    // ownership work onto the protected source timeline.
+    const bool conservativeFractionalHistoryGap =
+        this->conservativeCrossDeviceSync_
+        && conf.adaptiveFramegen
+        && !sourceHistoryWarmupActive
+        && plannedGeneratedFrameCount == 0
+        && adaptiveTelemetry.wantedGeneratedFrames > 0.0;
+    const bool conservativeSourceOnlyWarmup =
+        this->conservativeCrossDeviceSync_
+        && sourceHistoryWarmupActive;
+    const bool conservativeTrueSourceOnlyCycle =
+        this->conservativeCrossDeviceSync_
+        && historyOnly
+        && !conservativeSourceOnlyWarmup
+        && !conservativeFractionalHistoryGap;
+
     this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
 
     const auto updateAdaptiveFlowGovernor = [&]() {
@@ -2373,6 +2403,73 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-syncfd-fail-open-recreate");
     }
 
+    const auto presentCompatibilitySourceOnly = [&](
+            const char* stage, const char* sourceWait) -> VkResult {
+        const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+        VkPresentTimeGOOGLE sourcePresentTime{};
+        VkPresentTimesInfoGOOGLE sourcePresentTimes{};
+        const VkPresentInfoKHR sourcePresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = adaptivePresentPNext(
+                pNext,
+                this->currentSourceTimeline_.sourceDesiredTimeNs,
+                sourcePresentTime, sourcePresentTimes),
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &sourceReady,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        const auto sourceResult =
+            Layer::ovkQueuePresentKHR(queue, &sourcePresentInfo);
+        if (sourceResult != VK_SUCCESS
+                && sourceResult != VK_SUBOPTIMAL_KHR) {
+            metrics.windowSourcePresentFailures++;
+            metrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(
+                sourceResult, "Failed compatibility source-only present");
+        }
+        if (firstPresentDiagnostic || adaptiveTelemetry.discontinuityReset) {
+            std::cerr << "lsfg-vk: runtime stage=" << stage
+                      << " generated=0"
+                      << " history_warmup_remaining="
+                      << this->sourceHistoryWarmupRemaining_
+                      << " sync_policy="
+                      << AndroidSyncPolicy::crossDeviceSyncPolicyName(
+                            this->conservativeCrossDeviceSync_)
+                      << "\n";
+        }
+        return finishSourcePresent(sourceResult, sourceWait);
+    };
+
+    if (conservativeSourceOnlyWarmup) {
+        this->lastDispatchedGeneratedFrameCount_ = 0;
+        this->lastGeneratedFrameCount_ = 0;
+        pass.framegenBatchCompleteValid = false;
+        if (this->sourceHistoryWarmupRemaining_ > 0)
+            --this->sourceHistoryWarmupRemaining_;
+        this->requiresSourceHistoryWarmup_ =
+            this->sourceHistoryWarmupRemaining_ > 0;
+        updateAdaptiveFlowGovernor();
+        metrics.windowAdaptiveZeroGenerationCycles++;
+        metrics.totalAdaptiveZeroGenerationCycles++;
+        return presentCompatibilitySourceOnly(
+            "compat-source-warmup", "pre-copy-compat-warmup");
+    }
+
+    if (conservativeTrueSourceOnlyCycle) {
+        this->lastDispatchedGeneratedFrameCount_ = 0;
+        this->lastGeneratedFrameCount_ = 0;
+        pass.framegenBatchCompleteValid = false;
+        this->sourceHistoryWarmupRemaining_ = kSourceHistoryWarmupFrames;
+        this->requiresSourceHistoryWarmup_ = true;
+        updateAdaptiveFlowGovernor();
+        metrics.windowAdaptiveZeroGenerationCycles++;
+        metrics.totalAdaptiveZeroGenerationCycles++;
+        return presentCompatibilitySourceOnly(
+            "compat-source-only", "pre-copy-compat-source-only");
+    }
+
     if (historyOnly) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
         const auto adaptiveFlowBatch = nextAdaptiveFlowBatch();
@@ -2445,6 +2542,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         ? this->asyncAhbHandoffHandleType_
                         : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
                     0, adaptiveFlowBatch);
+
+            // Without an exported completion dependency, framegen's private
+            // VkDevice must finish its zero-count preprocessing before the game
+            // device can reuse either shared AHB on the next source cycle.
+            historyRequiresHostCompletionWait = true;
         }
 
         if (historyRequiresHostCompletionWait) {
