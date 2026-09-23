@@ -142,12 +142,15 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
 
     def test_zero_generation_exports_batch_completion_without_host_wait(self) -> None:
         wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn(
-            "presentContextWithCountExportSyncFd(\n"
-            "                    *this->lsfgCtxId, framegenInputSemaphoreFd, 0",
-            wrapper,
+        history_start = wrapper.index("if (historyOnly)")
+        history_end = wrapper.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
         )
-        self.assertIn("zero-history completion SYNC_FD import failed", wrapper)
+        history = wrapper[history_start:history_end]
+        self.assertIn("presentContextWithCountExportSyncFd(", history)
+        self.assertIn("const int historyInputFd =", history)
+        self.assertIn("historyReleaseImported", history)
+        self.assertIn("zero-history completion SYNC_FD import failed", history)
 
         for relative in (
             "framegen/v3.1_src/context.cpp",
