@@ -331,6 +331,46 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         guard = budget[max(0, clamp_pos - 500):clamp_pos]
         self.assertIn("this->conservativeCrossDeviceSync_", guard)
 
+    def test_adreno_cadence_evidence_distinguishes_copy_only_warmup_from_history(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        warmup_start = source.index("if (conservativeSourceOnlyWarmup)")
+        warmup_end = source.index("if (historyOnly)", warmup_start)
+        warmup = source[warmup_start:warmup_end]
+        self.assertIn(
+            "SourceCadenceObservation::SourceOnly",
+            warmup,
+            "Copy-only Adreno warmup is the cleanest available source baseline",
+        )
+        self.assertNotIn("SourceCadenceObservation::HistoryMaintenance", warmup)
+
+        history_start = source.index("if (historyOnly)", warmup_end)
+        history_end = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        history = source[history_start:history_end]
+        self.assertIn("SourceCadenceObservation::HistoryMaintenance", history)
+
+        generated = source[history_end:]
+        self.assertIn(
+            "this->lastSourceCadenceObservation_ =\n"
+            "        SourceCadenceObservation::Generated;",
+            generated,
+        )
+
+    def test_xclipse_non_async_history_fallback_keeps_bounded_wait(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        history_start = source.index("if (historyOnly)")
+        history_end = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        history = source[history_start:history_end]
+        non_export_start = history.index("} else {", history.index("if (exportHistoryRelease)"))
+        non_export = history[non_export_start:]
+        self.assertIn("!this->conservativeCrossDeviceSync_", non_export)
+        self.assertIn("historyRequiresHostCompletionWait = true", non_export)
+        self.assertIn("waitContext", history)
+
     def test_xclipse_history_completion_path_keeps_existing_capability_async_behavior(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         constructor_start = source.index("this->asyncFramegenCompletionEnabled_ =")
