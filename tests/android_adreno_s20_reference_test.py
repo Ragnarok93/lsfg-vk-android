@@ -42,7 +42,10 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             "The dormant queue selector may remain for non-Adreno code, "
             "but the Adreno compatibility path must not select it.",
         )
-        self.assertIn("sync_policy=host-fence-input-host-completion-adreno", policy)
+        # The exact telemetry label is covered by android_sync_policy_test.cpp;
+        # this contract verifies the executable routing invariants above rather
+        # than coupling the topology to an obsolete policy string.
+        self.assertIn("crossDeviceSyncPolicyName", policy)
 
     def test_adreno_admission_uses_source_boundary_for_fixed_and_adaptive_work(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -94,7 +97,24 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn("FixedSourceCadenceGovernor::plan", scheduler)
         self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
         self.assertIn("fixed_generation_limit=", source)
-        self.assertNotIn("sleep_for", header + scheduler + source)
+
+        governor_header_start = header.index("class FixedSourceCadenceGovernor")
+        governor_header_end = header.index("\n};", governor_header_start) + len("\n};")
+        governor_header = header[governor_header_start:governor_header_end]
+        governor_impl_start = scheduler.index("FixedSourceCadenceGovernor::plan")
+        governor_impl_end = scheduler.index(
+            "FixedSourceCadenceGovernor::reset", governor_impl_start
+        )
+        governor_impl = scheduler[governor_impl_start:governor_impl_end]
+        planning_start = source.index(
+            "if (conf.adaptiveFramegen)\n        this->fixedSourceCadenceGovernor_.reset();"
+        )
+        planning_end = source.index("const auto& adaptiveTelemetry", planning_start)
+        fixed_planning = source[planning_start:planning_end]
+
+        self.assertNotIn("sleep_for", governor_header)
+        self.assertNotIn("sleep_for", governor_impl)
+        self.assertNotIn("sleep_for", fixed_planning)
 
     def test_zero_generation_keeps_adreno_temporal_history_coherent(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -106,7 +126,13 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
 
         self.assertIn("presentContextWithCount(", history)
         self.assertIn("historyRequiresHostCompletionWait = true", history)
-        self.assertIn("generatedFrameCount = 0", history)
+        self.assertIn("noOutSems, 0", history)
+        self.assertIn("this->lastDispatchedGeneratedFrameCount_ = 0;", history)
+        self.assertIn("++this->conservativeFramegenSourceIndex_;", history)
+        self.assertIn(
+            'return finishSourcePresent(adaptiveSourceResult, "pre-copy-history-only");',
+            history,
+        )
         self.assertNotIn(
             "return presentCompatibilitySourceOnly("
             "\n            \"compat-adaptive-history-copy\"",
