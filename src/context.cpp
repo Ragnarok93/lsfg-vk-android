@@ -3619,57 +3619,102 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     if (historyOnly) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
+        this->lastSourceCadenceObservation_ =
+            SourceCadenceObservation::HistoryMaintenance;
         const auto adaptiveFlowBatch = nextAdaptiveFlowBatch();
-        // Zero-generation cadence still refreshes mipmaps/alpha history, but it
-        // must not stall the real source. On the normal SYNC_FD path framegen
-        // exports one batch-complete dependency after preprocessing and AHB
-        // release; the next source copy consumes it before reusing the inputs.
+
+        // Zero-generation cadence still refreshes Mipmaps/Alpha temporal state.
+        // Protected Adreno may export only that private preprocessing release as
+        // SYNC_FD; the matching source is presented immediately and the *next*
+        // source-copy submission consumes the release on-GPU. Generated output
+        // is never deferred and generated completion remains host-bounded.
         std::vector<int> noOutSems;
         LSFG::AndroidFrameSyncFds historySync{};
         bool historyRequiresHostCompletionWait = false;
+        bool historyReleaseImported = false;
+        const bool exportExistingAsyncHistory =
+            this->asyncFramegenCompletionEnabled_ && useAsyncHandoff;
+        const bool exportProtectedHistoryRelease =
+            this->conservativeCrossDeviceSync_
+            && this->asyncHistoryCompletionEnabled_;
+        const bool exportHistoryRelease =
+            exportExistingAsyncHistory || exportProtectedHistoryRelease;
         const auto historyAdvanceStart = RuntimeMetrics::Clock::now();
 
-        if (this->asyncFramegenCompletionEnabled_ && useAsyncHandoff) {
+        if (exportHistoryRelease) {
+            const int historyInputFd =
+                useAsyncHandoff ? framegenInputSemaphoreFd : -1;
+            const auto historyInputHandleType =
+                useAsyncHandoff
+                    ? this->asyncAhbHandoffHandleType_
+                    : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
             historySync = conf.performance
                 ? LSFG_3_1P::presentContextWithCountExportSyncFd(
-                    *this->lsfgCtxId, framegenInputSemaphoreFd, 0,
-                    this->asyncAhbHandoffHandleType_, 0, adaptiveFlowBatch)
+                    *this->lsfgCtxId, historyInputFd, 0,
+                    historyInputHandleType, 0, adaptiveFlowBatch)
                 : LSFG_3_1::presentContextWithCountExportSyncFd(
-                    *this->lsfgCtxId, framegenInputSemaphoreFd, 0,
-                    this->asyncAhbHandoffHandleType_, 0, adaptiveFlowBatch);
+                    *this->lsfgCtxId, historyInputFd, 0,
+                    historyInputHandleType, 0, adaptiveFlowBatch);
 
             for (const int fd : historySync.outputReadyFds)
                 if (fd >= 0) ::close(fd);
 
-            if (historySync.gpuDependenciesExported) {
+            if (historySync.gpuDependenciesExported
+                    && historySync.batchCompleteFd >= 0) {
                 try {
-                    if (historySync.batchCompleteFd >= 0) {
+                    if (this->conservativeCrossDeviceSync_) {
+                        pass.historyBatchCompleteSemaphore = Mini::Semaphore(
+                            info.device, historySync.batchCompleteFd,
+                            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+                        pass.historyBatchCompleteValid = true;
+                    } else {
+                        // Preserve the existing Xclipse/generic history release
+                        // ownership exactly as before.
                         pass.framegenBatchCompleteSemaphore = Mini::Semaphore(
                             info.device, historySync.batchCompleteFd,
                             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
-                        historySync.batchCompleteFd = -1;
                         pass.framegenBatchCompleteValid = true;
-                    } else {
-                        pass.framegenBatchCompleteValid = false;
                     }
+                    historySync.batchCompleteFd = -1;
+                    historyReleaseImported = true;
+                    metrics.windowHistoryAsyncReleases++;
+                    metrics.totalHistoryAsyncReleases++;
                 } catch (const std::exception& e) {
                     if (historySync.batchCompleteFd >= 0)
                         ::close(historySync.batchCompleteFd);
                     historySync.batchCompleteFd = -1;
-                    pass.framegenBatchCompleteValid = false;
+                    pass.historyBatchCompleteValid = false;
+                    if (this->conservativeCrossDeviceSync_) {
+                        this->asyncHistoryCompletionEnabled_ = false;
+                    } else {
+                        pass.framegenBatchCompleteValid = false;
+                        this->asyncFramegenCompletionEnabled_ = false;
+                    }
                     historyRequiresHostCompletionWait = true;
-                    this->asyncFramegenCompletionEnabled_ = false;
-                    std::cerr << "lsfg-vk: zero-history completion SYNC_FD import failed: "
-                              << e.what() << "; using bounded host fallback\n";
+                    std::cerr
+                        << "lsfg-vk: zero-history completion SYNC_FD import failed: "
+                        << e.what() << "; using bounded host fallback\n";
                 }
             } else if (historySync.hostWaitFallback) {
-                pass.framegenBatchCompleteValid = false;
+                // The framegen backend already completed the zero-count pass
+                // synchronously after export/setup failure.
+                pass.historyBatchCompleteValid = false;
+                if (!this->conservativeCrossDeviceSync_)
+                    pass.framegenBatchCompleteValid = false;
+                metrics.windowHistoryHostCompletions++;
+                metrics.totalHistoryHostCompletions++;
             } else {
-                pass.framegenBatchCompleteValid = false;
+                pass.historyBatchCompleteValid = false;
+                if (!this->conservativeCrossDeviceSync_)
+                    pass.framegenBatchCompleteValid = false;
                 historyRequiresHostCompletionWait = true;
-                this->asyncFramegenCompletionEnabled_ = false;
+                if (this->conservativeCrossDeviceSync_)
+                    this->asyncHistoryCompletionEnabled_ = false;
+                else
+                    this->asyncFramegenCompletionEnabled_ = false;
             }
         } else {
+            pass.historyBatchCompleteValid = false;
             pass.framegenBatchCompleteValid = false;
             if (conf.performance)
                 LSFG_3_1P::presentContextWithCount(
@@ -3690,11 +3735,26 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
                     0, adaptiveFlowBatch);
 
-            // Without an exported completion dependency, framegen's private
-            // VkDevice must finish its zero-count preprocessing before the game
-            // device can reuse either shared AHB on the next source cycle.
-            historyRequiresHostCompletionWait = true;
+            // Non-export zero-count present already performs its bounded private
+            // preprocessing completion wait before returning.
+            metrics.windowHistoryHostCompletions++;
+            metrics.totalHistoryHostCompletions++;
         }
+
+        const double historyCallMs = std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
+        if (historyReleaseImported) {
+            metrics.windowHistoryPreprocessSubmitMs += historyCallMs;
+        } else if (!historyRequiresHostCompletionWait) {
+            // hostWaitFallback and the non-export API both return only after
+            // private preprocessing completed.
+            metrics.windowHistoryPreprocessHostWaitMs += historyCallMs;
+        } else {
+            // Export succeeded but game-device import failed; this portion is
+            // submission/export time. The explicit fallback wait is timed below.
+            metrics.windowHistoryPreprocessSubmitMs += historyCallMs;
+        }
+        metrics.windowDispatchMs += historyCallMs;
 
         // A zero-count framegen submission still advances the private temporal
         // source pair. Keep the Adreno source-copy index in lockstep with that
@@ -3708,14 +3768,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const bool historyReady = conf.performance
                 ? LSFG_3_1P::waitContext(*this->lsfgCtxId, historyTimeoutNs)
                 : LSFG_3_1::waitContext(*this->lsfgCtxId, historyTimeoutNs);
-            metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-                RuntimeMetrics::Clock::now() - historyWaitStart).count();
+            const double historyWaitMs =
+                std::chrono::duration<double, std::milli>(
+                    RuntimeMetrics::Clock::now() - historyWaitStart).count();
+            metrics.windowWaitIdleMs += historyWaitMs;
+            metrics.windowHistoryPreprocessHostWaitMs += historyWaitMs;
+            metrics.windowHistoryHostCompletions++;
+            metrics.totalHistoryHostCompletions++;
             if (!historyReady) {
                 this->sourceHistoryWarmupRemaining_ =
                     kSourceHistoryWarmupFrames;
                 this->requiresSourceHistoryWarmup_ = true;
                 this->lastGeneratedFrameCount_ = 0;
-                const VkSemaphore sourceReady = pass.preCopySemaphores.at(0).handle();
+                const VkSemaphore sourceReady =
+                    pass.preCopySemaphores.at(0).handle();
                 const VkPresentInfoKHR timeoutPresentInfo{
                     .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                     .pNext = pNext,
@@ -3726,7 +3792,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     .pImageIndices = &presentIdx,
                 };
                 armPassGpuRetirement();
-                this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
+                this->retainPresentWait(
+                    presentIdx, pass.preCopySemaphores.at(0));
                 const auto timeoutResult =
                     Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
                 if (timeoutResult != VK_SUCCESS
@@ -3742,8 +3809,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             }
         }
 
-        metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
-            RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
@@ -3784,14 +3849,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated=0 history_valid="
                       << (this->requiresSourceHistoryWarmup_ ? 0 : 1)
                       << " async_completion="
-                      << (pass.framegenBatchCompleteValid ? 1 : 0)
+                      << (historyReleaseImported ? 1 : 0)
+                      << " history_release="
+                      << (historyReleaseImported
+                            ? "sync-fd-next-source-copy"
+                            : (historySync.hostWaitFallback
+                                ? "backend-host-fallback"
+                                : "host-complete"))
                       << " history_warmup_remaining="
                       << this->sourceHistoryWarmupRemaining_
                       << " discontinuity="
                       << (adaptiveTelemetry.discontinuityReset ? 1 : 0)
                       << "\n";
         }
-        return finishSourcePresent(adaptiveSourceResult, "pre-copy-history-only");
+        return finishSourcePresent(
+            adaptiveSourceResult, "pre-copy-history-only");
     }
 
 
