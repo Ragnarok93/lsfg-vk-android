@@ -122,12 +122,19 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("generatedFrameCount = 1", admission)
 
 
-    def test_adreno_single_queue_polls_deferred_syncfds_without_blocking_source(self) -> None:
+    def test_rejected_deferred_adreno_code_is_dormant_while_host_completion_is_active(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present = source[source.index("VkResult LsContext::present"):]
+        selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
+        selection_end = source.index("const bool xclipseCompatibilityPath", selection_start)
+        selection = source[selection_start:selection_end]
+
+        self.assertIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
+        self.assertNotIn("deferredAdrenoCompletionEnabled_ = true", source)
+        # Dormant r24 lifetime code remains for auditability until device
+        # qualification; no active compatibility selector can reach it.
         self.assertIn("poll(&batchPoll, 1, 0)", present)
         self.assertIn("poll(&outputPoll, 1, 0)", present)
-        self.assertIn("deferredAdrenoCompletionEnabled_", present)
         self.assertNotIn("adrenoSingleQueueReadinessPoll", present)
         self.assertNotIn("generated-readiness-drop", present)
         self.assertIn("waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)", present)
