@@ -337,6 +337,11 @@ private:
     Mini::Semaphore conservativePendingBatchCompleteSemaphore_;
     bool conservativePendingBatchCompleteValid_{false};
     int conservativePendingBatchCompletePollFd_{-1};
+    // Zero-generation private preprocessing may finish after its matching
+    // source present. Carry that release across any source-only bypasses until
+    // the next game-device AHB copy actually consumes it.
+    Mini::Semaphore conservativePendingHistoryCompleteSemaphore_;
+    bool conservativePendingHistoryCompleteValid_{false};
     VkQueue syntheticQueue_{VK_NULL_HANDLE};
 
     // Optional fast path only. Prefer one-shot SYNC_FD on Android, retain
@@ -471,11 +476,6 @@ private:
         Mini::Semaphore framegenInputSemaphore;
         Mini::Semaphore framegenBatchCompleteSemaphore;
         bool framegenBatchCompleteValid{false};
-        // Zero-generation private preprocessing may release the shared source
-        // pair asynchronously. Keep this dependency separate so it can only be
-        // consumed by the next source-copy submit, never by generated delivery.
-        Mini::Semaphore historyBatchCompleteSemaphore;
-        bool historyBatchCompleteValid{false};
         bool deferredAdrenoOwned{false};
 #endif
 
