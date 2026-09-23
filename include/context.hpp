@@ -338,6 +338,10 @@ private:
     // Optional fast path only. Prefer one-shot SYNC_FD on Android, retain
     // OPAQUE_FD compatibility, and fall back to the established host fence.
     bool asyncAhbHandoffEnabled_{false};
+    // Protected Adreno may export only zero-generation history release as a
+    // SYNC_FD. Generated-frame completion remains on the proven bounded host
+    // wait; Xclipse/generic keep their existing async generated path.
+    bool asyncHistoryCompletionEnabled_{false};
     bool asyncFramegenCompletionEnabled_{false};
     VkExternalSemaphoreHandleTypeFlagBits asyncAhbHandoffHandleType_{
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT};
@@ -392,6 +396,10 @@ private:
         uint64_t totalAsyncFallbacks{0};
         uint64_t windowHandoffPrevSourceDeps{0};
         uint64_t windowHandoffBatchDeps{0};
+        uint64_t windowHistoryAsyncReleases{0};
+        uint64_t totalHistoryAsyncReleases{0};
+        uint64_t windowHistoryHostCompletions{0};
+        uint64_t totalHistoryHostCompletions{0};
         uint64_t windowGeneratedLateDrops{0};
         uint64_t totalGeneratedLateDrops{0};
         uint64_t windowAdmissionRejects{0};
@@ -413,6 +421,11 @@ private:
         double windowHandoffMs{0.0};
         double windowHandoffSubmitMs{0.0};
         double windowHandoffFenceWaitMs{0.0};
+        // Zero-generation preprocessing is measured separately from generated
+        // dispatch/completion so an S20+ dump can distinguish history cost from
+        // source-copy and generated-frame work.
+        double windowHistoryPreprocessSubmitMs{0.0};
+        double windowHistoryPreprocessHostWaitMs{0.0};
         double windowDispatchMs{0.0};
         double windowWaitIdleMs{0.0};
         double windowGeneratedPresentMs{0.0};
@@ -454,6 +467,11 @@ private:
         Mini::Semaphore framegenInputSemaphore;
         Mini::Semaphore framegenBatchCompleteSemaphore;
         bool framegenBatchCompleteValid{false};
+        // Zero-generation private preprocessing may release the shared source
+        // pair asynchronously. Keep this dependency separate so it can only be
+        // consumed by the next source-copy submit, never by generated delivery.
+        Mini::Semaphore historyBatchCompleteSemaphore;
+        bool historyBatchCompleteValid{false};
         bool deferredAdrenoOwned{false};
 #endif
 
