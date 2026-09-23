@@ -895,9 +895,13 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     this->compatibilityPath_)
               << " completion=" << compatibilityCompletion
               << " history_completion="
-              << (this->asyncHistoryCompletionEnabled_
-                    ? "sync-fd-release"
-                    : "host-wait")
+              << (this->conservativeCrossDeviceSync_
+                    ? (this->asyncHistoryCompletionEnabled_
+                        ? "sync-fd-release"
+                        : "host-wait")
+                    : (this->asyncFramegenCompletionEnabled_
+                        ? "sync-fd"
+                        : "host-wait"))
               << " handoff="
               << (this->asyncAhbHandoffEnabled_
                     ? handoffTypeName(this->asyncAhbHandoffHandleType_)
@@ -946,9 +950,13 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                         ? "deferred-sync-fd"
                         : "host-wait"))
               << ", historyCompletion="
-              << (this->asyncHistoryCompletionEnabled_
-                    ? "sync-fd-release"
-                    : "host-wait")
+              << (this->conservativeCrossDeviceSync_
+                    ? (this->asyncHistoryCompletionEnabled_
+                        ? "sync-fd-release"
+                        : "host-wait")
+                    : (this->asyncFramegenCompletionEnabled_
+                        ? "sync-fd"
+                        : "host-wait"))
               << ", sync_policy="
               << AndroidSyncPolicy::crossDeviceSyncPolicyName(
                     this->conservativeCrossDeviceSync_)
@@ -3679,7 +3687,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (conservativeSourceOnlyWarmup) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
         this->lastSourceCadenceObservation_ =
-            SourceCadenceObservation::HistoryMaintenance;
+            SourceCadenceObservation::SourceOnly;
         this->lastGeneratedFrameCount_ = 0;
         pass.framegenBatchCompleteValid = false;
         if (this->sourceHistoryWarmupRemaining_ > 0)
@@ -3823,10 +3831,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
                     0, adaptiveFlowBatch);
 
-            // Non-export zero-count present already performs its bounded private
-            // preprocessing completion wait before returning.
-            metrics.windowHistoryHostCompletions++;
-            metrics.totalHistoryHostCompletions++;
+            if (this->conservativeCrossDeviceSync_) {
+                // Protected Adreno's non-export API already completes the
+                // zero-count private preprocessing before returning.
+                metrics.windowHistoryHostCompletions++;
+                metrics.totalHistoryHostCompletions++;
+            } else {
+                // Preserve the pre-repair Xclipse/generic fallback behavior:
+                // retain the explicit bounded completion check after the
+                // non-export zero-count API returns.
+                historyRequiresHostCompletionWait = true;
+            }
         }
 
         const double historyCallMs = std::chrono::duration<double, std::milli>(
