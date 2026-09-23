@@ -2140,6 +2140,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 conf, sourceInterval, generatedFrameCount);
         }
 
+        if (this->conservativeCrossDeviceSync_ && budgetMs > 0.0) {
+            budgetMs =
+                this->sourceProtectionBudgetTracker_.clampTimelineBudget(
+                    budgetMs);
+        }
+
         const double protectedAdrenoTargetBudgetMs =
             this->conservativeCrossDeviceSync_
             && conf.adaptiveFramegen
@@ -3395,19 +3401,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
     RenderPassInfo* previousPass = nullptr;
     bool consumePreviousBatchComplete = false;
-    bool consumePreviousHistoryComplete = false;
+    bool consumePendingHistoryComplete = false;
     if (this->frameIdx > 0)
         previousPass = &this->passInfos.at((this->frameIdx - 1) % 8);
-    if (previousPass != nullptr && previousPass->historyBatchCompleteValid) {
-        // The previous zero-generation private pass released the shared source
-        // AHB pair via SYNC_FD. Consume that release only on the next source
-        // copy submit; the CPU never waits for history preprocessing here.
+    if (this->conservativeCrossDeviceSync_
+            && this->conservativePendingHistoryCompleteValid_) {
+        // A protected zero-generation pass may be followed by one or more
+        // source-only bypasses. Carry its private-device release independently
+        // of the pass ring until an actual source AHB copy consumes it.
         metrics.windowHandoffBatchDeps++;
         pass.crossFrameWaitRetentions.emplace_back(
-            previousPass->historyBatchCompleteSemaphore);
+            this->conservativePendingHistoryCompleteSemaphore_);
         gameRenderSemaphores2.emplace_back(
             pass.crossFrameWaitRetentions.back().handle());
-        consumePreviousHistoryComplete = true;
+        consumePendingHistoryComplete = true;
     }
     if (this->previousSourceCopySignalValid_ && previousPass != nullptr) {
         metrics.windowHandoffPrevSourceDeps++;
@@ -3503,8 +3510,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
         if (consumePreviousBatchComplete && previousPass != nullptr)
             previousPass->framegenBatchCompleteValid = false;
-        if (consumePreviousHistoryComplete && previousPass != nullptr)
-            previousPass->historyBatchCompleteValid = false;
+        if (consumePendingHistoryComplete) {
+            this->conservativePendingHistoryCompleteValid_ = false;
+            this->conservativePendingHistoryCompleteSemaphore_ = {};
+        }
 
         try {
             // SYNC_FD copy transference requires its signal operation to be
@@ -3555,8 +3564,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
         if (consumePreviousBatchComplete && previousPass != nullptr)
             previousPass->framegenBatchCompleteValid = false;
-        if (consumePreviousHistoryComplete && previousPass != nullptr)
-            previousPass->historyBatchCompleteValid = false;
+        if (consumePendingHistoryComplete) {
+            this->conservativePendingHistoryCompleteValid_ = false;
+            this->conservativePendingHistoryCompleteSemaphore_ = {};
+        }
     }
     if (consumeDeferredAdrenoBatchComplete) {
         this->deferredAdrenoBatchCompleteReady_ = false;
@@ -3728,10 +3739,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     && historySync.batchCompleteFd >= 0) {
                 try {
                     if (this->conservativeCrossDeviceSync_) {
-                        pass.historyBatchCompleteSemaphore = Mini::Semaphore(
-                            info.device, historySync.batchCompleteFd,
-                            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
-                        pass.historyBatchCompleteValid = true;
+                        this->conservativePendingHistoryCompleteSemaphore_ =
+                            Mini::Semaphore(
+                                info.device, historySync.batchCompleteFd,
+                                VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+                        this->conservativePendingHistoryCompleteValid_ = true;
                     } else {
                         // Preserve the existing Xclipse/generic history release
                         // ownership exactly as before.
@@ -3748,8 +3760,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     if (historySync.batchCompleteFd >= 0)
                         ::close(historySync.batchCompleteFd);
                     historySync.batchCompleteFd = -1;
-                    pass.historyBatchCompleteValid = false;
                     if (this->conservativeCrossDeviceSync_) {
+                        this->conservativePendingHistoryCompleteValid_ = false;
+                        this->conservativePendingHistoryCompleteSemaphore_ = {};
                         this->asyncHistoryCompletionEnabled_ = false;
                     } else {
                         pass.framegenBatchCompleteValid = false;
@@ -3763,15 +3776,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             } else if (historySync.hostWaitFallback) {
                 // The framegen backend already completed the zero-count pass
                 // synchronously after export/setup failure.
-                pass.historyBatchCompleteValid = false;
-                if (!this->conservativeCrossDeviceSync_)
+                if (this->conservativeCrossDeviceSync_) {
+                    this->conservativePendingHistoryCompleteValid_ = false;
+                    this->conservativePendingHistoryCompleteSemaphore_ = {};
+                } else {
                     pass.framegenBatchCompleteValid = false;
+                }
                 metrics.windowHistoryHostCompletions++;
                 metrics.totalHistoryHostCompletions++;
             } else {
-                pass.historyBatchCompleteValid = false;
-                if (!this->conservativeCrossDeviceSync_)
+                if (this->conservativeCrossDeviceSync_) {
+                    this->conservativePendingHistoryCompleteValid_ = false;
+                    this->conservativePendingHistoryCompleteSemaphore_ = {};
+                } else {
                     pass.framegenBatchCompleteValid = false;
+                }
                 historyRequiresHostCompletionWait = true;
                 if (this->conservativeCrossDeviceSync_)
                     this->asyncHistoryCompletionEnabled_ = false;
@@ -3779,8 +3798,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     this->asyncFramegenCompletionEnabled_ = false;
             }
         } else {
-            pass.historyBatchCompleteValid = false;
-            pass.framegenBatchCompleteValid = false;
+            if (this->conservativeCrossDeviceSync_) {
+                this->conservativePendingHistoryCompleteValid_ = false;
+                this->conservativePendingHistoryCompleteSemaphore_ = {};
+            } else {
+                pass.framegenBatchCompleteValid = false;
+            }
             if (conf.performance)
                 LSFG_3_1P::presentContextWithCount(
                     *this->lsfgCtxId,
