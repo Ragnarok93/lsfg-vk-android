@@ -231,6 +231,10 @@ private:
     FixedSourceCadenceGovernor fixedSourceCadenceGovernor_;
     SourceProtectionBudgetTracker sourceProtectionBudgetTracker_;
     std::size_t lastDispatchedGeneratedFrameCount_{0};
+    // Classifies the interval observed at the next intercepted source present.
+    // Only a true LSFG-bypass source interval may expand the protected baseline.
+    SourceCadenceObservation lastSourceCadenceObservation_{
+        SourceCadenceObservation::SourceOnly};
     AdaptiveFlowController adaptiveFlowController_;
     AdaptiveFlowPreset adaptiveFlowPreset_{AdaptiveFlowPreset::Quality};
     bool adaptiveFlowRuntimeAvailable_{false};
