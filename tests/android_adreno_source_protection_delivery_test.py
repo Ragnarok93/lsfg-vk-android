@@ -199,5 +199,84 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn("syncFdHandoffSupported", selection)
         self.assertIn("gameImportSemaphoreFd != nullptr", selection)
 
+    def test_adreno_zero_history_exports_release_without_deferring_generated_output(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("asyncHistoryCompletionEnabled_", header)
+        history_start = source.index("if (historyOnly)")
+        generation_start = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        history = source[history_start:generation_start]
+
+        self.assertIn("presentContextWithCountExportSyncFd", history)
+        self.assertIn("historyBatchCompleteSemaphore", header)
+        self.assertIn("historyBatchCompleteValid", header)
+        self.assertIn("historyBatchCompleteValid", source)
+        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", history)
+        self.assertIn("historyRequiresHostCompletionWait = false", history)
+
+        # Generated Adreno completion remains the proven bounded host wait.
+        selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
+        selection_end = source.index("// Match the device-proven baseline", selection_start)
+        selection = source[selection_start:selection_end]
+        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
+        self.assertNotIn("asyncHistoryCompletionEnabled_", selection)
+
+    def test_adreno_source_budget_does_not_charge_full_host_fence_wall_wait(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        scheduler = (ROOT / "src/adaptive_scheduler.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
+
+        self.assertIn("observeSerializedCopyCost", header)
+        self.assertIn("serializedCopyReserveMs", header)
+        self.assertNotIn("observeSerializedHandoff", header)
+        self.assertNotIn("observeSerializedHandoff", scheduler)
+
+        handoff_start = source.index("if (!useAsyncHandoff && !asyncSubmissionIssued)")
+        handoff_end = source.index("metrics.windowSyncHandoffs++", handoff_start)
+        handoff = source[handoff_start:handoff_end]
+        self.assertNotIn(
+            "sourceProtectionBudgetTracker_.observeSerialized",
+            handoff,
+            "Fence wall time includes game-render dependencies and must remain diagnostics only",
+        )
+
+    def test_adreno_diagnostics_separate_history_and_handoff_costs(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "windowHistoryPreprocessSubmitMs",
+            "windowHistoryPreprocessHostWaitMs",
+            "windowHistoryAsyncReleases",
+            "windowHistoryHostCompletions",
+        ):
+            self.assertIn(token, header)
+
+        for token in (
+            "history_preprocess_submit_avg_ms=",
+            "history_preprocess_host_wait_avg_ms=",
+            "history_async_releases=",
+            "history_host_completions=",
+            "source_budget_raw_ms=",
+            "source_budget_effective_ms=",
+            "source_budget_copy_reserve_ms=",
+            "source_budget_observation=",
+        ):
+            self.assertIn(token, source)
+
+    def test_xclipse_history_completion_path_keeps_existing_capability_async_behavior(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        constructor_start = source.index("this->asyncFramegenCompletionEnabled_ =")
+        constructor_end = source.index("// Match the device-proven baseline", constructor_start)
+        selection = source[constructor_start:constructor_end]
+
+        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
+        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
+
+
 if __name__ == "__main__":
     unittest.main()
