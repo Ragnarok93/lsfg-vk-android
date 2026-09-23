@@ -127,20 +127,35 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
 
     def test_zero_generation_keeps_adreno_temporal_history_coherent(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
+        selection_end = source.index("const bool xclipseCompatibilityPath", selection_start)
+        selection = source[selection_start:selection_end]
+        self.assertIn("this->asyncHistoryCompletionEnabled_ = false;", selection)
+
+        handoff_start = source.index("bool useAsyncHandoff =")
+        handoff_end = source.index("bool asyncSubmissionIssued", handoff_start)
+        handoff = source[handoff_start:handoff_end]
+        self.assertIn("!conservativeHistoryGap", handoff)
+
         history_start = source.index("if (historyOnly)")
         generation_start = source.index(
             "// 2. Tell framegen to generate intermediary frames.", history_start
         )
         history = source[history_start:generation_start]
 
-        self.assertIn("presentContextWithCountExportSyncFd(", history)
         self.assertIn("presentContextWithCount(", history)
         self.assertIn("historyRequiresHostCompletionWait", history)
         self.assertIn("noOutSems, 0", history)
         self.assertIn("this->lastDispatchedGeneratedFrameCount_ = 0;", history)
         self.assertIn("++this->conservativeFramegenSourceIndex_;", history)
         self.assertIn("adaptiveSourceResult, \"pre-copy-history-only\"", history)
-        self.assertIn("sync-fd-next-source-copy", history)
+        self.assertIn(
+            "const bool exportHistoryRelease = exportExistingAsyncHistory;",
+            history,
+        )
+        self.assertNotIn("exportProtectedHistoryRelease", history)
+        self.assertIn("metrics.windowHistoryHostCompletions++", history)
         self.assertNotIn(
             "return presentCompatibilitySourceOnly("
             "\n            \"compat-adaptive-history-copy\"",
@@ -148,6 +163,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         )
         self.assertIn("conservativeSourceOnlyWarmup", source)
         self.assertNotIn("deferConservativeWarmupUntilGenerationDemand", source)
+
 
     def test_xclipse_async_selection_remains_capability_driven(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
