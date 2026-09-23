@@ -38,12 +38,13 @@ inline bool containsAsciiCaseInsensitive(
 }
 
 /// Qualcomm/Adreno drivers use the validated protected source/history policy.
-/// On single-queue Turnip, source input and private-device completion use
-/// one-shot SYNC_FDs, but generated delivery is deferred until a later source
-/// boundary has nonblocking readiness evidence. Deferred game-device copies
-/// retire on their real consuming submissions; host completion remains only a
-/// bounded fallback for export/import failure and recovery. Zero-generation,
-/// reprime, and true source-only cycles remain source-safe. This is a
+/// Ordinary generated cycles hand the source upload to the private framegen
+/// device with an OPAQUE_FD GPU semaphore, then use bounded host completion
+/// before the game device consumes generated AHBs. Warmup, zero-generation
+/// history, and true source-only recovery cycles retain the conservative
+/// host-fence source-copy path where required. Generated frames and their
+/// matching source are presented in the same intercepted call; deferred source
+/// buffering and a synthetic game-device queue are not selected. This is a
 /// driver-family policy, not a device-model allow/deny list.
 ///
 /// Samsung/Xclipse, ARM/Mali, and unknown drivers retain their existing fully
@@ -111,7 +112,7 @@ inline const char* compatibilityVendorName(
 
 inline const char* crossDeviceSyncPolicyName(bool conservative) noexcept {
     return conservative
-        ? "host-fence-input-host-completion-adreno"
+        ? "opaque-fd-input-host-completion-adreno"
         : "capability-async";
 }
 
