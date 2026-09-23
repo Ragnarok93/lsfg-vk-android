@@ -63,23 +63,33 @@ private:
     uint64_t predictedIntervalNs_{0};
 };
 
+enum class SourceCadenceObservation {
+    SourceOnly,
+    HistoryMaintenance,
+    Generated,
+};
+
+const char* sourceCadenceObservationName(SourceCadenceObservation observation);
+
 struct SourceProtectionBudgetTelemetry {
     double protectedSourceIntervalMs{};
-    double serializedHandoffReserveMs{};
+    double serializedCopyReserveMs{};
+    SourceCadenceObservation lastObservation{SourceCadenceObservation::SourceOnly};
     bool baselineValid{false};
-    bool handoffValid{false};
+    bool copyCostValid{false};
 };
 
 /// Protects a source-owned execution budget from self-inflation by generated
-/// work. Source-only/history observations may re-anchor a genuinely changed
-/// game cadence, while intervals following generated work may only tighten the
-/// baseline. A serialized host handoff is reserved from the same interval.
+/// or history-maintenance work. Only a genuine source-only observation may
+/// move the protected baseline slower; LSFG-active cycles may only prove that
+/// the source is naturally faster. The reserve is the incremental LSFG source
+/// copy cost, never the host-fence wall wait that also contains game rendering.
 class SourceProtectionBudgetTracker {
 public:
     void observeSource(
         std::chrono::nanoseconds sourceInterval,
-        std::size_t previousDispatchedGeneratedFrames);
-    void observeSerializedHandoff(double hostWaitMs);
+        SourceCadenceObservation observation);
+    void observeSerializedCopyCost(double copyCostMs);
     [[nodiscard]] double clampTimelineBudget(double timelineBudgetMs) const;
     void reset();
 
@@ -89,9 +99,9 @@ public:
 
 private:
     bool hasBaseline_{false};
-    bool hasHandoffEstimate_{false};
+    bool hasCopyCostEstimate_{false};
     double baselineIntervalMs_{};
-    double serializedHandoffReserveMs_{};
+    double serializedCopyReserveMs_{};
     SourceProtectionBudgetTelemetry telemetry_{};
 };
 
@@ -184,7 +194,9 @@ public:
         std::chrono::nanoseconds sourceInterval,
         std::size_t requestedGeneratedFrames,
         std::size_t previousDispatchedGeneratedFrames,
-        bool generationAllowed);
+        bool generationAllowed,
+        SourceCadenceObservation previousObservation =
+            SourceCadenceObservation::HistoryMaintenance);
 
     void reset();
 
