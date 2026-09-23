@@ -247,6 +247,36 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         )
 
 
+    def test_adreno_startup_and_reentry_warmup_match_september_18(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        constructor_start = source.index("this->compatibilityPath_ =")
+        constructor_end = source.index(
+            'std::cerr << "lsfg-vk: Android AHB context created', constructor_start
+        )
+        constructor = source[constructor_start:constructor_end]
+        self.assertIn(
+            "if (this->conservativeCrossDeviceSync_)",
+            constructor,
+        )
+        self.assertIn(
+            "this->sourceHistoryWarmupRemaining_ = 0;",
+            constructor,
+            "364178af starts Adreno generation without a synthetic startup warmup.",
+        )
+        self.assertIn(
+            "this->requiresSourceHistoryWarmup_ = false;",
+            constructor,
+        )
+
+        bypass_start = source.index("void LsContext::enterSourceOnlyBypass()")
+        bypass = source[bypass_start:]
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_ ? 1U : kSourceHistoryWarmupFrames",
+            bypass,
+            "September 18 re-entry requires exactly one real-source warmup on Adreno.",
+        )
+
     def test_adreno_execution_island_matches_september_18_transport_contract(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
