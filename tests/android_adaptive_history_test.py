@@ -45,6 +45,8 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         self.assertIn("requiresSourceHistoryWarmup_ = true", timeout_recovery)
         self.assertIn("history-completion-timeout", timeout_recovery)
         self.assertNotIn("enterSourceOnlyBypass", history_block)
+        self.assertNotIn("compat-adaptive-history-copy", source)
+        self.assertIn("presentContextWithCount(", history_block)
 
     def test_framegen_zero_generation_refreshes_temporal_preprocessing(self) -> None:
         backend_sources = (

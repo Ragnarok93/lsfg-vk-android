@@ -24,7 +24,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn("opaqueFdHandoffSupported", selection)
         self.assertIn(
             "this->asyncAhbHandoffHandleType_ ="
-            "\n        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
+            "\n            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
             selection,
         )
         self.assertIn(
@@ -68,8 +68,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         )
         self.assertIn("sourceBudgetMs", admission)
         self.assertIn(
-            "sourceProtectionBatchAdmission"
-            " && plannedBatchDecision.valid",
+            "if (sourceProtectionBatchAdmission)",
             admission,
         )
         self.assertIn(

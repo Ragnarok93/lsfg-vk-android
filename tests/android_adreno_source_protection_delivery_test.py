@@ -9,7 +9,8 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
     def test_admission_drop_preserves_adreno_source_history(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("conservativeAdaptiveHistoryGap", source)
+        self.assertIn("conservativeHistoryGap", source)
+        self.assertIn("conservativeFixedHistoryGap", source)
         start = source.index("const bool conservativeAdmissionRejectedHistoryGap")
         end = source.index("this->lastGeneratedFrameCount_", start)
         classification = source[start:end]
@@ -19,22 +20,23 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn("!sourceTimelineDiscontinuity", classification)
         self.assertIn("plannedGeneratedFrameCount > 0", classification)
         self.assertIn("conservativeAdmissionRejectedHistoryGap", classification)
-        self.assertIn("!conservativeAdaptiveHistoryGap", classification)
+        self.assertIn("conservativeAdaptiveHistoryGap", classification)
 
         bypass_start = source.index("if (conservativePreCopySourceBypass)")
         bypass_end = source.index(
             "// Android path: AHardwareBuffer exchange", bypass_start
         )
         bypass = source[bypass_start:bypass_end]
-        self.assertNotIn("conservativeAdaptiveHistoryGap", bypass)
+        self.assertNotIn("conservativeHistoryGap", bypass)
 
-        gap_start = source.index("if (conservativeAdaptiveHistoryGap)")
-        gap_end = source.index("if (conservativeSourceOnlyWarmup)", gap_start)
-        gap = source[gap_start:gap_end]
-        self.assertIn("presentCompatibilitySourceOnly", gap)
-        self.assertNotIn("requiresSourceHistoryWarmup_ = true", gap)
-        self.assertNotIn("previousSourceCopySignalValid_ = false", gap)
-        self.assertNotIn("presentContextWithCount", gap)
+        history_start = source.index("if (historyOnly)")
+        generation_start = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        history = source[history_start:generation_start]
+        self.assertIn("presentContextWithCount(", history)
+        self.assertIn("historyRequiresHostCompletionWait", history)
+        self.assertNotIn("compat-adaptive-history-copy", source)
 
     def test_history_invalidation_has_explicit_reason(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
@@ -82,7 +84,7 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn("generated_delivery_confidence=", source)
         self.assertIn("wsi-accepted-only", source)
 
-    def test_deferred_adreno_admission_uses_source_protection_deadline(self) -> None:
+    def test_adreno_admission_uses_source_protection_deadline(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn("sourceProtectionBatchAdmission", source)
@@ -93,18 +95,30 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn("compute_ready_budget_ms=", source)
         self.assertIn("presentation_slot_budget_ms=", source)
 
+        policy_start = source.index("const bool sourceProtectionBatchAdmission")
+        policy_end = source.index("double computeReadyBudgetMs", policy_start)
+        policy = source[policy_start:policy_end]
+        self.assertIn("this->conservativeCrossDeviceSync_", policy)
+        self.assertNotIn("deferredAdrenoCompletionEnabled_", policy)
+
         admission_start = source.index("// Active deadline admission")
         admission_end = source.index(
             "const auto& outputCadenceForPresentation", admission_start
         )
         admission = source[admission_start:admission_end]
         self.assertIn(
+            "if ((conf.adaptiveFramegen || sourceProtectionBatchAdmission)",
+            admission,
+        )
+        self.assertIn("sourceBudgetMs", admission)
+        self.assertIn(
             "if (sourceProtectionBatchAdmission)",
             admission,
         )
-        self.assertRegex(
+        self.assertIn(
+            "deadlineAdmissionPredictor_.predict(\n"
+            "                                    candidate, sourceBudgetMs)",
             admission,
-            r"deadlineAdmissionPredictor_\.predict\(\s*candidate,\s*sourceBudgetMs\)",
         )
         self.assertIn(
             "sourceTimeline_.syntheticDesiredTimeNs",
@@ -121,12 +135,12 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn('"capability-async"', policy)
         selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
         selection_end = source.index(
-            "// The known-good Qualcomm/Adreno path", selection_start
+            "const bool xclipseCompatibilityPath", selection_start
         )
         selection = source[selection_start:selection_end]
         self.assertIn("!this->conservativeCrossDeviceSync_", selection)
-        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
-
+        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
 
 if __name__ == "__main__":
     unittest.main()

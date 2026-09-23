@@ -83,31 +83,39 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait = true", fallback)
         self.assertIn("waitContext", history)
 
-    def test_single_queue_adreno_uses_source_protected_deferred_completion(self) -> None:
+    def test_adreno_uses_gpu_source_handoff_and_bounded_host_completion(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
-        selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
+        selection_end = source.index("const bool xclipseCompatibilityPath", selection_start)
         selection = source[selection_start:selection_end]
 
-        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertNotIn(
+            "!this->conservativeCrossDeviceSync_\n"
+            "        && gameGetSemaphoreFd != nullptr",
+            selection,
+        )
+        self.assertIn("if (this->conservativeCrossDeviceSync_)", selection)
+        self.assertIn("opaqueFdHandoffSupported", selection)
+        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT", selection)
         self.assertIn("gameImportSemaphoreFd != nullptr", selection)
-        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
-        self.assertIn("this->syntheticQueue_ != VK_NULL_HANDLE", selection)
-        self.assertIn("this->deferredAdrenoCompletionEnabled_ =", selection)
-        self.assertIn("this->conservativeCrossDeviceSync_", selection)
-        self.assertIn("this->syntheticQueue_ == VK_NULL_HANDLE", selection)
-        self.assertIn("gameGetSemaphoreFd != nullptr", selection)
-        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
-        self.assertNotIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
+        self.assertIn(
+            "this->asyncFramegenCompletionEnabled_ =\n"
+            "        !this->conservativeCrossDeviceSync_",
+            selection,
+        )
+        self.assertIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
 
         generated = source.split("// 2. Tell framegen", 1)[1].split(
             "// 4. Generated presentation is opportunistic.", 1
         )[0]
         self.assertIn("bool requireHostCompletionWait =", generated)
         self.assertIn("!this->deferredAdrenoCompletionEnabled_", generated)
-        self.assertIn("waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)", generated)
-        self.assertIn("runtime stage=adreno-deferred-batch-queued", generated)
+        self.assertIn(
+            "waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)",
+            generated,
+        )
+        self.assertNotIn("runtime stage=adreno-deferred-batch-queued", generated)
 
     def test_adreno_untrained_predictor_uses_generic_one_frame_bootstrap(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -230,7 +238,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         )[1].split("pass.acquireSemaphores.at(i)", 1)[0]
         self.assertIn("if (enforcePostDispatchSyntheticDeadline", deadline)
 
-    def test_adreno_async_completion_keeps_fixed_generated_acquire_nonblocking(self) -> None:
+    def test_adreno_generated_acquire_is_always_nonblocking(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated_start = source.index(
             "// 4. Generated presentation is opportunistic."
@@ -240,14 +248,11 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         )
         generated = source[generated_start:source_start]
 
-        self.assertIn("generatedAcquireTimeoutNs", generated)
-        self.assertIn(
-            "!conf.adaptiveFramegen && this->conservativeCrossDeviceSync_"
-            " && !this->asyncFramegenCompletionEnabled_",
-            generated,
-        )
-        self.assertIn("runtimeWaitTimeoutNs()", generated)
-        self.assertIn(": 0;", generated)
+        acquire_start = generated.index("const uint64_t generatedAcquireTimeoutNs")
+        acquire_end = generated.index("auto res =", acquire_start)
+        acquire = generated[acquire_start:acquire_end]
+        self.assertIn("generatedAcquireTimeoutNs = 0;", acquire)
+        self.assertNotIn("runtimeWaitTimeoutNs()", acquire)
 
     def test_adreno_reuses_game_device_copy_command_buffers_without_changing_xclipse(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -353,38 +358,31 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertNotIn("copySwapchainToExternalAhb", bypass)
         self.assertNotIn("submitAndWaitForAhbHandoff", bypass)
 
-    def test_adreno_reprime_copy_is_queued_without_host_fence_wait(self) -> None:
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        handoff_start = source.index("const auto handoffStart")
-        host_fallback = source.index(
-            "submitAndWaitForAhbHandoff", handoff_start
-        )
-        handoff = source[handoff_start:host_fallback]
-
-        self.assertIn("conservativeSourceOnlyWarmup", handoff)
-        self.assertIn("submitAhbHandoff", handoff)
-        self.assertIn("queuedCopyWithoutHostWait", handoff)
-
-    def test_adreno_fractional_gap_queues_copy_without_zero_count_framegen(self) -> None:
+    def test_adreno_warmup_and_zero_history_use_host_fence_copy(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         handoff_start = source.index("const auto handoffStart")
         history_start = source.index("if (historyOnly)", handoff_start)
-        pre_history = source[handoff_start:history_start]
+        handoff = source[handoff_start:history_start]
 
-        self.assertIn("conservativeFractionalHistoryGap", pre_history)
-        self.assertIn("queuedCopyWithoutHostWait", pre_history)
-        self.assertIn("conservativeAdaptiveHistoryGap", pre_history)
-        self.assertIn(
-            'presentCompatibilitySourceOnly(\n'
-            '            "compat-adaptive-history-copy"',
-            pre_history,
+        self.assertIn("conservativeSourceOnlyWarmup", handoff)
+        self.assertIn("submitAndWaitForAhbHandoff", handoff)
+        self.assertNotIn("conservativeCopyOnlyHistory", handoff)
+        self.assertIn('": "host-fence"', source)
+
+    def test_adreno_fractional_gap_advances_zero_count_history_with_host_fence(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        history_start = source.index("if (historyOnly)")
+        generation_start = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
         )
-        gap = pre_history.split(
-            "if (conservativeAdaptiveHistoryGap)", 1
-        )[1]
-        self.assertIn("conservativeFractionalHistoryGap", gap)
-        self.assertNotIn("presentContextWithCount(", gap)
-        self.assertNotIn("presentContextWithCountExportSyncFd(", gap)
+        history = source[history_start:generation_start]
+
+        self.assertIn("conservativeHistoryGap", source)
+        self.assertIn("presentContextWithCount(", history)
+        self.assertIn("historyRequiresHostCompletionWait = true", history)
+        self.assertIn("generatedFrameCount = 0", history)
+        self.assertNotIn("if (conservativeAdaptiveHistoryGap)", source)
+        self.assertNotIn("compat-adaptive-history-copy", source)
 
     def test_handoff_metrics_separate_submit_wait_and_cross_frame_dependencies(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
@@ -408,7 +406,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
     def test_xclipse_async_completion_gate_is_unchanged(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
-        selection_end = source.index("// The known-good Qualcomm/Adreno path", selection_start)
+        selection_end = source.index("// Match the device-proven baseline", selection_start)
         selection = source[selection_start:selection_end]
 
         self.assertIn(
@@ -419,18 +417,18 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("syncFdHandoffSupported", selection)
         self.assertIn("gameImportSemaphoreFd != nullptr", selection)
 
-    def test_adreno_async_completion_does_not_reopen_zero_count_framegen(self) -> None:
+    def test_adreno_zero_count_history_is_not_an_off_transition(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        adaptive_gap = source.index("if (conservativeAdaptiveHistoryGap)")
-        warmup = source.index("if (conservativeSourceOnlyWarmup)", adaptive_gap)
-        history = source.index("if (historyOnly)", warmup)
+        history_start = source.index("if (historyOnly)")
+        generation_start = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        history = source[history_start:generation_start]
 
-        self.assertLess(adaptive_gap, history)
-        self.assertLess(warmup, history)
-        pre_history = source[adaptive_gap:history]
-        self.assertIn("presentCompatibilitySourceOnly", pre_history)
-        self.assertNotIn("presentContextWithCountExportSyncFd", pre_history)
-        self.assertNotIn("presentContextWithCount(", pre_history)
+        self.assertIn("presentContextWithCount(", history)
+        self.assertIn("historyRequiresHostCompletionWait = true", history)
+        self.assertNotIn("compat-adaptive-history-copy", source)
+        self.assertNotIn("if (conservativeAdaptiveHistoryGap)", source)
 
     def test_adreno_syncfd_import_failure_transfers_fd_ownership_once(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -539,7 +537,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
     def test_runtime_policy_label_matches_split_adreno_topology(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
-        self.assertIn("syncfd-input-deferred-completion-adreno", policy)
+        self.assertIn("host-fence-input-host-completion-adreno", policy)
         self.assertIn("capability-async", policy)
 
     def test_xclipse_async_path_is_not_removed(self) -> None:
