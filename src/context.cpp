@@ -3487,16 +3487,28 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     if (useAsyncHandoff) {
         try {
-            pass.framegenInputSemaphore = Mini::Semaphore(
-                info.device, this->asyncAhbHandoffHandleType_);
+            if (this->conservativeCrossDeviceSync_) {
+                // September 18 Adreno path: OPAQUE_FD is a reusable handle, so
+                // export it before the source-copy submission. This keeps export
+                // failure recoverable by the same host-fence fallback used by
+                // 364178af instead of stranding an already-submitted copy.
+                pass.framegenInputSemaphore =
+                    Mini::Semaphore(info.device, &framegenInputSemaphoreFd);
+            } else {
+                // Generic/Xclipse may use SYNC_FD, which must be exported only
+                // after its signal operation has been submitted.
+                pass.framegenInputSemaphore = Mini::Semaphore(
+                    info.device, this->asyncAhbHandoffHandleType_);
+            }
             preCopySignals.emplace_back(pass.framegenInputSemaphore.handle());
         } catch (const std::exception& e) {
             this->asyncAhbHandoffEnabled_ = false;
             useAsyncHandoff = false;
+            framegenInputSemaphoreFd = -1;
             metrics.totalAsyncFallbacks++;
             std::cerr << "lsfg-vk: Android async AHB handoff disabled after "
                       << handoffTypeName(this->asyncAhbHandoffHandleType_)
-                      << " semaphore creation failure: " << e.what()
+                      << " semaphore creation/export failure: " << e.what()
                       << "; falling back to host fence\n";
         }
     }
@@ -3505,7 +3517,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto asyncSubmitStart = RuntimeMetrics::Clock::now();
         submitAhbHandoff(info.device, pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
-            VK_NULL_HANDLE, nullptr);
+            this->conservativeCrossDeviceSync_
+                ? *this->ahbHandoffFence
+                : VK_NULL_HANDLE,
+            this->conservativeCrossDeviceSync_
+                ? this->resetHandoffFences
+                : nullptr);
         metrics.windowHandoffSubmitMs +=
             std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - asyncSubmitStart).count();
@@ -3525,27 +3542,30 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->conservativePendingHistoryCompleteSemaphore_ = {};
         }
 
-        try {
-            // SYNC_FD copy transference requires its signal operation to be
-            // submitted before vkGetSemaphoreFdKHR. OPAQUE_FD is also valid here.
-            framegenInputSemaphoreFd = pass.framegenInputSemaphore.exportFd(
-                info.device, this->asyncAhbHandoffHandleType_);
+        if (this->conservativeCrossDeviceSync_) {
             metrics.windowAsyncHandoffs++;
             metrics.totalAsyncHandoffs++;
-        } catch (const std::exception& e) {
-            // The copy was already submitted without a reusable fence. Do not
-            // dispatch framegen unsynchronized and do not block the source
-            // thread. Present the real frame from the source-copy signal and
-            // require one history warmup before generation resumes.
-            this->asyncAhbHandoffEnabled_ = false;
-            useAsyncHandoff = false;
-            asyncExportFailed = true;
-            framegenInputSemaphoreFd = -1;
-            metrics.totalAsyncFallbacks++;
-            std::cerr << "lsfg-vk: Android async AHB handoff disabled after "
-                      << handoffTypeName(this->asyncAhbHandoffHandleType_)
-                      << " export failure: " << e.what()
-                      << "; failing open to source-only cycle\n";
+        } else {
+            try {
+                // SYNC_FD copy transference requires its signal operation to be
+                // submitted before vkGetSemaphoreFdKHR.
+                framegenInputSemaphoreFd = pass.framegenInputSemaphore.exportFd(
+                    info.device, this->asyncAhbHandoffHandleType_);
+                metrics.windowAsyncHandoffs++;
+                metrics.totalAsyncHandoffs++;
+            } catch (const std::exception& e) {
+                // The generic/SYNC_FD copy was already submitted without a
+                // reusable fence. Fail open rather than dispatch unsynchronized.
+                this->asyncAhbHandoffEnabled_ = false;
+                useAsyncHandoff = false;
+                asyncExportFailed = true;
+                framegenInputSemaphoreFd = -1;
+                metrics.totalAsyncFallbacks++;
+                std::cerr << "lsfg-vk: Android async AHB handoff disabled after "
+                          << handoffTypeName(this->asyncAhbHandoffHandleType_)
+                          << " export failure: " << e.what()
+                          << "; failing open to source-only cycle\n";
+            }
         }
     }
 
@@ -4348,18 +4368,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
-        // Generated WSI acquisition is opportunistic in every mode.
-        // Fixed multipliers are ceilings; the real source must never sleep while
-        // waiting for a synthetic swapchain image.
-        const uint64_t generatedAcquireTimeoutNs = 0;
+        // Preserve the September 18 Adreno WSI transaction: once the
+        // source-protection governors admit a generated batch, generated-image
+        // acquisition uses the same bounded wait as 364178af. The newer
+        // nonblocking/drop policy remains isolated to Xclipse/generic.
+        const uint64_t generatedAcquireTimeoutNs =
+            this->conservativeCrossDeviceSync_
+                ? runtimeWaitTimeoutNs()
+                : 0;
         auto res = Layer::ovkAcquireNextImageKHR(
             info.device, this->swapchain, generatedAcquireTimeoutNs,
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
-        if (res == VK_NOT_READY || res == VK_TIMEOUT) {
-            // Swapchain-image availability is downstream presentation
-            // capacity, not evidence that framegen compute missed its source
-            // deadline. Keep the deadline predictor trained only on actual
-            // submit-to-deadline lateness.
+        if (!this->conservativeCrossDeviceSync_
+                && (res == VK_NOT_READY || res == VK_TIMEOUT)) {
+            // Generic/Xclipse keeps opportunistic downstream-capacity drops.
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
             generatedWsiRejectedFrameCount = droppedGeneratedFrames;
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;
@@ -4420,12 +4442,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         VkPresentTimeGOOGLE generatedPresentTime{};
         VkPresentTimesInfoGOOGLE generatedPresentTimes{};
+        const void* generatedDownstreamPNext =
+            this->conservativeCrossDeviceSync_ && i == 0
+                ? pNext
+                : nullptr;
         const VkPresentInfoKHR presentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            // The application's pNext chain describes its real source present.
-            // Synthetic presents carry only LSFG's own optional timing hint.
+            // September 18 attached the application's present chain to the first
+            // generated Adreno present. Keep that ownership contract on the
+            // protected path; Xclipse/generic retains the newer source-owned
+            // downstream chain.
             .pNext = adaptivePresentPNext(
-                nullptr,
+                generatedDownstreamPNext,
                 syntheticDesiredTimeNs,
                 generatedPresentTime,
                 generatedPresentTimes),
@@ -4492,10 +4520,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         : pass.preCopySemaphores.at(0).handle();
     VkPresentTimeGOOGLE finalSourcePresentTime{};
     VkPresentTimesInfoGOOGLE finalSourcePresentTimes{};
+    const void* finalSourceDownstreamPNext =
+        this->conservativeCrossDeviceSync_
+            ? (queuedGeneratedFrameCount == 0 ? pNext : nullptr)
+            : pNext;
     const VkPresentInfoKHR finalPresentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = adaptivePresentPNext(
-            pNext,
+            finalSourceDownstreamPNext,
             this->currentSourceTimeline_.sourceDesiredTimeNs,
             finalSourcePresentTime,
             finalSourcePresentTimes),
