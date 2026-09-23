@@ -211,9 +211,9 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         history = source[history_start:generation_start]
 
         self.assertIn("presentContextWithCountExportSyncFd", history)
-        self.assertIn("historyBatchCompleteSemaphore", header)
-        self.assertIn("historyBatchCompleteValid", header)
-        self.assertIn("historyBatchCompleteValid", source)
+        self.assertIn("conservativePendingHistoryCompleteSemaphore_", header)
+        self.assertIn("conservativePendingHistoryCompleteValid_", header)
+        self.assertIn("conservativePendingHistoryCompleteValid_", source)
         self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", history)
         self.assertIn("historyRequiresHostCompletionWait = false", history)
 
@@ -223,6 +223,39 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         selection = source[selection_start:selection_end]
         self.assertIn("!this->conservativeCrossDeviceSync_", selection)
         self.assertNotIn("asyncHistoryCompletionEnabled_", selection)
+
+    def test_adreno_history_release_survives_source_only_bypass_until_reuse(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("conservativePendingHistoryCompleteSemaphore_", header)
+        self.assertIn("conservativePendingHistoryCompleteValid_", header)
+
+        bypass_start = source.index("if (conservativePreCopySourceBypass)")
+        bypass_end = source.index("// Android path: AHardwareBuffer exchange", bypass_start)
+        bypass = source[bypass_start:bypass_end]
+        self.assertNotIn(
+            "conservativePendingHistoryCompleteValid_ = false",
+            bypass,
+            "Source-only bypass must not discard a private history release that still guards AHB reuse",
+        )
+
+        copy_start = source.index(
+            "std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;"
+        )
+        handoff_start = source.index("const auto handoffStart", copy_start)
+        copy_dependencies = source[copy_start:handoff_start]
+        self.assertIn("conservativePendingHistoryCompleteValid_", copy_dependencies)
+        self.assertIn("conservativePendingHistoryCompleteSemaphore_", copy_dependencies)
+
+        submit_start = source.index("if (useAsyncHandoff)", handoff_start)
+        submit_end = source.index("if (consumeDeferredAdrenoBatchComplete)", submit_start)
+        submit = source[submit_start:submit_end]
+        self.assertIn(
+            "conservativePendingHistoryCompleteValid_ = false",
+            submit,
+            "The carried release may be cleared only after a source-copy submit has consumed it",
+        )
 
     def test_adreno_source_budget_does_not_charge_full_host_fence_wall_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
