@@ -1766,15 +1766,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (observedIntervalMs < kRuntimeTimingDiscontinuityMs)
             capacityIntervalMs = observedIntervalMs;
     }
+    const double protectedCapacityIntervalMs =
+        sourceProtectionBatchAdmission
+            ? this->sourceProtectionBudgetTracker_.clampTimelineBudget(
+                capacityIntervalMs)
+            : capacityIntervalMs;
     const bool safeGenerationHintValid =
         conf.adaptiveFramegen
         && maxAdaptiveGeneratedFrames > 0
-        && capacityIntervalMs > 0.0
+        && protectedCapacityIntervalMs > 0.0
         && this->deadlineAdmissionPredictor_.hasEstimate();
     const size_t safeGenerationHint = safeGenerationHintValid
         ? (sourceProtectionBatchAdmission
             ? this->deadlineAdmissionPredictor_.safeBatchGenerationHint(
-                maxAdaptiveGeneratedFrames, capacityIntervalMs)
+                maxAdaptiveGeneratedFrames, protectedCapacityIntervalMs)
             : this->deadlineAdmissionPredictor_.safeGenerationHint(
                 maxAdaptiveGeneratedFrames, capacityIntervalMs))
         : 0;
