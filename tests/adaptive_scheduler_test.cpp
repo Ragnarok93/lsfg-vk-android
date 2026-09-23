@@ -1034,10 +1034,11 @@ int main() {
         assert(backedOff);
         assert(count == 0);
 
-        // HistoryOnly evidence re-anchors a genuinely slower game cadence and
-        // eventually permits a cautious one-frame probe again.
+        // Only genuine source-only evidence may re-anchor a naturally slower
+        // game cadence and eventually permit a cautious one-frame probe again.
         for (int i = 0; i < 20 && count == 0; ++i)
-            count = governor.plan(60ms, 1, 0, true);
+            count = governor.plan(
+                60ms, 1, 0, true, SourceCadenceObservation::SourceOnly);
         assert(count == 1);
     }
 
