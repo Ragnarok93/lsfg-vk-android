@@ -396,7 +396,9 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
     def test_xclipse_async_completion_gate_is_unchanged(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
-        selection_end = source.index("// Match the device-proven baseline", selection_start)
+        selection_end = source.index(
+            "const bool xclipseCompatibilityPath", selection_start
+        )
         selection = source[selection_start:selection_end]
 
         self.assertIn(
