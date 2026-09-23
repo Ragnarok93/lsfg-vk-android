@@ -48,7 +48,9 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn("crossDeviceSyncPolicyName", policy)
 
         log_start = source.index('std::cerr << "lsfg-vk: LSFG compatibility path:"')
-        log_end = source.index("// Match the device-proven baseline", log_start)
+        log_end = source.index(
+            'std::cerr << "lsfg-vk: Android AHB context created', log_start
+        )
         compatibility_log = source[log_start:log_end]
         self.assertIn('" presentation=" << compatibilityPresentation', compatibility_log)
         self.assertIn('"generated-before-source-same-call"', source)
