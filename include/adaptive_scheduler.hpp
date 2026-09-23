@@ -63,6 +63,38 @@ private:
     uint64_t predictedIntervalNs_{0};
 };
 
+struct SourceProtectionBudgetTelemetry {
+    double protectedSourceIntervalMs{};
+    double serializedHandoffReserveMs{};
+    bool baselineValid{false};
+    bool handoffValid{false};
+};
+
+/// Protects a source-owned execution budget from self-inflation by generated
+/// work. Source-only/history observations may re-anchor a genuinely changed
+/// game cadence, while intervals following generated work may only tighten the
+/// baseline. A serialized host handoff is reserved from the same interval.
+class SourceProtectionBudgetTracker {
+public:
+    void observeSource(
+        std::chrono::nanoseconds sourceInterval,
+        std::size_t previousDispatchedGeneratedFrames);
+    void observeSerializedHandoff(double hostWaitMs);
+    [[nodiscard]] double clampTimelineBudget(double timelineBudgetMs) const;
+    void reset();
+
+    [[nodiscard]] const SourceProtectionBudgetTelemetry& telemetry() const {
+        return telemetry_;
+    }
+
+private:
+    bool hasBaseline_{false};
+    bool hasHandoffEstimate_{false};
+    double baselineIntervalMs_{};
+    double serializedHandoffReserveMs_{};
+    SourceProtectionBudgetTelemetry telemetry_{};
+};
+
 /// Chooses the minimum number of interpolation frames needed to approach an
 /// output FPS target. It owns no Vulkan objects, never paces source frames, and
 /// is independently testable.

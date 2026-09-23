@@ -149,6 +149,80 @@ void SourceProtectedTimeline::reset() {
     predictedIntervalNs_ = 0;
 }
 
+void SourceProtectionBudgetTracker::observeSource(
+        std::chrono::nanoseconds sourceInterval,
+        std::size_t previousDispatchedGeneratedFrames) {
+    const double intervalMs =
+        std::chrono::duration<double, std::milli>(sourceInterval).count();
+    if (!(intervalMs > 0.0) || !std::isfinite(intervalMs))
+        return;
+
+    constexpr double kSourceOnlyAlpha = 0.35;
+    constexpr double kFasterGeneratedAlpha = 0.20;
+
+    if (!hasBaseline_) {
+        baselineIntervalMs_ = intervalMs;
+        hasBaseline_ = true;
+    } else if (previousDispatchedGeneratedFrames == 0) {
+        // Source-only/history observations are the clean evidence that lets a
+        // real scene-rate transition move the protected cadence in either
+        // direction. This keeps protection cadence-relative at every FPS.
+        baselineIntervalMs_ +=
+            kSourceOnlyAlpha * (intervalMs - baselineIntervalMs_);
+    } else if (intervalMs < baselineIntervalMs_) {
+        // Generated work may prove that the game is naturally faster, but a
+        // slower interval cannot grant LSFG more work after LSFG itself may
+        // have contributed to that slowdown.
+        baselineIntervalMs_ +=
+            kFasterGeneratedAlpha * (intervalMs - baselineIntervalMs_);
+    }
+
+    telemetry_.baselineValid = hasBaseline_;
+    telemetry_.protectedSourceIntervalMs = baselineIntervalMs_;
+}
+
+void SourceProtectionBudgetTracker::observeSerializedHandoff(double hostWaitMs) {
+    if (!(hostWaitMs >= 0.0) || !std::isfinite(hostWaitMs))
+        return;
+
+    constexpr double kPressureRiseAlpha = 0.50;
+    constexpr double kRecoveryAlpha = 0.20;
+    if (!hasHandoffEstimate_) {
+        serializedHandoffReserveMs_ = hostWaitMs;
+        hasHandoffEstimate_ = true;
+    } else {
+        const double alpha = hostWaitMs > serializedHandoffReserveMs_
+            ? kPressureRiseAlpha
+            : kRecoveryAlpha;
+        serializedHandoffReserveMs_ +=
+            alpha * (hostWaitMs - serializedHandoffReserveMs_);
+    }
+
+    telemetry_.handoffValid = hasHandoffEstimate_;
+    telemetry_.serializedHandoffReserveMs = serializedHandoffReserveMs_;
+}
+
+double SourceProtectionBudgetTracker::clampTimelineBudget(
+        double timelineBudgetMs) const {
+    if (!(timelineBudgetMs > 0.0) || !std::isfinite(timelineBudgetMs))
+        return 0.0;
+
+    double protectedBudgetMs = timelineBudgetMs;
+    if (hasBaseline_)
+        protectedBudgetMs = std::min(protectedBudgetMs, baselineIntervalMs_);
+    if (hasHandoffEstimate_)
+        protectedBudgetMs -= serializedHandoffReserveMs_;
+    return std::max(0.0, protectedBudgetMs);
+}
+
+void SourceProtectionBudgetTracker::reset() {
+    hasBaseline_ = false;
+    hasHandoffEstimate_ = false;
+    baselineIntervalMs_ = 0.0;
+    serializedHandoffReserveMs_ = 0.0;
+    telemetry_ = {};
+}
+
 void DeadlineAdmissionPredictor::observe(
         const DeadlineAdmissionObservation& observation) {
     if (!observation.valid
