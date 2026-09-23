@@ -777,6 +777,150 @@ void LsfgOutputCadenceTracker::reset() {
     clearWindow();
 }
 
+std::size_t FixedSourceCadenceGovernor::plan(
+        std::chrono::nanoseconds sourceInterval,
+        std::size_t requestedGeneratedFrames,
+        std::size_t previousDispatchedGeneratedFrames,
+        bool generationAllowed) {
+    constexpr double kPressureIntervalRatio = 1.25;
+    constexpr double kStableIntervalRatio = 1.10;
+    constexpr double kPressureConfirmSeconds = 0.12;
+    constexpr double kRecoveryConfirmSeconds = 0.30;
+    constexpr double kBackoffCooldownSeconds = 0.50;
+    constexpr double kHistoryBaselineAlpha = 0.35;
+    constexpr double kFasterBaselineAlpha = 0.20;
+    constexpr double kMaxEvidenceSeconds = 0.25;
+
+    telemetry_.requestedGeneratedFrames = requestedGeneratedFrames;
+    telemetry_.backedOff = false;
+    telemetry_.raised = false;
+
+    if (requestedGeneratedFrames == 0) {
+        generationLimit_ = 0;
+        pressureSeconds_ = 0.0;
+        recoverySeconds_ = 0.0;
+        telemetry_.generationLimit = 0;
+        telemetry_.baselineValid = hasBaseline_;
+        telemetry_.baselineSourceFps =
+            hasBaseline_ && baselineIntervalSeconds_ > 0.0
+                ? 1.0 / baselineIntervalSeconds_
+                : 0.0;
+        return 0;
+    }
+
+    if (generationLimit_ > requestedGeneratedFrames)
+        generationLimit_ = requestedGeneratedFrames;
+
+    const double intervalSeconds =
+        std::chrono::duration<double>(sourceInterval).count();
+    const bool intervalValid =
+        intervalSeconds > 0.0 && std::isfinite(intervalSeconds);
+
+    if (intervalValid) {
+        const double evidenceSeconds =
+            std::min(intervalSeconds, kMaxEvidenceSeconds);
+        cooldownSeconds_ = std::max(0.0, cooldownSeconds_ - evidenceSeconds);
+
+        if (!hasBaseline_) {
+            // The first valid interval is measurement only. This is especially
+            // important when switching from Adaptive to Fixed without a
+            // swapchain recreation: do not treat the old generated load as
+            // permission to jump immediately to a high Fixed multiplier.
+            baselineIntervalSeconds_ = intervalSeconds;
+            hasBaseline_ = true;
+            pressureSeconds_ = 0.0;
+            recoverySeconds_ = 0.0;
+            telemetry_.intervalRatio = 1.0;
+            telemetry_.baselineValid = true;
+            telemetry_.baselineSourceFps = 1.0 / baselineIntervalSeconds_;
+            telemetry_.generationLimit = generationLimit_;
+            return 0;
+        }
+
+        const double intervalRatio =
+            intervalSeconds / baselineIntervalSeconds_;
+        telemetry_.intervalRatio = intervalRatio;
+
+        if (previousDispatchedGeneratedFrames == 0) {
+            // A HistoryOnly/source-protection cycle is the cleanest observation
+            // of the game's current cadence while LSFG preprocessing remains
+            // active. Let it re-anchor both genuine scene slowdowns and
+            // recoveries without allowing generated work to inflate the budget.
+            baselineIntervalSeconds_ += kHistoryBaselineAlpha
+                * (intervalSeconds - baselineIntervalSeconds_);
+            pressureSeconds_ = 0.0;
+            recoverySeconds_ = cooldownSeconds_ <= 0.0
+                ? recoverySeconds_ + evidenceSeconds
+                : 0.0;
+        } else if (intervalRatio >= kPressureIntervalRatio) {
+            pressureSeconds_ += evidenceSeconds;
+            recoverySeconds_ = 0.0;
+            if (pressureSeconds_ >= kPressureConfirmSeconds) {
+                const std::size_t saferLimit =
+                    previousDispatchedGeneratedFrames > 0
+                        ? previousDispatchedGeneratedFrames - 1
+                        : 0;
+                if (saferLimit < generationLimit_) {
+                    generationLimit_ = saferLimit;
+                    telemetry_.backedOff = true;
+                }
+                cooldownSeconds_ = kBackoffCooldownSeconds;
+                pressureSeconds_ = 0.0;
+            }
+        } else {
+            pressureSeconds_ = 0.0;
+
+            // Faster real-source cadence is safe evidence that the protected
+            // baseline may tighten. Never move the baseline slower while
+            // generated work is active; that would let LSFG justify its own
+            // source slowdown.
+            if (intervalSeconds < baselineIntervalSeconds_) {
+                baselineIntervalSeconds_ += kFasterBaselineAlpha
+                    * (intervalSeconds - baselineIntervalSeconds_);
+            }
+
+            if (intervalRatio <= kStableIntervalRatio
+                    && cooldownSeconds_ <= 0.0) {
+                recoverySeconds_ += evidenceSeconds;
+            } else {
+                recoverySeconds_ = 0.0;
+            }
+        }
+
+        if (generationAllowed
+                && generationLimit_ < requestedGeneratedFrames
+                && cooldownSeconds_ <= 0.0
+                && recoverySeconds_ >= kRecoveryConfirmSeconds) {
+            ++generationLimit_;
+            recoverySeconds_ = 0.0;
+            telemetry_.raised = true;
+        }
+    }
+
+    telemetry_.baselineValid = hasBaseline_;
+    telemetry_.baselineSourceFps =
+        hasBaseline_ && baselineIntervalSeconds_ > 0.0
+            ? 1.0 / baselineIntervalSeconds_
+            : 0.0;
+    telemetry_.generationLimit = generationLimit_;
+
+    if (!generationAllowed || !hasBaseline_)
+        return 0;
+    return std::min(generationLimit_, requestedGeneratedFrames);
+}
+
+void FixedSourceCadenceGovernor::reset() {
+    hasBaseline_ = false;
+    baselineIntervalSeconds_ = 0.0;
+    generationLimit_ = 1;
+    pressureSeconds_ = 0.0;
+    recoverySeconds_ = 0.0;
+    cooldownSeconds_ = 0.0;
+    telemetry_ = {};
+    telemetry_.generationLimit = generationLimit_;
+}
+
+
 AdaptiveFrameScheduler::AdaptiveFrameScheduler(
         uint32_t targetFps, std::size_t maxGeneratedFrames)
         : targetFps_(targetFps),

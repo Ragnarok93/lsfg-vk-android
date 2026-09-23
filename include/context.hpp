@@ -228,6 +228,7 @@ private:
     bool runtimeConfigSignatureValid_{false};
 
     AdaptiveFrameScheduler adaptiveScheduler_;
+    FixedSourceCadenceGovernor fixedSourceCadenceGovernor_;
     std::size_t lastDispatchedGeneratedFrameCount_{0};
     AdaptiveFlowController adaptiveFlowController_;
     AdaptiveFlowPreset adaptiveFlowPreset_{AdaptiveFlowPreset::Quality};

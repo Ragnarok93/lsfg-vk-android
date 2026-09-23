@@ -1777,9 +1777,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         safeGenerationHint,
         safeGenerationHintValid);
 
-    size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
+    if (conf.adaptiveFramegen)
+        this->fixedSourceCadenceGovernor_.reset();
+    const size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
-        : requestedFixedGeneratedFrameCount;
+        : this->fixedSourceCadenceGovernor_.plan(
+            sourceInterval,
+            requestedFixedGeneratedFrameCount,
+            this->lastDispatchedGeneratedFrameCount_,
+            !this->requiresSourceHistoryWarmup_);
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
@@ -2854,6 +2860,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << metrics.windowDeadlinePredictionSamples
                       << " fixed_requested_generated="
                       << requestedFixedGeneratedFrameCount
+                      << " fixed_source_baseline_fps="
+                      << this->fixedSourceCadenceGovernor_.telemetry().baselineSourceFps
+                      << " fixed_source_interval_ratio="
+                      << this->fixedSourceCadenceGovernor_.telemetry().intervalRatio
+                      << " fixed_generation_limit="
+                      << this->fixedSourceCadenceGovernor_.telemetry().generationLimit
+                      << " fixed_source_backoff="
+                      << (this->fixedSourceCadenceGovernor_.telemetry().backedOff ? 1 : 0)
+                      << " fixed_source_raise="
+                      << (this->fixedSourceCadenceGovernor_.telemetry().raised ? 1 : 0)
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
@@ -4450,6 +4466,7 @@ void LsContext::resetAdaptiveSourceEpoch(
 
     if (resetScheduler)
         this->adaptiveScheduler_.reset();
+    this->fixedSourceCadenceGovernor_.reset();
     this->advanceAdaptiveFlowTimingEpoch();
     this->deadlineAdmissionPredictor_.reset();
     this->generatedPresentationCapacityTracker_.reset();
@@ -4508,6 +4525,7 @@ void LsContext::enterSourceOnlyBypass() {
 
     this->advanceAdaptiveFlowTimingEpoch();
     this->adaptiveScheduler_.reset();
+    this->fixedSourceCadenceGovernor_.reset();
     this->deadlineAdmissionPredictor_.reset();
     this->adaptiveFlowController_.reset();
     this->sourceTimeline_.reset();
