@@ -149,57 +149,69 @@ void SourceProtectedTimeline::reset() {
     predictedIntervalNs_ = 0;
 }
 
+const char* sourceCadenceObservationName(
+        SourceCadenceObservation observation) {
+    switch (observation) {
+    case SourceCadenceObservation::SourceOnly:
+        return "source-only";
+    case SourceCadenceObservation::HistoryMaintenance:
+        return "history-maintenance";
+    case SourceCadenceObservation::Generated:
+        return "generated";
+    }
+    return "unknown";
+}
+
 void SourceProtectionBudgetTracker::observeSource(
         std::chrono::nanoseconds sourceInterval,
-        std::size_t previousDispatchedGeneratedFrames) {
+        SourceCadenceObservation observation) {
     const double intervalMs =
         std::chrono::duration<double, std::milli>(sourceInterval).count();
     if (!(intervalMs > 0.0) || !std::isfinite(intervalMs))
         return;
 
     constexpr double kSourceOnlyAlpha = 0.35;
-    constexpr double kFasterGeneratedAlpha = 0.20;
+    constexpr double kFasterActiveAlpha = 0.20;
 
     if (!hasBaseline_) {
         baselineIntervalMs_ = intervalMs;
         hasBaseline_ = true;
-    } else if (previousDispatchedGeneratedFrames == 0) {
-        // Source-only/history observations are the clean evidence that lets a
-        // real scene-rate transition move the protected cadence in either
-        // direction. This keeps protection cadence-relative at every FPS.
+    } else if (observation == SourceCadenceObservation::SourceOnly) {
+        // Only a cycle that bypassed LSFG maintenance is clean evidence that a
+        // genuinely slower game scene should expand the protected cadence.
         baselineIntervalMs_ +=
             kSourceOnlyAlpha * (intervalMs - baselineIntervalMs_);
     } else if (intervalMs < baselineIntervalMs_) {
-        // Generated work may prove that the game is naturally faster, but a
-        // slower interval cannot grant LSFG more work after LSFG itself may
-        // have contributed to that slowdown.
+        // History preprocessing and generated work may prove the game is
+        // naturally faster, but neither may justify its own slowdown.
         baselineIntervalMs_ +=
-            kFasterGeneratedAlpha * (intervalMs - baselineIntervalMs_);
+            kFasterActiveAlpha * (intervalMs - baselineIntervalMs_);
     }
 
+    telemetry_.lastObservation = observation;
     telemetry_.baselineValid = hasBaseline_;
     telemetry_.protectedSourceIntervalMs = baselineIntervalMs_;
 }
 
-void SourceProtectionBudgetTracker::observeSerializedHandoff(double hostWaitMs) {
-    if (!(hostWaitMs >= 0.0) || !std::isfinite(hostWaitMs))
+void SourceProtectionBudgetTracker::observeSerializedCopyCost(double copyCostMs) {
+    if (!(copyCostMs >= 0.0) || !std::isfinite(copyCostMs))
         return;
 
     constexpr double kPressureRiseAlpha = 0.50;
     constexpr double kRecoveryAlpha = 0.20;
-    if (!hasHandoffEstimate_) {
-        serializedHandoffReserveMs_ = hostWaitMs;
-        hasHandoffEstimate_ = true;
+    if (!hasCopyCostEstimate_) {
+        serializedCopyReserveMs_ = copyCostMs;
+        hasCopyCostEstimate_ = true;
     } else {
-        const double alpha = hostWaitMs > serializedHandoffReserveMs_
+        const double alpha = copyCostMs > serializedCopyReserveMs_
             ? kPressureRiseAlpha
             : kRecoveryAlpha;
-        serializedHandoffReserveMs_ +=
-            alpha * (hostWaitMs - serializedHandoffReserveMs_);
+        serializedCopyReserveMs_ +=
+            alpha * (copyCostMs - serializedCopyReserveMs_);
     }
 
-    telemetry_.handoffValid = hasHandoffEstimate_;
-    telemetry_.serializedHandoffReserveMs = serializedHandoffReserveMs_;
+    telemetry_.copyCostValid = hasCopyCostEstimate_;
+    telemetry_.serializedCopyReserveMs = serializedCopyReserveMs_;
 }
 
 double SourceProtectionBudgetTracker::clampTimelineBudget(
@@ -210,16 +222,16 @@ double SourceProtectionBudgetTracker::clampTimelineBudget(
     double protectedBudgetMs = timelineBudgetMs;
     if (hasBaseline_)
         protectedBudgetMs = std::min(protectedBudgetMs, baselineIntervalMs_);
-    if (hasHandoffEstimate_)
-        protectedBudgetMs -= serializedHandoffReserveMs_;
+    if (hasCopyCostEstimate_)
+        protectedBudgetMs -= serializedCopyReserveMs_;
     return std::max(0.0, protectedBudgetMs);
 }
 
 void SourceProtectionBudgetTracker::reset() {
     hasBaseline_ = false;
-    hasHandoffEstimate_ = false;
+    hasCopyCostEstimate_ = false;
     baselineIntervalMs_ = 0.0;
-    serializedHandoffReserveMs_ = 0.0;
+    serializedCopyReserveMs_ = 0.0;
     telemetry_ = {};
 }
 
@@ -855,7 +867,8 @@ std::size_t FixedSourceCadenceGovernor::plan(
         std::chrono::nanoseconds sourceInterval,
         std::size_t requestedGeneratedFrames,
         std::size_t previousDispatchedGeneratedFrames,
-        bool generationAllowed) {
+        bool generationAllowed,
+        SourceCadenceObservation previousObservation) {
     constexpr double kPressureIntervalRatio = 1.25;
     constexpr double kStableIntervalRatio = 1.10;
     constexpr double kPressureConfirmSeconds = 0.12;
@@ -916,14 +929,26 @@ std::size_t FixedSourceCadenceGovernor::plan(
         telemetry_.intervalRatio = intervalRatio;
 
         if (previousDispatchedGeneratedFrames == 0) {
-            // A HistoryOnly/source-protection cycle is the cleanest observation
-            // of the game's current cadence while LSFG preprocessing remains
-            // active. Let it re-anchor both genuine scene slowdowns and
-            // recoveries without allowing generated work to inflate the budget.
-            baselineIntervalSeconds_ += kHistoryBaselineAlpha
-                * (intervalSeconds - baselineIntervalSeconds_);
             pressureSeconds_ = 0.0;
-            recoverySeconds_ = cooldownSeconds_ <= 0.0
+
+            if (previousObservation == SourceCadenceObservation::SourceOnly) {
+                // A genuine source-only cycle may establish a naturally slower
+                // scene as well as a recovery.
+                baselineIntervalSeconds_ += kHistoryBaselineAlpha
+                    * (intervalSeconds - baselineIntervalSeconds_);
+            } else if (intervalSeconds < baselineIntervalSeconds_) {
+                // History maintenance is still LSFG-active. It may tighten the
+                // baseline but must not normalize its own slowdown.
+                baselineIntervalSeconds_ += kFasterBaselineAlpha
+                    * (intervalSeconds - baselineIntervalSeconds_);
+            }
+
+            const double protectedIntervalRatio =
+                intervalSeconds / baselineIntervalSeconds_;
+            telemetry_.intervalRatio = protectedIntervalRatio;
+            recoverySeconds_ =
+                protectedIntervalRatio <= kStableIntervalRatio
+                    && cooldownSeconds_ <= 0.0
                 ? recoverySeconds_ + evidenceSeconds
                 : 0.0;
         } else if (intervalRatio >= kPressureIntervalRatio) {
