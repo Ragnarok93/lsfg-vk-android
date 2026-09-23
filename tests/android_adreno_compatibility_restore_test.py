@@ -536,7 +536,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
     def test_runtime_policy_label_matches_split_adreno_topology(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
-        self.assertIn("host-fence-input-host-completion-adreno", policy)
+        self.assertIn("opaque-fd-input-host-completion-adreno", policy)
         self.assertIn("capability-async", policy)
 
     def test_xclipse_async_path_is_not_removed(self) -> None:
