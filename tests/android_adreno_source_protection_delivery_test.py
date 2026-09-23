@@ -300,6 +300,28 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         ):
             self.assertIn(token, source)
 
+    def test_adreno_adaptive_flow_fallback_budget_uses_protected_source_budget(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        budget_start = source.index("const double adaptiveFlowBatchBudgetMs =")
+        budget_end = source.index("const auto nextAdaptiveFlowBatch", budget_start)
+        budget = source[budget_start:budget_end]
+
+        self.assertIn("this->conservativeCrossDeviceSync_", budget)
+        self.assertIn(
+            "this->sourceProtectionBudgetTracker_.clampTimelineBudget",
+            budget,
+            "Adreno Flow fallback budget must not expand with an LSFG-stretched source interval",
+        )
+        self.assertIn("protectedAdrenoTargetBudgetMs", budget)
+
+        # The clamp is guarded by the Adreno compatibility selector, so the
+        # Xclipse/generic budget route remains unchanged.
+        clamp_pos = budget.index(
+            "this->sourceProtectionBudgetTracker_.clampTimelineBudget"
+        )
+        guard = budget[max(0, clamp_pos - 500):clamp_pos]
+        self.assertIn("this->conservativeCrossDeviceSync_", guard)
+
     def test_xclipse_history_completion_path_keeps_existing_capability_async_behavior(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         constructor_start = source.index("this->asyncFramegenCompletionEnabled_ =")
