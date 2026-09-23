@@ -47,6 +47,14 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         # than coupling the topology to an obsolete policy string.
         self.assertIn("crossDeviceSyncPolicyName", policy)
 
+        log_start = source.index('std::cerr << "lsfg-vk: LSFG compatibility path:"')
+        log_end = source.index("// Match the device-proven baseline", log_start)
+        compatibility_log = source[log_start:log_end]
+        self.assertIn('"generated-before-source-same-call"', compatibility_log)
+        self.assertIn('" synthetic_queue="', compatibility_log)
+        self.assertIn('" deadline_semantics="', compatibility_log)
+        self.assertIn('"source-protection"', compatibility_log)
+
     def test_adreno_admission_uses_source_boundary_for_fixed_and_adaptive_work(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
