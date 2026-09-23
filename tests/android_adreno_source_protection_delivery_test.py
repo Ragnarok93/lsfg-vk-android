@@ -222,23 +222,39 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn("syncFdHandoffSupported", selection)
         self.assertIn("gameImportSemaphoreFd != nullptr", selection)
 
-    def test_adreno_zero_history_exports_release_without_deferring_generated_output(self) -> None:
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+    def test_adreno_zero_history_uses_known_good_bounded_host_completion(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("asyncHistoryCompletionEnabled_", header)
+        selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
+        selection_end = source.index("const bool xclipseCompatibilityPath", selection_start)
+        selection = source[selection_start:selection_end]
+        self.assertIn(
+            "this->asyncHistoryCompletionEnabled_ = false;",
+            selection,
+            "Protected Adreno must keep zero-generation preprocessing on the "
+            "September 18 bounded-host-completion path.",
+        )
+
         history_start = source.index("if (historyOnly)")
         generation_start = source.index(
             "// 2. Tell framegen to generate intermediary frames.", history_start
         )
         history = source[history_start:generation_start]
 
-        self.assertIn("presentContextWithCountExportSyncFd", history)
-        self.assertIn("conservativePendingHistoryCompleteSemaphore_", header)
-        self.assertIn("conservativePendingHistoryCompleteValid_", header)
-        self.assertIn("conservativePendingHistoryCompleteValid_", source)
-        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", history)
-        self.assertIn("historyRequiresHostCompletionWait = false", history)
+        self.assertIn("presentContextWithCount(", history)
+        self.assertIn("metrics.windowHistoryHostCompletions++", history)
+        self.assertNotIn(
+            "exportProtectedHistoryRelease",
+            history,
+            "Adreno history maintenance must not export/import a cross-device "
+            "SYNC_FD release; that path regressed the S20+ immediately after "
+            "the first generated Fixed frame.",
+        )
+        self.assertIn(
+            "exportExistingAsyncHistory",
+            history,
+            "Xclipse/generic capability-driven async history must remain available.",
+        )
 
         # Generated Adreno completion remains the proven bounded host wait.
         selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
@@ -249,9 +265,7 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn(
             "!this->conservativeCrossDeviceSync_", generated_completion_gate
         )
-        self.assertNotIn(
-            "asyncHistoryCompletionEnabled_", generated_completion_gate
-        )
+
 
     def test_adreno_history_release_survives_source_only_bypass_until_reuse(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
