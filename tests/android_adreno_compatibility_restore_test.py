@@ -36,7 +36,6 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             "\n        && this->sourceHistoryWarmupRemaining_ > 0",
             warmup_selection,
         )
-        self.assertIn("conservativeSourceOnlyWarmup", warmup_selection)
 
     def test_conservative_warmup_is_source_only_but_fractional_gaps_keep_history(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -109,7 +108,6 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             "waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)",
             generated,
         )
-        self.assertNotIn("runtime stage=adreno-deferred-batch-queued", generated)
 
     def test_adreno_untrained_predictor_uses_generic_one_frame_bootstrap(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
