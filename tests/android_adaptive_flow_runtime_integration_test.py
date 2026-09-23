@@ -353,20 +353,10 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         observe_prefix = source[max(0, observe_start - 220):observe_start]
         self.assertIn("generatedDeadlineObservationEligible", observe_prefix)
 
-        self.assertIn("generatedAcquireTimeoutNs", source)
         self.assertIn(
-            "!conf.adaptiveFramegen && this->conservativeCrossDeviceSync_"
-            " && !this->asyncFramegenCompletionEnabled_",
+            "const uint64_t generatedAcquireTimeoutNs = 0;",
             source,
-        )
-        self.assertIn(
-            "? runtimeWaitTimeoutNs()",
-            source,
-        )
-        self.assertIn(
-            ": 0;",
-            source,
-            "Adaptive and non-conservative/Xclipse generated acquires must remain nonblocking",
+            "Synthetic WSI acquisition must remain opportunistic/nonblocking in every mode",
         )
         dispatch_start = source.index("runtime stage=framegen-dispatch-begin")
         acquire_start = source.index("ovkAcquireNextImageKHR", dispatch_start)
