@@ -133,15 +133,14 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         )
         history = source[history_start:generation_start]
 
+        self.assertIn("presentContextWithCountExportSyncFd(", history)
         self.assertIn("presentContextWithCount(", history)
-        self.assertIn("historyRequiresHostCompletionWait = true", history)
+        self.assertIn("historyRequiresHostCompletionWait", history)
         self.assertIn("noOutSems, 0", history)
         self.assertIn("this->lastDispatchedGeneratedFrameCount_ = 0;", history)
         self.assertIn("++this->conservativeFramegenSourceIndex_;", history)
-        self.assertIn(
-            'return finishSourcePresent(adaptiveSourceResult, "pre-copy-history-only");',
-            history,
-        )
+        self.assertIn("adaptiveSourceResult, \"pre-copy-history-only\"", history)
+        self.assertIn("sync-fd-next-source-copy", history)
         self.assertNotIn(
             "return presentCompatibilitySourceOnly("
             "\n            \"compat-adaptive-history-copy\"",
