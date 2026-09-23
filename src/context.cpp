@@ -3619,6 +3619,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             historyRequiresHostCompletionWait = true;
         }
 
+        // A zero-count framegen submission still advances the private temporal
+        // source pair. Keep the Adreno source-copy index in lockstep with that
+        // private history; genuine source-only warmup never enters this block.
+        if (this->conservativeCrossDeviceSync_)
+            ++this->conservativeFramegenSourceIndex_;
+
         if (historyRequiresHostCompletionWait) {
             const auto historyWaitStart = RuntimeMetrics::Clock::now();
             const uint64_t historyTimeoutNs = runtimeWaitTimeoutNs();
