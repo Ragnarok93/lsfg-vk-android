@@ -152,7 +152,7 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         # authoritative Adreno batch admission. Otherwise an LSFG-slowed source
         # can still raise the long-term Adaptive cost ceiling before admission
         # rejects the resulting work.
-        hint_start = source.index("const bool safeGenerationHintValid")
+        hint_start = source.index("const double protectedCapacityIntervalMs")
         hint_end = source.index("this->adaptiveScheduler_.setSafeGenerationHint", hint_start)
         hint = source[hint_start:hint_end]
         self.assertIn("protectedCapacityIntervalMs", hint)
