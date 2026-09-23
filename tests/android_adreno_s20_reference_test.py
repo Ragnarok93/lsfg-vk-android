@@ -165,6 +165,83 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertNotIn("deferConservativeWarmupUntilGenerationDemand", source)
 
 
+    def test_adreno_opaque_source_handoff_matches_september18_order(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        handoff_start = source.index("bool useAsyncHandoff =")
+        handoff_end = source.index("bool queuedCopyWithoutHostWait", handoff_start)
+        handoff = source[handoff_start:handoff_end]
+
+        # 364178af exported the reusable OPAQUE_FD before queue submission,
+        # then submitted the source copy with the real reusable handoff fence.
+        # SYNC_FD's post-submit export remains a non-Adreno/Xclipse-only path.
+        self.assertIn(
+            "if (this->conservativeCrossDeviceSync_) {\n"
+            "                pass.framegenInputSemaphore =\n"
+            "                    Mini::Semaphore(info.device, &framegenInputSemaphoreFd);",
+            handoff,
+        )
+        adreno_export = handoff.index(
+            "Mini::Semaphore(info.device, &framegenInputSemaphoreFd)"
+        )
+        submit = handoff.index("submitAhbHandoff(")
+        self.assertLess(adreno_export, submit)
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_\n"
+            "                ? *this->ahbHandoffFence\n"
+            "                : VK_NULL_HANDLE",
+            handoff,
+        )
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_\n"
+            "                ? this->resetHandoffFences\n"
+            "                : nullptr",
+            handoff,
+        )
+        self.assertIn(
+            "if (!this->conservativeCrossDeviceSync_) {",
+            handoff[submit:],
+            "Post-submit export is required only for the generic/SYNC_FD path.",
+        )
+
+    def test_adreno_generated_wsi_matches_september18_presentation_contract(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("// 4. Generated presentation")
+        end = source.index("#else", start)
+        generated = source[start:end]
+
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_\n"
+            "                ? runtimeWaitTimeoutNs()\n"
+            "                : 0",
+            generated,
+            "Adreno generated-image acquisition must keep the bounded September 18 wait; "
+            "Xclipse/generic keeps the newer nonblocking policy.",
+        )
+        self.assertIn(
+            "if (!this->conservativeCrossDeviceSync_\n"
+            "                && (res == VK_NOT_READY || res == VK_TIMEOUT))",
+            generated,
+        )
+        self.assertIn(
+            "const void* generatedDownstreamPNext =\n"
+            "            this->conservativeCrossDeviceSync_ && i == 0\n"
+            "                ? pNext\n"
+            "                : nullptr;",
+            generated,
+        )
+        self.assertIn(
+            "const void* finalSourceDownstreamPNext =\n"
+            "        this->conservativeCrossDeviceSync_\n"
+            "            ? (queuedGeneratedFrameCount == 0 ? pNext : nullptr)\n"
+            "            : pNext;",
+            generated,
+        )
+        self.assertIn(
+            "res = Layer::ovkQueuePresentKHR(generatedPresentQueue, &presentInfo);",
+            generated,
+        )
+
+
     def test_xclipse_async_selection_remains_capability_driven(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
