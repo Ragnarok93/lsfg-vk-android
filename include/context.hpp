@@ -229,6 +229,7 @@ private:
 
     AdaptiveFrameScheduler adaptiveScheduler_;
     FixedSourceCadenceGovernor fixedSourceCadenceGovernor_;
+    SourceProtectionBudgetTracker sourceProtectionBudgetTracker_;
     std::size_t lastDispatchedGeneratedFrameCount_{0};
     AdaptiveFlowController adaptiveFlowController_;
     AdaptiveFlowPreset adaptiveFlowPreset_{AdaptiveFlowPreset::Quality};

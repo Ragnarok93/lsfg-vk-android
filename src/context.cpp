@@ -1849,6 +1849,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    // Conservative Adreno owns a source-cadence budget independent of the
+    // raw source timeline. Generated work may tighten this baseline when the
+    // game speeds up, but may not turn LSFG-induced slowdown into more compute
+    // headroom. Source-only/history cycles remain authoritative evidence for a
+    // genuine slower scene.
+    if (sourceProtectionBatchAdmission
+            && this->currentSourceTimeline_.valid
+            && sourceInterval.count() > 0) {
+        this->sourceProtectionBudgetTracker_.observeSource(
+            sourceInterval, this->lastDispatchedGeneratedFrameCount_);
+    }
+
     // Warmup is a genuine history/lifecycle condition, not a function of
     // current fractional demand. Advance it through the conservative source
     // path even when Adaptive plans zero generated frames; otherwise a rejected
@@ -1877,10 +1889,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 metrics.totalAdmissionRejects += generatedFrameCount;
                 generatedFrameCount = 0;
             } else {
-                const double sourceBudgetMs =
+                const double rawSourceBudgetMs =
                     static_cast<double>(
                         this->currentSourceTimeline_.sourceDesiredTimeNs - admissionNowNs)
                     / 1'000'000.0;
+                const double sourceBudgetMs =
+                    sourceProtectionBatchAdmission
+                        ? this->sourceProtectionBudgetTracker_.clampTimelineBudget(
+                            rawSourceBudgetMs)
+                        : rawSourceBudgetMs;
                 computeReadyBudgetMs = sourceBudgetMs;
                 const auto plannedBatchDecision =
                     this->deadlineAdmissionPredictor_.predict(
@@ -3402,10 +3419,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     bool queuedCopyWithoutHostWait = false;
     if (!useAsyncHandoff && !asyncSubmissionIssued) {
-        // Warmup and zero-generation history are deliberately conservative:
-        // complete the game-device source upload at the host fence before the
-        // private device reuses either AHB. Ordinary generated cycles never
-        // enter this branch because they use the OPAQUE_FD handoff above.
+        // Warmup and zero-generation history are deliberately conservative.
+        // A capability-limited Adreno generated cycle also uses this proven
+        // host-fence path; reserve that serialized wait from its protected
+        // source budget rather than allowing the slowed source interval to
+        // justify more generated work on the next cycle.
+        const double handoffFenceWaitBeforeMs =
+            metrics.windowHandoffFenceWaitMs;
         submitAndWaitForAhbHandoff(
             info.device, pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
@@ -3413,6 +3433,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->waitHandoffFences,
             &metrics.windowHandoffSubmitMs,
             &metrics.windowHandoffFenceWaitMs);
+        if (this->conservativeCrossDeviceSync_
+                && !this->asyncAhbHandoffEnabled_) {
+            const double serializedHandoffWaitMs =
+                metrics.windowHandoffFenceWaitMs - handoffFenceWaitBeforeMs;
+            this->sourceProtectionBudgetTracker_.observeSerializedHandoff(
+                serializedHandoffWaitMs);
+        }
         metrics.windowSyncHandoffs++;
         metrics.totalSyncHandoffs++;
         if (consumeConservativeBatchComplete) {
@@ -4449,6 +4476,7 @@ void LsContext::resetAdaptiveSourceEpoch(
     if (resetScheduler)
         this->adaptiveScheduler_.reset();
     this->fixedSourceCadenceGovernor_.reset();
+    this->sourceProtectionBudgetTracker_.reset();
     this->advanceAdaptiveFlowTimingEpoch();
     this->deadlineAdmissionPredictor_.reset();
     this->generatedPresentationCapacityTracker_.reset();
@@ -4508,6 +4536,7 @@ void LsContext::enterSourceOnlyBypass() {
     this->advanceAdaptiveFlowTimingEpoch();
     this->adaptiveScheduler_.reset();
     this->fixedSourceCadenceGovernor_.reset();
+    this->sourceProtectionBudgetTracker_.reset();
     this->deadlineAdmissionPredictor_.reset();
     this->adaptiveFlowController_.reset();
     this->sourceTimeline_.reset();
