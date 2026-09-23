@@ -3537,10 +3537,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto waitIdleStart = RuntimeMetrics::Clock::now();
         const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
         const bool framegenReady = conf.performance
-            ? LSFG_3_1P::waitContext(
-                *this->lsfgCtxId, framegenCompletionTimeoutNs)
-            : LSFG_3_1::waitContext(
-                *this->lsfgCtxId, framegenCompletionTimeoutNs);
+            ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
+            : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
         metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - waitIdleStart).count();
 
@@ -3636,8 +3634,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     syntheticFraction);
             VkPresentTimeGOOGLE generatedPresentTime{};
             VkPresentTimesInfoGOOGLE generatedPresentTimes{};
-            const void* generatedDownstreamPNext =
-                i == 0 ? pNext : nullptr;
+            const void* generatedDownstreamPNext = i == 0 ? pNext : nullptr;
             const VkPresentInfoKHR presentInfo{
                 .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                 .pNext = adaptivePresentPNext(
