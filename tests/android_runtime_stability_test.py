@@ -224,7 +224,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("ScopedLsfgDisable disableRecursiveInterception", source)
         self.assertEqual(source.count('unsetenv("DISABLE_LSFG")'), 1)
 
-    def test_generated_wsi_acquire_is_opportunistic_and_source_safe(self) -> None:
+    def test_generated_wsi_policy_is_historical_on_adreno_and_opportunistic_elsewhere(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present_start = source.index("VkResult LsContext::present")
         desktop_start = source.index(
@@ -232,50 +232,56 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             present_start,
         )
         android_present = source[present_start:desktop_start]
-        generated_start = android_present.index(
-            "// 4. Generated presentation is opportunistic."
-        )
+        generated_start = android_present.index("// 4. Generated presentation")
         source_start = android_present.index(
             "// 5. Present the real game frame", generated_start
         )
         generated = android_present[generated_start:source_start]
 
-        self.assertIn("generatedAcquireTimeoutNs", generated)
         acquire_start = generated.index("const uint64_t generatedAcquireTimeoutNs")
         acquire_end = generated.index("auto res =", acquire_start)
         acquire = generated[acquire_start:acquire_end]
-        self.assertIn("generatedAcquireTimeoutNs = 0;", acquire)
-        self.assertNotIn("runtimeWaitTimeoutNs()", acquire)
+        self.assertIn("this->conservativeCrossDeviceSync_", acquire)
+        self.assertIn("runtimeWaitTimeoutNs()", acquire)
+        self.assertIn(": 0", acquire)
+
+        # Newer deadline/capacity policy remains available for generic/Xclipse,
+        # but the protected Adreno WSI transaction is not converted into a
+        # zero-time opportunistic acquire.
         self.assertIn("syntheticAdmissionNowNs >= syntheticDesiredTimeNs", generated)
-        self.assertIn("if (conf.adaptiveFramegen", generated)
         self.assertIn("stage=generated-deadline-drop", generated)
-        self.assertIn("res == VK_NOT_READY || res == VK_TIMEOUT", generated)
         self.assertIn(
-            "droppedGeneratedFrames = generatedFrameCount - i", generated
+            "!this->conservativeCrossDeviceSync_\n"
+            "                && (res == VK_NOT_READY || res == VK_TIMEOUT)",
+            generated,
         )
+        self.assertIn("droppedGeneratedFrames = generatedFrameCount - i", generated)
         self.assertIn("metrics.windowGeneratedLateDrops", generated)
-        self.assertIn("metrics.totalGeneratedLateDrops", generated)
+
+        # Preserve September 18 application pNext ownership on Adreno while
+        # generic/Xclipse keeps the newer source-owned chain.
+        self.assertIn("generatedDownstreamPNext", generated)
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_ && i == 0",
+            generated,
+        )
 
         source_tail = android_present[source_start:]
         self.assertIn(
             "lastPrevPostCopySemaphore = queuedGeneratedFrameCount > 0",
             source_tail,
         )
+        self.assertIn("finalSourceDownstreamPNext", source_tail)
         self.assertIn(
-            ".pNext = adaptivePresentPNext(\n"
-            "            pNext,",
+            "this->conservativeCrossDeviceSync_\n"
+            "            ? (queuedGeneratedFrameCount == 0 ? pNext : nullptr)",
             source_tail,
         )
-        self.assertIn(
-            ".pNext = adaptivePresentPNext(\n"
-            "                nullptr,",
-            generated,
-        )
-        self.assertNotIn("generatedDownstreamPNext", generated)
         self.assertIn(
             "this->lastGeneratedFrameCount_ = queuedGeneratedFrameCount",
             android_present,
         )
+
 
     def test_adreno_async_completion_enforces_post_dispatch_deadline(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
