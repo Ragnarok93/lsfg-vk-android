@@ -237,10 +237,10 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         )[1].split("pass.acquireSemaphores.at(i)", 1)[0]
         self.assertIn("if (enforcePostDispatchSyntheticDeadline", deadline)
 
-    def test_adreno_generated_acquire_is_always_nonblocking(self) -> None:
+    def test_adreno_generated_acquire_uses_september18_bounded_wait_only_on_adreno(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         generated_start = source.index(
-            "// 4. Generated presentation is opportunistic."
+            "// 4. Generated presentation"
         )
         source_start = source.index(
             "// 5. Present the real game frame", generated_start
@@ -250,8 +250,9 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         acquire_start = generated.index("const uint64_t generatedAcquireTimeoutNs")
         acquire_end = generated.index("auto res =", acquire_start)
         acquire = generated[acquire_start:acquire_end]
-        self.assertIn("generatedAcquireTimeoutNs = 0;", acquire)
-        self.assertNotIn("runtimeWaitTimeoutNs()", acquire)
+        self.assertIn("this->conservativeCrossDeviceSync_", acquire)
+        self.assertIn("runtimeWaitTimeoutNs()", acquire)
+        self.assertIn(": 0", acquire)
 
     def test_adreno_reuses_game_device_copy_command_buffers_without_changing_xclipse(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
