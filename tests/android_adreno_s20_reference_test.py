@@ -174,15 +174,16 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         # 364178af exported the reusable OPAQUE_FD before queue submission,
         # then submitted the source copy with the real reusable handoff fence.
         # SYNC_FD's post-submit export remains a non-Adreno/Xclipse-only path.
-        self.assertIn(
-            "if (this->conservativeCrossDeviceSync_) {\n"
-            "                pass.framegenInputSemaphore =\n"
-            "                    Mini::Semaphore(info.device, &framegenInputSemaphoreFd);",
-            handoff,
+        conservative_branch = handoff.index(
+            "if (this->conservativeCrossDeviceSync_) {"
         )
         adreno_export = handoff.index(
-            "Mini::Semaphore(info.device, &framegenInputSemaphoreFd)"
+            "Mini::Semaphore(info.device, &framegenInputSemaphoreFd)",
+            conservative_branch,
         )
+        generic_else = handoff.index("} else {", conservative_branch)
+        self.assertLess(conservative_branch, adreno_export)
+        self.assertLess(adreno_export, generic_else)
         submit = handoff.index("submitAhbHandoff(")
         self.assertLess(adreno_export, submit)
         self.assertIn(
