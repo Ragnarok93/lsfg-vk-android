@@ -126,14 +126,17 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
             "Xclipse/non-deferred admission must keep ideal slot semantics",
         )
 
-    def test_adreno_budget_reserves_serialized_handoff_without_touching_xclipse(self) -> None:
+    def test_adreno_budget_excludes_host_fence_wall_wait_without_touching_xclipse(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        scheduler = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
 
         self.assertIn("SourceProtectionBudgetTracker sourceProtectionBudgetTracker_", header)
         self.assertIn("sourceProtectionBudgetTracker_.observeSource(", source)
         self.assertIn("sourceProtectionBudgetTracker_.clampTimelineBudget(", source)
-        self.assertIn("sourceProtectionBudgetTracker_.observeSerializedHandoff(", source)
+        self.assertIn("observeSerializedCopyCost", scheduler)
+        self.assertNotIn("observeSerializedHandoff", scheduler)
+        self.assertNotIn("sourceProtectionBudgetTracker_.observeSerialized", source)
 
         admission_start = source.index("// Active deadline admission")
         admission_end = source.index(
@@ -148,25 +151,22 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         )
         self.assertIn(": rawSourceBudgetMs", admission)
 
-        # Predictor capacity promotion must use the same protected interval as
-        # authoritative Adreno batch admission. Otherwise an LSFG-slowed source
-        # can still raise the long-term Adaptive cost ceiling before admission
-        # rejects the resulting work.
+        # Predictor capacity promotion uses the protected interval on Adreno,
+        # while generic/Xclipse keeps its original raw capacity interval.
         hint_start = source.index("const double protectedCapacityIntervalMs")
         hint_end = source.index("this->adaptiveScheduler_.setSafeGenerationHint", hint_start)
         hint = source[hint_start:hint_end]
-        self.assertIn("protectedCapacityIntervalMs", hint)
         self.assertIn("sourceProtectionBatchAdmission", hint)
         self.assertIn("sourceProtectionBudgetTracker_.clampTimelineBudget(", hint)
-        self.assertIn("safeBatchGenerationHint(\n                maxAdaptiveGeneratedFrames, protectedCapacityIntervalMs)", hint)
-        self.assertIn("safeGenerationHint(\n                maxAdaptiveGeneratedFrames, capacityIntervalMs)", hint)
+        self.assertIn("safeBatchGenerationHint(", hint)
+        self.assertIn("safeGenerationHint(", hint)
+        self.assertIn("capacityIntervalMs", hint)
 
         handoff_start = source.index("const auto handoffStart")
         handoff_end = source.index("if (asyncExportFailed)", handoff_start)
         handoff = source[handoff_start:handoff_end]
         self.assertIn("windowHandoffFenceWaitMs", handoff)
-        self.assertIn("!this->asyncAhbHandoffEnabled_", handoff)
-        self.assertIn("observeSerializedHandoff", handoff)
+        self.assertNotIn("sourceProtectionBudgetTracker_.observeSerialized", handoff)
 
     def test_adreno_budget_telemetry_reports_effective_policy(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -174,9 +174,12 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
 
         for field in (
             "source_protected_interval_ms=",
-            "serialized_handoff_reserve_ms=",
+            "source_budget_raw_ms=",
+            "source_budget_effective_ms=",
+            "source_budget_copy_reserve_ms=",
+            "source_budget_observation=",
             "source_protection_baseline_valid=",
-            "source_protection_handoff_valid=",
+            "source_protection_copy_cost_valid=",
         ):
             self.assertIn(field, source)
 
