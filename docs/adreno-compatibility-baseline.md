@@ -93,7 +93,7 @@ invariants:
 | Xclipse | Existing capability-driven asynchronous route unchanged |
 
 The runtime synchronization policy identifier for this route is
-`opaque-fd-input-host-completion-adreno`.
+`adreno-source-protected-host-completion`.
 
 ## Rejected experiments
 
@@ -179,3 +179,51 @@ state, Fixed governor state, Adaptive demand, Flow Scale, and present failures.
 
 Deterministic contracts and Android builds are mandatory gates before device
 testing, but they do not replace the S20+ and S25 FE runtime runs.
+
+
+## Compatibility-island boundary
+
+The current scheduler architecture may evolve around this path, but the protected
+Adreno transaction is an execution compatibility island.
+
+Allowed **upstream** inputs from newer architecture:
+
+- Fixed source-cadence governor generation ceiling.
+- Adaptive frame-generation requested count.
+- Source-protection deadline admission.
+- Adaptive Flow Scale / performance-governor quality choice.
+- Telemetry, diagnostics, and cost prediction.
+
+These components may decide only **whether** a source cycle generates and **how
+many** synthetic frames are requested.
+
+Once a generated Adreno cycle is admitted, the downstream transaction is frozen
+to the September 18 reference:
+
+1. Export the reusable OPAQUE_FD source-handoff semaphore before submission.
+2. Submit the source AHB copy on the application graphics queue with the reusable
+   handoff fence attached, without host-waiting that fence.
+3. Dispatch private framegen using that OPAQUE_FD input.
+4. Perform bounded host completion before the game device reads generated AHBs.
+5. Acquire generated swapchain images with the historical bounded wait.
+6. Present generated images before the matching real source in the same
+   intercepted call.
+7. Preserve the September 18 application-pNext ownership: the first generated
+   present owns the downstream application chain when synthetics exist; otherwise
+   the real source owns it.
+8. Present the matching real source last.
+
+Zero-generation Adreno history cycles remain conservative: host-fence the source
+copy, execute zero-count private preprocessing, complete it on the host, then
+present the source. Cross-device zero-history SYNC_FD release is prohibited on
+this compatibility path.
+
+The following are **not** valid governor adaptations for Adreno: synthetic game
+queues, cross-call source buffering, deferred generated completion, zero-time
+generated WSI acquisition, cross-device zero-history release, or changing
+generated/source present order. Xclipse and generic capability paths are outside
+this compatibility island and retain their current behavior.
+
+Runtime diagnostics must report
+`execution_reference=364178af-sep18 governor_adapter=admission-only` whenever
+this path is selected.
