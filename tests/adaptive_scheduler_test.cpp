@@ -936,41 +936,49 @@ int main() {
     }
 
     {
-        // Conservative Adreno host-fence admission must protect the cadence
-        // learned from source-owned cycles. Generated work may tighten that
-        // cadence when the game speeds up, but it must not turn its own source
-        // slowdown into a larger future compute budget. The synchronous AHB
-        // handoff is serialized on the intercepted present thread, so its
-        // measured host wait consumes the same protected source interval.
+        // Source protection must distinguish a real source-only cadence sample
+        // from LSFG history maintenance. A host-fence wall wait includes the
+        // game's render dependency and must never be treated as pure LSFG copy
+        // overhead. Only the incremental source-copy cost may reserve budget.
         SourceProtectionBudgetTracker budget;
-        budget.observeSource(40ms, 0);
-        budget.observeSerializedHandoff(10.0);
+        budget.observeSource(
+            40ms, SourceCadenceObservation::HistoryMaintenance);
+        budget.observeSerializedCopyCost(1.5);
         assert(budget.telemetry().baselineValid);
-        assert(budget.telemetry().handoffValid);
+        assert(budget.telemetry().copyCostValid);
         assert(budget.telemetry().protectedSourceIntervalMs > 39.9);
         assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
-        assert(budget.clampTimelineBudget(80.0) > 29.9);
-        assert(budget.clampTimelineBudget(80.0) < 30.1);
+        assert(budget.telemetry().serializedCopyReserveMs > 1.4);
+        assert(budget.telemetry().serializedCopyReserveMs < 1.6);
+        assert(budget.clampTimelineBudget(80.0) > 38.4);
+        assert(budget.clampTimelineBudget(80.0) < 38.6);
 
-        // LSFG-induced 80 ms source intervals must not inflate a 40 ms clean
-        // baseline while generated work was active.
-        for (int i = 0; i < 6; ++i)
-            budget.observeSource(80ms, 1);
-        assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
-        assert(budget.clampTimelineBudget(100.0) < 30.1);
-
-        // A genuine slower scene eventually re-anchors from source-only/history
-        // evidence, preserving cadence-relative behavior at every frame rate.
+        // History maintenance is not clean evidence of a naturally slower game.
+        // Its own preprocessing/ownership work may have stretched the interval,
+        // so it may tighten a baseline but may not move it slower.
         for (int i = 0; i < 8; ++i)
-            budget.observeSource(80ms, 0);
-        assert(budget.telemetry().protectedSourceIntervalMs > 75.0);
-        assert(budget.clampTimelineBudget(100.0) > 65.0);
+            budget.observeSource(
+                80ms, SourceCadenceObservation::HistoryMaintenance);
+        assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
 
-        // Serialized pressure rises quickly so one expensive source handoff
-        // cannot keep granting stale compute headroom for several more frames.
-        budget.observeSerializedHandoff(30.0);
-        assert(budget.telemetry().serializedHandoffReserveMs >= 20.0);
-        assert(budget.clampTimelineBudget(100.0) < 60.0);
+        // Generated work follows the same one-way rule.
+        for (int i = 0; i < 6; ++i)
+            budget.observeSource(
+                80ms, SourceCadenceObservation::Generated);
+        assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
+
+        // A genuine source-only observation remains the authority for a natural
+        // scene-rate transition in either direction.
+        for (int i = 0; i < 8; ++i)
+            budget.observeSource(
+                80ms, SourceCadenceObservation::SourceOnly);
+        assert(budget.telemetry().protectedSourceIntervalMs > 75.0);
+
+        // A larger measured copy cost may tighten the budget, but an unrelated
+        // render/fence wall wait never enters this API.
+        budget.observeSerializedCopyCost(4.0);
+        assert(budget.telemetry().serializedCopyReserveMs > 2.7);
+        assert(budget.clampTimelineBudget(100.0) > 72.0);
     }
 
     {
@@ -1030,6 +1038,42 @@ int main() {
         // eventually permits a cautious one-frame probe again.
         for (int i = 0; i < 20 && count == 0; ++i)
             count = governor.plan(60ms, 1, 0, true);
+        assert(count == 1);
+    }
+
+    {
+        // A HistoryOnly interval is still LSFG-active on protected Adreno.
+        // Once Fixed backs off, those maintenance intervals must not redefine a
+        // faster clean baseline as a naturally slower game and immediately
+        // restart the same hitch-producing probe loop.
+        FixedSourceCadenceGovernor governor;
+        governor.plan(
+            40ms, 1, 0, false, SourceCadenceObservation::SourceOnly);
+        std::size_t count = governor.plan(
+            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance);
+        assert(count == 1);
+
+        bool backedOff = false;
+        for (int i = 0; i < 3; ++i) {
+            count = governor.plan(
+                70ms, 1, count, true, SourceCadenceObservation::Generated);
+            backedOff = backedOff || governor.telemetry().backedOff;
+        }
+        assert(backedOff);
+        assert(count == 0);
+
+        for (int i = 0; i < 20; ++i)
+            count = governor.plan(
+                60ms, 1, 0, true,
+                SourceCadenceObservation::HistoryMaintenance);
+        assert(governor.telemetry().baselineSourceFps > 24.0);
+        assert(count == 0);
+
+        // Clean source-only evidence can still establish a genuinely slower
+        // scene and eventually permit a cautious probe.
+        for (int i = 0; i < 20 && count == 0; ++i)
+            count = governor.plan(
+                60ms, 1, 0, true, SourceCadenceObservation::SourceOnly);
         assert(count == 1);
     }
 
