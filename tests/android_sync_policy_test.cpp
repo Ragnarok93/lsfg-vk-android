@@ -4,6 +4,7 @@
 
 int main() {
     using AndroidSyncPolicy::FramegenCompatibilityPath;
+    using AndroidSyncPolicy::crossDeviceSyncPolicyName;
     using AndroidSyncPolicy::requiresConservativeCrossDeviceSync;
     using AndroidSyncPolicy::selectFramegenCompatibilityPath;
 
@@ -41,6 +42,11 @@ int main() {
     assert(selectFramegenCompatibilityPath(
         static_cast<VkDriverId>(0), "unknown", "Generic GPU")
         == FramegenCompatibilityPath::Generic);
+
+    assert(std::string_view(crossDeviceSyncPolicyName(true))
+        == "opaque-fd-input-host-completion-adreno");
+    assert(std::string_view(crossDeviceSyncPolicyName(false))
+        == "capability-async");
 
     return 0;
 }
