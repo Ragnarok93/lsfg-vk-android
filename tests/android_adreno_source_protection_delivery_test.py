@@ -148,6 +148,19 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         )
         self.assertIn(": rawSourceBudgetMs", admission)
 
+        # Predictor capacity promotion must use the same protected interval as
+        # authoritative Adreno batch admission. Otherwise an LSFG-slowed source
+        # can still raise the long-term Adaptive cost ceiling before admission
+        # rejects the resulting work.
+        hint_start = source.index("const bool safeGenerationHintValid")
+        hint_end = source.index("this->adaptiveScheduler_.setSafeGenerationHint", hint_start)
+        hint = source[hint_start:hint_end]
+        self.assertIn("protectedCapacityIntervalMs", hint)
+        self.assertIn("sourceProtectionBatchAdmission", hint)
+        self.assertIn("sourceProtectionBudgetTracker_.clampTimelineBudget(", hint)
+        self.assertIn("safeBatchGenerationHint(\n                maxAdaptiveGeneratedFrames, protectedCapacityIntervalMs)", hint)
+        self.assertIn("safeGenerationHint(\n                maxAdaptiveGeneratedFrames, capacityIntervalMs)", hint)
+
         handoff_start = source.index("const auto handoffStart")
         handoff_end = source.index("if (asyncExportFailed)", handoff_start)
         handoff = source[handoff_start:handoff_end]
