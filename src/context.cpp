@@ -2240,12 +2240,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && (conservativeAdmissionRejectedHistoryGap
             || conservativeFractionalHistoryGap
             || conservativeZeroDemandHistoryGap);
+    // Fixed source-protection rejection is still a history-maintenance
+    // cycle. Whether the governor planned zero work or deadline admission
+    // reduced planned work to zero, keep the source pair coherent instead of
+    // reclassifying the cycle as a true source-only bypass.
     const bool conservativeFixedHistoryGap =
         this->conservativeCrossDeviceSync_
         && !conf.adaptiveFramegen
         && !sourceHistoryWarmupActive
         && !sourceTimelineDiscontinuity
-        && plannedGeneratedFrameCount == 0
         && generatedFrameCount == 0;
     const bool conservativeHistoryGap =
         this->conservativeCrossDeviceSync_
