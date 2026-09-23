@@ -126,6 +126,35 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
             "Xclipse/non-deferred admission must keep ideal slot semantics",
         )
 
+    def test_adreno_budget_reserves_serialized_handoff_without_touching_xclipse(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("SourceProtectionBudgetTracker sourceProtectionBudgetTracker_", header)
+        self.assertIn("sourceProtectionBudgetTracker_.observeSource(", source)
+        self.assertIn("sourceProtectionBudgetTracker_.clampTimelineBudget(", source)
+        self.assertIn("sourceProtectionBudgetTracker_.observeSerializedHandoff(", source)
+
+        admission_start = source.index("// Active deadline admission")
+        admission_end = source.index(
+            "const auto& outputCadenceForPresentation", admission_start
+        )
+        admission = source[admission_start:admission_end]
+        self.assertIn("rawSourceBudgetMs", admission)
+        self.assertIn(
+            "sourceProtectionBatchAdmission\n"
+            "                        ? this->sourceProtectionBudgetTracker_.clampTimelineBudget(",
+            admission,
+        )
+        self.assertIn(": rawSourceBudgetMs", admission)
+
+        handoff_start = source.index("const auto handoffStart")
+        handoff_end = source.index("if (asyncExportFailed)", handoff_start)
+        handoff = source[handoff_start:handoff_end]
+        self.assertIn("windowHandoffFenceWaitMs", handoff)
+        self.assertIn("!this->asyncAhbHandoffEnabled_", handoff)
+        self.assertIn("observeSerializedHandoff", handoff)
+
     def test_xclipse_capability_async_policy_remains_separate(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(
             encoding="utf-8"
