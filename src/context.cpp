@@ -846,15 +846,14 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                 ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
                 : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
     }
-    // Zero-generation Adreno preprocessing owns no generated output. It may
-    // therefore export only the private-device source-release dependency and
-    // let the next game-device source copy consume that SYNC_FD on-GPU. This
-    // is deliberately separate from generated completion, which remains the
-    // proven bounded host wait on the protected Adreno path.
-    this->asyncHistoryCompletionEnabled_ =
-        this->conservativeCrossDeviceSync_
-        && syncFdHandoffSupported
-        && gameImportSemaphoreFd != nullptr;
+    // September 18's proven Adreno 6xx topology keeps zero-generation
+    // temporal preprocessing conservative: host-fence the source copy, run the
+    // private zero-count pass, and return only after its bounded private-device
+    // completion. Do not carry a private SYNC_FD release into the next game
+    // source copy; enabling that path caused the S20+ Fixed-mode r28 regression.
+    // Xclipse/generic asynchronous completion remains selected independently
+    // below through asyncFramegenCompletionEnabled_.
+    this->asyncHistoryCompletionEnabled_ = false;
     this->asyncFramegenCompletionEnabled_ =
         !this->conservativeCrossDeviceSync_
         && syncFdHandoffSupported
@@ -3711,21 +3710,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto adaptiveFlowBatch = nextAdaptiveFlowBatch();
 
         // Zero-generation cadence still refreshes Mipmaps/Alpha temporal state.
-        // Protected Adreno may export only that private preprocessing release as
-        // SYNC_FD; the matching source is presented immediately and the *next*
-        // source-copy submission consumes the release on-GPU. Generated output
-        // is never deferred and generated completion remains host-bounded.
+        // Protected Adreno deliberately uses the September 18 host-complete
+        // zero-count path before presenting the matching source. Xclipse/generic
+        // capability paths may keep exporting their existing asynchronous
+        // history release. Generated output is never deferred.
         std::vector<int> noOutSems;
         LSFG::AndroidFrameSyncFds historySync{};
         bool historyRequiresHostCompletionWait = false;
         bool historyReleaseImported = false;
         const bool exportExistingAsyncHistory =
             this->asyncFramegenCompletionEnabled_ && useAsyncHandoff;
-        const bool exportProtectedHistoryRelease =
-            this->conservativeCrossDeviceSync_
-            && this->asyncHistoryCompletionEnabled_;
-        const bool exportHistoryRelease =
-            exportExistingAsyncHistory || exportProtectedHistoryRelease;
+        const bool exportHistoryRelease = exportExistingAsyncHistory;
         const auto historyAdvanceStart = RuntimeMetrics::Clock::now();
 
         if (exportHistoryRelease) {
