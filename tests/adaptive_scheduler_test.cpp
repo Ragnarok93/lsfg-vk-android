@@ -935,7 +935,7 @@ int main() {
         assert(tooExpensiveBatchHint == 0);
     }
 
-
+    {
         // Fixed mode learns a source baseline without generated work, starts
         // conservatively, and reaches the requested ceiling only after stable
         // source cadence. No absolute FPS threshold participates.
