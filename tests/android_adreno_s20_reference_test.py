@@ -247,6 +247,47 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         )
 
 
+    def test_adreno_execution_island_matches_september_18_transport_contract(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+
+        # New governors may choose the admitted/interpolation count and Flow
+        # metadata before entering this block. They may not alter the proven
+        # September 18 cross-device/presentation topology inside it.
+        self.assertIn("generatedFrameCount > 0", adreno)
+        self.assertIn("!sourceHistoryWarmupActive", adreno)
+        self.assertNotIn("conservativeFramegenSourceIndex_", adreno)
+        self.assertNotIn("conservativePendingBatchComplete", adreno)
+        self.assertNotIn("conservativePendingHistoryComplete", adreno)
+        self.assertNotIn("deferredAdreno", adreno)
+        self.assertNotIn("crossFrameWaitRetentions", adreno)
+
+        self.assertIn("submitAhbHandoff(", adreno)
+        self.assertIn("submitAndWaitForAhbHandoff(", adreno)
+        self.assertIn("presentContextWithCount(", adreno)
+        self.assertNotIn("presentContextWithCountExportSyncFd(", adreno)
+        self.assertIn("waitContext(*this->lsfgCtxId", adreno)
+
+        self.assertIn("runtimeWaitTimeoutNs()", adreno)
+        self.assertNotIn("generatedAcquireTimeoutNs = 0", adreno)
+        self.assertNotIn("VK_NOT_READY", adreno)
+        self.assertNotIn("generated-wsi-drop", adreno)
+
+        self.assertIn(
+            "const void* generatedDownstreamPNext = i == 0 ? pNext : nullptr;",
+            adreno,
+        )
+        self.assertIn(
+            "const void* finalSourceDownstreamPNext =\n"
+            "            generatedFrameCount == 0 ? pNext : nullptr;",
+            adreno,
+        )
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, &presentInfo)", adreno)
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, &finalPresentInfo)", adreno)
+
     def test_xclipse_async_selection_remains_capability_driven(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
