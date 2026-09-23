@@ -113,6 +113,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             source,
         )
         self.assertIn("conservativeSourceOnlyWarmup", source)
+        self.assertNotIn("deferConservativeWarmupUntilGenerationDemand", source)
 
     def test_xclipse_async_selection_remains_capability_driven(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")

@@ -24,25 +24,19 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("this->asyncAhbHandoffEnabled_", source)
         self.assertIn("this->asyncFramegenCompletionEnabled_", source)
 
-    def test_adreno_zero_demand_defers_reprime_until_generation_is_requested(self) -> None:
+    def test_adreno_warmup_is_not_latched_by_zero_generation_demand(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("const bool deferConservativeWarmupUntilGenerationDemand")
+        start = source.index("const bool sourceHistoryWarmupActive")
         end = source.index("// Active deadline admission", start)
         warmup_selection = source[start:end]
 
-        self.assertIn("this->conservativeCrossDeviceSync_", warmup_selection)
-        self.assertIn("conf.adaptiveFramegen", warmup_selection)
-        self.assertIn("plannedGeneratedFrameCount == 0", warmup_selection)
+        self.assertNotIn("deferConservativeWarmupUntilGenerationDemand", warmup_selection)
         self.assertIn(
-            "&& !deferConservativeWarmupUntilGenerationDemand",
+            "this->requiresSourceHistoryWarmup_"
+            "\n        && this->sourceHistoryWarmupRemaining_ > 0",
             warmup_selection,
         )
-
-        warmup = source.split("if (conservativeSourceOnlyWarmup)", 1)[1].split(
-            "if (historyOnly)", 1
-        )[0]
-        self.assertIn("--this->sourceHistoryWarmupRemaining_", warmup)
-        self.assertIn("presentCompatibilitySourceOnly", warmup)
+        self.assertIn("conservativeSourceOnlyWarmup", warmup_selection)
 
     def test_conservative_warmup_is_source_only_but_fractional_gaps_keep_history(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
