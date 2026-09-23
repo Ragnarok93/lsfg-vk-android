@@ -1778,7 +1778,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     if (conf.adaptiveFramegen)
         this->fixedSourceCadenceGovernor_.reset();
-    const size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
+    size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
         : this->fixedSourceCadenceGovernor_.plan(
             sourceInterval,
