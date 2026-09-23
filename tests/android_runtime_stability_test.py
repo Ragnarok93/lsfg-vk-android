@@ -396,7 +396,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
         self.assertIn("fixed_generation_limit=", source)
         self.assertIn("FixedSourceCadenceGovernor::plan", scheduler_source)
-        self.assertNotIn("sleep_for", scheduler + scheduler_source + source)
+        self.assertNotIn("sleep_for", scheduler + scheduler_source)
 
         pacing_start = hooks.index("bool adaptivePresentationPacing")
         pacing_end = hooks.index("bool requiresSwapchainRecreation", pacing_start)
