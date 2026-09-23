@@ -142,49 +142,37 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
 
 
 
-    def test_adreno_pass_ring_pressure_does_not_restart_reprime_epoch(self) -> None:
+    def test_adreno_bypasses_newer_pass_ring_retirement_path(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("if (!this->tryRecyclePass(pass))")
-        end = source.index("#ifdef __ANDROID__", start + 1)
-        # Include the Android-specific branch immediately following the
-        # successful passthrough present.
-        end = source.index("#endif", end) + len("#endif")
-        pressure = source[start:end]
 
-        self.assertIn("this->conservativeCrossDeviceSync_", pressure)
         self.assertIn(
-            "kConservativeSourceReprimeFrames - 1",
-            pressure,
-            "Adreno pass pressure should request only the one copy needed to reprime",
+            "if (!this->conservativeCrossDeviceSync_ "
+            "&& !this->tryRecyclePass(pass))",
+            source,
         )
-        self.assertIn("previousSourceCopySignalValid_ = false", pressure)
-        self.assertIn("lastDispatchedGeneratedFrameCount_ = 0", pressure)
-        self.assertIn(
-            "else {\n                this->resetAdaptiveSourceEpoch(\n"
-            "                true, SourceHistoryInvalidationReason::TimelineDiscontinuity);",
-            pressure,
-            "non-Adreno/Xclipse behavior must keep the existing epoch reset",
-        )
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+        self.assertNotIn("tryRecyclePass", adreno)
+        self.assertNotIn("submitPassCompletionFence", adreno)
+        self.assertNotIn("SourceHistoryInvalidationReason::SourcePairMismatch", adreno)
 
-        adreno_branch = pressure.split(
-            "if (this->conservativeCrossDeviceSync_)", 1
-        )[1].split("} else {", 1)[0]
-        self.assertNotIn("resetAdaptiveSourceEpoch", adreno_branch)
-        self.assertNotIn("sourceTimeline_.reset", adreno_branch)
-        self.assertNotIn("adaptiveScheduler_.reset", adreno_branch)
-
-    def test_adreno_host_completion_timeout_uses_normal_recovery_not_history_loop(self) -> None:
+    def test_adreno_host_completion_timeout_matches_september_18_recovery(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("if (!framegenReady)")
-        end = source.index("if (firstPresentDiagnostic)", start)
-        timeout = source[start:end]
 
-        self.assertIn("adrenoHostCompletionFallback", timeout)
-        self.assertIn("conservativePendingBatchCompleteValid_ = false", timeout)
-        self.assertIn('"pre-copy-timeout"', timeout)
-        self.assertNotIn('"framegen-timeout-source-only"', timeout)
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+        start = adreno.index("if (!framegenReady)")
+        stop = adreno.index("metrics.windowGeneratedCompleted", start)
+        timeout = adreno[start:stop]
+
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo)", timeout)
+        self.assertIn("VK_ERROR_OUT_OF_DATE_KHR", timeout)
+        self.assertIn("pre-copy-adreno-364178af-timeout", timeout)
+        self.assertNotIn("conservativePendingBatchComplete", timeout)
+        self.assertNotIn("deferredAdreno", timeout)
         self.assertNotIn("sourceHistoryWarmupRemaining_", timeout)
-
 
     def test_adreno_adaptive_flow_budget_is_clamped_to_target_cadence(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
