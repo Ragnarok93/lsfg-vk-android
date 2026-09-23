@@ -1737,8 +1737,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             ? static_cast<size_t>(conf.multiplier - 1)
             : 0;
     const bool sourceProtectionBatchAdmission =
-        this->conservativeCrossDeviceSync_
-        && this->deferredAdrenoCompletionEnabled_;
+        this->conservativeCrossDeviceSync_;
     const char* deadlineSemantics =
         sourceProtectionBatchAdmission
             ? "source-protection"
@@ -1860,13 +1859,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && !deferConservativeWarmupUntilGenerationDemand;
 
     // Active deadline admission: generation is subordinate to the protected
-    // source timeline. Use measured GPU cost to choose the largest evenly
-    // distributed synthetic count whose prefixes can meet their own slots.
+    // real-source boundary. Adreno tests a complete candidate batch against
+    // that boundary; Xclipse/generic paths retain ideal-slot admission.
     // A rejected opportunity is dropped, never accumulated as catch-up debt.
     this->deadlineBatchDecision_ = {};
     // The historical Adreno scheduler does not need a synthetic readiness
     // bootstrap. Cost estimates are learned from completed batches below.
-    if (conf.adaptiveFramegen
+    if ((conf.adaptiveFramegen || sourceProtectionBatchAdmission)
             && !sourceHistoryWarmupActive
             && generatedFrameCount > 0
             && this->currentSourceTimeline_.valid) {
@@ -2177,6 +2176,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && (conservativeAdmissionRejectedHistoryGap
             || conservativeFractionalHistoryGap
             || conservativeZeroDemandHistoryGap);
+    const bool conservativeFixedHistoryGap =
+        this->conservativeCrossDeviceSync_
+        && !conf.adaptiveFramegen
+        && !sourceHistoryWarmupActive
+        && !sourceTimelineDiscontinuity
+        && plannedGeneratedFrameCount == 0
+        && generatedFrameCount == 0;
+    const bool conservativeHistoryGap =
+        this->conservativeCrossDeviceSync_
+        && !sourceHistoryWarmupActive
+        && !sourceTimelineDiscontinuity
+        && generatedFrameCount == 0
+        && (conservativeAdaptiveHistoryGap || conservativeFixedHistoryGap);
     const bool conservativeSourceOnlyWarmup =
         this->conservativeCrossDeviceSync_
         && sourceHistoryWarmupActive;
@@ -2184,7 +2196,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->conservativeCrossDeviceSync_
         && historyOnly
         && !conservativeSourceOnlyWarmup
-        && !conservativeAdaptiveHistoryGap;
+        && !conservativeHistoryGap;
 
     this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
 
@@ -3316,14 +3328,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     };
 
     // Xclipse keeps the async handoff for every private-history/generation
-    // cycle. Conservative Adreno exports one-shot SYNC_FD only for cycles that
-    // actually generate. Reprime and fractional zero-generation cycles queue a
-    // game-device copy for source-pair parity without crossing into framegen.
+    // cycle. Ordinary generated Adreno cycles use the validated OPAQUE_FD
+    // GPU-semaphore handoff; warmup and zero-generation history cycles use the
+    // conservative host-fence path. No generated completion is deferred.
     bool useAsyncHandoff =
         this->asyncAhbHandoffEnabled_
         && (!this->conservativeCrossDeviceSync_
             || (!conservativeSourceOnlyWarmup
-                && !conservativeAdaptiveHistoryGap
+                && !conservativeHistoryGap
                 && !conservativeTrueSourceOnlyCycle));
     bool asyncSubmissionIssued = false;
     bool asyncExportFailed = false;
@@ -3391,30 +3403,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     bool queuedCopyWithoutHostWait = false;
     if (!useAsyncHandoff && !asyncSubmissionIssued) {
-        const bool conservativeCopyOnlyHistory =
-            conservativeSourceOnlyWarmup
-            || conservativeAdaptiveHistoryGap;
-        if (conservativeCopyOnlyHistory) {
-            const auto copyOnlySubmitStart = RuntimeMetrics::Clock::now();
-            submitAhbHandoff(
-                info.device, pass.preCopyBuf, info.queue.second,
-                gameRenderSemaphores2, preCopySignals,
-                VK_NULL_HANDLE, nullptr);
-            metrics.windowHandoffSubmitMs +=
-                std::chrono::duration<double, std::milli>(
-                    RuntimeMetrics::Clock::now() - copyOnlySubmitStart).count();
-            queuedCopyWithoutHostWait = true;
-        } else {
-            submitAndWaitForAhbHandoff(
-                info.device, pass.preCopyBuf, info.queue.second,
-                gameRenderSemaphores2, preCopySignals,
-                *this->ahbHandoffFence, this->resetHandoffFences,
-                this->waitHandoffFences,
-                &metrics.windowHandoffSubmitMs,
-                &metrics.windowHandoffFenceWaitMs);
-            metrics.windowSyncHandoffs++;
-            metrics.totalSyncHandoffs++;
-        }
+        // Warmup and zero-generation history are deliberately conservative:
+        // complete the game-device source upload at the host fence before the
+        // private device reuses either AHB. Ordinary generated cycles never
+        // enter this branch because they use the OPAQUE_FD handoff above.
+        submitAndWaitForAhbHandoff(
+            info.device, pass.preCopyBuf, info.queue.second,
+            gameRenderSemaphores2, preCopySignals,
+            *this->ahbHandoffFence, this->resetHandoffFences,
+            this->waitHandoffFences,
+            &metrics.windowHandoffSubmitMs,
+            &metrics.windowHandoffFenceWaitMs);
+        metrics.windowSyncHandoffs++;
+        metrics.totalSyncHandoffs++;
         if (consumeConservativeBatchComplete) {
             if (this->conservativePendingBatchCompletePollFd_ >= 0) {
                 ::close(this->conservativePendingBatchCompletePollFd_);
@@ -3527,36 +3528,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return finishSourcePresent(sourceResult, sourceWait);
     };
 
-    if (conservativeAdaptiveHistoryGap) {
-        // Admission rejection and fractional/zero-demand cadence gaps are
-        // consumed opportunities. Keep the source-pair copy chain coherent,
-        // do not enter private framegen, and do not request a reprime.
-        const char* historyGapReason =
-            conservativeAdmissionRejectedHistoryGap
-                ? "admission_reject"
-                : (conservativeFractionalHistoryGap
-                    ? "fractional_gap"
-                    : "zero_demand");
-        this->lastDispatchedGeneratedFrameCount_ = 0;
-        this->lastGeneratedFrameCount_ = 0;
-        pass.framegenBatchCompleteValid = false;
-        updateAdaptiveFlowGovernor();
-        metrics.windowAdaptiveZeroGenerationCycles++;
-        metrics.totalAdaptiveZeroGenerationCycles++;
-        if (firstPresentDiagnostic || conservativeAdmissionRejectedHistoryGap) {
-            std::cerr << "lsfg-vk: runtime stage=compat-adaptive-history-gap"
-                      << " history_gap_reason=" << historyGapReason
-                      << " history_invalidation_reason=none"
-                      << " history_reprime_reason=none"
-                      << " planned=" << plannedGeneratedFrameCount
-                      << " admitted=" << generatedFrameCount
-                      << "\n";
-        }
-        return presentCompatibilitySourceOnly(
-            "compat-adaptive-history-copy",
-            "pre-copy-compat-adaptive-history");
-    }
-
+    // Adaptive/fixed zero-generation gaps are ordinary temporal-history
+    // cycles. They continue through the zero-count framegen path below so the
+    // alternating source AHB pair and private temporal index stay coherent.
+    // Only genuine warmup/discontinuity/ownership cases use source-only bypass.
     if (conservativeSourceOnlyWarmup) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
         this->lastGeneratedFrameCount_ = 0;
@@ -4120,10 +4095,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
-        const uint64_t generatedAcquireTimeoutNs =
-            !conf.adaptiveFramegen && this->conservativeCrossDeviceSync_ && !this->asyncFramegenCompletionEnabled_
-                ? runtimeWaitTimeoutNs()
-                : 0;
+        // Generated WSI acquisition is opportunistic in every mode.
+        // Fixed multipliers are ceilings; the real source must never sleep while
+        // waiting for a synthetic swapchain image.
+        const uint64_t generatedAcquireTimeoutNs = 0;
         auto res = Layer::ovkAcquireNextImageKHR(
             info.device, this->swapchain, generatedAcquireTimeoutNs,
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
