@@ -846,6 +846,15 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                 ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
                 : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
     }
+    // Zero-generation Adreno preprocessing owns no generated output. It may
+    // therefore export only the private-device source-release dependency and
+    // let the next game-device source copy consume that SYNC_FD on-GPU. This
+    // is deliberately separate from generated completion, which remains the
+    // proven bounded host wait on the protected Adreno path.
+    this->asyncHistoryCompletionEnabled_ =
+        this->conservativeCrossDeviceSync_
+        && syncFdHandoffSupported
+        && gameImportSemaphoreFd != nullptr;
     this->asyncFramegenCompletionEnabled_ =
         !this->conservativeCrossDeviceSync_
         && syncFdHandoffSupported
@@ -885,6 +894,10 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
               << AndroidSyncPolicy::compatibilityPathName(
                     this->compatibilityPath_)
               << " completion=" << compatibilityCompletion
+              << " history_completion="
+              << (this->asyncHistoryCompletionEnabled_
+                    ? "sync-fd-release"
+                    : "host-wait")
               << " handoff="
               << (this->asyncAhbHandoffEnabled_
                     ? handoffTypeName(this->asyncAhbHandoffHandleType_)
@@ -932,6 +945,10 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     : (this->deferredAdrenoCompletionEnabled_
                         ? "deferred-sync-fd"
                         : "host-wait"))
+              << ", historyCompletion="
+              << (this->asyncHistoryCompletionEnabled_
+                    ? "sync-fd-release"
+                    : "host-wait")
               << ", sync_policy="
               << AndroidSyncPolicy::crossDeviceSyncPolicyName(
                     this->conservativeCrossDeviceSync_)
