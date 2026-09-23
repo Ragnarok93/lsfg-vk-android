@@ -1687,6 +1687,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 // request only the single copy needed to reprime the skipped
                 // source before the next generated batch.
                 this->lastDispatchedGeneratedFrameCount_ = 0;
+                this->lastSourceCadenceObservation_ =
+                    SourceCadenceObservation::SourceOnly;
                 this->previousSourceCopySignalValid_ = false;
                 this->sourceHistoryWarmupRemaining_ = std::max(
                     this->sourceHistoryWarmupRemaining_,
@@ -1770,7 +1772,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     double sourceBudgetRawMs = 0.0;
     double sourceBudgetEffectiveMs = 0.0;
     const SourceCadenceObservation previousSourceCadenceObservation =
-        this->lastSourceCadenceObservation_;
+        this->conservativeCrossDeviceSync_
+            ? this->lastSourceCadenceObservation_
+            : (this->lastDispatchedGeneratedFrameCount_ > 0
+                ? SourceCadenceObservation::Generated
+                : SourceCadenceObservation::SourceOnly);
 
     // Capacity feedback is advisory and comes from the previous measured GPU
     // cost/timeline. It may accelerate one scheduler level only after repeated
@@ -3236,6 +3242,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && (conservativeTrueSourceOnlyCycle || conservativeBatchStillInFlight);
     if (conservativePreCopySourceBypass) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
+        this->lastSourceCadenceObservation_ =
+            SourceCadenceObservation::SourceOnly;
         this->lastGeneratedFrameCount_ = 0;
         this->previousSourceCopySignalValid_ = false;
         this->sourceHistoryWarmupRemaining_ =
@@ -3516,6 +3524,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     if (asyncExportFailed) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
+        this->lastSourceCadenceObservation_ =
+            SourceCadenceObservation::HistoryMaintenance;
         this->sourceHistoryWarmupRemaining_ =
             this->conservativeCrossDeviceSync_
                 ? kConservativeSourceReprimeFrames
@@ -3604,6 +3614,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // Only genuine warmup/discontinuity/ownership cases use source-only bypass.
     if (conservativeSourceOnlyWarmup) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
+        this->lastSourceCadenceObservation_ =
+            SourceCadenceObservation::HistoryMaintenance;
         this->lastGeneratedFrameCount_ = 0;
         pass.framegenBatchCompleteValid = false;
         if (this->sourceHistoryWarmupRemaining_ > 0)
@@ -3868,6 +3880,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
 
     this->lastDispatchedGeneratedFrameCount_ = generatedFrameCount;
+    this->lastSourceCadenceObservation_ =
+        SourceCadenceObservation::Generated;
     const auto adaptiveFlowBatch = nextAdaptiveFlowBatch();
 
     // 2. Tell framegen to generate intermediary frames. Xclipse/generic
