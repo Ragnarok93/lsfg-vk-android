@@ -3334,8 +3334,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
     RenderPassInfo* previousPass = nullptr;
     bool consumePreviousBatchComplete = false;
+    bool consumePreviousHistoryComplete = false;
     if (this->frameIdx > 0)
         previousPass = &this->passInfos.at((this->frameIdx - 1) % 8);
+    if (previousPass != nullptr && previousPass->historyBatchCompleteValid) {
+        // The previous zero-generation private pass released the shared source
+        // AHB pair via SYNC_FD. Consume that release only on the next source
+        // copy submit; the CPU never waits for history preprocessing here.
+        metrics.windowHandoffBatchDeps++;
+        pass.crossFrameWaitRetentions.emplace_back(
+            previousPass->historyBatchCompleteSemaphore);
+        gameRenderSemaphores2.emplace_back(
+            pass.crossFrameWaitRetentions.back().handle());
+        consumePreviousHistoryComplete = true;
+    }
     if (this->previousSourceCopySignalValid_ && previousPass != nullptr) {
         metrics.windowHandoffPrevSourceDeps++;
         pass.crossFrameWaitRetentions.emplace_back(
@@ -3430,6 +3442,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
         if (consumePreviousBatchComplete && previousPass != nullptr)
             previousPass->framegenBatchCompleteValid = false;
+        if (consumePreviousHistoryComplete && previousPass != nullptr)
+            previousPass->historyBatchCompleteValid = false;
 
         try {
             // SYNC_FD copy transference requires its signal operation to be
@@ -3457,13 +3471,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     bool queuedCopyWithoutHostWait = false;
     if (!useAsyncHandoff && !asyncSubmissionIssued) {
-        // Warmup and zero-generation history are deliberately conservative.
-        // A capability-limited Adreno generated cycle also uses this proven
-        // host-fence path; reserve that serialized wait from its protected
-        // source budget rather than allowing the slowed source interval to
-        // justify more generated work on the next cycle.
-        const double handoffFenceWaitBeforeMs =
-            metrics.windowHandoffFenceWaitMs;
+        // Warmup/history and capability-limited Adreno still use the proven
+        // host-fence source handoff. The fence wall time includes the game's
+        // render dependency, so it is diagnostics only and must never be
+        // charged wholesale as LSFG source-copy cost.
         submitAndWaitForAhbHandoff(
             info.device, pass.preCopyBuf, info.queue.second,
             gameRenderSemaphores2, preCopySignals,
@@ -3471,13 +3482,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->waitHandoffFences,
             &metrics.windowHandoffSubmitMs,
             &metrics.windowHandoffFenceWaitMs);
-        if (this->conservativeCrossDeviceSync_
-                && !this->asyncAhbHandoffEnabled_) {
-            const double serializedHandoffWaitMs =
-                metrics.windowHandoffFenceWaitMs - handoffFenceWaitBeforeMs;
-            this->sourceProtectionBudgetTracker_.observeSerializedHandoff(
-                serializedHandoffWaitMs);
-        }
         metrics.windowSyncHandoffs++;
         metrics.totalSyncHandoffs++;
         if (consumeConservativeBatchComplete) {
@@ -3490,6 +3494,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
         if (consumePreviousBatchComplete && previousPass != nullptr)
             previousPass->framegenBatchCompleteValid = false;
+        if (consumePreviousHistoryComplete && previousPass != nullptr)
+            previousPass->historyBatchCompleteValid = false;
     }
     if (consumeDeferredAdrenoBatchComplete) {
         this->deferredAdrenoBatchCompleteReady_ = false;
