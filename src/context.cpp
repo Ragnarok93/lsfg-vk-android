@@ -4701,6 +4701,8 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->lastHistoryReprimeReason_ = reason;
     this->lastGeneratedFrameCount_ = 0;
     this->lastDispatchedGeneratedFrameCount_ = 0;
+    this->lastSourceCadenceObservation_ =
+        SourceCadenceObservation::SourceOnly;
 
     this->adaptiveFlowController_.reset();
     this->adaptiveFlowNextPressureRead_ = {};
@@ -4765,6 +4767,8 @@ void LsContext::enterSourceOnlyBypass() {
     this->lastHistoryReprimeReason_ =
         SourceHistoryInvalidationReason::ContextRecreate;
     this->lastDispatchedGeneratedFrameCount_ = 0;
+    this->lastSourceCadenceObservation_ =
+        SourceCadenceObservation::SourceOnly;
     this->previousSourceCopySignalValid_ = false;
     this->generatedPresentationCapacityTracker_.reset();
     this->lsfgOutputCadenceTracker_.reset();
