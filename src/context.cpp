@@ -1767,6 +1767,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             : "synthetic-slot";
     double computeReadyBudgetMs = 0.0;
     double presentationSlotBudgetMs = 0.0;
+    double sourceBudgetRawMs = 0.0;
+    double sourceBudgetEffectiveMs = 0.0;
+    const SourceCadenceObservation previousSourceCadenceObservation =
+        this->lastSourceCadenceObservation_;
 
     // Capacity feedback is advisory and comes from the previous measured GPU
     // cost/timeline. It may accelerate one scheduler level only after repeated
@@ -1812,7 +1816,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             sourceInterval,
             requestedFixedGeneratedFrameCount,
             this->lastDispatchedGeneratedFrameCount_,
-            !this->requiresSourceHistoryWarmup_);
+            !this->requiresSourceHistoryWarmup_,
+            previousSourceCadenceObservation);
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
@@ -1872,15 +1877,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     // Conservative Adreno owns a source-cadence budget independent of the
-    // raw source timeline. Generated work may tighten this baseline when the
-    // game speeds up, but may not turn LSFG-induced slowdown into more compute
-    // headroom. Source-only/history cycles remain authoritative evidence for a
-    // genuine slower scene.
+    // raw source timeline. Generated and history-maintenance work may tighten
+    // the baseline when the game proves it can run faster, but only a genuine
+    // LSFG-bypass source interval may expand the protected cadence.
     if (sourceProtectionBatchAdmission
             && this->currentSourceTimeline_.valid
             && sourceInterval.count() > 0) {
         this->sourceProtectionBudgetTracker_.observeSource(
-            sourceInterval, this->lastDispatchedGeneratedFrameCount_);
+            sourceInterval, previousSourceCadenceObservation);
     }
 
     // Warmup is a genuine history/lifecycle condition, not a function of
@@ -1920,6 +1924,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         ? this->sourceProtectionBudgetTracker_.clampTimelineBudget(
                             rawSourceBudgetMs)
                         : rawSourceBudgetMs;
+                sourceBudgetRawMs = rawSourceBudgetMs;
+                sourceBudgetEffectiveMs = sourceBudgetMs;
                 computeReadyBudgetMs = sourceBudgetMs;
                 const auto plannedBatchDecision =
                     this->deadlineAdmissionPredictor_.predict(
