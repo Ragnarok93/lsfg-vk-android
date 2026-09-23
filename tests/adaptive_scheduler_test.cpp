@@ -936,6 +936,44 @@ int main() {
     }
 
     {
+        // Conservative Adreno host-fence admission must protect the cadence
+        // learned from source-owned cycles. Generated work may tighten that
+        // cadence when the game speeds up, but it must not turn its own source
+        // slowdown into a larger future compute budget. The synchronous AHB
+        // handoff is serialized on the intercepted present thread, so its
+        // measured host wait consumes the same protected source interval.
+        SourceProtectionBudgetTracker budget;
+        budget.observeSource(40ms, 0);
+        budget.observeSerializedHandoff(10.0);
+        assert(budget.telemetry().baselineValid);
+        assert(budget.telemetry().handoffValid);
+        assert(budget.telemetry().protectedSourceIntervalMs > 39.9);
+        assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
+        assert(budget.clampTimelineBudget(80.0) > 29.9);
+        assert(budget.clampTimelineBudget(80.0) < 30.1);
+
+        // LSFG-induced 80 ms source intervals must not inflate a 40 ms clean
+        // baseline while generated work was active.
+        for (int i = 0; i < 6; ++i)
+            budget.observeSource(80ms, 1);
+        assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
+        assert(budget.clampTimelineBudget(100.0) < 30.1);
+
+        // A genuine slower scene eventually re-anchors from source-only/history
+        // evidence, preserving cadence-relative behavior at every frame rate.
+        for (int i = 0; i < 8; ++i)
+            budget.observeSource(80ms, 0);
+        assert(budget.telemetry().protectedSourceIntervalMs > 75.0);
+        assert(budget.clampTimelineBudget(100.0) > 65.0);
+
+        // Serialized pressure rises quickly so one expensive source handoff
+        // cannot keep granting stale compute headroom for several more frames.
+        budget.observeSerializedHandoff(30.0);
+        assert(budget.telemetry().serializedHandoffReserveMs >= 20.0);
+        assert(budget.clampTimelineBudget(100.0) < 60.0);
+    }
+
+    {
         // Fixed mode learns a source baseline without generated work, starts
         // conservatively, and reaches the requested ceiling only after stable
         // source cadence. No absolute FPS threshold participates.
