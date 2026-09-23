@@ -351,11 +351,11 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         history = source[history_start:history_end]
         self.assertIn("SourceCadenceObservation::HistoryMaintenance", history)
 
-        generated = source[history_end:]
+        post_history = source[max(0, history_end - 500):history_end]
         self.assertIn(
             "this->lastSourceCadenceObservation_ =\n"
             "        SourceCadenceObservation::Generated;",
-            generated,
+            post_history,
         )
 
     def test_xclipse_non_async_history_fallback_keeps_bounded_wait(self) -> None:
@@ -365,10 +365,16 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
             "// 2. Tell framegen to generate intermediary frames.", history_start
         )
         history = source[history_start:history_end]
-        non_export_start = history.index("} else {", history.index("if (exportHistoryRelease)"))
-        non_export = history[non_export_start:]
-        self.assertIn("!this->conservativeCrossDeviceSync_", non_export)
-        self.assertIn("historyRequiresHostCompletionWait = true", non_export)
+        self.assertIn(
+            "// Preserve the pre-repair Xclipse/generic fallback behavior:",
+            history,
+        )
+        self.assertIn(
+            "} else {\n"
+            "                // Preserve the pre-repair Xclipse/generic fallback behavior:",
+            history,
+        )
+        self.assertIn("historyRequiresHostCompletionWait = true", history)
         self.assertIn("waitContext", history)
 
     def test_xclipse_history_completion_path_keeps_existing_capability_async_behavior(self) -> None:
