@@ -38,14 +38,15 @@ inline bool containsAsciiCaseInsensitive(
 }
 
 /// Qualcomm/Adreno drivers use the validated protected source/history policy.
-/// Ordinary generated cycles hand the source upload to the private framegen
-/// device with an OPAQUE_FD GPU semaphore, then use bounded host completion
-/// before the game device consumes generated AHBs. Warmup, zero-generation
-/// history, and true source-only recovery cycles retain the conservative
-/// host-fence source-copy path where required. Generated frames and their
+/// The game-device -> private-framegen input handoff remains capability-driven,
+/// with the proven host-fence path used whenever no validated external-FD route
+/// is available. Private framegen completion remains a bounded host completion
+/// before the game device consumes generated AHBs. Generated frames and their
 /// matching source are presented in the same intercepted call; deferred source
-/// buffering and a synthetic game-device queue are not selected. This is a
-/// driver-family policy, not a device-model allow/deny list.
+/// buffering and a synthetic game-device queue are not selected. The policy
+/// name therefore describes source protection/completion semantics rather than
+/// claiming a particular effective input transport. This is a driver-family
+/// policy, not a device-model allow/deny list.
 ///
 /// Samsung/Xclipse, ARM/Mali, and unknown drivers retain their existing fully
 /// capability-driven asynchronous synchronization.
@@ -112,7 +113,7 @@ inline const char* compatibilityVendorName(
 
 inline const char* crossDeviceSyncPolicyName(bool conservative) noexcept {
     return conservative
-        ? "opaque-fd-input-host-completion-adreno"
+        ? "adreno-source-protected-host-completion"
         : "capability-async";
 }
 

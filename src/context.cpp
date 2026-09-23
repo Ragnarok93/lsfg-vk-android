@@ -2772,6 +2772,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     : 0.0;
             const auto& presentationTelemetry =
                 this->generatedPresentationCapacityTracker_.telemetry();
+            const auto& sourceProtectionTelemetry =
+                this->sourceProtectionBudgetTracker_.telemetry();
 
             std::cerr << "lsfg-vk: metrics"
                       << " runtime_session_id=" << this->runtimeSessionId_
@@ -2843,6 +2845,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
                       << " source_interval_avg_ms=" << sourceIntervalAvgMs
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
+                      << " source_protected_interval_ms="
+                      << sourceProtectionTelemetry.protectedSourceIntervalMs
+                      << " serialized_handoff_reserve_ms="
+                      << sourceProtectionTelemetry.serializedHandoffReserveMs
+                      << " source_protection_baseline_valid="
+                      << (sourceProtectionTelemetry.baselineValid ? 1 : 0)
+                      << " source_protection_handoff_valid="
+                      << (sourceProtectionTelemetry.handoffValid ? 1 : 0)
                       << " source_deadline_error_avg_ms=" << sourceDeadlineErrorAvgMs
                       << " source_deadline_error_max_ms="
                       << metrics.windowSourceDeadlineErrorMaxMs
