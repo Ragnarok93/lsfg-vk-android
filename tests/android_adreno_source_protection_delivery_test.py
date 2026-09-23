@@ -267,38 +267,28 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         )
 
 
-    def test_adreno_history_release_survives_source_only_bypass_until_reuse(self) -> None:
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+    def test_adreno_history_gap_keeps_conservative_source_handoff(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("conservativePendingHistoryCompleteSemaphore_", header)
-        self.assertIn("conservativePendingHistoryCompleteValid_", header)
-
-        bypass_start = source.index("if (conservativePreCopySourceBypass)")
-        bypass_end = source.index("// Android path: AHardwareBuffer exchange", bypass_start)
-        bypass = source[bypass_start:bypass_end]
-        self.assertNotIn(
-            "conservativePendingHistoryCompleteValid_ = false",
-            bypass,
-            "Source-only bypass must not discard a private history release that still guards AHB reuse",
-        )
-
-        copy_start = source.index(
-            "std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;"
-        )
-        handoff_start = source.index("const auto handoffStart", copy_start)
-        copy_dependencies = source[copy_start:handoff_start]
-        self.assertIn("conservativePendingHistoryCompleteValid_", copy_dependencies)
-        self.assertIn("conservativePendingHistoryCompleteSemaphore_", copy_dependencies)
-
-        submit_start = source.index("if (useAsyncHandoff)", handoff_start)
-        submit_end = source.index("if (consumeDeferredAdrenoBatchComplete)", submit_start)
-        submit = source[submit_start:submit_end]
+        handoff_start = source.index("bool useAsyncHandoff =")
+        handoff_end = source.index("bool asyncSubmissionIssued", handoff_start)
+        handoff = source[handoff_start:handoff_end]
         self.assertIn(
-            "conservativePendingHistoryCompleteValid_ = false",
-            submit,
-            "The carried release may be cleared only after a source-copy submit has consumed it",
+            "!conservativeHistoryGap",
+            handoff,
+            "September 18 Adreno zero-generation cycles must keep the host-fence "
+            "source-copy boundary rather than exporting a cross-device input semaphore.",
         )
+
+        history_start = source.index("if (historyOnly)")
+        generation_start = source.index(
+            "// 2. Tell framegen to generate intermediary frames.", history_start
+        )
+        history = source[history_start:generation_start]
+        self.assertIn("presentContextWithCount(", history)
+        self.assertIn("metrics.windowHistoryHostCompletions++", history)
+        self.assertNotIn("exportProtectedHistoryRelease", history)
+
 
     def test_adreno_source_budget_does_not_charge_full_host_fence_wall_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
