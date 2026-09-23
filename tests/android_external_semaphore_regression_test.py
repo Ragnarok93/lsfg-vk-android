@@ -138,10 +138,11 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             "                : VK_NULL_HANDLE",
             submit,
         )
-        self.assertIn(
-            "if (!this->conservativeCrossDeviceSync_) {",
-            wrapper[async_submit:fail_open],
-        )
+        branch = wrapper[async_submit:fail_open]
+        conservative = branch.index("if (this->conservativeCrossDeviceSync_) {")
+        generic_else = branch.index("} else {", conservative)
+        export_pos = branch.index("framegenInputSemaphore.exportFd", generic_else)
+        self.assertLess(generic_else, export_pos)
         self.assertNotIn("waitForAhbHandoff(", wrapper[export_fd:fail_open])
         self.assertIn("requiresSourceHistoryWarmup_ = true", wrapper[export_fd:fail_open])
 
