@@ -2679,6 +2679,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSyncHandoffs = 0;
             metrics.windowHandoffPrevSourceDeps = 0;
             metrics.windowHandoffBatchDeps = 0;
+            metrics.windowHistoryAsyncReleases = 0;
+            metrics.windowHistoryHostCompletions = 0;
             metrics.windowDeadlineShadowOpportunities = 0;
             metrics.windowDeadlineShadowWouldAdmit = 0;
             metrics.windowDeadlineShadowWouldReject = 0;
@@ -2687,6 +2689,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowHandoffMs = 0.0;
             metrics.windowHandoffSubmitMs = 0.0;
             metrics.windowHandoffFenceWaitMs = 0.0;
+            metrics.windowHistoryPreprocessSubmitMs = 0.0;
+            metrics.windowHistoryPreprocessHostWaitMs = 0.0;
             metrics.windowDispatchMs = 0.0;
             metrics.windowWaitIdleMs = 0.0;
             metrics.windowGeneratedPresentMs = 0.0;
@@ -2782,6 +2786,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ? metrics.windowHandoffSubmitMs / sourceCount : 0.0;
             const double handoffFenceWaitAvgMs = sourceCount > 0.0
                 ? metrics.windowHandoffFenceWaitMs / sourceCount : 0.0;
+            const double historySamples = static_cast<double>(
+                metrics.windowHistoryAsyncReleases
+                + metrics.windowHistoryHostCompletions);
+            const double historyPreprocessSubmitAvgMs = historySamples > 0.0
+                ? metrics.windowHistoryPreprocessSubmitMs / historySamples
+                : 0.0;
+            const double historyPreprocessHostWaitAvgMs = historySamples > 0.0
+                ? metrics.windowHistoryPreprocessHostWaitMs / historySamples
+                : 0.0;
             const double dispatchAvgMs = sourceCount > 0.0 ? metrics.windowDispatchMs / sourceCount : 0.0;
             const double waitIdleAvgMs = sourceCount > 0.0 ? metrics.windowWaitIdleMs / sourceCount : 0.0;
             const double generatedPresentAvgMs = generatedCount > 0.0
@@ -2869,6 +2882,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " ahb_sync_handoffs=" << metrics.windowSyncHandoffs
                       << " ahb_sync_handoffs_total=" << metrics.totalSyncHandoffs
                       << " ahb_async_fallbacks_total=" << metrics.totalAsyncFallbacks
+                      << " history_preprocess_submit_avg_ms="
+                      << historyPreprocessSubmitAvgMs
+                      << " history_preprocess_host_wait_avg_ms="
+                      << historyPreprocessHostWaitAvgMs
+                      << " history_async_releases="
+                      << metrics.windowHistoryAsyncReleases
+                      << " history_async_releases_total="
+                      << metrics.totalHistoryAsyncReleases
+                      << " history_host_completions="
+                      << metrics.windowHistoryHostCompletions
+                      << " history_host_completions_total="
+                      << metrics.totalHistoryHostCompletions
                       << " framegen_dispatch_avg_ms=" << dispatchAvgMs
                       << " framegen_wait_avg_ms=" << waitIdleAvgMs
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
@@ -2876,12 +2901,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
                       << " source_protected_interval_ms="
                       << sourceProtectionTelemetry.protectedSourceIntervalMs
-                      << " serialized_handoff_reserve_ms="
-                      << sourceProtectionTelemetry.serializedHandoffReserveMs
+                      << " source_budget_raw_ms=" << sourceBudgetRawMs
+                      << " source_budget_effective_ms=" << sourceBudgetEffectiveMs
+                      << " source_budget_copy_reserve_ms="
+                      << sourceProtectionTelemetry.serializedCopyReserveMs
+                      << " source_budget_observation="
+                      << sourceCadenceObservationName(
+                            sourceProtectionTelemetry.lastObservation)
                       << " source_protection_baseline_valid="
                       << (sourceProtectionTelemetry.baselineValid ? 1 : 0)
-                      << " source_protection_handoff_valid="
-                      << (sourceProtectionTelemetry.handoffValid ? 1 : 0)
+                      << " source_protection_copy_cost_valid="
+                      << (sourceProtectionTelemetry.copyCostValid ? 1 : 0)
                       << " source_deadline_error_avg_ms=" << sourceDeadlineErrorAvgMs
                       << " source_deadline_error_max_ms="
                       << metrics.windowSourceDeadlineErrorMaxMs
@@ -3112,6 +3142,25 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             __android_log_print(
                 ANDROID_LOG_INFO,
                 "LSFG_METRICS",
+                "source_budget_raw_ms=%.3f source_budget_effective_ms=%.3f "
+                "source_budget_copy_reserve_ms=%.3f source_budget_observation=%s "
+                "history_preprocess_submit_avg_ms=%.3f "
+                "history_preprocess_host_wait_avg_ms=%.3f "
+                "history_async_releases=%llu history_host_completions=%llu",
+                sourceBudgetRawMs,
+                sourceBudgetEffectiveMs,
+                sourceProtectionTelemetry.serializedCopyReserveMs,
+                sourceCadenceObservationName(
+                    sourceProtectionTelemetry.lastObservation),
+                historyPreprocessSubmitAvgMs,
+                historyPreprocessHostWaitAvgMs,
+                static_cast<unsigned long long>(
+                    metrics.windowHistoryAsyncReleases),
+                static_cast<unsigned long long>(
+                    metrics.windowHistoryHostCompletions));
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_METRICS",
                 "presentation_rejection_evidence=%u "
                 "presentation_recovery_evidence=%.3f "
                 "presentation_attempted_generated=%llu "
@@ -3162,6 +3211,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSyncHandoffs = 0;
             metrics.windowHandoffPrevSourceDeps = 0;
             metrics.windowHandoffBatchDeps = 0;
+            metrics.windowHistoryAsyncReleases = 0;
+            metrics.windowHistoryHostCompletions = 0;
             metrics.windowDeadlineShadowOpportunities = 0;
             metrics.windowDeadlineShadowWouldAdmit = 0;
             metrics.windowDeadlineShadowWouldReject = 0;
@@ -3170,6 +3221,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowHandoffMs = 0.0;
             metrics.windowHandoffSubmitMs = 0.0;
             metrics.windowHandoffFenceWaitMs = 0.0;
+            metrics.windowHistoryPreprocessSubmitMs = 0.0;
+            metrics.windowHistoryPreprocessHostWaitMs = 0.0;
             metrics.windowDispatchMs = 0.0;
             metrics.windowWaitIdleMs = 0.0;
             metrics.windowGeneratedPresentMs = 0.0;
