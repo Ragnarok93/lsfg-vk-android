@@ -111,7 +111,7 @@ inline const char* compatibilityVendorName(
 
 inline const char* crossDeviceSyncPolicyName(bool conservative) noexcept {
     return conservative
-        ? "syncfd-input-deferred-completion-adreno"
+        ? "host-fence-input-host-completion-adreno"
         : "capability-async";
 }
 

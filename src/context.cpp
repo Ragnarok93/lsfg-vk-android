@@ -815,29 +815,37 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->conservativeCrossDeviceSync_ =
         this->compatibilityPath_
             == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood;
-    if (this->conservativeCrossDeviceSync_
-            && info.adrenoSyntheticQueueAvailable
-            && info.syntheticQueue != VK_NULL_HANDLE) {
-        this->syntheticQueue_ = info.syntheticQueue;
-    }
+    // The device-proven Adreno path never selects a synthetic queue.
+    // Ordinary generated cycles use one-shot OPAQUE_FD source handoff and keep
+    // completion on the bounded private-device host wait below.
+    if (this->conservativeCrossDeviceSync_)
+        this->syntheticQueue_ = VK_NULL_HANDLE;
     // Source ownership and framegen completion are independent policies.
-    // The validated Adreno 650/Turnip baseline used a host-fence source handoff,
-    // completed private-device framegen before reading generated AHBs, and
-    // forwarded generated + source WSI presents in the same intercepted call.
-    // Do not retain an application swapchain image or present wait across calls:
-    // the r24 deferred source-buffer route exhausted the six-image swapchain and
-    // terminated the guest render process on its first generated batch.
+    // The validated Adreno 650/Turnip baseline used a GPU semaphore for the
+    // ordinary generated-cycle source upload, then performed bounded host
+    // completion before reading generated AHBs. Warmup and zero-generation
+    // cycles retain the conservative host-fence source path.
+    //
+    // Never retain an application swapchain image or present wait across calls:
+    // the rejected deferred source-buffer route exhausted the swapchain and
+    // terminated the guest render process on Adreno 650.
     //
     // Xclipse and generic drivers keep their existing capability-driven
     // asynchronous handoff/completion route unchanged.
     this->asyncAhbHandoffEnabled_ =
-        !this->conservativeCrossDeviceSync_
-        && gameGetSemaphoreFd != nullptr
-        && (syncFdHandoffSupported || opaqueFdHandoffSupported);
-    this->asyncAhbHandoffHandleType_ =
-        syncFdHandoffSupported
-            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
-            : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+        gameGetSemaphoreFd != nullptr
+        && (this->conservativeCrossDeviceSync_
+            ? opaqueFdHandoffSupported
+            : (syncFdHandoffSupported || opaqueFdHandoffSupported));
+    if (this->conservativeCrossDeviceSync_) {
+        this->asyncAhbHandoffHandleType_ =
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    } else {
+        this->asyncAhbHandoffHandleType_ =
+            syncFdHandoffSupported
+                ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
+                : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    }
     this->asyncFramegenCompletionEnabled_ =
         !this->conservativeCrossDeviceSync_
         && syncFdHandoffSupported
