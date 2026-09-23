@@ -534,10 +534,14 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("runtimeWaitTimeoutNs()", generated)
         self.assertIn("waitContext", generated)
 
-    def test_runtime_policy_label_matches_split_adreno_topology(self) -> None:
+    def test_runtime_policy_label_reports_source_protection_not_input_transport(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
-        self.assertIn("opaque-fd-input-host-completion-adreno", policy)
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("adreno-source-protected-host-completion", policy)
+        self.assertNotIn("opaque-fd-input-host-completion-adreno", policy)
         self.assertIn("capability-async", policy)
+        self.assertIn("handoff=", source)
+        self.assertIn("completion=", source)
 
     def test_xclipse_async_path_is_not_removed(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
