@@ -933,13 +933,13 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
               << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
               << '\n';
 
-    // Match the device-proven baseline: establish one real-source history
-    // boundary before the first Adreno interpolation dispatch. This source is
-    // presented normally in the same call; it is never buffered for a later
-    // intercepted present.
+    // September 18 starts the protected Adreno context immediately: the
+    // first generated cycle initializes frame_0/frame_1 through wrapper frameIdx
+    // parity and does not insert a synthetic startup warmup. A real Off/reset
+    // transition below still requests exactly one source-only warmup.
     if (this->conservativeCrossDeviceSync_) {
-        this->sourceHistoryWarmupRemaining_ = 1;
-        this->requiresSourceHistoryWarmup_ = true;
+        this->sourceHistoryWarmupRemaining_ = 0;
+        this->requiresSourceHistoryWarmup_ = false;
     }
 
     std::cerr << "lsfg-vk: Android AHB context created (id=" << ctxId
@@ -5195,8 +5195,7 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->adaptivePresentPeriodNs_ = 0;
 
     this->sourceHistoryWarmupRemaining_ =
-        this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames
-                                           : kSourceHistoryWarmupFrames;
+        this->conservativeCrossDeviceSync_ ? 1U : kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ =
         this->sourceHistoryWarmupRemaining_ > 0;
     this->lastHistoryInvalidationReason_ = reason;
@@ -5260,8 +5259,7 @@ void LsContext::enterSourceOnlyBypass() {
     this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
     this->lastGeneratedFrameCount_ = 0;
     this->sourceHistoryWarmupRemaining_ =
-        this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames
-                                           : kSourceHistoryWarmupFrames;
+        this->conservativeCrossDeviceSync_ ? 1U : kSourceHistoryWarmupFrames;
     this->requiresSourceHistoryWarmup_ =
         this->sourceHistoryWarmupRemaining_ > 0;
     this->lastHistoryInvalidationReason_ =
