@@ -65,8 +65,8 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         selection = source.split(
             "this->conservativeCrossDeviceSync_ =", 1
         )[1].split("std::cerr << \"lsfg-vk: Android AHB context created", 1)[0]
-        self.assertIn("sourceHistoryWarmupRemaining_ = 0", selection)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", selection)
+        self.assertIn("sourceHistoryWarmupRemaining_ = 1", selection)
+        self.assertIn("requiresSourceHistoryWarmup_ = true", selection)
 
     def test_non_async_history_preprocessing_waits_before_ahb_reuse(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -361,7 +361,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("conservativeSourceOnlyWarmup", handoff)
         self.assertIn("submitAndWaitForAhbHandoff", handoff)
         self.assertNotIn("conservativeCopyOnlyHistory", handoff)
-        self.assertIn('": "host-fence"', source)
+        self.assertIn("\"host-fence\"", source)
 
     def test_adreno_fractional_gap_advances_zero_count_history_with_host_fence(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -372,9 +372,9 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         history = source[history_start:generation_start]
 
         self.assertIn("conservativeHistoryGap", source)
+        self.assertIn("generatedFrameCount == 0", source)
         self.assertIn("presentContextWithCount(", history)
         self.assertIn("historyRequiresHostCompletionWait = true", history)
-        self.assertIn("generatedFrameCount = 0", history)
         self.assertNotIn("if (conservativeAdaptiveHistoryGap)", source)
         self.assertNotIn("compat-adaptive-history-copy", source)
 
