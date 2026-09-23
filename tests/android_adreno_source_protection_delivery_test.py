@@ -38,6 +38,26 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait", history)
         self.assertNotIn("compat-adaptive-history-copy", source)
 
+    def test_fixed_admission_rejection_stays_on_protected_history_path(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        start = source.index("const bool conservativeFixedHistoryGap")
+        end = source.index("const bool conservativeHistoryGap", start)
+        fixed_gap = source[start:end]
+
+        self.assertIn("this->conservativeCrossDeviceSync_", fixed_gap)
+        self.assertIn("!conf.adaptiveFramegen", fixed_gap)
+        self.assertIn("!sourceHistoryWarmupActive", fixed_gap)
+        self.assertIn("!sourceTimelineDiscontinuity", fixed_gap)
+        self.assertIn("generatedFrameCount == 0", fixed_gap)
+        self.assertNotIn(
+            "plannedGeneratedFrameCount == 0",
+            fixed_gap,
+            "A rejected Fixed generation opportunity (planned > 0, admitted 0) "
+            "must remain a protected history-maintenance cycle instead of "
+            "falling into the true source-only bypass.",
+        )
+
     def test_history_invalidation_has_explicit_reason(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
