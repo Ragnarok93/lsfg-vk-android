@@ -167,46 +167,28 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
 
     def test_adreno_opaque_source_handoff_matches_september18_order(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        handoff_start = source.index("bool useAsyncHandoff =")
-        handoff_end = source.index("bool queuedCopyWithoutHostWait", handoff_start)
-        handoff = source[handoff_start:handoff_end]
 
-        # 364178af exported the reusable OPAQUE_FD before queue submission,
-        # then submitted the source copy with the real reusable handoff fence.
-        # SYNC_FD's post-submit export remains a non-Adreno/Xclipse-only path.
-        conservative_branch = handoff.index(
-            "if (this->conservativeCrossDeviceSync_) {"
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+
+        # 364178af creates/exports the reusable OPAQUE_FD semaphore before the
+        # game-device source-copy submit, and that submit carries the real
+        # reusable handoff fence. No post-submit SYNC_FD export exists here.
+        export = adreno.index(
+            "Mini::Semaphore(info.device, &framegenInputSemaphoreFd)"
         )
-        adreno_export = handoff.index(
-            "Mini::Semaphore(info.device, &framegenInputSemaphoreFd)",
-            conservative_branch,
-        )
-        generic_else = handoff.index("} else {", conservative_branch)
-        self.assertLess(conservative_branch, adreno_export)
-        self.assertLess(adreno_export, generic_else)
-        submit = handoff.index("submitAhbHandoff(")
-        self.assertLess(adreno_export, submit)
-        self.assertIn(
-            "this->conservativeCrossDeviceSync_\n"
-            "                ? *this->ahbHandoffFence\n"
-            "                : VK_NULL_HANDLE",
-            handoff,
-        )
-        self.assertIn(
-            "this->conservativeCrossDeviceSync_\n"
-            "                ? this->resetHandoffFences\n"
-            "                : nullptr",
-            handoff,
-        )
-        post_submit = handoff[submit:]
-        conservative_metrics = post_submit.index(
-            "if (this->conservativeCrossDeviceSync_) {"
-        )
-        generic_else = post_submit.index("} else {", conservative_metrics)
-        post_submit_export = post_submit.index(
-            "framegenInputSemaphore.exportFd", generic_else
-        )
-        self.assertLess(generic_else, post_submit_export)
+        submit = adreno.index("submitAhbHandoff(", export)
+        self.assertLess(export, submit)
+        self.assertIn("*this->ahbHandoffFence", adreno[submit:submit + 700])
+        self.assertIn("this->resetHandoffFences", adreno[submit:submit + 700])
+        self.assertNotIn("framegenInputSemaphore.exportFd", adreno)
+        self.assertNotIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", adreno)
+
+        # Generic/Xclipse remains outside the island and may keep its newer
+        # handle-specific post-submit export behavior.
+        generic = source[end:]
+        self.assertIn("framegenInputSemaphore.exportFd", generic)
 
     def test_adreno_generated_wsi_matches_september18_presentation_contract(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
