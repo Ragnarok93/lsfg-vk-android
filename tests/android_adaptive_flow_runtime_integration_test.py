@@ -336,9 +336,13 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
     def test_wsi_unavailability_does_not_poison_deadline_predictor(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        wsi_start = source.index("if (res == VK_NOT_READY || res == VK_TIMEOUT)")
+        wsi_start = source.index(
+            "if (!this->conservativeCrossDeviceSync_\n"
+            "                && (res == VK_NOT_READY || res == VK_TIMEOUT))"
+        )
         wsi_end = source.index("if (res != VK_SUCCESS", wsi_start)
         wsi_drop = source[wsi_start:wsi_end]
+        self.assertIn("!this->conservativeCrossDeviceSync_", wsi_drop)
         self.assertIn("windowGeneratedWsiDrops", wsi_drop)
         self.assertIn("generatedWsiRejectedFrameCount", wsi_drop)
         self.assertNotIn(
@@ -354,9 +358,11 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("generatedDeadlineObservationEligible", observe_prefix)
 
         self.assertIn(
-            "const uint64_t generatedAcquireTimeoutNs = 0;",
+            "this->conservativeCrossDeviceSync_\n"
+            "                ? runtimeWaitTimeoutNs()\n"
+            "                : 0",
             source,
-            "Synthetic WSI acquisition must remain opportunistic/nonblocking in every mode",
+            "Adreno keeps the September 18 bounded acquire; generic/Xclipse stays opportunistic",
         )
         dispatch_start = source.index("runtime stage=framegen-dispatch-begin")
         acquire_start = source.index("ovkAcquireNextImageKHR", dispatch_start)
