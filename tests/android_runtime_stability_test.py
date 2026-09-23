@@ -139,17 +139,21 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         recycle = source[recycle_start:recycle_end]
         self.assertIn("pass.crossFrameWaitRetentions.clear()", recycle)
 
-    def test_busy_pass_does_not_advance_wrapper_temporal_parity(self) -> None:
-        """A source passthrough while the pass ring is busy must not offset AHB/framegen parity."""
+    def test_pass_ring_backpressure_is_non_adreno_only(self) -> None:
+        """The September 18 Adreno island must not enter newer pass-ring retirement fallback."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("if (!this->tryRecyclePass(pass))")
-        end = source.index("return passthroughResult;", start)
-        busy = source[start:end]
 
-        self.assertIn("if (this->conservativeCrossDeviceSync_)", busy)
-        self.assertIn("SourceHistoryInvalidationReason::SourcePairMismatch", busy)
-        self.assertRegex(busy, r"resetAdaptiveSourceEpoch\(\s*true")
-        self.assertNotIn("++this->frameIdx", busy)
+        guard = (
+            "if (!this->conservativeCrossDeviceSync_ "
+            "&& !this->tryRecyclePass(pass))"
+        )
+        self.assertIn(guard, source)
+
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+        self.assertNotIn("tryRecyclePass", adreno)
+        self.assertNotIn("SourceHistoryInvalidationReason::SourcePairMismatch", adreno)
 
     def test_adreno_standalone_reprime_preserves_two_input_parity(self) -> None:
         """Standalone Adreno reset needs two source copies; zero-cycle recovery needs one more."""
@@ -307,38 +311,34 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("pass.preCopyBuf.reset()", source)
         self.assertIn("postCopyBuf.reset()", source)
 
-    def test_adreno_deferred_batch_survives_source_only_boundaries(self) -> None:
+    def test_adreno_execution_island_excludes_deferred_batch_architecture(self) -> None:
+        """Deferred batches remain dormant and cannot affect the protected Adreno path."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
+        # Dormant state may remain for audit/non-selected experiments.
         self.assertIn("deferredAdrenoBatchValid_", header)
-        self.assertIn("deferredAdrenoBatchCompleteFd_", header)
-        self.assertIn("deferredAdrenoPassIndex_", header)
 
-        start = source.index("if (this->deferredAdrenoBatchValid_)")
-        end = source.index("const bool conservativePreCopySourceBypass", start)
-        deferred = source[start:end]
-        self.assertIn("poll(&batchPoll, 1, 0)", deferred)
-        self.assertIn("deferredAdrenoOutputEligible_ = false", deferred)
-        self.assertIn("deferredAdrenoBatchCompleteReady_", deferred)
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+        self.assertNotIn("deferredAdreno", adreno)
+        self.assertNotIn("conservativePendingBatchComplete", adreno)
+        self.assertNotIn("conservativePendingHistoryComplete", adreno)
+        self.assertNotIn("crossFrameWaitRetentions", adreno)
 
-        dependency_start = source.index("std::vector<VkSemaphore> gameRenderSemaphores2")
-        dependency_end = source.index("const auto handoffStart", dependency_start)
-        dependency = source[dependency_start:dependency_end]
-        self.assertIn("deferredAdrenoBatchCompleteReady_", dependency)
-        self.assertIn("deferredAdrenoBatchCompleteSemaphore_", dependency)
-        self.assertIn("consumeDeferredAdrenoBatchComplete", dependency)
-
-    def test_first_framegen_source_initializes_both_ahb_inputs(self) -> None:
+    def test_adreno_source_pair_uses_september_18_frame_index_parity(self) -> None:
+        """Protected Adreno uses wrapper frameIdx parity exactly as 364178af."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        present = source[source.index("VkResult LsContext::present"):]
-        first_copy = present.index("copySwapchainToExternalAhb")
-        duplicate = present.index("if (sourceCopyIndex == 0)", first_copy)
-        second_copy = present.index("copySwapchainToExternalAhb", duplicate)
-        self.assertLess(first_copy, duplicate)
-        self.assertLess(duplicate, second_copy)
-        self.assertIn("this->frame_1.handle()", present[second_copy:second_copy + 400])
-        self.assertIn("conservativeFramegenSourceIndex_", present[:first_copy])
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+
+        self.assertIn("this->frameIdx % 2 == 0", adreno)
+        self.assertIn("this->frameIdx < 2", adreno)
+        self.assertNotIn("conservativeFramegenSourceIndex_", adreno)
+        self.assertNotIn("sourceCopyIndex", adreno)
+        self.assertNotIn("if (sourceCopyIndex == 0)", adreno)
 
     def test_fixed_and_adaptive_discontinuities_rebuild_history(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -506,45 +506,33 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("source-direct-present", source[present_start:handoff_start])
 
 
-    def test_generation_resumes_with_driver_appropriate_history_reprime(self) -> None:
-        """Async drivers keep full history flush; serialized Adreno uses one source reprime."""
+    def test_generation_resumes_with_legacy_adreno_warmup_and_modern_generic_history(self) -> None:
+        """Adreno keeps the Sep-18 single source warmup; generic/Xclipse keeps modern history."""
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn("kSourceHistoryWarmupFrames = 4", header)
-        beta = (ROOT / "framegen/v3.1_src/shaders/beta.cpp").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("for (size_t i = 0; i < 3; i++)", beta)
-        self.assertIn("firstDescriptorSet.at(frameCount % 3)", beta)
         self.assertIn(
             "sourceHistoryWarmupRemaining_{kSourceHistoryWarmupFrames}",
             header,
         )
         self.assertIn("requiresSourceHistoryWarmup_{true}", header)
-        bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
-        self.assertIn(
-            "this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames",
-            bypass,
-        )
-        self.assertIn("kSourceHistoryWarmupFrames", bypass)
-        self.assertIn(
-            "requiresSourceHistoryWarmup_ =\n"
-            "        this->sourceHistoryWarmupRemaining_ > 0",
-            bypass,
-        )
-        self.assertIn("previousSourceCopySignalValid_ = false", bypass)
 
-        self.assertIn("const bool sourceHistoryWarmupActive", source)
-        self.assertIn("sourceHistoryWarmupActive\n        ||", source)
-        self.assertIn("--this->sourceHistoryWarmupRemaining_", source)
-        self.assertNotIn("AndroidFrameCycleMode::SourceWarmup", source)
-        self.assertNotIn("stage=source-history-warmup", source)
-        self.assertIn(
-            "if (this->previousSourceCopySignalValid_ && previousPass != nullptr)",
-            source,
-        )
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+        self.assertIn("if (sourceHistoryWarmupActive)", adreno)
+        self.assertIn("runtime stage=source-history-warmup", adreno)
+        self.assertIn("this->sourceHistoryWarmupRemaining_ = 0;", adreno)
+        self.assertIn("this->requiresSourceHistoryWarmup_ = false;", adreno)
+        self.assertNotIn("kConservativeSourceReprimeFrames", adreno)
+        self.assertNotIn("conservativeFramegenSourceIndex_", adreno)
 
+        # The modern generic/Xclipse path remains present after the island.
+        generic = source[end:]
+        self.assertIn("if (historyOnly)", generic)
+        self.assertIn("sourceHistoryWarmupRemaining_", generic)
+        self.assertIn("presentContextWithCountExportSyncFd", generic)
 
     def test_fixed_multiplier_never_underflows_when_runtime_is_off(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
