@@ -50,7 +50,8 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         log_start = source.index('std::cerr << "lsfg-vk: LSFG compatibility path:"')
         log_end = source.index("// Match the device-proven baseline", log_start)
         compatibility_log = source[log_start:log_end]
-        self.assertIn('"generated-before-source-same-call"', compatibility_log)
+        self.assertIn('" presentation=" << compatibilityPresentation', compatibility_log)
+        self.assertIn('"generated-before-source-same-call"', source)
         self.assertIn('" synthetic_queue="', compatibility_log)
         self.assertIn('" deadline_semantics="', compatibility_log)
         self.assertIn('"source-protection"', compatibility_log)
