@@ -1676,7 +1676,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 #endif
 
     auto& pass = this->passInfos.at(this->frameIdx % 8);
-    if (!this->tryRecyclePass(pass)) {
+    if (!this->conservativeCrossDeviceSync_ && !this->tryRecyclePass(pass)) {
         const VkPresentInfoKHR passthroughPresentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = pNext,
@@ -3264,6 +3264,458 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->frameIdx++;
         return result;
     };
+
+    // BEGIN ADRENO_364178AF_EXECUTION
+    // The Qualcomm/Turnip execution path below intentionally preserves the
+    // September 18 364178af transport/presentation topology. Modern scheduling
+    // is allowed to choose generatedFrameCount, interpolationGenerationCount,
+    // and Adaptive Flow metadata before entering this block; it may not change
+    // source ownership, cross-device completion, WSI acquisition, queue choice,
+    // or generated-before-source ordering inside it.
+    if (this->conservativeCrossDeviceSync_) {
+        pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
+        pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
+        pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
+        pass.preCopyBuf.begin();
+
+        copySwapchainToExternalAhb(
+            pass.preCopyBuf.handle(),
+            this->swapchainImages.at(presentIdx),
+            this->frameIdx % 2 == 0
+                ? this->frame_0.handle()
+                : this->frame_1.handle(),
+            this->extent.width,
+            this->extent.height,
+            info.queue.first,
+            this->frameIdx < 2);
+
+        pass.preCopyBuf.end();
+
+        std::vector<VkSemaphore> gameRenderSemaphores2 = gameRenderSemaphores;
+        if (this->previousSourceCopySignalValid_) {
+            gameRenderSemaphores2.emplace_back(
+                this->passInfos.at((this->frameIdx - 1) % 8)
+                    .preCopySemaphores.at(1).handle());
+        }
+
+        const auto handoffStart = RuntimeMetrics::Clock::now();
+        std::vector<VkSemaphore> preCopySignals{
+            pass.preCopySemaphores.at(0).handle(),
+            pass.preCopySemaphores.at(1).handle(),
+        };
+
+        // 364178af: ordinary generated cycles may use the dedicated OPAQUE_FD
+        // GPU semaphore. Warmup and zero-generation/history cycles use the
+        // bounded host-fence source handoff.
+        bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
+            && generatedFrameCount > 0
+            && !sourceHistoryWarmupActive;
+        int framegenInputSemaphoreFd = -1;
+        if (useAsyncHandoff) {
+            try {
+                pass.framegenInputSemaphore =
+                    Mini::Semaphore(info.device, &framegenInputSemaphoreFd);
+                preCopySignals.emplace_back(
+                    pass.framegenInputSemaphore.handle());
+            } catch (const std::exception& e) {
+                this->asyncAhbHandoffEnabled_ = false;
+                useAsyncHandoff = false;
+                framegenInputSemaphoreFd = -1;
+                metrics.totalAsyncFallbacks++;
+                std::cerr
+                    << "lsfg-vk: Android async AHB handoff disabled after "
+                    << "OPAQUE_FD export failure: " << e.what()
+                    << "; falling back to host fence\n";
+            }
+        }
+
+        if (useAsyncHandoff) {
+            const auto submitStart = RuntimeMetrics::Clock::now();
+            submitAhbHandoff(
+                info.device,
+                pass.preCopyBuf,
+                info.queue.second,
+                gameRenderSemaphores2,
+                preCopySignals,
+                *this->ahbHandoffFence,
+                this->resetHandoffFences);
+            metrics.windowHandoffSubmitMs +=
+                std::chrono::duration<double, std::milli>(
+                    RuntimeMetrics::Clock::now() - submitStart).count();
+            metrics.windowAsyncHandoffs++;
+            metrics.totalAsyncHandoffs++;
+        } else {
+            submitAndWaitForAhbHandoff(
+                info.device,
+                pass.preCopyBuf,
+                info.queue.second,
+                gameRenderSemaphores2,
+                preCopySignals,
+                *this->ahbHandoffFence,
+                this->resetHandoffFences,
+                this->waitHandoffFences,
+                &metrics.windowHandoffSubmitMs,
+                &metrics.windowHandoffFenceWaitMs);
+            metrics.windowSyncHandoffs++;
+            metrics.totalSyncHandoffs++;
+        }
+        this->previousSourceCopySignalValid_ = true;
+        metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - handoffStart).count();
+
+        if (firstPresentDiagnostic) {
+            std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready mode="
+                      << (useAsyncHandoff ? "gpu-semaphore" : "host-fence")
+                      << " adreno_execution=364178af\n";
+        }
+
+        // The newer governors may create a zero-generation Fixed or Adaptive
+        // cadence gap. Execute it through the same September 18 zero-count
+        // private preprocessing route: source handoff is already host-complete,
+        // and the backend's preprocessingFence wait completes before return.
+        if (generatedFrameCount == 0 && !sourceHistoryWarmupActive) {
+            this->lastDispatchedGeneratedFrameCount_ = 0;
+            this->lastSourceCadenceObservation_ =
+                SourceCadenceObservation::HistoryMaintenance;
+            const auto adaptiveFlowBatch = nextAdaptiveFlowBatch();
+            std::vector<int> noOutSems;
+            const auto historyAdvanceStart = RuntimeMetrics::Clock::now();
+            if (conf.performance) {
+                LSFG_3_1P::presentContextWithCount(
+                    *this->lsfgCtxId,
+                    -1,
+                    noOutSems,
+                    0,
+                    VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+                    0,
+                    adaptiveFlowBatch);
+            } else {
+                LSFG_3_1::presentContextWithCount(
+                    *this->lsfgCtxId,
+                    -1,
+                    noOutSems,
+                    0,
+                    VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+                    0,
+                    adaptiveFlowBatch);
+            }
+            const double historyMs =
+                std::chrono::duration<double, std::milli>(
+                    RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
+            metrics.windowDispatchMs += historyMs;
+            metrics.windowHistoryPreprocessHostWaitMs += historyMs;
+            metrics.windowHistoryHostCompletions++;
+            metrics.totalHistoryHostCompletions++;
+            metrics.windowAdaptiveZeroGenerationCycles++;
+            metrics.totalAdaptiveZeroGenerationCycles++;
+            this->sourceHistoryWarmupRemaining_ = 0;
+            this->requiresSourceHistoryWarmup_ = false;
+            this->lastGeneratedFrameCount_ = 0;
+            updateAdaptiveFlowGovernor();
+
+            const VkSemaphore sourceReady =
+                pass.preCopySemaphores.at(0).handle();
+            VkPresentTimeGOOGLE sourcePresentTime{};
+            VkPresentTimesInfoGOOGLE sourcePresentTimes{};
+            const VkPresentInfoKHR sourcePresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = adaptivePresentPNext(
+                    pNext,
+                    this->currentSourceTimeline_.sourceDesiredTimeNs,
+                    sourcePresentTime,
+                    sourcePresentTimes),
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &sourceReady,
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto sourceResult =
+                Layer::ovkQueuePresentKHR(queue, &sourcePresentInfo);
+            if (sourceResult != VK_SUCCESS
+                    && sourceResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(
+                    sourceResult,
+                    "Failed September 18 Adreno zero-generation source present");
+            }
+            return finishSourcePresent(
+                sourceResult, "pre-copy-adreno-364178af-zero");
+        }
+
+        // September 18 performs one real-source copy/present warmup before the
+        // first generated batch after lifecycle/history invalidation.
+        if (sourceHistoryWarmupActive) {
+            this->lastDispatchedGeneratedFrameCount_ = 0;
+            this->lastSourceCadenceObservation_ =
+                SourceCadenceObservation::SourceOnly;
+            this->sourceHistoryWarmupRemaining_ = 0;
+            this->requiresSourceHistoryWarmup_ = false;
+            this->lastGeneratedFrameCount_ = 0;
+            metrics.windowAdaptiveZeroGenerationCycles++;
+            metrics.totalAdaptiveZeroGenerationCycles++;
+            updateAdaptiveFlowGovernor();
+
+            const VkSemaphore sourceReady =
+                pass.preCopySemaphores.at(0).handle();
+            VkPresentTimeGOOGLE warmupPresentTime{};
+            VkPresentTimesInfoGOOGLE warmupPresentTimes{};
+            const VkPresentInfoKHR warmupPresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = adaptivePresentPNext(
+                    pNext,
+                    this->currentSourceTimeline_.sourceDesiredTimeNs,
+                    warmupPresentTime,
+                    warmupPresentTimes),
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &sourceReady,
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto warmupResult =
+                Layer::ovkQueuePresentKHR(queue, &warmupPresentInfo);
+            if (warmupResult != VK_SUCCESS
+                    && warmupResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(
+                    warmupResult,
+                    "Failed September 18 Adreno source-history warmup");
+            }
+            if (firstPresentDiagnostic)
+                std::cerr
+                    << "lsfg-vk: runtime stage=source-history-warmup"
+                    << " adreno_execution=364178af\n";
+            return finishSourcePresent(
+                warmupResult, "pre-copy-adreno-364178af-warmup");
+        }
+
+        this->lastDispatchedGeneratedFrameCount_ = generatedFrameCount;
+        this->lastSourceCadenceObservation_ =
+            SourceCadenceObservation::Generated;
+        const auto adaptiveFlowBatch = nextAdaptiveFlowBatch();
+        std::vector<int> noOutSems;
+
+        if (firstPresentDiagnostic) {
+            std::cerr << "lsfg-vk: runtime stage=framegen-dispatch-begin"
+                      << " mode=" << (conf.performance ? "performance" : "quality")
+                      << " generated=" << generatedFrameCount
+                      << " handoff="
+                      << (useAsyncHandoff ? "gpu-semaphore" : "host-fence")
+                      << " adreno_execution=364178af\n";
+        }
+
+        const auto dispatchStart = RuntimeMetrics::Clock::now();
+        if (conf.performance) {
+            LSFG_3_1P::presentContextWithCount(
+                *this->lsfgCtxId,
+                framegenInputSemaphoreFd,
+                noOutSems,
+                generatedFrameCount,
+                VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+                interpolationGenerationCount,
+                adaptiveFlowBatch);
+        } else {
+            LSFG_3_1::presentContextWithCount(
+                *this->lsfgCtxId,
+                framegenInputSemaphoreFd,
+                noOutSems,
+                generatedFrameCount,
+                VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+                interpolationGenerationCount,
+                adaptiveFlowBatch);
+        }
+        metrics.windowGeneratedDispatched += generatedFrameCount;
+        metrics.totalGeneratedDispatched += generatedFrameCount;
+        metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - dispatchStart).count();
+
+        // 364178af blocks only at this private-device completion boundary before
+        // the game device reads generated AHBs.
+        const auto waitIdleStart = RuntimeMetrics::Clock::now();
+        const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
+        const bool framegenReady = conf.performance
+            ? LSFG_3_1P::waitContext(
+                *this->lsfgCtxId, framegenCompletionTimeoutNs)
+            : LSFG_3_1::waitContext(
+                *this->lsfgCtxId, framegenCompletionTimeoutNs);
+        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+
+        if (!framegenReady) {
+            this->lastGeneratedFrameCount_ = 0;
+            const VkSemaphore sourceReady =
+                pass.preCopySemaphores.at(0).handle();
+            const VkPresentInfoKHR timeoutPresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = pNext,
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &sourceReady,
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto timeoutPresentResult =
+                Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
+            if (timeoutPresentResult != VK_SUCCESS
+                    && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(
+                    timeoutPresentResult,
+                    "Failed September 18 Adreno source present after framegen timeout");
+            }
+            return finishSourcePresent(
+                VK_ERROR_OUT_OF_DATE_KHR, "pre-copy-adreno-364178af-timeout");
+        }
+
+        metrics.windowGeneratedCompleted += generatedFrameCount;
+        metrics.totalGeneratedCompleted += generatedFrameCount;
+        updateAdaptiveFlowGovernor();
+
+        // 364178af acquires each synthetic image with a bounded blocking timeout,
+        // then presents every admitted synthetic on the application's queue.
+        for (size_t i = 0; i < generatedFrameCount; ++i) {
+            const auto generatedPresentStart = RuntimeMetrics::Clock::now();
+            pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
+            uint32_t imageIdx{};
+            auto res = Layer::ovkAcquireNextImageKHR(
+                info.device,
+                this->swapchain,
+                runtimeWaitTimeoutNs(),
+                pass.acquireSemaphores.at(i).handle(),
+                VK_NULL_HANDLE,
+                &imageIdx);
+            if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+                metrics.windowGeneratedPresentFailures++;
+                metrics.totalGeneratedPresentFailures++;
+                throw LSFG::vulkan_error(
+                    res,
+                    "Failed September 18 Adreno generated swapchain acquire");
+            }
+
+            pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
+            pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
+            pass.postCopyBufs.at(i) =
+                Mini::CommandBuffer(info.device, this->cmdPool);
+            pass.postCopyBufs.at(i).begin();
+
+            copyExternalAhbToSwapchain(
+                pass.postCopyBufs.at(i).handle(),
+                this->out_n.at(i).handle(),
+                this->swapchainImages.at(imageIdx),
+                this->extent.width,
+                this->extent.height,
+                info.queue.first);
+
+            pass.postCopyBufs.at(i).end();
+            pass.postCopyBufs.at(i).submit(
+                info.queue.second,
+                { pass.acquireSemaphores.at(i).handle() },
+                { pass.postCopySemaphores.at(i).handle(),
+                  pass.prevPostCopySemaphores.at(i).handle() });
+            metrics.windowGeneratedCopySubmitted++;
+            metrics.totalGeneratedCopySubmitted++;
+
+            std::vector<VkSemaphore> waitSemaphores{
+                pass.postCopySemaphores.at(i).handle()
+            };
+            if (i != 0) {
+                waitSemaphores.emplace_back(
+                    pass.prevPostCopySemaphores.at(i - 1).handle());
+            }
+
+            const double syntheticFraction =
+                static_cast<double>(i + 1)
+                / static_cast<double>(interpolationGenerationCount + 1);
+            const uint64_t syntheticDesiredTimeNs =
+                this->sourceTimeline_.syntheticDesiredTimeNs(
+                    this->currentSourceTimeline_,
+                    syntheticFraction);
+            VkPresentTimeGOOGLE generatedPresentTime{};
+            VkPresentTimesInfoGOOGLE generatedPresentTimes{};
+            const void* generatedDownstreamPNext =
+                i == 0 ? pNext : nullptr;
+            const VkPresentInfoKHR presentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = adaptivePresentPNext(
+                    generatedDownstreamPNext,
+                    syntheticDesiredTimeNs,
+                    generatedPresentTime,
+                    generatedPresentTimes),
+                .waitSemaphoreCount =
+                    static_cast<uint32_t>(waitSemaphores.size()),
+                .pWaitSemaphores = waitSemaphores.data(),
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &imageIdx,
+            };
+            metrics.windowGeneratedWsiSubmitted++;
+            metrics.totalGeneratedWsiSubmitted++;
+            res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
+            if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+                metrics.windowGeneratedPresentFailures++;
+                metrics.totalGeneratedPresentFailures++;
+                throw LSFG::vulkan_error(
+                    res,
+                    "Failed September 18 Adreno generated present");
+            }
+            metrics.windowGeneratedFrames++;
+            metrics.totalGeneratedFrames++;
+            metrics.windowGeneratedWsiAccepted++;
+            metrics.totalGeneratedWsiAccepted++;
+            metrics.windowGeneratedDisplayUnknown++;
+            metrics.totalGeneratedDisplayUnknown++;
+            metrics.windowGeneratedPresentMs +=
+                std::chrono::duration<double, std::milli>(
+                    RuntimeMetrics::Clock::now()
+                    - generatedPresentStart).count();
+        }
+
+        // The source is queued after the admitted generated prefix, using the
+        // second signal from the final generated post-copy exactly as 364178af.
+        VkSemaphore lastPrevPostCopySemaphore =
+            generatedFrameCount > 0
+                ? pass.prevPostCopySemaphores
+                    .at(generatedFrameCount - 1).handle()
+                : pass.preCopySemaphores.at(0).handle();
+        VkPresentTimeGOOGLE finalSourcePresentTime{};
+        VkPresentTimesInfoGOOGLE finalSourcePresentTimes{};
+        const void* finalSourceDownstreamPNext =
+            generatedFrameCount == 0 ? pNext : nullptr;
+        const VkPresentInfoKHR finalPresentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = adaptivePresentPNext(
+                finalSourceDownstreamPNext,
+                this->currentSourceTimeline_.sourceDesiredTimeNs,
+                finalSourcePresentTime,
+                finalSourcePresentTimes),
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &lastPrevPostCopySemaphore,
+            .swapchainCount = 1,
+            .pSwapchains = &this->swapchain,
+            .pImageIndices = &presentIdx,
+        };
+        auto res =
+            Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);
+        if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+            metrics.windowSourcePresentFailures++;
+            metrics.totalSourcePresentFailures++;
+            throw LSFG::vulkan_error(
+                res,
+                "Failed September 18 Adreno source present");
+        }
+
+        this->lastGeneratedFrameCount_ = generatedFrameCount;
+        if (generatedFrameCount > 0) {
+            this->deadlineAdmissionPredictor_.observeDeliverySuccess();
+        }
+        return finishSourcePresent(
+            res, "prev-post-copy-adreno-364178af");
+    }
+    // END ADRENO_364178AF_EXECUTION
 
     const auto armPassGpuRetirement = [&](VkQueue retirementQueue = VK_NULL_HANDLE) {
         const VkQueue targetQueue = retirementQueue != VK_NULL_HANDLE
