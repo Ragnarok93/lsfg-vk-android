@@ -900,6 +900,12 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
               << (this->syntheticQueue_ != VK_NULL_HANDLE
                     ? "synthetic-graphics"
                     : "application-present")
+              << " synthetic_queue="
+              << (this->syntheticQueue_ != VK_NULL_HANDLE ? 1 : 0)
+              << " deadline_semantics="
+              << (this->conservativeCrossDeviceSync_
+                    ? "source-protection"
+                    : "synthetic-slot")
               << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
               << '\n';
 
@@ -3721,9 +3727,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     this->lastDispatchedGeneratedFrameCount_ = generatedFrameCount;
     const auto adaptiveFlowBatch = nextAdaptiveFlowBatch();
 
-    // 2. Tell framegen to generate intermediary frames. The normal Android
-    //    path exports output-ready and batch-complete SYNC_FDs after submission,
-    //    allowing game-device work to queue without a host completion wait.
+    // 2. Tell framegen to generate intermediary frames. Xclipse/generic
+    //    capability paths may export output-ready and batch-complete SYNC_FDs
+    //    for asynchronous completion. Protected Adreno deliberately does not:
+    //    its OPAQUE_FD source handoff is followed by the bounded host completion
+    //    wait below before generated AHBs are consumed on the game device.
     std::vector<int> noOutSems;
     std::vector<bool> outputReadyWaitValid(generatedFrameCount, false);
     LSFG::AndroidFrameSyncFds framegenSync{};
