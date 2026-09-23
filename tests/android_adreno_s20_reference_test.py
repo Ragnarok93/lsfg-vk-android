@@ -198,11 +198,15 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             "                : nullptr",
             handoff,
         )
-        self.assertIn(
-            "if (!this->conservativeCrossDeviceSync_) {",
-            handoff[submit:],
-            "Post-submit export is required only for the generic/SYNC_FD path.",
+        post_submit = handoff[submit:]
+        conservative_metrics = post_submit.index(
+            "if (this->conservativeCrossDeviceSync_) {"
         )
+        generic_else = post_submit.index("} else {", conservative_metrics)
+        post_submit_export = post_submit.index(
+            "framegenInputSemaphore.exportFd", generic_else
+        )
+        self.assertLess(generic_else, post_submit_export)
 
     def test_adreno_generated_wsi_matches_september18_presentation_contract(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
