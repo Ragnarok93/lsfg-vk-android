@@ -168,6 +168,21 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn("!this->asyncAhbHandoffEnabled_", handoff)
         self.assertIn("observeSerializedHandoff", handoff)
 
+    def test_adreno_budget_telemetry_reports_effective_policy(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
+
+        for field in (
+            "source_protected_interval_ms=",
+            "serialized_handoff_reserve_ms=",
+            "source_protection_baseline_valid=",
+            "source_protection_handoff_valid=",
+        ):
+            self.assertIn(field, source)
+
+        self.assertIn('"adreno-source-protected-host-completion"', policy)
+        self.assertNotIn('"opaque-fd-input-host-completion-adreno"', policy)
+
     def test_xclipse_capability_async_policy_remains_separate(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(
             encoding="utf-8"
