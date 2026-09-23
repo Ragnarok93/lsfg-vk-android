@@ -222,10 +222,16 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
 
         # Generated Adreno completion remains the proven bounded host wait.
         selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
-        selection_end = source.index("// Match the device-proven baseline", selection_start)
-        selection = source[selection_start:selection_end]
-        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
-        self.assertNotIn("asyncHistoryCompletionEnabled_", selection)
+        selection_end = source.index(
+            "// Rejected Adreno experiment", selection_start
+        )
+        generated_completion_gate = source[selection_start:selection_end]
+        self.assertIn(
+            "!this->conservativeCrossDeviceSync_", generated_completion_gate
+        )
+        self.assertNotIn(
+            "asyncHistoryCompletionEnabled_", generated_completion_gate
+        )
 
     def test_adreno_history_release_survives_source_only_bypass_until_reuse(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
