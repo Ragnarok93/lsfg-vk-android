@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
-    def test_adreno_ordinary_handoff_prefers_sync_fd_but_completion_is_host_bounded(self) -> None:
+    def test_adreno_ordinary_handoff_uses_historical_opaque_fd_and_host_completion(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
 
@@ -15,25 +15,23 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         selection_end = source.index("const bool xclipseCompatibilityPath", selection_start)
         selection = source[selection_start:selection_end]
 
-        # The clean September 18 Android artifact was build-composed with the
-        # SYNC_FD handoff transform. On S20+/Turnip it reported OPAQUE_FD
-        # unavailable, SYNC_FD available, then used asynchronous handoffs on
-        # ordinary generated cycles. Keep OPAQUE_FD only as the capability
-        # fallback when SYNC_FD is genuinely unavailable.
-        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("adrenoHistoricalOpaqueAttempt", selection)
         self.assertIn("opaqueFdHandoffSupported", selection)
         self.assertIn(
-            "(syncFdHandoffSupported || opaqueFdHandoffSupported)",
+            "? (opaqueFdHandoffSupported || adrenoHistoricalOpaqueAttempt)",
             selection,
         )
         self.assertIn(
-            "syncFdHandoffSupported\n"
-            "            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT",
+            "this->asyncAhbHandoffHandleType_ =\n"
+            "            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;",
             selection,
         )
+        self.assertIn(
+            ": (syncFdHandoffSupported || opaqueFdHandoffSupported)",
+            selection,
+            "Xclipse/generic source handoff remains capability-driven.",
+        )
 
-        # Input/source handoff is asynchronous, but the protected Adreno output
-        # side remains the bounded private-device host-completion topology.
         self.assertIn(
             "this->asyncFramegenCompletionEnabled_ =\n"
             "        !this->conservativeCrossDeviceSync_",
@@ -43,12 +41,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
 
         constructor = source[source.index("this->compatibilityPath_ ="):selection_start]
         self.assertIn("this->syntheticQueue_ = VK_NULL_HANDLE;", constructor)
-        self.assertIn(
-            "useAdrenoSyntheticQueue",
-            source,
-            "The dormant queue selector may remain for non-Adreno code, "
-            "but the Adreno compatibility path must not select it.",
-        )
+        self.assertIn("useAdrenoSyntheticQueue", source)
         self.assertIn("crossDeviceSyncPolicyName", policy)
 
         log_start = source.index('std::cerr << "lsfg-vk: LSFG compatibility path:"')
@@ -178,38 +171,31 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertNotIn("deferConservativeWarmupUntilGenerationDemand", source)
 
 
-    def test_adreno_sync_fd_source_handoff_matches_september18_built_runtime(self) -> None:
+    def test_adreno_opaque_fd_source_handoff_matches_september18_runtime(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
         end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
         adreno = source[begin:end]
 
-        # September 18's *built* runtime applied adreno_syncfd_handoff.py:
-        # create the selected exportable semaphore, submit the source copy, then
-        # export SYNC_FD so it represents that exact GPU completion point.
         create = adreno.index(
-            "Mini::Semaphore(\n"
-            "                    info.device, this->asyncAhbHandoffHandleType_)"
+            "Mini::Semaphore(info.device, &framegenInputSemaphoreFd)"
         )
         submit = adreno.index("submitAhbHandoff(", create)
-        export_fd = adreno.index("framegenInputSemaphore.exportFd(", submit)
-        dispatch = adreno.index("presentContextWithCount(", export_fd)
+        dispatch = adreno.index("presentContextWithCount(", submit)
 
         self.assertLess(create, submit)
-        self.assertLess(submit, export_fd)
-        self.assertLess(export_fd, dispatch)
+        self.assertLess(submit, dispatch)
         self.assertIn("*this->ahbHandoffFence", adreno[submit:submit + 900])
         self.assertIn("this->resetHandoffFences", adreno[submit:submit + 900])
-        self.assertIn("this->asyncAhbHandoffHandleType_", adreno)
-        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", source)
-        self.assertNotIn(
-            "Mini::Semaphore(info.device, &framegenInputSemaphoreFd)",
-            adreno,
+        self.assertNotIn("framegenInputSemaphore.exportFd(", adreno)
+        self.assertIn(
+            "VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
+            source[source.index("this->asyncAhbHandoffEnabled_ ="):begin],
         )
 
-        # Generated AHB consumption is still bounded by waitContext on Adreno;
-        # this test changes source handoff only, not Xclipse/generic completion.
+        # Generated AHB consumption remains bounded on Adreno; generic/Xclipse
+        # keeps its post-submit SYNC_FD export path.
         self.assertIn("waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)", adreno)
         generic = source[end:]
         self.assertIn("framegenInputSemaphore.exportFd", generic)

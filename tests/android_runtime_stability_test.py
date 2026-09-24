@@ -626,8 +626,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("adaptiveFramegen", helper)
         self.assertNotIn("fpsLimit", helper)
 
-    def test_gamenative_active_multipliers_are_resident_but_off_crossing_recreates(self) -> None:
-        """2x/3x/4x may share resident capacity; Off must restore a native swapchain."""
+    def test_gamenative_off_on_stays_inside_resident_target_context(self) -> None:
+        """2x/3x/4x and Off share resident capacity; Off uses native source-only present."""
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
@@ -635,8 +635,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
         helper = hooks[helper_start:helper_end]
         self.assertIn("const bool residentTarget = previous.targeted && next.targeted", helper)
-        self.assertIn("generationActivityChanged", helper)
-        self.assertIn("(previous.multiplier > 1) != (next.multiplier > 1)", helper)
+        self.assertNotIn("generationActivityChanged", helper)
+        self.assertNotIn("(previous.multiplier > 1) != (next.multiplier > 1)", helper)
         self.assertIn("next.multiplier > residentCapacityMultiplier(previous)", helper)
 
         self.assertIn("kAndroidResidentMaxMultiplier = 4", hooks)
@@ -644,11 +644,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("kAndroidResidentMaxMultiplier = 4", context)
         self.assertIn("size_t residentCapacityMultiplier", context)
         self.assertIn("const size_t runtimeMultiplier = residentCapacityMultiplier(conf)", context)
-        self.assertIn("if (!activeConf.enable || activeConf.multiplier <= 1)", hooks)
-        self.assertIn("init stage=swapchain-pass-through reason=", hooks)
+        self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
+        self.assertIn("if (conf.targeted && conf.multiplier <= 1)", hooks)
+        self.assertIn("state->context->enterSourceOnlyBypass()", hooks)
 
-        # Soft reload remains available inside the already-active resident
-        # generation range; crossing Off/On is handled by generationActivityChanged.
         self.assertIn("runtime stage=config-reload-soft-toggle", hooks)
         self.assertIn("recreateSwapchain=0", hooks)
 

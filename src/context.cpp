@@ -821,25 +821,36 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     if (this->conservativeCrossDeviceSync_)
         this->syntheticQueue_ = VK_NULL_HANDLE;
     // Source ownership and framegen completion are independent policies.
-    // The validated September 18 Android artifact composed the SYNC_FD source
-    // handoff transform on top of the 364178af execution topology. On the
-    // S20+/Turnip path OPAQUE_FD was unavailable while SYNC_FD was available;
-    // ordinary generated cycles therefore used a GPU SYNC_FD handoff, followed
-    // by the same bounded private-device host completion before generated AHBs
-    // were consumed. Warmup and zero-generation/history cycles remain on the
-    // conservative host-fence path below.
+    // The proven S20+/Turnip transaction uses an OPAQUE_FD GPU semaphore for
+    // ordinary generated-cycle source upload, then keeps generated AHB
+    // consumption behind the bounded private-device host completion below.
+    // Warmup and zero-generation/history cycles retain the host-fence handoff.
     //
-    // Prefer SYNC_FD when both devices expose it. OPAQUE_FD remains a valid
-    // fallback for drivers that genuinely support it. This selection is the
-    // same capability order already used by the non-conservative/Xclipse path,
-    // so Xclipse routing and completion behavior are unchanged.
+    // Turnip can report zero OPAQUE_FD feature bits through the GameNative
+    // wrapper even when the real OPAQUE_FD create/export/import transaction
+    // succeeds. For protected Adreno only, SYNC_FD capability is therefore
+    // used as evidence that the fd extension/import plumbing exists; the real
+    // OPAQUE_FD transaction is the authoritative runtime probe. Any actual
+    // create/export failure falls back to the bounded host fence. Xclipse and
+    // generic devices remain strictly capability-driven.
+    const bool adrenoHistoricalOpaqueAttempt =
+        this->conservativeCrossDeviceSync_
+        && info.androidSyncFdSemaphoreSupported
+        && backendDiagnostics.externalSemaphoreSyncFd;
     this->asyncAhbHandoffEnabled_ =
         gameGetSemaphoreFd != nullptr
-        && (syncFdHandoffSupported || opaqueFdHandoffSupported);
-    this->asyncAhbHandoffHandleType_ =
-        syncFdHandoffSupported
-            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
-            : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+        && (this->conservativeCrossDeviceSync_
+            ? (opaqueFdHandoffSupported || adrenoHistoricalOpaqueAttempt)
+            : (syncFdHandoffSupported || opaqueFdHandoffSupported));
+    if (this->conservativeCrossDeviceSync_) {
+        this->asyncAhbHandoffHandleType_ =
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    } else {
+        this->asyncAhbHandoffHandleType_ =
+            syncFdHandoffSupported
+                ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT
+                : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    }
     // September 18's proven Adreno 6xx topology keeps zero-generation
     // temporal preprocessing conservative: host-fence the source copy, run the
     // private zero-count pass, and return only after its bounded private-device
@@ -1820,6 +1831,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         conf.adaptiveFramegen
         && maxAdaptiveGeneratedFrames > 0
         && protectedCapacityIntervalMs > 0.0
+        && (!sourceProtectionBatchAdmission
+            || this->sourceProtectionBudgetTracker_.telemetry().baselineValid)
         && this->deadlineAdmissionPredictor_.hasEstimate();
     const size_t safeGenerationHint = safeGenerationHintValid
         ? (sourceProtectionBatchAdmission
@@ -1923,6 +1936,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     const bool sourceHistoryWarmupActive =
         this->requiresSourceHistoryWarmup_
         && this->sourceHistoryWarmupRemaining_ > 0;
+    const bool sourceProtectionBaselineValid =
+        !sourceProtectionBatchAdmission
+        || this->sourceProtectionBudgetTracker_.telemetry().baselineValid;
 
     // Active deadline admission is Adaptive-only. Fixed Adreno restores the
     // September 18 multiplier-minus-one generation count and enters the
@@ -1931,8 +1947,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // real-source boundary; Xclipse/generic Adaptive keeps ideal-slot admission.
     // A rejected opportunity is dropped, never accumulated as catch-up debt.
     this->deadlineBatchDecision_ = {};
-    // The historical Adreno scheduler does not need a synthetic readiness
-    // bootstrap. Cost estimates are learned from completed batches below.
+    // Protected Adreno must not bootstrap from an LSFG-active interval. Until
+    // one genuine source-only interval establishes the source cadence, reject
+    // synthetic work and let the existing admission source-escape path collect
+    // uncontaminated baseline evidence.
+    if (conf.adaptiveFramegen
+            && sourceProtectionBatchAdmission && !sourceProtectionBaselineValid
+            && !sourceHistoryWarmupActive && generatedFrameCount > 0) {
+        metrics.windowAdmissionRejects += generatedFrameCount;
+        metrics.totalAdmissionRejects += generatedFrameCount;
+        generatedFrameCount = 0;
+    }
+
+    // Cost estimates are learned from completed batches below only after the
+    // protected source cadence is known.
     if (conf.adaptiveFramegen
             && !sourceHistoryWarmupActive
             && generatedFrameCount > 0
@@ -1951,7 +1979,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                         this->currentSourceTimeline_.sourceDesiredTimeNs - admissionNowNs)
                     / 1'000'000.0;
                 const double sourceBudgetMs =
-                    sourceProtectionBatchAdmission
+                    sourceProtectionBaselineValid && sourceProtectionBatchAdmission
                         ? this->sourceProtectionBudgetTracker_.clampTimelineBudget(
                             rawSourceBudgetMs)
                         : rawSourceBudgetMs;
@@ -3468,28 +3496,30 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             pass.preCopySemaphores.at(1).handle(),
         };
 
-        // September 18 built-runtime topology: ordinary generated cycles use
-        // the selected cross-device GPU semaphore (SYNC_FD on Turnip/Adreno
-        // when advertised). Warmup and zero-generation/history cycles retain
-        // the bounded host-fence source handoff.
+        // 364178af transaction: ordinary generated cycles use the dedicated
+        // OPAQUE_FD GPU semaphore. Warmup and zero-generation/history cycles
+        // keep the bounded host-fence source handoff.
         bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
             && generatedFrameCount > 0
             && !sourceHistoryWarmupActive;
         int framegenInputSemaphoreFd = -1;
         if (useAsyncHandoff) {
             try {
-                pass.framegenInputSemaphore = Mini::Semaphore(
-                    info.device, this->asyncAhbHandoffHandleType_);
+                // OPAQUE_FD is reusable and may be exported before the source
+                // copy signals it. This is the proven S20+/Turnip transaction
+                // and leaves export failure recoverable before submission.
+                pass.framegenInputSemaphore =
+                    Mini::Semaphore(info.device, &framegenInputSemaphoreFd);
                 preCopySignals.emplace_back(
                     pass.framegenInputSemaphore.handle());
             } catch (const std::exception& e) {
                 this->asyncAhbHandoffEnabled_ = false;
                 useAsyncHandoff = false;
+                framegenInputSemaphoreFd = -1;
                 metrics.totalAsyncFallbacks++;
                 std::cerr
                     << "lsfg-vk: Android async AHB handoff disabled after "
-                    << handoffTypeName(this->asyncAhbHandoffHandleType_)
-                    << " semaphore creation failure: " << e.what()
+                    << "OPAQUE_FD create/export failure: " << e.what()
                     << "; falling back to host fence\n";
             }
         }
@@ -3507,39 +3537,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowHandoffSubmitMs +=
                 std::chrono::duration<double, std::milli>(
                     RuntimeMetrics::Clock::now() - submitStart).count();
-
-            try {
-                // SYNC_FD has copy-transference semantics. Export only after
-                // the source-copy signal operation has been submitted so the
-                // descriptor represents that exact GPU completion point.
-                framegenInputSemaphoreFd = pass.framegenInputSemaphore.exportFd(
-                    info.device, this->asyncAhbHandoffHandleType_);
-                metrics.windowAsyncHandoffs++;
-                metrics.totalAsyncHandoffs++;
-            } catch (const std::exception& e) {
-                // The copy is already queued with the reusable handoff fence.
-                // Complete it before falling back so framegen never consumes
-                // the shared AHB unsynchronized.
-                const auto fallbackWaitStart = RuntimeMetrics::Clock::now();
-                waitForAhbHandoff(
-                    info.device,
-                    *this->ahbHandoffFence,
-                    this->waitHandoffFences);
-                metrics.windowHandoffFenceWaitMs +=
-                    std::chrono::duration<double, std::milli>(
-                        RuntimeMetrics::Clock::now() - fallbackWaitStart).count();
-                this->asyncAhbHandoffEnabled_ = false;
-                useAsyncHandoff = false;
-                framegenInputSemaphoreFd = -1;
-                metrics.totalAsyncFallbacks++;
-                metrics.windowSyncHandoffs++;
-                metrics.totalSyncHandoffs++;
-                std::cerr
-                    << "lsfg-vk: Android async AHB handoff disabled after "
-                    << handoffTypeName(this->asyncAhbHandoffHandleType_)
-                    << " fd export failure: " << e.what()
-                    << "; completed source copy with host-fence fallback\n";
-            }
+            metrics.windowAsyncHandoffs++;
+            metrics.totalAsyncHandoffs++;
         } else {
             submitAndWaitForAhbHandoff(
                 info.device,

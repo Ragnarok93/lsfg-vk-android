@@ -174,9 +174,17 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         admission = source[admission_start:admission_end]
         self.assertIn("rawSourceBudgetMs", admission)
         self.assertIn(
-            "sourceProtectionBatchAdmission\n"
-            "                        ? this->sourceProtectionBudgetTracker_.clampTimelineBudget(",
+            "sourceProtectionBaselineValid && sourceProtectionBatchAdmission",
             admission,
+        )
+        self.assertIn(
+            "sourceProtectionBudgetTracker_.clampTimelineBudget(",
+            admission,
+        )
+        self.assertIn(
+            "sourceProtectionBatchAdmission && !sourceProtectionBaselineValid",
+            admission,
+            "Protected Adreno must collect source-only cadence before admission.",
         )
         self.assertIn(": rawSourceBudgetMs", admission)
 
@@ -187,6 +195,7 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         hint = source[hint_start:hint_end]
         self.assertIn("sourceProtectionBatchAdmission", hint)
         self.assertIn("sourceProtectionBudgetTracker_.clampTimelineBudget(", hint)
+        self.assertIn("baselineValid", hint)
         self.assertIn("safeBatchGenerationHint(", hint)
         self.assertIn("safeGenerationHint(", hint)
         self.assertIn("capacityIntervalMs", hint)

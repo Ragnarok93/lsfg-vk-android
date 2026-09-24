@@ -78,20 +78,24 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait = true", fallback)
         self.assertIn("waitContext", history)
 
-    def test_adreno_uses_gpu_source_handoff_and_bounded_host_completion(self) -> None:
+    def test_adreno_uses_opaque_gpu_source_handoff_and_bounded_host_completion(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
         selection_end = source.index("const bool xclipseCompatibilityPath", selection_start)
         selection = source[selection_start:selection_end]
 
-        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("adrenoHistoricalOpaqueAttempt", selection)
         self.assertIn("opaqueFdHandoffSupported", selection)
         self.assertIn(
-            "(syncFdHandoffSupported || opaqueFdHandoffSupported)",
+            "? (opaqueFdHandoffSupported || adrenoHistoricalOpaqueAttempt)",
             selection,
         )
-        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", selection)
+        self.assertIn(
+            "this->asyncAhbHandoffHandleType_ =\n"
+            "            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;",
+            selection,
+        )
         self.assertIn(
             "this->asyncFramegenCompletionEnabled_ =\n"
             "        !this->conservativeCrossDeviceSync_",
@@ -102,10 +106,10 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
         end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
         adreno = source[begin:end]
-        submit = adreno.index("submitAhbHandoff(")
-        export_fd = adreno.index("framegenInputSemaphore.exportFd(", submit)
-        self.assertLess(submit, export_fd)
-        self.assertIn("this->asyncAhbHandoffHandleType_", adreno)
+        create = adreno.index("Mini::Semaphore(info.device, &framegenInputSemaphoreFd)")
+        submit = adreno.index("submitAhbHandoff(", create)
+        self.assertLess(create, submit)
+        self.assertNotIn("framegenInputSemaphore.exportFd(", adreno)
 
         generated = source.split("// 2. Tell framegen", 1)[1].split(
             "// 4. Generated presentation is opportunistic.", 1

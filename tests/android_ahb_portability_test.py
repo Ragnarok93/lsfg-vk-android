@@ -257,12 +257,13 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         self.assertIn("requiredHeadroom", swapchain)
         self.assertIn("residentMultiplier - 1", swapchain)
         self.assertIn(
-            "if (!activeConf.enable || activeConf.multiplier <= 1)",
+            "activeConf.multiplier <= 1 && !activeConf.targeted",
             swapchain,
-            "Disabled targeted Android sessions must preserve the application's native swapchain.",
+            "A targeted GameNative Off toggle must keep the resident context; "
+            "non-targeted disabled sessions still preserve the native swapchain.",
         )
         self.assertLess(
-            swapchain.index("if (!activeConf.enable || activeConf.multiplier <= 1)"),
+            swapchain.index("activeConf.multiplier <= 1 && !activeConf.targeted"),
             swapchain.index("residentCapacityMultiplier(activeConf)"),
         )
         self.assertIn("pCreateInfo->minImageCount + requiredHeadroom", swapchain)
