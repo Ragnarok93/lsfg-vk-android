@@ -218,5 +218,27 @@ class AndroidExternalSemaphoreRegressionTest(unittest.TestCase):
             self.assertIn("pass, interpolationCount", source, path.as_posix())
 
 
+    def test_external_semaphore_probes_log_raw_driver_capability_bits(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        backend = (ROOT / "framegen/src/core/device.cpp").read_text(encoding="utf-8")
+
+        # Device logs must tell us *why* OPAQUE_FD was rejected instead of
+        # collapsing the Vulkan query into a single supported=0 boolean.
+        for source, scope in ((hooks, "game"), (backend, "framegen")):
+            self.assertIn(f"external-semaphore-probe scope={scope}", source)
+            self.assertIn('" handle="', source)
+            self.assertIn('" extension="', source)
+            self.assertIn('" query="', source)
+            self.assertIn('" features=0x"', source)
+            self.assertIn('" compatible=0x"', source)
+            self.assertIn('" export_from_imported=0x"', source)
+            self.assertIn('" supported="', source)
+
+        for source in (hooks, backend):
+            self.assertIn('"opaque-fd"', source)
+            self.assertIn('"sync-fd"', source)
+
+
+
 if __name__ == "__main__":
     unittest.main()

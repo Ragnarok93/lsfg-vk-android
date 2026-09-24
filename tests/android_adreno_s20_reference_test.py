@@ -356,5 +356,32 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn("!this->conservativeCrossDeviceSync_", selection)
 
 
+    def test_private_framegen_instance_suppresses_recursive_lsfg_force_enable(self) -> None:
+        source = (ROOT / "framegen/src/core/instance.cpp").read_text(encoding="utf-8")
+
+        # 364178af did more than set DISABLE_LSFG: GameNative also force-enables
+        # the layer through VK_INSTANCE_LAYERS, so the private compute instance
+        # must temporarily remove LSFG from that list and restore it afterwards.
+        for token in (
+            "privateInstanceEnvironmentMutex",
+            'readEnvironment("VK_INSTANCE_LAYERS")',
+            'setenv("DISABLE_LSFG", "1", 1)',
+            "stripLayerName(",
+            '"VK_LAYER_LS_frame_generation"',
+            'unsetenv("VK_INSTANCE_LAYERS")',
+            'restoreEnvironment("VK_INSTANCE_LAYERS", previousInstanceLayers)',
+            'restoreEnvironment("DISABLE_LSFG", previousDisable)',
+            "ScopedPrivateInstanceLayerSuppression suppressRecursiveLsfgLayer",
+        ):
+            self.assertIn(token, source)
+
+        suppression = source.index(
+            "ScopedPrivateInstanceLayerSuppression suppressRecursiveLsfgLayer"
+        )
+        create = source.index("vkCreateInstance(&createInfo", suppression)
+        self.assertLess(suppression, create)
+
+
+
 if __name__ == "__main__":
     unittest.main()
