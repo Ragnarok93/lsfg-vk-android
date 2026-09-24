@@ -75,6 +75,8 @@ namespace {
 #ifdef __ANDROID__
         const bool residentTarget = previous.targeted && next.targeted;
         if (residentTarget) {
+            const bool generationActivityChanged =
+                (previous.multiplier > 1) != (next.multiplier > 1);
             const bool adaptiveFlowModeChanged =
                 previous.adaptiveFlowScale != next.adaptiveFlowScale;
             const bool adaptiveFlowPresetChanged =
@@ -86,7 +88,8 @@ namespace {
             // A resident context is allocated for at least four
             // generated outputs. A larger hot-reloaded multiplier needs a new
             // swapchain/context before present can index those outputs.
-            return next.multiplier > residentCapacityMultiplier(previous)
+            return generationActivityChanged
+                || next.multiplier > residentCapacityMultiplier(previous)
                 || previous.dll != next.dll
                 || adaptiveFlowModeChanged
                 || adaptiveFlowPresetChanged
@@ -849,7 +852,7 @@ namespace {
             return res;
         };
 
-        if (!activeConf.enable || (activeConf.multiplier <= 1 && !activeConf.targeted))
+        if (!activeConf.enable || activeConf.multiplier <= 1)
             return createPassThrough("disabled");
 
 #ifdef __ANDROID__
