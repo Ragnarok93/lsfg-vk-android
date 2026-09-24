@@ -94,6 +94,24 @@ class AndroidInstanceDispatchRegressionTest(unittest.TestCase):
         self.assertLess(snapshot, post_hook)
         self.assertNotIn("runtime stage=device-dispatch-ready presentation=1", layer)
 
+    def test_private_framegen_instance_removes_force_enable_from_loader_scope(self) -> None:
+        framegen_instance = (
+            ROOT / "framegen/src/core/instance.cpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('readEnvironment("VK_LOADER_LAYERS_ENABLE")', framegen_instance)
+        self.assertIn(
+            'stripLayerName(\n'
+            '                *previousLoaderLayersEnable, "VK_LAYER_LS_frame_generation")',
+            framegen_instance,
+        )
+        self.assertIn('unsetenv("VK_LOADER_LAYERS_ENABLE")', framegen_instance)
+        self.assertIn(
+            'restoreEnvironment("VK_LOADER_LAYERS_ENABLE", previousLoaderLayersEnable)',
+            framegen_instance,
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()

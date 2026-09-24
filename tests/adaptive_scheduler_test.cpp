@@ -936,49 +936,53 @@ int main() {
     }
 
     {
-        // Source protection must distinguish a real source-only cadence sample
-        // from LSFG history maintenance. A host-fence wall wait includes the
-        // game's render dependency and must never be treated as pure LSFG copy
-        // overhead. Only the incremental source-copy cost may reserve budget.
+        // Protected Adreno cadence may not be bootstrapped from LSFG-active
+        // maintenance or generated cycles. Those intervals already include
+        // LSFG work and can make the governor permanently protect an
+        // unrealistically fast source deadline.
         SourceProtectionBudgetTracker budget;
         budget.observeSource(
-            40ms, SourceCadenceObservation::HistoryMaintenance);
-        budget.observeSerializedCopyCost(1.5);
+            18ms, SourceCadenceObservation::HistoryMaintenance);
+        assert(!budget.telemetry().baselineValid);
+        assert(budget.clampTimelineBudget(40.0) > 39.9);
+        assert(budget.clampTimelineBudget(40.0) < 40.1);
+
+        budget.observeSource(
+            16ms, SourceCadenceObservation::Generated);
+        assert(!budget.telemetry().baselineValid);
+
+        // A genuine source-only observation establishes the baseline.
+        budget.observeSource(
+            40ms, SourceCadenceObservation::SourceOnly);
         assert(budget.telemetry().baselineValid);
-        assert(budget.telemetry().copyCostValid);
         assert(budget.telemetry().protectedSourceIntervalMs > 39.9);
         assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
+
+        budget.observeSerializedCopyCost(1.5);
+        assert(budget.telemetry().copyCostValid);
         assert(budget.telemetry().serializedCopyReserveMs > 1.4);
         assert(budget.telemetry().serializedCopyReserveMs < 1.6);
         assert(budget.clampTimelineBudget(80.0) > 38.4);
         assert(budget.clampTimelineBudget(80.0) < 38.6);
 
-        // History maintenance is not clean evidence of a naturally slower game.
-        // Its own preprocessing/ownership work may have stretched the interval,
-        // so it may tighten a baseline but may not move it slower.
+        // LSFG-active cycles may tighten a clean baseline when the source is
+        // genuinely faster, but can never teach it a slower cadence.
         for (int i = 0; i < 8; ++i)
             budget.observeSource(
                 80ms, SourceCadenceObservation::HistoryMaintenance);
         assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
 
-        // Generated work follows the same one-way rule.
         for (int i = 0; i < 6; ++i)
             budget.observeSource(
                 80ms, SourceCadenceObservation::Generated);
         assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
 
-        // A genuine source-only observation remains the authority for a natural
-        // scene-rate transition in either direction.
+        // Clean source-only evidence remains authoritative for a natural scene
+        // transition after the baseline has been established.
         for (int i = 0; i < 8; ++i)
             budget.observeSource(
                 80ms, SourceCadenceObservation::SourceOnly);
         assert(budget.telemetry().protectedSourceIntervalMs > 75.0);
-
-        // A larger measured copy cost may tighten the budget, but an unrelated
-        // render/fence wall wait never enters this API.
-        budget.observeSerializedCopyCost(4.0);
-        assert(budget.telemetry().serializedCopyReserveMs > 2.7);
-        assert(budget.clampTimelineBudget(100.0) > 72.0);
     }
 
     {

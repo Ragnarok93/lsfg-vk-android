@@ -38,24 +38,34 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait", history)
         self.assertNotIn("compat-adaptive-history-copy", source)
 
-    def test_fixed_admission_rejection_stays_on_protected_history_path(self) -> None:
+    def test_fixed_adreno_uses_historical_generation_without_deadline_admission(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        start = source.index("const bool conservativeFixedHistoryGap")
-        end = source.index("const bool conservativeHistoryGap", start)
-        fixed_gap = source[start:end]
+        selection_start = source.index("const size_t requestedFixedGeneratedFrameCount")
+        selection_end = source.index("const auto& adaptiveTelemetry", selection_start)
+        selection = source[selection_start:selection_end]
+        self.assertIn("fixedAdrenoHistoricalGeneration", selection)
+        self.assertIn("this->conservativeCrossDeviceSync_", selection)
+        self.assertIn("!conf.adaptiveFramegen", selection)
+        self.assertIn(
+            "fixedAdrenoHistoricalGeneration\n"
+            "            ? requestedFixedGeneratedFrameCount",
+            selection,
+            "Protected Adreno Fixed mode must restore September 18 multiplier-minus-one "
+            "generation before entering the compatibility execution island.",
+        )
 
-        self.assertIn("this->conservativeCrossDeviceSync_", fixed_gap)
-        self.assertIn("!conf.adaptiveFramegen", fixed_gap)
-        self.assertIn("!sourceHistoryWarmupActive", fixed_gap)
-        self.assertIn("!sourceTimelineDiscontinuity", fixed_gap)
-        self.assertIn("generatedFrameCount == 0", fixed_gap)
+        admission_start = source.index("// Active deadline admission")
+        admission_end = source.index(
+            "const auto& outputCadenceForPresentation", admission_start
+        )
+        admission = source[admission_start:admission_end]
+        self.assertIn("if (conf.adaptiveFramegen", admission)
         self.assertNotIn(
-            "plannedGeneratedFrameCount == 0",
-            fixed_gap,
-            "A rejected Fixed generation opportunity (planned > 0, admitted 0) "
-            "must remain a protected history-maintenance cycle instead of "
-            "falling into the true source-only bypass.",
+            "conf.adaptiveFramegen || sourceProtectionBatchAdmission",
+            admission,
+            "Fixed Adreno must not be suppressed by the post-September-18 "
+            "deadline predictor.",
         )
 
     def test_history_invalidation_has_explicit_reason(self) -> None:
@@ -126,8 +136,9 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
             "const auto& outputCadenceForPresentation", admission_start
         )
         admission = source[admission_start:admission_end]
-        self.assertIn(
-            "if ((conf.adaptiveFramegen || sourceProtectionBatchAdmission)",
+        self.assertIn("if (conf.adaptiveFramegen", admission)
+        self.assertNotIn(
+            "conf.adaptiveFramegen || sourceProtectionBatchAdmission",
             admission,
         )
         self.assertIn("sourceBudgetMs", admission)
