@@ -57,9 +57,11 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
                           context_source.as_posix())
             self.assertIn("data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool", source,
                           context_source.as_posix())
-            self.assertIn("data.cmdBuffer1, pendingGraph, adaptiveFlowTimingPool", source,
+            self.assertIn("shadowBudgetAvailable", source, context_source.as_posix())
+            self.assertIn("shadowPreprocessEstimateMs", source, context_source.as_posix())
+            self.assertIn("generationCount == 0 || shadowBudgetAvailable", source,
                           context_source.as_posix())
-            self.assertIn("data.cmdBuffer1, pendingGraph);", source,
+            self.assertIn("data.cmdBuffer1, pendingGraph", source,
                           context_source.as_posix())
             self.assertIn("generationGraphIndex = pendingIndex", source,
                           context_source.as_posix())
