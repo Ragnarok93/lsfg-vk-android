@@ -1676,7 +1676,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 #endif
 
     auto& pass = this->passInfos.at(this->frameIdx % 8);
-    if (!this->conservativeCrossDeviceSync_ && !this->tryRecyclePass(pass)) {
+#ifdef __ANDROID__
+    const bool shouldRecyclePass = !this->conservativeCrossDeviceSync_;
+#else
+    const bool shouldRecyclePass = true;
+#endif
+    if (shouldRecyclePass && !this->tryRecyclePass(pass)) {
         const VkPresentInfoKHR passthroughPresentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = pNext,
