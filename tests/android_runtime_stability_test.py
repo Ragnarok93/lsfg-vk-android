@@ -143,11 +143,19 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         """The September 18 Adreno island must not enter newer pass-ring retirement fallback."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        guard = (
-            "if (!this->conservativeCrossDeviceSync_ "
-            "&& !this->tryRecyclePass(pass))"
+        self.assertIn(
+            "const bool shouldRecyclePass = !this->conservativeCrossDeviceSync_;",
+            source,
         )
-        self.assertIn(guard, source)
+        self.assertIn(
+            "const bool shouldRecyclePass = true;",
+            source,
+            "Non-Android builds must retain ordinary pass recycling.",
+        )
+        self.assertIn(
+            "if (shouldRecyclePass && !this->tryRecyclePass(pass))",
+            source,
+        )
 
         begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
         end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
