@@ -1829,16 +1829,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         safeGenerationHint,
         safeGenerationHintValid);
 
+    const bool fixedAdrenoHistoricalGeneration =
+        this->conservativeCrossDeviceSync_
+        && !conf.adaptiveFramegen;
     if (conf.adaptiveFramegen)
         this->fixedSourceCadenceGovernor_.reset();
     size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
-        : this->fixedSourceCadenceGovernor_.plan(
-            sourceInterval,
-            requestedFixedGeneratedFrameCount,
-            this->lastDispatchedGeneratedFrameCount_,
-            !this->requiresSourceHistoryWarmup_,
-            previousSourceCadenceObservation);
+        : fixedAdrenoHistoricalGeneration
+            ? requestedFixedGeneratedFrameCount
+            : this->fixedSourceCadenceGovernor_.plan(
+                sourceInterval,
+                requestedFixedGeneratedFrameCount,
+                this->lastDispatchedGeneratedFrameCount_,
+                !this->requiresSourceHistoryWarmup_,
+                previousSourceCadenceObservation);
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
@@ -1916,14 +1921,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->requiresSourceHistoryWarmup_
         && this->sourceHistoryWarmupRemaining_ > 0;
 
-    // Active deadline admission: generation is subordinate to the protected
-    // real-source boundary. Adreno tests a complete candidate batch against
-    // that boundary; Xclipse/generic paths retain ideal-slot admission.
+    // Active deadline admission is Adaptive-only. Fixed Adreno restores the
+    // September 18 multiplier-minus-one generation count and enters the
+    // compatibility island without the post-reference deadline predictor.
+    // Adaptive Adreno tests a complete candidate batch against the protected
+    // real-source boundary; Xclipse/generic Adaptive keeps ideal-slot admission.
     // A rejected opportunity is dropped, never accumulated as catch-up debt.
     this->deadlineBatchDecision_ = {};
     // The historical Adreno scheduler does not need a synthetic readiness
     // bootstrap. Cost estimates are learned from completed batches below.
-    if ((conf.adaptiveFramegen || sourceProtectionBatchAdmission)
+    if (conf.adaptiveFramegen
             && !sourceHistoryWarmupActive
             && generatedFrameCount > 0
             && this->currentSourceTimeline_.valid) {
