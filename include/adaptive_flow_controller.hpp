@@ -35,9 +35,9 @@ struct AdaptiveFlowObservation {
     double frameBudgetMs{};
     /// Completed previous-cycle LSFG GPU duration.
     double totalLsfgMs{};
-    /// Scale-sensitive optical-flow duration, including mipmaps and flow refinement.
+    /// Scale-sensitive optical-flow/refinement duration excluding mipmaps.
     double flowMs{};
-    /// Mipmaps portion of flowMs, retained for diagnostics.
+    /// Mipmaps duration retained separately for diagnostics and total-cost attribution.
     double mipmapsMs{};
     std::size_t generationCount{};
     bool deadlineMissed{false};
