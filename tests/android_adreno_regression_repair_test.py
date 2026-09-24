@@ -86,12 +86,11 @@ class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
             "Adaptive Adreno must collect a clean source-only interval before "
             "synthetic work can consume the source timeline.",
         )
-        self.assertNotIn(
-            "sourceProtectionBatchAdmission\n"
-            "                        ? this->sourceProtectionBudgetTracker_.clampTimelineBudget(",
+        self.assertIn(
+            "sourceProtectionBaselineValid && sourceProtectionBatchAdmission",
             admission,
-            "An invalid protected baseline must never make the raw LSFG-inflated "
-            "source interval authoritative.",
+            "Protected Adreno may only clamp/admit against a source budget after "
+            "clean source-only cadence established the baseline.",
         )
 
     def test_adreno_prior_compute_overload_escapes_before_source_copy(self) -> None:
