@@ -928,7 +928,11 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     : "current-capability")
               << " governor_adapter="
               << (this->conservativeCrossDeviceSync_
-                    ? "admission-only"
+                    ? "adaptive-admission-only"
+                    : "native-current")
+              << " fixed_generation="
+              << (this->conservativeCrossDeviceSync_
+                    ? "historical-direct"
                     : "native-current")
               << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
               << '\n';
