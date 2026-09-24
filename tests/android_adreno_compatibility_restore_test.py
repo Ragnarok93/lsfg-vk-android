@@ -85,21 +85,27 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         selection_end = source.index("const bool xclipseCompatibilityPath", selection_start)
         selection = source[selection_start:selection_end]
 
-        self.assertNotIn(
-            "!this->conservativeCrossDeviceSync_\n"
-            "        && gameGetSemaphoreFd != nullptr",
+        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("opaqueFdHandoffSupported", selection)
+        self.assertIn(
+            "(syncFdHandoffSupported || opaqueFdHandoffSupported)",
             selection,
         )
-        self.assertIn("if (this->conservativeCrossDeviceSync_)", selection)
-        self.assertIn("opaqueFdHandoffSupported", selection)
-        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT", selection)
-        self.assertIn("gameImportSemaphoreFd != nullptr", selection)
+        self.assertIn("VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT", selection)
         self.assertIn(
             "this->asyncFramegenCompletionEnabled_ =\n"
             "        !this->conservativeCrossDeviceSync_",
             selection,
         )
         self.assertIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
+
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+        submit = adreno.index("submitAhbHandoff(")
+        export_fd = adreno.index("framegenInputSemaphore.exportFd(", submit)
+        self.assertLess(submit, export_fd)
+        self.assertIn("this->asyncAhbHandoffHandleType_", adreno)
 
         generated = source.split("// 2. Tell framegen", 1)[1].split(
             "// 4. Generated presentation is opportunistic.", 1
