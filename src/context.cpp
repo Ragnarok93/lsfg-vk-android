@@ -93,6 +93,10 @@ const char* sourceHistoryInvalidationReasonName(
         case SourceHistoryInvalidationReason::Startup: return "startup";
         case SourceHistoryInvalidationReason::TimelineDiscontinuity:
             return "timeline_discontinuity";
+        case SourceHistoryInvalidationReason::RuntimeConfigChange:
+            return "runtime_config_change";
+        case SourceHistoryInvalidationReason::SuspendResume:
+            return "suspend_resume";
         case SourceHistoryInvalidationReason::SyncExportFailure:
             return "sync_export_failure";
         case SourceHistoryInvalidationReason::SyncImportFailure:
@@ -1751,7 +1755,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     } else if (this->runtimeConfigSignature_ != currentConfigSignature) {
         this->runtimeConfigSignature_ = currentConfigSignature;
         this->configRevision_ = nextRuntimeConfigRevision();
-        this->advanceAdaptiveFlowTimingEpoch();
+        // Resident hot reloads deliberately preserve the swapchain/AHB
+        // allocation, but their generated cadence cannot inherit temporal
+        // history from the pre-menu configuration. Start a fresh source epoch
+        // before the new scheduler settings are allowed to generate.
+        this->resetAdaptiveSourceEpoch(
+            true, SourceHistoryInvalidationReason::RuntimeConfigChange);
+        std::cerr << "lsfg-vk: runtime stage=temporal-epoch-reset"
+                  << " reason=runtime-config-change"
+                  << " config_revision=" << this->configRevision_
+                  << "\n";
     }
 
     auto& metrics = this->runtimeMetrics;
@@ -2737,7 +2750,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             excludeCurrentCycleFromTimingMetrics = true;
             std::cerr << "lsfg-vk: runtime-timing-discontinuity"
                       << " cycle_ms=" << cycleMs
-                      << " action=reset-window\n";
+                      << " action=reset-temporal-epoch\n";
+            // A suspend can happen after sourceInterval was sampled, so the
+            // scheduler may never see the multi-second gap. Metrics-only reset
+            // leaves the private framegen/source pair armed across that gap and
+            // can persistently alternate stale temporal output. Preserve GPU
+            // ownership releases, but invalidate cadence/history exactly as an
+            // explicit Off -> On transition does.
+            this->resetAdaptiveSourceEpoch(
+                true, SourceHistoryInvalidationReason::SuspendResume);
             metrics.windowStart = cycleEnd;
             metrics.windowSourceFrames = 0;
             metrics.windowGeneratedFrames = 0;
@@ -5446,6 +5467,12 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->lastDispatchedGeneratedFrameCount_ = 0;
     this->lastSourceCadenceObservation_ =
         SourceCadenceObservation::SourceOnly;
+    // A new temporal epoch must never chain source-copy parity or cadence
+    // timestamps from the previous epoch. Private-device batch releases remain
+    // retained above and are still consumed before shared AHB reuse.
+    this->previousSourceCopySignalValid_ = false;
+    this->runtimeMetrics.hasLastSourcePresent = false;
+    this->runtimeMetrics.lastSourcePresent = {};
 
     this->adaptiveFlowController_.reset();
     this->adaptiveFlowNextPressureRead_ = {};

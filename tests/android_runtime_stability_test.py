@@ -521,7 +521,11 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("cycleMs >= kRuntimeTimingDiscontinuityMs", source)
         self.assertIn("excludeCurrentCycleFromTimingMetrics = true", source)
         self.assertIn("runtime-timing-discontinuity", source)
-        self.assertIn("action=reset-window", source)
+        self.assertIn("action=reset-temporal-epoch", source)
+        self.assertIn(
+            "SourceHistoryInvalidationReason::SuspendResume",
+            source,
+        )
         self.assertIn("metrics.windowWaitIdleMs = 0.0", source)
         self.assertIn("metrics.windowDispatchMs = 0.0", source)
         self.assertIn("if (!excludeCurrentCycleFromTimingMetrics)", source)

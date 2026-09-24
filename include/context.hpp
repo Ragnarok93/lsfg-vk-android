@@ -27,6 +27,8 @@ enum class SourceHistoryInvalidationReason {
     None,
     Startup,
     TimelineDiscontinuity,
+    RuntimeConfigChange,
+    SuspendResume,
     SyncExportFailure,
     SyncImportFailure,
     ContextRecreate,
