@@ -6,17 +6,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
-    def test_adreno_opaque_handoff_respects_reported_capability(self) -> None:
+    def test_adreno_source_handoff_respects_reported_fd_capabilities(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("const bool syncFdHandoffSupported")
         end = source.index("const bool xclipseCompatibilityPath", start)
         selection = source[start:end]
 
         self.assertNotIn("adrenoHistoricalOpaqueAttempt", selection)
+        self.assertIn("syncFdHandoffSupported", selection)
         self.assertIn("opaqueFdHandoffSupported", selection)
         self.assertIn(
-            "this->conservativeCrossDeviceSync_\n"
-            "            ? opaqueFdHandoffSupported",
+            "(syncFdHandoffSupported || opaqueFdHandoffSupported)",
+            selection,
+        )
+        self.assertIn(
+            "syncFdHandoffSupported\n"
+            "            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT",
+            selection,
+        )
+        self.assertIn(
+            ": VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
             selection,
         )
 
