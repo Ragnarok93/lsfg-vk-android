@@ -2421,8 +2421,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             && this->adaptiveFlowRetainedGenerationCount_ > 0;
         const double observationMipmapsMs = generatedWorkSample
             ? timing.mipmapsMs : this->adaptiveFlowRetainedMipmapsMs_;
-        const double observationFlowMs = generatedWorkSample
+        const double observationFlowEndMs = generatedWorkSample
             ? timing.opticalFlowMs : this->adaptiveFlowRetainedWorkMs_;
+        const double observationScaleSensitiveFlowMs = std::max(
+            0.0, observationFlowEndMs - observationMipmapsMs);
         const double observationTotalMs = generatedWorkSample
             ? timing.totalLsfgMs : this->adaptiveFlowRetainedTotalLsfgMs_;
         const size_t observationGenerationCount = generatedWorkSample
@@ -2442,7 +2444,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .elapsed = sourceInterval,
             .frameBudgetMs = observationBudgetMs,
             .totalLsfgMs = observationTotalMs,
-            .flowMs = observationFlowMs,
+            .flowMs = observationScaleSensitiveFlowMs,
             .mipmapsMs = observationMipmapsMs,
             .generationCount = observationGenerationCount,
             .deadlineMissed = generatedWorkSample && observationBudgetValid
@@ -2459,7 +2461,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .globalGpuUsagePercent =
                 this->adaptiveFlowGlobalGpuUsagePercent_,
             .globalPressureValid =
-                this->adaptiveFlowGlobalPressureValid_,
+                !this->conservativeCrossDeviceSync_
+                && this->adaptiveFlowGlobalPressureValid_,
             .outputDeficit = outputDeficit,
             .syntheticDropPressure = false,
             .generatedWorkSample = generatedWorkSample,
@@ -2490,6 +2493,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // changes scale, that timing no longer describes the active Flow
             // state and must not authorize another step without fresh GPU work.
             this->adaptiveFlowGeneratedTimingValid_ = false;
+            // Cost measurements are scale-specific. Never admit a new batch
+            // using an estimate learned at the previous Flow Scale.
+            this->deadlineAdmissionPredictor_.reset();
             if (conf.performance)
                 LSFG_3_1P::requestContextFlowScale(
                     *this->lsfgCtxId, selectedScale);
