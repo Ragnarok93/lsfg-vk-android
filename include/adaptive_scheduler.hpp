@@ -137,6 +137,12 @@ struct DeadlineAdmissionDecision {
 class DeadlineAdmissionPredictor {
 public:
     void observe(const DeadlineAdmissionObservation& observation);
+    /// Learn the source-thread blocking cost at the protected private-device
+    /// completion boundary. On host-bounded Adreno this includes queue residency
+    /// that GPU shader timestamps do not see, so it is part of the source-owned
+    /// admission cost rather than a presentation-only reserve.
+    void observeBlockingCompletion(
+        std::size_t generationCount, double completionMs);
     /// Learn unmodeled submit-to-delivery pressure only from a frame that was
     /// admitted but still missed its synthetic deadline/WSI opportunity.
     void observeDeliveryMiss(double latenessMs);
