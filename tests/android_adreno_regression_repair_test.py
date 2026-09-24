@@ -6,50 +6,93 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
-    def test_adreno_source_handoff_respects_reported_fd_capabilities(self) -> None:
+    def test_adreno_source_handoff_restores_historical_opaque_fd_attempt(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("const bool syncFdHandoffSupported")
         end = source.index("const bool xclipseCompatibilityPath", start)
         selection = source[start:end]
 
-        self.assertNotIn("adrenoHistoricalOpaqueAttempt", selection)
-        self.assertIn("syncFdHandoffSupported", selection)
-        self.assertIn("opaqueFdHandoffSupported", selection)
+        # Protected Adreno must not substitute SYNC_FD for the September 18
+        # source handoff. Turnip can report OPAQUE_FD feature bits as zero even
+        # though the real OPAQUE_FD create/export/import transaction succeeds,
+        # so the actual transaction remains the runtime probe and failure falls
+        # back to the bounded host fence.
+        self.assertIn("adrenoHistoricalOpaqueAttempt", selection)
+        self.assertIn("info.androidSyncFdSemaphoreSupported", selection)
+        self.assertIn("backendDiagnostics.externalSemaphoreSyncFd", selection)
         self.assertIn(
-            "(syncFdHandoffSupported || opaqueFdHandoffSupported)",
+            "? (opaqueFdHandoffSupported || adrenoHistoricalOpaqueAttempt)",
             selection,
         )
         self.assertIn(
-            "syncFdHandoffSupported\n"
-            "            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT",
+            "this->asyncAhbHandoffHandleType_ =\n"
+            "            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;",
             selection,
         )
         self.assertIn(
-            ": VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
+            ": (syncFdHandoffSupported || opaqueFdHandoffSupported)",
             selection,
+            "Generic/Xclipse routing must remain capability-driven.",
         )
 
-
-    def test_disabled_targeted_android_swapchain_is_true_wsi_passthrough(self) -> None:
+    def test_disabled_targeted_android_swapchain_stays_resident_and_bypasses_framegen(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         create_start = hooks.index("const auto createPassThrough")
         create_end = hooks.index("#ifdef __ANDROID__", create_start + 1000)
         create_region = hooks[create_start:create_end]
         self.assertIn(
-            "if (!activeConf.enable || activeConf.multiplier <= 1)",
+            "activeConf.multiplier <= 1 && !activeConf.targeted",
             create_region,
         )
         self.assertNotIn(
-            "activeConf.multiplier <= 1 && !activeConf.targeted",
+            "if (!activeConf.enable || activeConf.multiplier <= 1)",
             create_region,
         )
 
         recreation_start = hooks.index("bool requiresSwapchainRecreation")
         recreation_end = hooks.index("bool supportsDeviceExtension", recreation_start)
         recreation = hooks[recreation_start:recreation_end]
-        self.assertIn("generationActivityChanged", recreation)
-        self.assertIn("(previous.multiplier > 1) != (next.multiplier > 1)", recreation)
+        self.assertNotIn("generationActivityChanged", recreation)
+        self.assertNotIn("(previous.multiplier > 1) != (next.multiplier > 1)", recreation)
+
+        present_start = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
+        present_end = hooks.index("try {", present_start)
+        present = hooks[present_start:present_end]
+        self.assertIn("state->context->enterSourceOnlyBypass()", present)
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", present)
+        self.assertIn("void enterSourceOnlyBypass();", header)
+        self.assertIn("void LsContext::enterSourceOnlyBypass()", context)
+
+    def test_adaptive_adreno_requires_clean_source_baseline_before_admission(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        admission_start = source.index("// Active deadline admission")
+        admission_end = source.index(
+            "const auto& outputCadenceForPresentation", admission_start
+        )
+        admission = source[admission_start:admission_end]
+
+        self.assertIn("sourceProtectionBaselineValid", admission)
+        self.assertIn(
+            "sourceProtectionBatchAdmission && !sourceProtectionBaselineValid",
+            admission,
+        )
+        self.assertIn(
+            "generatedFrameCount = 0;",
+            admission,
+            "Adaptive Adreno must collect a clean source-only interval before "
+            "synthetic work can consume the source timeline.",
+        )
+        self.assertNotIn(
+            "sourceProtectionBatchAdmission\n"
+            "                        ? this->sourceProtectionBudgetTracker_.clampTimelineBudget(",
+            admission,
+            "An invalid protected baseline must never make the raw LSFG-inflated "
+            "source interval authoritative.",
+        )
 
     def test_adreno_prior_compute_overload_escapes_before_source_copy(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
