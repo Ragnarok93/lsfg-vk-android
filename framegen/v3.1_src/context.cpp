@@ -406,14 +406,44 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         if (this->pendingFlowGraphIndex_.has_value()) {
             const size_t pendingIndex = *this->pendingFlowGraphIndex_;
             const auto pendingGraph = this->flowGraph(pendingIndex);
+            // A Flow downstep is requested because the active operating point
+            // is already under pressure. Do not automatically double the
+            // preprocess load while generated work is active. The most recent
+            // non-transition preprocess timing is a conservative upper bound
+            // for one shadow update; only spend that work when the batch budget
+            // has explicit headroom. A zero-generation cycle can advance the
+            // pending graph directly without also refreshing the active graph.
+            const double shadowPreprocessEstimateMs =
+                this->lastAdaptiveFlowGpuTiming_.valid
+                    && !this->lastAdaptiveFlowGpuTiming_.transitionActive
+                    ? std::max(
+                        0.0,
+                        this->lastAdaptiveFlowGpuTiming_.opticalFlowMs * 1.10)
+                    : 0.0;
+            const double shadowHeadroomMs =
+                adaptiveFlowBatch.frameBudgetMs > 0.0
+                    && adaptiveFlowBatch.predictedTotalLsfgMs > 0.0
+                    ? adaptiveFlowBatch.frameBudgetMs
+                        - adaptiveFlowBatch.predictedTotalLsfgMs
+                    : 0.0;
+            const bool shadowBudgetAvailable =
+                shadowPreprocessEstimateMs > 0.0
+                && shadowHeadroomMs >= shadowPreprocessEstimateMs;
+
             if (this->pendingFlowWarmupFrames_ + 1 < kAdaptiveFlowHistoryFrames) {
-                this->dispatchAdaptiveFlowPreprocess(
-                    data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
-                this->dispatchAdaptiveFlowPreprocess(
-                    data.cmdBuffer1, pendingGraph);
+                if (generationCount > 0) {
+                    this->dispatchAdaptiveFlowPreprocess(
+                        data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
+                }
+                if (generationCount == 0 || shadowBudgetAvailable) {
+                    this->dispatchAdaptiveFlowPreprocess(
+                        data.cmdBuffer1,
+                        pendingGraph,
+                        generationCount == 0 ? adaptiveFlowTimingPool : nullptr);
+                    adaptiveFlowShadowSubmitted = true;
+                }
                 if (generationCount > 0)
                     activeGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
-                adaptiveFlowShadowSubmitted = true;
             } else {
                 // The first two shadow cycles already refreshed two distinct
                 // temporal slots. Writing the current source into the pending
