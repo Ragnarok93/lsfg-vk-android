@@ -202,7 +202,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         bypass = source[source.index("void LsContext::enterSourceOnlyBypass"):]
         self.assertIn(
-            "this->conservativeCrossDeviceSync_ ? kConservativeSourceReprimeFrames",
+            "this->conservativeCrossDeviceSync_ ? 1U : kSourceHistoryWarmupFrames",
             bypass,
         )
         self.assertIn("kSourceHistoryWarmupFrames", bypass)
