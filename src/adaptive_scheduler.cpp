@@ -386,11 +386,14 @@ DeadlineAdmissionDecision DeadlineAdmissionPredictor::predict(
         return decision;
 
     const bool exact = estimateCount == generationCount;
+    const double relativeCount =
+        static_cast<double>(generationCount)
+        / static_cast<double>(estimateCount);
     const double scale = exact
         ? 1.0
-        : static_cast<double>(generationCount)
-            / static_cast<double>(estimateCount)
-            * kUnknownBatchSafetyRatio;
+        : (generationCount < estimateCount
+            ? std::max(0.70, relativeCount * kUnknownBatchSafetyRatio)
+            : relativeCount * kUnknownBatchSafetyRatio);
     decision.predictedMipmapsMs = estimate->mipmapsMs;
     decision.predictedOpticalFlowMs = estimate->opticalFlowMs;
     decision.predictedTotalLsfgMs = estimate->totalLsfgMs * scale;
