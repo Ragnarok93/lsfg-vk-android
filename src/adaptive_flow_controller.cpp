@@ -151,21 +151,33 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     telemetry_.wsiPressure = wsiPressure;
     telemetry_.globalPressure = globalPressure;
 
+    // Scheduler transitions suppress ordinary near-budget noise, but they
+    // must not hide a completed generated batch that is already slower than
+    // its entire LSFG budget. This is direct GPU timing, independent of the
+    // potentially stale whole-device utilization sample.
+    const bool severeTransitionComputePressure =
+        computePressure
+        && observation.generatedWorkSample
+        && telemetry_.pressureRatio >= 1.0;
+
     if (observation.schedulerTransition) {
         if (downstepEvaluationActive_)
             downstepEvaluationStartedSeconds_ += evidenceSeconds;
         schedulerHoldUntilSeconds_ = std::max(
             schedulerHoldUntilSeconds_, observedSeconds_ + kSchedulerTransitionHoldSeconds);
         headroomSeconds_ = 0.0;
-        if (globalPressure)
-            pressureSeconds_ += evidenceSeconds;
-        else
-            pressureSeconds_ = 0.0;
-        telemetry_.reason = AdaptiveFlowDecisionReason::SchedulerTransition;
-        return telemetry_.currentScale;
+        if (!severeTransitionComputePressure) {
+            if (globalPressure)
+                pressureSeconds_ += evidenceSeconds;
+            else
+                pressureSeconds_ = 0.0;
+            telemetry_.reason = AdaptiveFlowDecisionReason::SchedulerTransition;
+            return telemetry_.currentScale;
+        }
     }
 
-    if (observedSeconds_ < schedulerHoldUntilSeconds_) {
+    if (observedSeconds_ < schedulerHoldUntilSeconds_
+            && !severeTransitionComputePressure) {
         if (downstepEvaluationActive_)
             downstepEvaluationStartedSeconds_ += evidenceSeconds;
         headroomSeconds_ = 0.0;

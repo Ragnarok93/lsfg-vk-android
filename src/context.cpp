@@ -2402,9 +2402,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->generatedPresentationCapacityTracker_.telemetry();
         const bool wsiPresentationPressure =
             newWsiDropPressure || presentationCapacity.pressure;
-        this->adaptiveFlowComputePressure_ = computeDropPressure;
-        this->adaptiveFlowWsiPressure_ = wsiPresentationPressure;
-
         const bool retainedTimingUsable =
             this->adaptiveFlowGeneratedTimingValid_
             && this->adaptiveFlowRetainedGenerationCount_ > 0;
@@ -2454,15 +2451,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .generatedWorkSample = generatedWorkSample,
             .schedulerTransition = schedulerTransition,
             .valid = observationBudgetValid
-                && !cadenceDiscontinuity
                 && sourceInterval.count() > 0
-                && retainedTimingUsable,
+                && retainedTimingUsable
+                && (!cadenceDiscontinuity || generatedWorkSample),
         };
 
         const float previousScale = this->adaptiveFlowController_.currentScale();
         const float selectedScale =
             this->adaptiveFlowController_.observe(observation);
         const auto& flowTelemetry = this->adaptiveFlowController_.telemetry();
+        // Diagnostics must report the controller's actual direct-timing
+        // pressure decision, not only event-counter deltas. On Adreno the
+        // system GPU-utilization sidecar can stay flat while LSFG GPU time is
+        // grossly over budget.
+        this->adaptiveFlowComputePressure_ = flowTelemetry.computePressure;
+        this->adaptiveFlowWsiPressure_ = flowTelemetry.wsiPressure;
 
         if (flowTelemetry.changed
                 && std::fabs(selectedScale - previousScale) > 0.0005F) {
@@ -3292,7 +3295,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && this->lastSourceCadenceObservation_
             == SourceCadenceObservation::Generated
         && this->adaptiveFlowGeneratedTimingValid_
-        && this->adaptiveFlowRetainedTotalLsfgMs_ > sourceBudgetMs;
+        && this->adaptiveFlowRetainedBudgetMs_ > 0.0
+        && this->adaptiveFlowRetainedTotalLsfgMs_
+            > this->adaptiveFlowRetainedBudgetMs_;
 
     // BEGIN ADRENO_364178AF_EXECUTION
     // The Qualcomm/Turnip execution path below intentionally preserves the
@@ -3361,7 +3366,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     << "lsfg-vk: runtime stage=adreno-overload-source-bypass"
                     << " prior_lsfg_ms="
                     << this->adaptiveFlowRetainedTotalLsfgMs_
-                    << " source_budget_ms=" << sourceBudgetMs
+                    << " source_budget_ms="
+                    << this->adaptiveFlowRetainedBudgetMs_
                     << " reprime=1\n";
             }
             return finishSourcePresent(
