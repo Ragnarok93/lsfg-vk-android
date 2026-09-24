@@ -101,6 +101,14 @@ const char* sourceHistoryInvalidationReasonName(
             return "context_recreate";
         case SourceHistoryInvalidationReason::SourcePairMismatch:
             return "source_pair_mismatch";
+        case SourceHistoryInvalidationReason::AdmissionBypass:
+            return "admission_bypass";
+        case SourceHistoryInvalidationReason::OverloadBypass:
+            return "overload_bypass";
+        case SourceHistoryInvalidationReason::RetirementBackpressure:
+            return "retirement_backpressure";
+        case SourceHistoryInvalidationReason::FractionalGap:
+            return "fractional_gap";
         case SourceHistoryInvalidationReason::AbandonedBatch:
             return "abandoned_batch";
         case SourceHistoryInvalidationReason::TrueOwnershipFailure:
@@ -1714,9 +1722,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->requiresSourceHistoryWarmup_ =
                     this->sourceHistoryWarmupRemaining_ > 0;
                 this->lastHistoryInvalidationReason_ =
-                    SourceHistoryInvalidationReason::SourcePairMismatch;
+                    SourceHistoryInvalidationReason::None;
                 this->lastHistoryReprimeReason_ =
-                    SourceHistoryInvalidationReason::SourcePairMismatch;
+                    SourceHistoryInvalidationReason::RetirementBackpressure;
                 this->deadlineBatchDecision_ = {};
             } else {
                 this->resetAdaptiveSourceEpoch(
@@ -3341,9 +3349,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->sourceHistoryWarmupRemaining_ = 1;
             this->requiresSourceHistoryWarmup_ = true;
             this->lastHistoryInvalidationReason_ =
-                SourceHistoryInvalidationReason::SourcePairMismatch;
+                SourceHistoryInvalidationReason::None;
             this->lastHistoryReprimeReason_ =
-                SourceHistoryInvalidationReason::SourcePairMismatch;
+                SourceHistoryInvalidationReason::OverloadBypass;
             this->deadlineBatchDecision_ = {};
             updateAdaptiveFlowGovernor();
             metrics.windowAdaptiveZeroGenerationCycles++;
@@ -3406,9 +3414,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->sourceHistoryWarmupRemaining_ = 1;
             this->requiresSourceHistoryWarmup_ = true;
             this->lastHistoryInvalidationReason_ =
-                SourceHistoryInvalidationReason::SourcePairMismatch;
+                SourceHistoryInvalidationReason::None;
             this->lastHistoryReprimeReason_ =
-                SourceHistoryInvalidationReason::SourcePairMismatch;
+                SourceHistoryInvalidationReason::AdmissionBypass;
             this->deadlineBatchDecision_ = {};
             updateAdaptiveFlowGovernor();
             metrics.windowAdaptiveZeroGenerationCycles++;
@@ -3666,7 +3674,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (sourceHistoryWarmupActive) {
             this->lastDispatchedGeneratedFrameCount_ = 0;
             this->lastSourceCadenceObservation_ =
-                SourceCadenceObservation::SourceOnly;
+                SourceCadenceObservation::HistoryMaintenance;
             this->sourceHistoryWarmupRemaining_ = 0;
             this->requiresSourceHistoryWarmup_ = false;
             this->lastGeneratedFrameCount_ = 0;
@@ -3995,9 +4003,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             kConservativeSourceReprimeFrames - 1;
         this->requiresSourceHistoryWarmup_ = true;
         this->lastHistoryInvalidationReason_ =
-            SourceHistoryInvalidationReason::SourcePairMismatch;
+            SourceHistoryInvalidationReason::None;
         this->lastHistoryReprimeReason_ =
-            SourceHistoryInvalidationReason::SourcePairMismatch;
+            conservativeBatchStillInFlight
+                ? SourceHistoryInvalidationReason::RetirementBackpressure
+                : SourceHistoryInvalidationReason::FractionalGap;
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
@@ -4385,7 +4395,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (conservativeSourceOnlyWarmup) {
         this->lastDispatchedGeneratedFrameCount_ = 0;
         this->lastSourceCadenceObservation_ =
-            SourceCadenceObservation::SourceOnly;
+            SourceCadenceObservation::HistoryMaintenance;
         this->lastGeneratedFrameCount_ = 0;
         pass.framegenBatchCompleteValid = false;
         if (this->sourceHistoryWarmupRemaining_ > 0)
