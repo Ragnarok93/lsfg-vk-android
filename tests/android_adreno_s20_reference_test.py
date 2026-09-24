@@ -58,7 +58,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn('" deadline_semantics="', compatibility_log)
         self.assertIn('"source-protection"', compatibility_log)
 
-    def test_adreno_admission_uses_source_boundary_for_fixed_and_adaptive_work(self) -> None:
+    def test_adreno_adaptive_admission_uses_source_boundary_while_fixed_bypasses_it(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         policy_start = source.index("const bool sourceProtectionBatchAdmission")
@@ -76,9 +76,16 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             "const auto& outputCadenceForPresentation", admission_start
         )
         admission = source[admission_start:admission_end]
-        self.assertIn(
+        self.assertIn("if (conf.adaptiveFramegen", admission)
+        self.assertNotIn(
             "conf.adaptiveFramegen || sourceProtectionBatchAdmission",
             admission,
+        )
+        self.assertIn("fixedAdrenoHistoricalGeneration", source)
+        self.assertIn(
+            "fixedAdrenoHistoricalGeneration\n"
+            "            ? requestedFixedGeneratedFrameCount",
+            source,
         )
         self.assertIn("sourceBudgetMs", admission)
         self.assertIn(
