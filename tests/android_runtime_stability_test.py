@@ -400,6 +400,12 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("FixedSourceCadenceGovernor", scheduler)
         self.assertIn("fixedSourceCadenceGovernor_", header)
         self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
+        self.assertIn("fixedAdrenoHistoricalGeneration", source)
+        self.assertIn(
+            "fixedAdrenoHistoricalGeneration\n"
+            "            ? requestedFixedGeneratedFrameCount",
+            source,
+        )
         self.assertIn("fixed_generation_limit=", source)
         self.assertIn("FixedSourceCadenceGovernor::plan", scheduler_source)
         self.assertNotIn("sleep_for", scheduler + scheduler_source)
@@ -416,7 +422,11 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "if (this->currentSourceTimeline_.valid)", admission_start
         )
         admission = source[admission_start:admission_end]
-        self.assertIn("conf.adaptiveFramegen || sourceProtectionBatchAdmission", admission)
+        self.assertIn("if (conf.adaptiveFramegen", admission)
+        self.assertNotIn(
+            "conf.adaptiveFramegen || sourceProtectionBatchAdmission",
+            admission,
+        )
 
     def test_adaptive_path_uses_variable_count_without_owning_source_pacing(self) -> None:
         scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
