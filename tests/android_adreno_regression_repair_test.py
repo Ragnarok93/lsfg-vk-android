@@ -6,33 +6,31 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
-    def test_adreno_source_handoff_restores_historical_opaque_fd_attempt(self) -> None:
+    def test_adreno_source_handoff_respects_reported_fd_capabilities(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("const bool syncFdHandoffSupported")
         end = source.index("const bool xclipseCompatibilityPath", start)
         selection = source[start:end]
 
-        # Protected Adreno must not substitute SYNC_FD for the September 18
-        # source handoff. Turnip can report OPAQUE_FD feature bits as zero even
-        # though the real OPAQUE_FD create/export/import transaction succeeds,
-        # so the actual transaction remains the runtime probe and failure falls
-        # back to the bounded host fence.
-        self.assertIn("adrenoHistoricalOpaqueAttempt", selection)
-        self.assertIn("info.androidSyncFdSemaphoreSupported", selection)
-        self.assertIn("backendDiagnostics.externalSemaphoreSyncFd", selection)
+        # The current GameNative/Turnip wrapper reports OPAQUE_FD unsupported
+        # and SYNC_FD export/import supported. Protected Adreno must therefore
+        # select the capability-advertised SYNC_FD source handoff instead of
+        # probing a rejected OPAQUE_FD transaction and serializing on a host fence.
+        self.assertNotIn("adrenoHistoricalOpaqueAttempt", selection)
+        self.assertIn("syncFdHandoffSupported", selection)
+        self.assertIn("opaqueFdHandoffSupported", selection)
         self.assertIn(
-            "? (opaqueFdHandoffSupported || adrenoHistoricalOpaqueAttempt)",
+            "(syncFdHandoffSupported || opaqueFdHandoffSupported)",
             selection,
         )
         self.assertIn(
-            "this->asyncAhbHandoffHandleType_ =\n"
-            "            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;",
+            "syncFdHandoffSupported\n"
+            "            ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT",
             selection,
         )
         self.assertIn(
-            ": (syncFdHandoffSupported || opaqueFdHandoffSupported)",
+            ": VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
             selection,
-            "Generic/Xclipse routing must remain capability-driven.",
         )
 
     def test_disabled_targeted_android_swapchain_stays_resident_and_bypasses_framegen(self) -> None:
