@@ -328,7 +328,11 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         present_start = source.index("VkResult LsContext::present")
         route_prefix = source[present_start:begin]
         self.assertIn(
-            "if (!this->conservativeCrossDeviceSync_ && !this->tryRecyclePass(pass))",
+            "const bool shouldRecyclePass = !this->conservativeCrossDeviceSync_;",
+            route_prefix,
+        )
+        self.assertIn(
+            "if (shouldRecyclePass && !this->tryRecyclePass(pass))",
             route_prefix,
         )
         self.assertNotIn("tryRecyclePass(pass)", island)
@@ -348,7 +352,9 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn('" execution_reference="', constructor_log)
         self.assertIn('"364178af-sep18"', constructor_log)
         self.assertIn('" governor_adapter="', constructor_log)
-        self.assertIn('"admission-only"', constructor_log)
+        self.assertIn('"adaptive-admission-only"', constructor_log)
+        self.assertIn('" fixed_generation="', constructor_log)
+        self.assertIn('"historical-direct"', constructor_log)
 
 
     def test_xclipse_async_selection_remains_capability_driven(self) -> None:
