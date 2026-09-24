@@ -148,8 +148,11 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn(
-            "if (!this->conservativeCrossDeviceSync_ "
-            "&& !this->tryRecyclePass(pass))",
+            "const bool shouldRecyclePass = !this->conservativeCrossDeviceSync_;",
+            source,
+        )
+        self.assertIn(
+            "if (shouldRecyclePass && !this->tryRecyclePass(pass))",
             source,
         )
         begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
