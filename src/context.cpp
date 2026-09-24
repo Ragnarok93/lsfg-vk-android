@@ -2242,9 +2242,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             ? AndroidFrameCycleMode::HistoryOnly
             : AndroidFrameCycleMode::Generate;
 
-    // Ordinary Adaptive zero-generation intervals are cadence/admission
-    // events, not ownership failures. Preserve the source pair for fractional
-    // gaps, zero-demand intervals, and rejected synthetic opportunities.
+    // Ordinary fractional/zero-demand Adaptive gaps preserve temporal
+    // history. A rejected synthetic opportunity is different: on protected
+    // Adreno it is an emergency source-protection escape and must return a
+    // real source frame without entering AHB/private-framegen maintenance.
     const bool conservativeAdmissionRejectedHistoryGap =
         this->conservativeCrossDeviceSync_
         && conf.adaptiveFramegen
@@ -2272,8 +2273,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && !sourceHistoryWarmupActive
         && !sourceTimelineDiscontinuity
         && generatedFrameCount == 0
-        && (conservativeAdmissionRejectedHistoryGap
-            || conservativeFractionalHistoryGap
+        && (conservativeFractionalHistoryGap
             || conservativeZeroDemandHistoryGap);
     // Fixed source-protection rejection is still a history-maintenance
     // cycle. Whether the governor planned zero work or deadline admission

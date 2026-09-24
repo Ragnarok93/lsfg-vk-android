@@ -160,7 +160,8 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         adreno = source[begin:end]
         self.assertNotIn("tryRecyclePass", adreno)
         self.assertNotIn("submitPassCompletionFence", adreno)
-        self.assertNotIn("SourceHistoryInvalidationReason::SourcePairMismatch", adreno)
+        self.assertNotIn("shouldRecyclePass", adreno)
+        self.assertNotIn("conservativeBatchStillInFlight", adreno)
 
     def test_adreno_host_completion_timeout_matches_september_18_recovery(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")

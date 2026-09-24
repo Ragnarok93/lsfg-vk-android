@@ -6,37 +6,35 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
-    def test_admission_drop_preserves_adreno_source_history(self) -> None:
+    def test_admission_drop_escapes_before_adreno_history_maintenance(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("conservativeHistoryGap", source)
-        self.assertIn("conservativeFixedHistoryGap", source)
         start = source.index("const bool conservativeAdmissionRejectedHistoryGap")
-        end = source.index("this->lastGeneratedFrameCount_", start)
+        end = source.index("const bool conservativeFixedHistoryGap", start)
         classification = source[start:end]
-
-        self.assertIn("generatedFrameCount == 0", classification)
-        self.assertIn("!sourceHistoryWarmupActive", classification)
-        self.assertIn("!sourceTimelineDiscontinuity", classification)
         self.assertIn("plannedGeneratedFrameCount > 0", classification)
-        self.assertIn("conservativeAdmissionRejectedHistoryGap", classification)
-        self.assertIn("conservativeAdaptiveHistoryGap", classification)
+        self.assertIn("generatedFrameCount == 0", classification)
 
-        bypass_start = source.index("if (conservativePreCopySourceBypass)")
-        bypass_end = source.index(
-            "// Android path: AHardwareBuffer exchange", bypass_start
+        adaptive_start = classification.index("const bool conservativeAdaptiveHistoryGap")
+        adaptive = classification[adaptive_start:]
+        self.assertIn("conservativeFractionalHistoryGap", adaptive)
+        self.assertIn("conservativeZeroDemandHistoryGap", adaptive)
+        self.assertNotIn(
+            "conservativeAdmissionRejectedHistoryGap",
+            adaptive,
+            "Rejected synthetic work is a source-only escape, not history maintenance.",
         )
-        bypass = source[bypass_start:bypass_end]
-        self.assertNotIn("conservativeHistoryGap", bypass)
 
-        history_start = source.index("if (historyOnly)")
-        generation_start = source.index(
-            "// 2. Tell framegen to generate intermediary frames.", history_start
-        )
-        history = source[history_start:generation_start]
-        self.assertIn("presentContextWithCount(", history)
-        self.assertIn("historyRequiresHostCompletionWait", history)
-        self.assertNotIn("compat-adaptive-history-copy", source)
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        finish = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:finish]
+        escape = adreno.index("if (conservativeAdmissionRejectedHistoryGap)")
+        first_copy = adreno.index("copySwapchainToExternalAhb", escape)
+        escape_block = adreno[escape:first_copy]
+        self.assertIn("SourceCadenceObservation::SourceOnly", escape_block)
+        self.assertIn("sourceHistoryWarmupRemaining_ = 1", escape_block)
+        self.assertIn("game-render-admission-bypass", escape_block)
+        self.assertNotIn("presentContextWithCount(", escape_block)
 
     def test_fixed_adreno_uses_historical_generation_without_deadline_admission(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
