@@ -161,7 +161,15 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
         adreno = source[begin:end]
         self.assertNotIn("tryRecyclePass", adreno)
-        self.assertNotIn("SourceHistoryInvalidationReason::SourcePairMismatch", adreno)
+        self.assertNotIn("shouldRecyclePass", adreno)
+        self.assertNotIn("conservativeBatchStillInFlight", adreno)
+        self.assertNotIn(
+            "Pass ring busy",
+            adreno,
+            "The protected Adreno island may invalidate temporal history for an "
+            "intentional source-only admission escape, but must never inherit "
+            "the newer pass-ring retirement/backpressure path.",
+        )
 
     def test_adreno_standalone_reprime_preserves_two_input_parity(self) -> None:
         """Standalone Adreno reset needs two source copies; zero-cycle recovery needs one more."""
