@@ -38,7 +38,8 @@ std::string stripLayerName(const std::string& value, const std::string& layerNam
     size_t start = 0;
     for (size_t i = 0; i <= value.size(); ++i) {
         const bool atEnd = i == value.size();
-        const bool separator = !atEnd && (value[i] == ':' || value[i] == ';');
+        const bool separator = !atEnd
+            && (value[i] == ':' || value[i] == ';' || value[i] == ',');
         if (!atEnd && !separator)
             continue;
         if (i > start) {
@@ -49,10 +50,12 @@ std::string stripLayerName(const std::string& value, const std::string& layerNam
         start = i + 1;
     }
 
+    const char joinSeparator =
+        value.find(',') != std::string::npos ? ',' : ':';
     std::string result;
     for (const auto& layer : layers) {
         if (!result.empty())
-            result += ':';
+            result += joinSeparator;
         result += layer;
     }
     return result;
@@ -63,7 +66,8 @@ public:
     ScopedPrivateInstanceLayerSuppression()
         : lock(privateInstanceEnvironmentMutex),
           previousDisable(readEnvironment("DISABLE_LSFG")),
-          previousInstanceLayers(readEnvironment("VK_INSTANCE_LAYERS")) {
+          previousInstanceLayers(readEnvironment("VK_INSTANCE_LAYERS")),
+          previousLoaderLayersEnable(readEnvironment("VK_LOADER_LAYERS_ENABLE")) {
         setenv("DISABLE_LSFG", "1", 1);
 
         if (previousInstanceLayers.has_value()) {
@@ -74,9 +78,19 @@ public:
             else
                 setenv("VK_INSTANCE_LAYERS", filtered.c_str(), 1);
         }
+
+        if (previousLoaderLayersEnable.has_value()) {
+            const auto filtered = stripLayerName(
+                *previousLoaderLayersEnable, "VK_LAYER_LS_frame_generation");
+            if (filtered.empty())
+                unsetenv("VK_LOADER_LAYERS_ENABLE");
+            else
+                setenv("VK_LOADER_LAYERS_ENABLE", filtered.c_str(), 1);
+        }
     }
 
     ~ScopedPrivateInstanceLayerSuppression() {
+        restoreEnvironment("VK_LOADER_LAYERS_ENABLE", previousLoaderLayersEnable);
         restoreEnvironment("VK_INSTANCE_LAYERS", previousInstanceLayers);
         restoreEnvironment("DISABLE_LSFG", previousDisable);
     }
@@ -90,6 +104,7 @@ private:
     std::unique_lock<std::mutex> lock;
     std::optional<std::string> previousDisable;
     std::optional<std::string> previousInstanceLayers;
+    std::optional<std::string> previousLoaderLayersEnable;
 };
 
 } // namespace
