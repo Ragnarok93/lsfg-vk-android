@@ -318,6 +318,29 @@ void DeadlineAdmissionPredictor::observe(
     hasEstimate_ = true;
 }
 
+void DeadlineAdmissionPredictor::observeBlockingCompletion(
+        std::size_t generationCount, double completionMs) {
+    if (generationCount == 0
+            || generationCount >= kTrackedBatchCounts
+            || !std::isfinite(completionMs)
+            || completionMs <= 0.0) {
+        return;
+    }
+
+    auto& estimate = batchEstimates_.at(generationCount);
+    if (!estimate.valid || completionMs >= estimate.totalLsfgMs) {
+        estimate.totalLsfgMs = completionMs;
+    } else {
+        // A saturated queue must close admission immediately, while recovery
+        // requires repeated fast completion evidence. This is the same
+        // conservative decay used for lower GPU timing samples.
+        estimate.totalLsfgMs +=
+            kRecoveryEwmaAlpha * (completionMs - estimate.totalLsfgMs);
+    }
+    estimate.valid = true;
+    hasEstimate_ = true;
+}
+
 void DeadlineAdmissionPredictor::observeDeliveryMiss(double latenessMs) {
     if (!std::isfinite(latenessMs) || latenessMs < 0.0)
         return;
