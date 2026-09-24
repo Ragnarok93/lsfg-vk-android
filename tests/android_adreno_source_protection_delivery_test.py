@@ -404,7 +404,7 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
     def test_xclipse_history_completion_path_keeps_existing_capability_async_behavior(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         constructor_start = source.index("this->asyncFramegenCompletionEnabled_ =")
-        constructor_end = source.index("// Match the device-proven baseline", constructor_start)
+        constructor_end = source.index("const bool xclipseCompatibilityPath =", constructor_start)
         selection = source[constructor_start:constructor_end]
 
         self.assertIn("!this->conservativeCrossDeviceSync_", selection)
