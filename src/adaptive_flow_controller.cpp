@@ -133,11 +133,16 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     telemetry_.globalGpuUsagePercent = observation.globalPressureValid
         ? observation.globalGpuUsagePercent : 0.0;
     telemetry_.outputDeficit = observation.outputDeficit;
-    const bool computePressure =
+    const bool freshGeneratedComputePressure =
         observation.generatedWorkSample
         && (observation.computeDeadlinePressure
             || observation.deadlineMissed
             || telemetry_.pressureRatio >= kPressureRatio);
+    const bool retainedSevereComputePressure =
+        observation.retainedGeneratedTimingSample
+        && telemetry_.pressureRatio >= 1.0;
+    const bool computePressure =
+        freshGeneratedComputePressure || retainedSevereComputePressure;
     const bool wsiPressure = observation.wsiPresentationPressure;
     const bool globalGpuPressure =
         observation.globalPressureValid
@@ -156,9 +161,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     // its entire LSFG budget. This is direct GPU timing, independent of the
     // potentially stale whole-device utilization sample.
     const bool severeTransitionComputePressure =
-        computePressure
-        && observation.generatedWorkSample
-        && telemetry_.pressureRatio >= 1.0;
+        computePressure && telemetry_.pressureRatio >= 1.0;
 
     if (observation.schedulerTransition) {
         if (downstepEvaluationActive_)

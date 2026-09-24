@@ -2449,6 +2449,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .outputDeficit = outputDeficit,
             .syntheticDropPressure = false,
             .generatedWorkSample = generatedWorkSample,
+            .retainedGeneratedTimingSample =
+                !generatedWorkSample && retainedTimingUsable,
             .schedulerTransition = schedulerTransition,
             .valid = observationBudgetValid
                 && sourceInterval.count() > 0
@@ -2469,6 +2471,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         if (flowTelemetry.changed
                 && std::fabs(selectedScale - previousScale) > 0.0005F) {
+            // One retained real-batch timing sample may bridge source-only
+            // protection cycles to authorize this downstep. Once the actuator
+            // changes scale, that timing no longer describes the active Flow
+            // state and must not authorize another step without fresh GPU work.
+            this->adaptiveFlowGeneratedTimingValid_ = false;
             if (conf.performance)
                 LSFG_3_1P::requestContextFlowScale(
                     *this->lsfgCtxId, selectedScale);

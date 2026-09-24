@@ -63,6 +63,10 @@ struct AdaptiveFlowObservation {
     bool syntheticDropPressure{false};
     /// Current timing comes from a cycle that actually generated LSFG output.
     bool generatedWorkSample{true};
+    /// Timing is retained from the most recent real generated batch. This is
+    /// explicit provenance, not permission to treat arbitrary history-only
+    /// telemetry as fresh GPU work.
+    bool retainedGeneratedTimingSample{false};
     /// True when Adaptive LSFG has just changed/snap/probed/backed-off/reset.
     bool schedulerTransition{false};
     bool valid{false};
