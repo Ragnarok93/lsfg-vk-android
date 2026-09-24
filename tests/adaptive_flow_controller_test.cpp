@@ -445,5 +445,21 @@ int main() {
         assert(near(controller.currentScale(), 1.00F));
     }
 
+    {
+        // Direct LSFG GPU timing remains authoritative under repeated source
+        // discontinuity/scheduler-transition observations. A stuck global GPU
+        // utilization sample must not mask a grossly over-budget LSFG cycle.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Balanced);
+        bool lowered = false;
+        for (int i = 0; i < 20 && !lowered; ++i) {
+            controller.observe(sample(
+                90.0, 35.0, 65.0, true, true,
+                8.0, true, true, false, true));
+            lowered = near(controller.currentScale(), 0.70F);
+        }
+        assert(lowered);
+        assert(controller.telemetry().computePressure);
+    }
+
     return 0;
 }

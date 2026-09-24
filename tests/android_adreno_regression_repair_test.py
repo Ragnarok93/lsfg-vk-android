@@ -6,20 +6,60 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
-    def test_adreno_historical_async_attempt_is_not_blocked_by_opaque_capability_bit(self) -> None:
+    def test_adreno_opaque_handoff_respects_reported_capability(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("const bool syncFdHandoffSupported")
         end = source.index("const bool xclipseCompatibilityPath", start)
         selection = source[start:end]
 
-        self.assertIn("adrenoHistoricalOpaqueAttempt", selection)
-        self.assertIn("info.androidSyncFdSemaphoreSupported", selection)
-        self.assertIn("backendDiagnostics.externalSemaphoreSyncFd", selection)
-        self.assertIn("opaqueFdHandoffSupported || adrenoHistoricalOpaqueAttempt", selection)
+        self.assertNotIn("adrenoHistoricalOpaqueAttempt", selection)
+        self.assertIn("opaqueFdHandoffSupported", selection)
         self.assertIn(
-            "VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT",
+            "this->conservativeCrossDeviceSync_\n"
+            "            ? opaqueFdHandoffSupported",
             selection,
         )
+
+
+    def test_disabled_targeted_android_swapchain_is_true_wsi_passthrough(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        create_start = hooks.index("const auto createPassThrough")
+        create_end = hooks.index("#ifdef __ANDROID__", create_start + 1000)
+        create_region = hooks[create_start:create_end]
+        self.assertIn(
+            "if (!activeConf.enable || activeConf.multiplier <= 1)",
+            create_region,
+        )
+        self.assertNotIn(
+            "activeConf.multiplier <= 1 && !activeConf.targeted",
+            create_region,
+        )
+
+        recreation_start = hooks.index("bool requiresSwapchainRecreation")
+        recreation_end = hooks.index("bool supportsDeviceExtension", recreation_start)
+        recreation = hooks[recreation_start:recreation_end]
+        self.assertIn("generationActivityChanged", recreation)
+        self.assertIn("(previous.multiplier > 1) != (next.multiplier > 1)", recreation)
+
+    def test_adreno_prior_compute_overload_escapes_before_source_copy(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+
+        prefix = source[:begin]
+        self.assertIn("protectedAdrenoPriorComputeOverBudget", prefix)
+        self.assertIn("adaptiveFlowRetainedTotalLsfgMs_", prefix)
+        self.assertIn("lastSourceCadenceObservation_", prefix)
+        escape = adreno.index("protectedAdrenoPriorComputeOverBudget")
+        first_copy = adreno.index("copySwapchainToExternalAhb", escape)
+        self.assertLess(escape, first_copy)
+        escape_block = adreno[escape:first_copy]
+        self.assertIn("SourceCadenceObservation::SourceOnly", escape_block)
+        self.assertIn("sourceHistoryWarmupRemaining_ = 1", escape_block)
+        self.assertIn("game-render-overload-bypass", escape_block)
+        self.assertNotIn("submitAndWaitForAhbHandoff(", escape_block)
 
     def test_adreno_admission_rejection_escapes_before_ahb_copy(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
