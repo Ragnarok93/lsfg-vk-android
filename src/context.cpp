@@ -934,11 +934,11 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     : "current-capability")
               << " governor_adapter="
               << (this->conservativeCrossDeviceSync_
-                    ? "adaptive-admission-only"
+                    ? "source-protected"
                     : "native-current")
               << " fixed_generation="
               << (this->conservativeCrossDeviceSync_
-                    ? "historical-direct"
+                    ? "source-cadence-governed"
                     : "native-current")
               << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
               << '\n';
@@ -1873,21 +1873,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         safeGenerationHint,
         safeGenerationHintValid);
 
-    const bool fixedAdrenoHistoricalGeneration =
-        this->conservativeCrossDeviceSync_
-        && !conf.adaptiveFramegen;
     if (conf.adaptiveFramegen)
         this->fixedSourceCadenceGovernor_.reset();
     size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(sourceInterval)
-        : fixedAdrenoHistoricalGeneration
-            ? requestedFixedGeneratedFrameCount
-            : this->fixedSourceCadenceGovernor_.plan(
-                sourceInterval,
-                requestedFixedGeneratedFrameCount,
-                this->lastDispatchedGeneratedFrameCount_,
-                !this->requiresSourceHistoryWarmup_,
-                previousSourceCadenceObservation);
+        : this->fixedSourceCadenceGovernor_.plan(
+            sourceInterval,
+            requestedFixedGeneratedFrameCount,
+            this->lastDispatchedGeneratedFrameCount_,
+            !this->requiresSourceHistoryWarmup_,
+            previousSourceCadenceObservation);
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
@@ -1957,9 +1952,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         !sourceProtectionBatchAdmission
         || this->sourceProtectionBudgetTracker_.telemetry().baselineValid;
 
-    // Active deadline admission is Adaptive-only. Fixed Adreno restores the
-    // September 18 multiplier-minus-one generation count and enters the
-    // compatibility island without the post-reference deadline predictor.
+    // Active deadline admission remains Adaptive-only. Fixed mode protects the
+    // real-source cadence through FixedSourceCadenceGovernor before entering
+    // the compatibility island; it does not use Adaptive's GPU-cost predictor.
     // Adaptive Adreno tests a complete candidate batch against the protected
     // real-source boundary; Xclipse/generic Adaptive keeps ideal-slot admission.
     // A rejected opportunity is dropped, never accumulated as catch-up debt.
@@ -2268,6 +2263,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         historyOnly
             ? AndroidFrameCycleMode::HistoryOnly
             : AndroidFrameCycleMode::Generate;
+
+    // Fixed mode also needs uncontaminated source-only evidence. Immediately
+    // after a temporal/config reset there is no protected baseline, and after a
+    // governor backoff a zero generated count means synthetic work has already
+    // harmed source cadence. In both cases bypass AHB/private-framegen work for
+    // this cycle so the next interval measures the game itself.
+    const bool conservativeFixedSourceProtectionGap =
+        this->conservativeCrossDeviceSync_
+        && !conf.adaptiveFramegen
+        && requestedFixedGeneratedFrameCount > 0
+        && !sourceTimelineDiscontinuity
+        && (!sourceProtectionBaselineValid
+            || (!sourceHistoryWarmupActive
+                && this->fixedSourceCadenceGovernor_.telemetry().baselineValid
+                && plannedGeneratedFrameCount == 0));
 
     // Ordinary fractional/zero-demand Adaptive gaps preserve temporal
     // history. A rejected synthetic opportunity is different: on protected
@@ -3433,6 +3443,66 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 bypassResult, "game-render-overload-bypass");
         }
 
+        if (conservativeFixedSourceProtectionGap) {
+            this->lastDispatchedGeneratedFrameCount_ = 0;
+            this->lastSourceCadenceObservation_ =
+                SourceCadenceObservation::SourceOnly;
+            this->lastGeneratedFrameCount_ = 0;
+            this->previousSourceCopySignalValid_ = false;
+            // Direct presentation does not refresh the private AHB history.
+            // Require exactly one copy-only source warmup before a later
+            // generated probe is allowed back into the September 18 island.
+            this->sourceHistoryWarmupRemaining_ = 1;
+            this->requiresSourceHistoryWarmup_ = true;
+            this->lastHistoryInvalidationReason_ =
+                SourceHistoryInvalidationReason::None;
+            this->lastHistoryReprimeReason_ =
+                SourceHistoryInvalidationReason::AdmissionBypass;
+            this->deadlineBatchDecision_ = {};
+            updateAdaptiveFlowGovernor();
+
+            VkPresentTimeGOOGLE bypassPresentTime{};
+            VkPresentTimesInfoGOOGLE bypassPresentTimes{};
+            const VkPresentInfoKHR bypassPresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = adaptivePresentPNext(
+                    pNext,
+                    this->currentSourceTimeline_.sourceDesiredTimeNs,
+                    bypassPresentTime,
+                    bypassPresentTimes),
+                .waitSemaphoreCount =
+                    static_cast<uint32_t>(gameRenderSemaphores.size()),
+                .pWaitSemaphores = gameRenderSemaphores.empty()
+                    ? nullptr : gameRenderSemaphores.data(),
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto bypassResult =
+                Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo);
+            if (isAdrenoWsiRetirementResult(bypassResult))
+                return bypassResult;
+            if (bypassResult != VK_SUCCESS
+                    && bypassResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(
+                    bypassResult,
+                    "Failed protected Adreno Fixed source-only present");
+            }
+            if (firstPresentDiagnostic) {
+                std::cerr
+                    << "lsfg-vk: runtime stage=adreno-fixed-source-protection"
+                    << " baseline_valid="
+                    << (sourceProtectionBaselineValid ? 1 : 0)
+                    << " fixed_limit="
+                    << this->fixedSourceCadenceGovernor_.telemetry().generationLimit
+                    << " reprime=1\n";
+            }
+            return finishSourcePresent(
+                bypassResult, "game-render-fixed-source-protection");
+        }
+
         // A rejected synthetic opportunity is source protection, not temporal
         // maintenance. Do not copy into the AHB pair and then host-wait through
         // a zero-count private framegen pass: that was the feedback loop that
@@ -3527,9 +3597,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             pass.preCopySemaphores.at(1).handle(),
         };
 
-        // 364178af transaction: ordinary generated cycles use the dedicated
-        // OPAQUE_FD GPU semaphore. Warmup and zero-generation/history cycles
-        // keep the bounded host-fence source handoff.
+        // September 18 built transaction: ordinary generated cycles use the
+        // selected GPU semaphore handoff (SYNC_FD on the S20+/Turnip build
+        // composition, OPAQUE_FD where that payload is supported). Warmup and
+        // zero-generation/history cycles keep the bounded host-fence handoff.
         bool useAsyncHandoff = this->asyncAhbHandoffEnabled_
             && generatedFrameCount > 0
             && !sourceHistoryWarmupActive;
@@ -3800,8 +3871,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const bool framegenReady = conf.performance
             ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
             : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        const double framegenBlockingCompletionMs =
+            std::chrono::duration<double, std::milli>(
+                RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
+        if (framegenReady && generatedFrameCount > 0) {
+            // This is the cost that actually blocks the matching source present
+            // on protected Adreno. GPU timestamps omit queue residency and were
+            // admitting ~23 ms batches that took ~69 ms to reach this boundary.
+            this->deadlineAdmissionPredictor_.observeBlockingCompletion(
+                generatedFrameCount, framegenBlockingCompletionMs);
+        }
 
         if (!framegenReady) {
             this->lastGeneratedFrameCount_ = 0;
