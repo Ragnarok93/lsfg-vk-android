@@ -930,8 +930,11 @@ int main() {
         assert(measuredThree.predictedTotalLsfgMs >= 57.9);
 
         const auto safeHint = predictor.safeGenerationHint(3, 33.0);
-        assert(safeHint >= 1);
-        assert(safeHint <= 3);
+        // With a measured 40 ms two-frame batch and a conservative lower-count
+        // fallback, even the first evenly-spaced synthetic slot is not proven
+        // safe inside a 33 ms source interval. Prefix-slot promotion must stay
+        // closed rather than inventing capacity from the batch-only budget.
+        assert(safeHint == 0);
 
         // Deferred Adreno protects the real-source boundary rather than
         // requiring compute to finish by the first ideal synthetic scanout.
