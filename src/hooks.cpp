@@ -126,11 +126,34 @@ namespace {
     }
 
 #ifdef __ANDROID__
-    bool supportsFdSemaphore(VkPhysicalDevice physicalDevice,
+    struct ExternalSemaphoreProbe {
+        bool extensionPresent{false};
+        bool queryAvailable{false};
+        VkExternalSemaphoreFeatureFlags features{};
+        VkExternalSemaphoreHandleTypeFlags compatibleHandleTypes{};
+        VkExternalSemaphoreHandleTypeFlags exportFromImportedHandleTypes{};
+        bool supported{false};
+    };
+
+    const char* externalSemaphoreHandleName(
             VkExternalSemaphoreHandleTypeFlagBits handleType) {
-        if (!supportsDeviceExtension(
-                physicalDevice, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
-            return false;
+        switch (handleType) {
+            case VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT:
+                return "opaque-fd";
+            case VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT:
+                return "sync-fd";
+            default:
+                return "other";
+        }
+    }
+
+    ExternalSemaphoreProbe probeFdSemaphore(VkPhysicalDevice physicalDevice,
+            VkExternalSemaphoreHandleTypeFlagBits handleType) {
+        ExternalSemaphoreProbe probe{};
+        probe.extensionPresent = supportsDeviceExtension(
+            physicalDevice, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+        if (!probe.extensionPresent)
+            return probe;
 
         auto getExternalSemaphoreProperties =
             reinterpret_cast<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(
@@ -142,8 +165,9 @@ namespace {
                     Layer::ovkGetInstanceProcAddr(
                         layerInstance, "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR"));
         }
-        if (getExternalSemaphoreProperties == nullptr)
-            return false;
+        probe.queryAvailable = getExternalSemaphoreProperties != nullptr;
+        if (!probe.queryAvailable)
+            return probe;
 
         const VkPhysicalDeviceExternalSemaphoreInfo info{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
@@ -153,12 +177,35 @@ namespace {
             .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
         };
         getExternalSemaphoreProperties(physicalDevice, &info, &properties);
+        probe.features = properties.externalSemaphoreFeatures;
+        probe.compatibleHandleTypes = properties.compatibleHandleTypes;
+        probe.exportFromImportedHandleTypes = properties.exportFromImportedHandleTypes;
 
         constexpr VkExternalSemaphoreFeatureFlags required =
             VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT
             | VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
-        return (properties.externalSemaphoreFeatures & required) == required
-            && (properties.compatibleHandleTypes & handleType) != 0;
+        probe.supported =
+            (probe.features & required) == required
+            && (probe.compatibleHandleTypes & handleType) != 0;
+        return probe;
+    }
+
+    void logGameExternalSemaphoreProbe(
+            VkExternalSemaphoreHandleTypeFlagBits handleType,
+            const ExternalSemaphoreProbe& probe) {
+        std::cerr << "lsfg-vk: external-semaphore-probe scope=game"
+                  << " handle=" << externalSemaphoreHandleName(handleType)
+                  << " extension=" << (probe.extensionPresent ? 1 : 0)
+                  << " query=" << (probe.queryAvailable ? 1 : 0)
+                  << " features=0x" << std::hex
+                  << static_cast<uint32_t>(probe.features)
+                  << " compatible=0x"
+                  << static_cast<uint32_t>(probe.compatibleHandleTypes)
+                  << " export_from_imported=0x"
+                  << static_cast<uint32_t>(probe.exportFromImportedHandleTypes)
+                  << std::dec
+                  << " supported=" << (probe.supported ? 1 : 0)
+                  << '\n';
     }
 
 #endif
@@ -220,10 +267,16 @@ namespace {
         std::vector<const char*> requestedExtensions{
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
         };
-        const bool opaqueFdSemaphoreSupported = supportsFdSemaphore(
+        const auto opaqueFdSemaphoreProbe = probeFdSemaphore(
             physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
-        const bool syncFdSemaphoreSupported = supportsFdSemaphore(
+        const auto syncFdSemaphoreProbe = probeFdSemaphore(
             physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+        logGameExternalSemaphoreProbe(
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT, opaqueFdSemaphoreProbe);
+        logGameExternalSemaphoreProbe(
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT, syncFdSemaphoreProbe);
+        const bool opaqueFdSemaphoreSupported = opaqueFdSemaphoreProbe.supported;
+        const bool syncFdSemaphoreSupported = syncFdSemaphoreProbe.supported;
         if (opaqueFdSemaphoreSupported || syncFdSemaphoreSupported)
             requestedExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
         const bool displayTimingSupported = supportsDeviceExtension(
@@ -273,10 +326,10 @@ namespace {
 #ifdef __ANDROID__
         const bool androidAhbSupported = supportsDeviceExtension(physicalDevice,
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
-        const bool androidOpaqueFdSemaphoreSupported = supportsFdSemaphore(
-            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
-        const bool androidSyncFdSemaphoreSupported = supportsFdSemaphore(
-            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+        const bool androidOpaqueFdSemaphoreSupported = probeFdSemaphore(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT).supported;
+        const bool androidSyncFdSemaphoreSupported = probeFdSemaphore(
+            physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT).supported;
         const bool androidDisplayTimingSupported = supportsDeviceExtension(
             physicalDevice, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
 #else

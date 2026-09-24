@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <iomanip>
 #include <memory>
 #include <optional>
 #include <string>
@@ -90,13 +91,37 @@ bool probeAhbImageUsage(VkPhysicalDevice physicalDevice, VkFormat format,
 #endif
 }
 
-bool probeExternalSemaphoreSupport(VkPhysicalDevice physicalDevice,
+struct ExternalSemaphoreProbe {
+    bool extensionPresent{false};
+    bool queryAvailable{false};
+    VkExternalSemaphoreFeatureFlags features{};
+    VkExternalSemaphoreHandleTypeFlags compatibleHandleTypes{};
+    VkExternalSemaphoreHandleTypeFlags exportFromImportedHandleTypes{};
+    bool supported{false};
+};
+
+const char* externalSemaphoreHandleName(
+        VkExternalSemaphoreHandleTypeFlagBits handleType) {
+    switch (handleType) {
+        case VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT:
+            return "opaque-fd";
+        case VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT:
+            return "sync-fd";
+        default:
+            return "other";
+    }
+}
+
+ExternalSemaphoreProbe probeExternalSemaphoreSupport(VkPhysicalDevice physicalDevice,
         const std::vector<VkExtensionProperties>& availableExtensions,
         VkExternalSemaphoreHandleTypeFlagBits handleType) {
+    ExternalSemaphoreProbe probe{};
 #ifdef __ANDROID__
-    if (!hasExtension(availableExtensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)
-            || vkGetPhysicalDeviceExternalSemaphoreProperties == nullptr)
-        return false;
+    probe.extensionPresent = hasExtension(
+        availableExtensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+    probe.queryAvailable = vkGetPhysicalDeviceExternalSemaphoreProperties != nullptr;
+    if (!probe.extensionPresent || !probe.queryAvailable)
+        return probe;
 
     const VkPhysicalDeviceExternalSemaphoreInfo info{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
@@ -106,18 +131,43 @@ bool probeExternalSemaphoreSupport(VkPhysicalDevice physicalDevice,
         .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
     };
     vkGetPhysicalDeviceExternalSemaphoreProperties(physicalDevice, &info, &properties);
+    probe.features = properties.externalSemaphoreFeatures;
+    probe.compatibleHandleTypes = properties.compatibleHandleTypes;
+    probe.exportFromImportedHandleTypes = properties.exportFromImportedHandleTypes;
 
     constexpr VkExternalSemaphoreFeatureFlags required =
         VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT
         | VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
-    return (properties.externalSemaphoreFeatures & required) == required
-        && (properties.compatibleHandleTypes & handleType) != 0;
+    probe.supported =
+        (probe.features & required) == required
+        && (probe.compatibleHandleTypes & handleType) != 0;
 #else
     (void)physicalDevice;
     (void)availableExtensions;
     (void)handleType;
-    return true;
+    probe.extensionPresent = true;
+    probe.queryAvailable = true;
+    probe.supported = true;
 #endif
+    return probe;
+}
+
+void logFramegenExternalSemaphoreProbe(
+        VkExternalSemaphoreHandleTypeFlagBits handleType,
+        const ExternalSemaphoreProbe& probe) {
+    std::cerr << "lsfg-vk: external-semaphore-probe scope=framegen"
+              << " handle=" << externalSemaphoreHandleName(handleType)
+              << " extension=" << (probe.extensionPresent ? 1 : 0)
+              << " query=" << (probe.queryAvailable ? 1 : 0)
+              << " features=0x" << std::hex
+              << static_cast<uint32_t>(probe.features)
+              << " compatible=0x"
+              << static_cast<uint32_t>(probe.compatibleHandleTypes)
+              << " export_from_imported=0x"
+              << static_cast<uint32_t>(probe.exportFromImportedHandleTypes)
+              << std::dec
+              << " supported=" << (probe.supported ? 1 : 0)
+              << '\n';
 }
 
 } // namespace
@@ -316,12 +366,18 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.ahbTransferOutput = transferOutput;
     this->diagnostics.ahbTransportMode = LSFG::selectAhbTransportMode(
         sampledInput, transferInput, storageOutput, transferOutput);
-    this->diagnostics.externalSemaphoreOpaqueFd = probeExternalSemaphoreSupport(
+    const auto opaqueFdSemaphoreProbe = probeExternalSemaphoreSupport(
         physicalDevice, availableExtensions,
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
-    this->diagnostics.externalSemaphoreSyncFd = probeExternalSemaphoreSupport(
+    const auto syncFdSemaphoreProbe = probeExternalSemaphoreSupport(
         physicalDevice, availableExtensions,
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+    logFramegenExternalSemaphoreProbe(
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT, opaqueFdSemaphoreProbe);
+    logFramegenExternalSemaphoreProbe(
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT, syncFdSemaphoreProbe);
+    this->diagnostics.externalSemaphoreOpaqueFd = opaqueFdSemaphoreProbe.supported;
+    this->diagnostics.externalSemaphoreSyncFd = syncFdSemaphoreProbe.supported;
 #else
     this->diagnostics.ahbTransportMode = LSFG::AhbTransportMode::DirectStorage;
     this->diagnostics.externalSemaphoreOpaqueFd = true;
