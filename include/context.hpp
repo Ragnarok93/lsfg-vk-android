@@ -31,6 +31,10 @@ enum class SourceHistoryInvalidationReason {
     SyncImportFailure,
     ContextRecreate,
     SourcePairMismatch,
+    AdmissionBypass,
+    OverloadBypass,
+    RetirementBackpressure,
+    FractionalGap,
     AbandonedBatch,
     TrueOwnershipFailure,
 };
