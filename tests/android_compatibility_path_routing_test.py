@@ -59,7 +59,7 @@ class AndroidCompatibilityPathRoutingTest(unittest.TestCase):
         self.assertIn("this->deferredAdrenoCompletionEnabled_ = false;", selection)
         self.assertIn('"generated-before-source-same-call"', source)
         self.assertIn('"host-completion+real-copy-fence+wsi-reacquire"', source)
-        self.assertIn("this->sourceHistoryWarmupRemaining_ = 1;", source)
+        self.assertIn("this->conservativeCrossDeviceSync_ ? 1U : kSourceHistoryWarmupFrames", source)
         self.assertNotIn(
             '? "generated-before-buffered-source"',
             source,
