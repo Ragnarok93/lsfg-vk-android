@@ -2583,7 +2583,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->adaptiveFlowMipmapsMs_ =
             retainedTimingUsable ? observationMipmapsMs : 0.0;
         this->adaptiveFlowWorkMs_ =
-            retainedTimingUsable ? observationFlowMs : 0.0;
+            retainedTimingUsable ? observationScaleSensitiveFlowMs : 0.0;
         this->adaptiveFlowTotalLsfgMs_ =
             retainedTimingUsable ? observationTotalMs : 0.0;
         this->adaptiveFlowBudgetMs_ = observationBudgetMs;
