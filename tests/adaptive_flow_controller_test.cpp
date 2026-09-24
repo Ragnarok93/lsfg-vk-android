@@ -461,5 +461,28 @@ int main() {
         assert(controller.telemetry().computePressure);
     }
 
+    {
+        // A real over-budget generated sample remains actionable across the
+        // source-only/history cycles used to protect Adreno from serialized
+        // overload. The provenance bit distinguishes retained GPU timing from
+        // arbitrary non-generated telemetry; the runtime invalidates it after
+        // any Flow scale change so stale timing cannot cascade downsteps.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Balanced);
+        controller.observe(sample(
+            90.0, 35.0, 65.0, false, true,
+            8.0, true, true, false, true));
+        bool lowered = false;
+        for (int i = 0; i < 12 && !lowered; ++i) {
+            auto retained = sample(
+                90.0, 35.0, 65.0, false, false,
+                8.0, true, true, false, false);
+            retained.retainedGeneratedTimingSample = true;
+            controller.observe(retained);
+            lowered = near(controller.currentScale(), 0.70F);
+        }
+        assert(lowered);
+        assert(controller.telemetry().computePressure);
+    }
+
     return 0;
 }
