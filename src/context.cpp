@@ -832,10 +832,22 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     //
     // Xclipse and generic drivers keep their existing capability-driven
     // asynchronous handoff/completion route unchanged.
+    // Turnip on the proven S20+ path reports OPAQUE_FD feature bits as zero
+    // even though the September 18 transaction successfully created/exported
+    // the reusable OPAQUE_FD semaphore. Treat the advertised bit as advisory
+    // for protected Adreno only: SYNC_FD support proves the fd extension and
+    // private-device import plumbing are present, then the real OPAQUE_FD
+    // create/export/import operation remains the authoritative runtime probe.
+    // Any actual export/import failure still falls back to the bounded host
+    // fence below. Generic/Xclipse remain strictly capability-driven.
+    const bool adrenoHistoricalOpaqueAttempt =
+        this->conservativeCrossDeviceSync_
+        && info.androidSyncFdSemaphoreSupported
+        && backendDiagnostics.externalSemaphoreSyncFd;
     this->asyncAhbHandoffEnabled_ =
         gameGetSemaphoreFd != nullptr
         && (this->conservativeCrossDeviceSync_
-            ? opaqueFdHandoffSupported
+            ? (opaqueFdHandoffSupported || adrenoHistoricalOpaqueAttempt)
             : (syncFdHandoffSupported || opaqueFdHandoffSupported));
     if (this->conservativeCrossDeviceSync_) {
         this->asyncAhbHandoffHandleType_ =
@@ -3289,6 +3301,69 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // source ownership, cross-device completion, WSI acquisition, queue choice,
     // or generated-before-source ordering inside it.
     if (this->conservativeCrossDeviceSync_) {
+        // A rejected synthetic opportunity is source protection, not temporal
+        // maintenance. Do not copy into the AHB pair and then host-wait through
+        // a zero-count private framegen pass: that was the feedback loop that
+        // collapsed the S20+ source cadence. Present the real source directly,
+        // mark this as an authoritative source-only observation, and request
+        // exactly one real-source reprime before generation resumes.
+        if (conservativeAdmissionRejectedHistoryGap) {
+            this->lastDispatchedGeneratedFrameCount_ = 0;
+            this->lastSourceCadenceObservation_ =
+                SourceCadenceObservation::SourceOnly;
+            this->lastGeneratedFrameCount_ = 0;
+            this->previousSourceCopySignalValid_ = false;
+            this->sourceHistoryWarmupRemaining_ = 1;
+            this->requiresSourceHistoryWarmup_ = true;
+            this->lastHistoryInvalidationReason_ =
+                SourceHistoryInvalidationReason::SourcePairMismatch;
+            this->lastHistoryReprimeReason_ =
+                SourceHistoryInvalidationReason::SourcePairMismatch;
+            this->deadlineBatchDecision_ = {};
+            updateAdaptiveFlowGovernor();
+            metrics.windowAdaptiveZeroGenerationCycles++;
+            metrics.totalAdaptiveZeroGenerationCycles++;
+
+            VkPresentTimeGOOGLE bypassPresentTime{};
+            VkPresentTimesInfoGOOGLE bypassPresentTimes{};
+            const VkPresentInfoKHR bypassPresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = adaptivePresentPNext(
+                    pNext,
+                    this->currentSourceTimeline_.sourceDesiredTimeNs,
+                    bypassPresentTime,
+                    bypassPresentTimes),
+                .waitSemaphoreCount =
+                    static_cast<uint32_t>(gameRenderSemaphores.size()),
+                .pWaitSemaphores = gameRenderSemaphores.empty()
+                    ? nullptr : gameRenderSemaphores.data(),
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto bypassResult =
+                Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo);
+            if (isAdrenoWsiRetirementResult(bypassResult))
+                return bypassResult;
+            if (bypassResult != VK_SUCCESS
+                    && bypassResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(
+                    bypassResult,
+                    "Failed protected Adreno admission source-only present");
+            }
+            if (firstPresentDiagnostic) {
+                std::cerr
+                    << "lsfg-vk: runtime stage=adreno-admission-source-bypass"
+                    << " planned=" << plannedGeneratedFrameCount
+                    << " admitted=" << generatedFrameCount
+                    << " reprime=1\n";
+            }
+            return finishSourcePresent(
+                bypassResult, "game-render-admission-bypass");
+        }
+
         pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
         pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
         pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
