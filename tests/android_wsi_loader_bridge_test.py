@@ -193,21 +193,26 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertNotIn("VkSemaphore lastPostCopySem =", android)
         self.assertIn("runtime stage=present-sync-ready", android)
 
-    def test_runtime_disable_uses_resident_source_only_context(self) -> None:
+    def test_runtime_disable_uses_native_swapchain_pass_through(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
-        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
+        self.assertIn(
+            "if (!activeConf.enable || activeConf.multiplier <= 1)",
+            hooks,
+        )
         self.assertIn("init stage=swapchain-pass-through reason=", hooks)
-        self.assertIn("enabled=", hooks)
         self.assertIn("publishSwapchainState(*pSwapchain", hooks)
-        self.assertNotIn("if (!conf.enable || conf.multiplier <= 1)", hooks)
-        self.assertIn("if (conf.targeted && conf.multiplier <= 1)", hooks)
-        self.assertIn("state->context->enterSourceOnlyBypass()", hooks)
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", hooks)
-        self.assertIn("void enterSourceOnlyBypass();", header)
-        self.assertIn("void LsContext::enterSourceOnlyBypass()", context)
+        self.assertIn("generationActivityChanged", hooks)
+        self.assertIn("(previous.multiplier > 1) != (next.multiplier > 1)", hooks)
+
+        create_start = hooks.index("VkResult myvkCreateSwapchainKHR")
+        queue_start = hooks.index("VkResult myvkQueuePresentKHR", create_start)
+        create = hooks[create_start:queue_start]
+        disabled = create.index(
+            "if (!activeConf.enable || activeConf.multiplier <= 1)"
+        )
+        capacity = create.index("residentCapacityMultiplier(activeConf)")
+        self.assertLess(disabled, capacity)
 
         reload_pos = hooks.index("init stage=config-reloaded multiplier=")
         context_lookup_pos = hooks.index("if (!state->context)")
