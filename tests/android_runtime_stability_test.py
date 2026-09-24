@@ -194,6 +194,50 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("lsfgOutputCadenceTracker_.reset()", source)
         self.assertIn("sourceTimeline_.reset()", source)
 
+    def test_resident_config_change_resets_temporal_generation_epoch(self) -> None:
+        """Hot target/multiplier changes must not generate against pre-menu temporal state."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("RuntimeConfigChange", header)
+        signature_start = source.index(
+            "else if (this->runtimeConfigSignature_ != currentConfigSignature)"
+        )
+        signature_end = source.index("auto& metrics = this->runtimeMetrics", signature_start)
+        signature_change = source[signature_start:signature_end]
+        self.assertIn("resetAdaptiveSourceEpoch(", signature_change)
+        self.assertIn(
+            "SourceHistoryInvalidationReason::RuntimeConfigChange",
+            signature_change,
+        )
+
+        reset_start = source.index("void LsContext::resetAdaptiveSourceEpoch")
+        reset_end = source.index("void LsContext::enterSourceOnlyBypass", reset_start)
+        reset_epoch = source[reset_start:reset_end]
+        self.assertIn("previousSourceCopySignalValid_ = false", reset_epoch)
+        self.assertIn("runtimeMetrics.hasLastSourcePresent = false", reset_epoch)
+        self.assertIn("runtimeMetrics.lastSourcePresent = {}", reset_epoch)
+
+    def test_suspend_spanning_present_resets_temporal_generation_epoch(self) -> None:
+        """Quick Menu suspend/resume must invalidate framegen history, not only metrics."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("SuspendResume", header)
+        finish_start = source.index("const auto finishSourcePresent")
+        finish_end = source.index("const double elapsedSeconds", finish_start)
+        finish = source[finish_start:finish_end]
+        discontinuity_start = finish.index(
+            "if (cycleMs >= kRuntimeTimingDiscontinuityMs)"
+        )
+        discontinuity = finish[discontinuity_start:]
+        self.assertIn("resetAdaptiveSourceEpoch(", discontinuity)
+        self.assertIn(
+            "SourceHistoryInvalidationReason::SuspendResume",
+            discontinuity,
+        )
+        self.assertIn("action=reset-temporal-epoch", discontinuity)
+
     def test_present_hook_debounces_fs_and_reuses_wait_storage(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         self.assertIn("Clock::time_point nextConfigPoll", source)
