@@ -21,7 +21,7 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
             self.assertIn(token, header)
 
         selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
-        selection_end = source.index("// Match the device-proven baseline", selection_start)
+        selection_end = source.index("const bool xclipseCompatibilityPath =", selection_start)
         selection = source[selection_start:selection_end]
         self.assertIn(
             "!this->conservativeCrossDeviceSync_",
@@ -141,17 +141,21 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         )
         self.assertIn("deferredPass.deferredAdrenoOwned = false", deferred)
 
-    def test_source_ahb_reuse_waits_ready_batch_dependency_without_host_wait(self) -> None:
+    def test_protected_adreno_source_reuse_matches_september18_previous_source_dependency(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("deferredAdrenoBatchCompleteSemaphore_", source)
-        dependency_start = source.index("std::vector<VkSemaphore> gameRenderSemaphores2")
-        dependency_end = source.index("const auto handoffStart", dependency_start)
-        dependency = source[dependency_start:dependency_end]
+        island_start = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        island_end = source.index("// END ADRENO_364178AF_EXECUTION", island_start)
+        island = source[island_start:island_end]
+        dependency_start = island.index("std::vector<VkSemaphore> gameRenderSemaphores2")
+        dependency_end = island.index("const auto handoffStart", dependency_start)
+        dependency = island[dependency_start:dependency_end]
 
-        self.assertIn("deferredAdrenoBatchCompleteReady_", dependency)
-        self.assertIn("deferredAdrenoBatchCompleteSemaphore_", dependency)
-        self.assertIn("consumeDeferredAdrenoBatchComplete", dependency)
+        self.assertIn("previousSourceCopySignalValid_", dependency)
+        self.assertIn("passInfos.at((this->frameIdx - 1) % 8)", dependency)
+        self.assertIn("preCopySemaphores.at(1).handle()", dependency)
+        self.assertNotIn("deferredAdreno", dependency)
+        self.assertNotIn("conservativePending", dependency)
 
     def test_deferred_adreno_buffers_closing_source_until_next_boundary(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
@@ -255,7 +259,7 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
-        selection_end = source.index("// Match the device-proven baseline", selection_start)
+        selection_end = source.index("const bool xclipseCompatibilityPath =", selection_start)
         selection = source[selection_start:selection_end]
         self.assertIn("!this->conservativeCrossDeviceSync_", selection)
 
