@@ -131,6 +131,40 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertNotIn("adaptiveFlowGlobalOutputFps_", deficit)
         self.assertNotIn("metrics.lastWindowOutputFps", deficit)
 
+    def test_adaptive_flow_uses_only_scale_sensitive_cost_and_ignores_adreno_sidecar(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "const double observationScaleSensitiveFlowMs = std::max(",
+            source,
+        )
+        self.assertIn(
+            "0.0, observationFlowEndMs - observationMipmapsMs",
+            source,
+        )
+        self.assertIn(
+            ".flowMs = observationScaleSensitiveFlowMs",
+            source,
+        )
+        self.assertIn(
+            ".globalPressureValid =\n"
+            "                !this->conservativeCrossDeviceSync_\n"
+            "                && this->adaptiveFlowGlobalPressureValid_",
+            source,
+            "Adreno must not govern Flow from the unreliable Android GPU sidecar.",
+        )
+        self.assertIn(
+            ".outputFps = outputCadence.outputFps",
+            source,
+            "Flow decisions must use the native LSFG rolling cadence, not GameNative's stride-modified FPS.",
+        )
+        self.assertIn(
+            "this->deadlineAdmissionPredictor_.reset();",
+            source[source.index("if (flowTelemetry.changed"):],
+            "A Flow-scale transition must not reuse cost estimates from the old scale.",
+        )
+
+
     def test_logcat_diagnostics_include_runtime_session_and_config_epoch(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
