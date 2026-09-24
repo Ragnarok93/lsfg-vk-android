@@ -1804,6 +1804,24 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ? SourceCadenceObservation::Generated
                 : SourceCadenceObservation::SourceOnly);
 
+    // Learn source cadence before target planning. Only the previous cycle's
+    // classification may authorize baseline growth, so generated/history work
+    // cannot teach Adaptive that LSFG's own slowdown is a larger budget.
+    if (sourceProtectionBatchAdmission && sourceInterval.count() > 0) {
+        const double observedSourceIntervalMs =
+            std::chrono::duration<double, std::milli>(sourceInterval).count();
+        if (observedSourceIntervalMs < kRuntimeTimingDiscontinuityMs) {
+            this->sourceProtectionBudgetTracker_.observeSource(
+                sourceInterval, previousSourceCadenceObservation);
+        }
+    }
+    const auto& sourceProtectionBeforePlan =
+        this->sourceProtectionBudgetTracker_.telemetry();
+    this->adaptiveScheduler_.setSourceProtectionBaseline(
+        sourceProtectionBeforePlan.protectedSourceIntervalMs,
+        sourceProtectionBatchAdmission
+            && sourceProtectionBeforePlan.baselineValid);
+
     // Capacity feedback is advisory and comes from the previous measured GPU
     // cost/timeline. It may accelerate one scheduler level only after repeated
     // safe evidence; per-cycle deadline admission remains authoritative.
@@ -1913,17 +1931,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         } else {
             this->adaptivePresentPeriodNs_ = 0;
         }
-    }
-
-    // Conservative Adreno owns a source-cadence budget independent of the
-    // raw source timeline. Generated and history-maintenance work may tighten
-    // the baseline when the game proves it can run faster, but only a genuine
-    // LSFG-bypass source interval may expand the protected cadence.
-    if (sourceProtectionBatchAdmission
-            && this->currentSourceTimeline_.valid
-            && sourceInterval.count() > 0) {
-        this->sourceProtectionBudgetTracker_.observeSource(
-            sourceInterval, previousSourceCadenceObservation);
     }
 
     // Warmup is a genuine history/lifecycle condition, not a function of

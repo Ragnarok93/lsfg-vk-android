@@ -102,6 +102,8 @@ private:
     bool hasCopyCostEstimate_{false};
     double baselineIntervalMs_{};
     double serializedCopyReserveMs_{};
+    double slowerSourceCandidateMs_{};
+    unsigned slowerSourceCandidateSamples_{};
     SourceProtectionBudgetTelemetry telemetry_{};
 };
 
@@ -156,7 +158,16 @@ public:
     void reset();
 
 private:
-    static constexpr double kEwmaAlpha = 0.20;
+    struct BatchCostEstimate {
+        bool valid{false};
+        double mipmapsMs{};
+        double opticalFlowMs{};
+        double totalLsfgMs{};
+    };
+
+    static constexpr std::size_t kTrackedBatchCounts = 4;
+    static constexpr double kRecoveryEwmaAlpha = 0.12;
+    static constexpr double kUnknownBatchSafetyRatio = 1.10;
     static constexpr double kSafetyMarginRatio = 0.12;
     static constexpr double kSafetyMarginFloorMs = 0.35;
     static constexpr double kDeliveryReserveFloorMs = 0.50;
@@ -165,9 +176,7 @@ private:
     static constexpr double kDeliveryReserveSuccessDecay = 0.95;
 
     bool hasEstimate_{false};
-    double mipmapsMs_{0.0};
-    double opticalFlowMs_{0.0};
-    double perGeneratedMs_{0.0};
+    std::array<BatchCostEstimate, kTrackedBatchCounts> batchEstimates_{};
     double deliveryReserveMs_{0.0};
 };
 
@@ -372,6 +381,11 @@ public:
     /// ordinary sustained-demand governor.
     void setSafeGenerationHint(std::size_t hint, bool valid);
 
+    /// Supply the last clean, LSFG-independent source interval. When valid,
+    /// source protection has priority over target seeking: synthetic cost may
+    /// not rise while the observed source cadence is materially degraded.
+    void setSourceProtectionBaseline(double intervalMs, bool valid);
+
     void reset();
 
     [[nodiscard]] uint32_t targetFps() const { return targetFps_; }
@@ -384,7 +398,7 @@ private:
     void resetUnmetDemand();
     void updateSourceRate(double intervalSeconds);
     [[nodiscard]] double robustSourceIntervalSeconds() const;
-    void updateCostLimit(double wantedGeneratedFrames);
+    void updateCostLimit(double wantedGeneratedFrames, double intervalSeconds);
 
     uint32_t targetFps_{};
     std::size_t maxGeneratedFrames_{};
@@ -413,9 +427,13 @@ private:
     double observedTimeSeconds_{};
     std::size_t costLimit_{};
 
-    // Source cadence determines target demand, but never serves as a
-    // generation-count veto. Sustained unmet target demand raises this ceiling
-    // until the configured maximum is reached.
+    bool sourceProtectionBaselineValid_{false};
+    double sourceProtectionBaselineSeconds_{};
+    unsigned sourceDegradationSamples_{};
+    double sourceProtectionHoldUntilSeconds_{};
+
+    // Target demand may raise the ceiling only while source protection is
+    // healthy. A clean baseline is authoritative over self-inflicted slowdown.
     double unmetDemandSinceSeconds_{-1.0};
 
     AdaptiveSchedulerTelemetry telemetry_{};
