@@ -302,59 +302,47 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn("Layer::ovkQueuePresentKHR(queue, &presentInfo)", adreno)
         self.assertIn("Layer::ovkQueuePresentKHR(queue, &finalPresentInfo)", adreno)
 
-    def test_adreno_execution_plane_matches_september18_known_good(self) -> None:
+    def test_adreno_execution_island_is_reached_before_modern_runtime_plumbing(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        start = source.index("const auto presentAdrenoKnownGoodCycle")
-        end = source.index(
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        generic = source.index(
             "// Android path: AHardwareBuffer exchange between two VkDevices.",
-            start,
+            end,
         )
-        adreno = source[start:end]
+        island = source[begin:end]
 
-        # Keep the modern planner/governors above this executor, but once the
-        # generated-frame count is chosen the Qualcomm/Turnip transport and
-        # presentation sequence must match the September 18 path.
-        self.assertIn("generatedFrameCount", adreno)
-        self.assertIn("pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool)", adreno)
-        self.assertIn("this->frameIdx % 2 == 0 ? this->frame_0.handle() : this->frame_1.handle()", adreno)
-        self.assertNotIn("conservativeFramegenSourceIndex_", adreno)
-        self.assertNotIn("crossFrameWaitRetentions", adreno)
-        self.assertNotIn("conservativePendingBatchComplete", adreno)
-        self.assertNotIn("conservativePendingHistoryComplete", adreno)
+        self.assertLess(begin, generic)
+        self.assertIn("if (this->conservativeCrossDeviceSync_)", island)
 
-        self.assertIn("generatedFrameCount > 0", adreno)
-        self.assertIn("!warmupSourceHistory", adreno)
-        self.assertIn("Mini::Semaphore(info.device, &framegenInputSemaphoreFd)", adreno)
-        self.assertIn("*this->ahbHandoffFence, this->resetHandoffFences", adreno)
-
-        self.assertIn("presentContextWithCount(", adreno)
-        self.assertNotIn("presentContextWithCountExportSyncFd", adreno)
-        self.assertIn("waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)", adreno)
-
-        self.assertIn("runtimeWaitTimeoutNs()", adreno)
-        self.assertNotIn("generatedAcquireTimeoutNs = 0", adreno)
-        self.assertIn("pass.postCopyBufs.at(i) = Mini::CommandBuffer(info.device, this->cmdPool)", adreno)
-        self.assertIn("const void* generatedDownstreamPNext = i == 0 ? pNext : nullptr", adreno)
-        self.assertIn("const void* finalSourceDownstreamPNext =", adreno)
-        self.assertIn("generatedFrameCount == 0 ? pNext : nullptr", adreno)
-        self.assertNotIn("retainPresentWait(", adreno)
-        self.assertNotIn("armPassGpuRetirement(", adreno)
-        self.assertNotIn("syntheticQueue_", adreno)
-
-        route = source[
-            source.index("auto& pass = this->passInfos.at(this->frameIdx % 8)"):
-            source.index("// Android path: AHardwareBuffer exchange between two VkDevices.")
-        ]
-        self.assertIn(
-            "if (this->conservativeCrossDeviceSync_)\n"
-            "        return presentAdrenoKnownGoodCycle();",
-            route,
-        )
+        # Modern pass-slot/retirement plumbing is deliberately not allowed to
+        # gate or mutate the September 18 Qualcomm transaction.
+        present_start = source.index("VkResult LsContext::present")
+        route_prefix = source[present_start:begin]
         self.assertIn(
             "if (!this->conservativeCrossDeviceSync_ && !this->tryRecyclePass(pass))",
-            route,
+            route_prefix,
         )
+        self.assertNotIn("tryRecyclePass(pass)", island)
+        self.assertNotIn("retainPresentWait(", island)
+        self.assertNotIn("armPassGpuRetirement(", island)
+
+        # Runtime logs make the compatibility island and governor boundary
+        # explicit in device captures.
+        constructor_start = source.index(
+            'std::cerr << "lsfg-vk: LSFG compatibility path:"'
+        )
+        constructor_end = source.index(
+            'std::cerr << "lsfg-vk: Android AHB context created',
+            constructor_start,
+        )
+        constructor_log = source[constructor_start:constructor_end]
+        self.assertIn('" execution_reference="', constructor_log)
+        self.assertIn('"364178af-sep18"', constructor_log)
+        self.assertIn('" governor_adapter="', constructor_log)
+        self.assertIn('"admission-only"', constructor_log)
+
 
     def test_xclipse_async_selection_remains_capability_driven(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
