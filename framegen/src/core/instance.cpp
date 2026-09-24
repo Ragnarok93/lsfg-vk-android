@@ -6,9 +6,93 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
 
 using namespace LSFG::Core;
+
+namespace {
+
+std::mutex privateInstanceEnvironmentMutex;
+
+std::optional<std::string> readEnvironment(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value)
+        return std::nullopt;
+    return std::string(value);
+}
+
+void restoreEnvironment(const char* name, const std::optional<std::string>& value) {
+    if (value.has_value())
+        setenv(name, value->c_str(), 1);
+    else
+        unsetenv(name);
+}
+
+std::string stripLayerName(const std::string& value, const std::string& layerName) {
+    std::vector<std::string> layers;
+    size_t start = 0;
+    for (size_t i = 0; i <= value.size(); ++i) {
+        const bool atEnd = i == value.size();
+        const bool separator = !atEnd && (value[i] == ':' || value[i] == ';');
+        if (!atEnd && !separator)
+            continue;
+        if (i > start) {
+            const std::string token = value.substr(start, i - start);
+            if (token != layerName)
+                layers.push_back(token);
+        }
+        start = i + 1;
+    }
+
+    std::string result;
+    for (const auto& layer : layers) {
+        if (!result.empty())
+            result += ':';
+        result += layer;
+    }
+    return result;
+}
+
+class ScopedPrivateInstanceLayerSuppression {
+public:
+    ScopedPrivateInstanceLayerSuppression()
+        : lock(privateInstanceEnvironmentMutex),
+          previousDisable(readEnvironment("DISABLE_LSFG")),
+          previousInstanceLayers(readEnvironment("VK_INSTANCE_LAYERS")) {
+        setenv("DISABLE_LSFG", "1", 1);
+
+        if (previousInstanceLayers.has_value()) {
+            const auto filtered = stripLayerName(
+                *previousInstanceLayers, "VK_LAYER_LS_frame_generation");
+            if (filtered.empty())
+                unsetenv("VK_INSTANCE_LAYERS");
+            else
+                setenv("VK_INSTANCE_LAYERS", filtered.c_str(), 1);
+        }
+    }
+
+    ~ScopedPrivateInstanceLayerSuppression() {
+        restoreEnvironment("VK_INSTANCE_LAYERS", previousInstanceLayers);
+        restoreEnvironment("DISABLE_LSFG", previousDisable);
+    }
+
+    ScopedPrivateInstanceLayerSuppression(
+        const ScopedPrivateInstanceLayerSuppression&) = delete;
+    ScopedPrivateInstanceLayerSuppression& operator=(
+        const ScopedPrivateInstanceLayerSuppression&) = delete;
+
+private:
+    std::unique_lock<std::mutex> lock;
+    std::optional<std::string> previousDisable;
+    std::optional<std::string> previousInstanceLayers;
+};
+
+} // namespace
 
 Instance::Instance() {
     if (volkInitialize() != VK_SUCCESS)
@@ -36,7 +120,11 @@ Instance::Instance() {
         .pApplicationInfo = &appInfo,
     };
     VkInstance instanceHandle{};
-    const auto res = vkCreateInstance(&createInfo, nullptr, &instanceHandle);
+    VkResult res = VK_ERROR_INITIALIZATION_FAILED;
+    {
+        ScopedPrivateInstanceLayerSuppression suppressRecursiveLsfgLayer;
+        res = vkCreateInstance(&createInfo, nullptr, &instanceHandle);
+    }
     if (res != VK_SUCCESS || instanceHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create capability-selected Vulkan instance");
 
