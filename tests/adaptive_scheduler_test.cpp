@@ -290,11 +290,11 @@ int main() {
     }
 
     {
-        // Source cadence degradation increases target demand; it must never be
-        // used as a reason to back off a generation ceiling that Adaptive just
-        // proved it needed. Keep pursuing the configured target up to the
-        // user/runtime maximum even when the source slows under load.
+        // Once a clean source cadence is protected, source degradation overrides
+        // target seeking. A collapsing source must lower synthetic cost instead
+        // of raising 2 -> 3 because the target equation sees more demand.
         AdaptiveFrameScheduler scheduler(120, 3);
+        scheduler.setSourceProtectionBaseline(40.0, true);
         bool sawRaise = false;
         for (int frame = 0; frame < 24; ++frame) {
             scheduler.plan(40ms);
@@ -305,13 +305,13 @@ int main() {
         assert(sawRaise);
 
         bool sawBackoff = false;
-        for (int frame = 0; frame < 20; ++frame) {
+        for (int frame = 0; frame < 4; ++frame) {
             scheduler.plan(60ms);
             sawBackoff = sawBackoff || scheduler.telemetry().costBackedOff;
         }
-        assert(!sawBackoff);
-        assert(scheduler.telemetry().costLimit == 3);
-        assert(scheduler.telemetry().wantedGeneratedFrames >= 2.9);
+        assert(sawBackoff);
+        assert(scheduler.telemetry().costLimit <= 2);
+        assert(scheduler.telemetry().wantedGeneratedFrames >= 2.0);
     }
 
     {
@@ -390,25 +390,29 @@ int main() {
     }
 
     {
-        // A warm-started target is authoritative. A later source-rate drop may
-        // increase required interpolation density, but it must not cause the
-        // scheduler to undo the configured target by reducing its cost ceiling.
+        // A Quick Menu warm start may seed the requested target, but an
+        // established protected source cadence remains the higher-priority
+        // contract. Severe post-enable degradation must unwind the warm start.
         AdaptiveFrameScheduler scheduler(45, 3);
+        scheduler.setSourceProtectionBaseline(40.0, true);
         for (int frame = 0; frame < 12; ++frame)
             scheduler.plan(40ms);
         scheduler.configure(120, 3);
+        scheduler.setSourceProtectionBaseline(40.0, true);
         assert(scheduler.plan(1s) == 0);
+        scheduler.setSourceProtectionBaseline(40.0, true);
         scheduler.plan(40ms);
         assert(scheduler.telemetry().configWarmStart);
         assert(scheduler.telemetry().costLimit == 3);
 
         bool backedOff = false;
-        for (int frame = 0; frame < 8; ++frame) {
+        for (int frame = 0; frame < 4; ++frame) {
+            scheduler.setSourceProtectionBaseline(40.0, true);
             scheduler.plan(80ms);
             backedOff = backedOff || scheduler.telemetry().costBackedOff;
         }
-        assert(!backedOff);
-        assert(scheduler.telemetry().costLimit == 3);
+        assert(backedOff);
+        assert(scheduler.telemetry().costLimit < 3);
     }
 
     {
@@ -439,30 +443,27 @@ int main() {
     }
 
     {
-        // Once Adaptive has established a generation level, later source
-        // degradation must create *more* target demand, never a source-
-        // preservation experiment that lowers generation density. Per-cycle
-        // deadline admission may still skip work that cannot be delivered in
-        // time, but the long-term scheduler ceiling keeps pursuing the target.
+        // Source-protection is authoritative over target demand. Once the
+        // source stretches materially beyond a clean baseline, Adaptive must
+        // shed generated work and hold promotion until source cadence recovers.
         AdaptiveFrameScheduler scheduler(60, 3);
-        for (int frame = 0; frame < 48; ++frame)
+        scheduler.setSourceProtectionBaseline(40.0, true);
+        for (int frame = 0; frame < 48; ++frame) {
+            scheduler.setSourceProtectionBaseline(40.0, true);
             scheduler.plan(40ms);
+        }
         assert(scheduler.telemetry().costLimit >= 2);
 
         bool sawProtectiveBackoff = false;
-        bool sawProtectiveProbe = false;
-        for (int frame = 0; frame < 40; ++frame) {
+        for (int frame = 0; frame < 8; ++frame) {
+            scheduler.setSourceProtectionBaseline(40.0, true);
             scheduler.plan(55ms);
             sawProtectiveBackoff =
                 sawProtectiveBackoff || scheduler.telemetry().costBackedOff;
-            sawProtectiveProbe =
-                sawProtectiveProbe || scheduler.telemetry().costProbe;
         }
 
-        assert(!sawProtectiveBackoff);
-        assert(!sawProtectiveProbe);
-        assert(scheduler.telemetry().costLimit == 3);
-        assert(scheduler.telemetry().wantedGeneratedFrames > 2.0);
+        assert(sawProtectiveBackoff);
+        assert(scheduler.telemetry().costLimit <= 2);
     }
 
     {
@@ -539,29 +540,29 @@ int main() {
     }
 
     {
-        // Capacity-informed promotion may advance exactly one level before the
-        // generic 600 ms timer, but only after several consecutive safe hints.
+        // Capacity may promote while source cadence is healthy, but it cannot
+        // defeat source protection after that cadence collapses.
         AdaptiveFrameScheduler scheduler(120, 3);
+        scheduler.setSourceProtectionBaseline(40.0, true);
         bool promoted = false;
         for (int frame = 0; frame < 4; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
+            scheduler.setSourceProtectionBaseline(40.0, true);
             scheduler.plan(40ms);
             promoted = promoted || scheduler.telemetry().capacityPromoted;
         }
         assert(promoted);
         assert(scheduler.telemetry().costLimit == 2);
 
-        // A capacity hint only accelerates promotion; it does not create a
-        // later source-FPS veto. If the source slows, target demand rises and
-        // Adaptive continues toward the configured maximum.
         bool backedOff = false;
-        for (int frame = 0; frame < 12; ++frame) {
+        for (int frame = 0; frame < 4; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
+            scheduler.setSourceProtectionBaseline(40.0, true);
             scheduler.plan(80ms);
             backedOff = backedOff || scheduler.telemetry().costBackedOff;
         }
-        assert(!backedOff);
-        assert(scheduler.telemetry().costLimit == 3);
+        assert(backedOff);
+        assert(scheduler.telemetry().costLimit < 2);
     }
 
     {
@@ -594,13 +595,15 @@ int main() {
     }
 
     {
-        // Capacity-informed promotion follows the same target-authoritative
-        // policy as the ordinary ramp. Source degradation after promotion may
-        // increase demand, but must never revoke the promoted generation level.
+        // A promoted level is provisional with respect to source protection.
+        // Severe degradation immediately revokes synthetic capacity even when
+        // predictor hints would otherwise keep promoting toward the target.
         AdaptiveFrameScheduler scheduler(120, 3);
+        scheduler.setSourceProtectionBaseline(40.0, true);
         bool promoted = false;
         for (int frame = 0; frame < 8 && !promoted; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
+            scheduler.setSourceProtectionBaseline(40.0, true);
             scheduler.plan(40ms);
             promoted = promoted || scheduler.telemetry().capacityPromoted;
         }
@@ -608,21 +611,14 @@ int main() {
         assert(scheduler.telemetry().costLimit == 2);
 
         bool backedOff = false;
-        for (int frame = 0; frame < 2; ++frame) {
+        for (int frame = 0; frame < 3; ++frame) {
             scheduler.setSafeGenerationHint(2, true);
+            scheduler.setSourceProtectionBaseline(40.0, true);
             scheduler.plan(80ms);
             backedOff = backedOff || scheduler.telemetry().costBackedOff;
         }
-        assert(!backedOff);
-        assert(scheduler.telemetry().costLimit == 2);
-
-        for (int frame = 0; frame < 8; ++frame) {
-            scheduler.setSafeGenerationHint(2, true);
-            scheduler.plan(80ms);
-            backedOff = backedOff || scheduler.telemetry().costBackedOff;
-        }
-        assert(!backedOff);
-        assert(scheduler.telemetry().costLimit == 3);
+        assert(backedOff);
+        assert(scheduler.telemetry().costLimit == 1);
     }
 
     {
@@ -899,13 +895,39 @@ int main() {
         assert(recovered.deliveryReserveMs < 0.05);
         assert(recovered.wouldAdmit);
 
-        // The per-output residual scales with requested synthetic work while
-        // mipmaps/flow remain shared costs. This is a prediction only; a later
-        // rejected opportunity is never fed back into fractional scheduling.
-        const auto oneOutput = predictor.predict(1, 12.0);
+        // Batch cost is learned independently by generation count. Unknown
+        // counts use a conservative whole-batch bound; a measured 2-frame
+        // batch must replace that fallback instead of being decomposed into a
+        // misleading shared + linear per-frame model.
+        const auto oneOutput = predictor.predict(1, 20.0);
         assert(oneOutput.valid);
-        assert(oneOutput.predictedTotalLsfgMs > 7.49);
-        assert(oneOutput.predictedTotalLsfgMs < roomy.predictedTotalLsfgMs);
+        assert(oneOutput.predictedTotalLsfgMs >= roomy.predictedTotalLsfgMs * 0.5);
+
+        predictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 7.0,
+            .opticalFlowMs = 11.0,
+            .totalLsfgMs = 40.0,
+            .generationCount = 2,
+            .valid = true,
+        });
+        const auto measuredTwo = predictor.predict(2, 60.0);
+        assert(measuredTwo.valid);
+        assert(measuredTwo.predictedTotalLsfgMs >= 39.9);
+
+        const auto conservativeThree = predictor.predict(3, 100.0);
+        assert(conservativeThree.valid);
+        assert(conservativeThree.predictedTotalLsfgMs >= 55.0);
+
+        predictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 8.0,
+            .opticalFlowMs = 13.0,
+            .totalLsfgMs = 58.0,
+            .generationCount = 3,
+            .valid = true,
+        });
+        const auto measuredThree = predictor.predict(3, 100.0);
+        assert(measuredThree.valid);
+        assert(measuredThree.predictedTotalLsfgMs >= 57.9);
 
         const auto safeHint = predictor.safeGenerationHint(3, 33.0);
         assert(safeHint >= 1);
@@ -977,12 +999,16 @@ int main() {
                 80ms, SourceCadenceObservation::Generated);
         assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
 
-        // Clean source-only evidence remains authoritative for a natural scene
-        // transition after the baseline has been established.
-        for (int i = 0; i < 8; ++i)
+        // One or a few slow direct-source intervals cannot inflate the
+        // protected cadence. Expansion requires sustained clean evidence.
+        for (int i = 0; i < 5; ++i)
             budget.observeSource(
                 80ms, SourceCadenceObservation::SourceOnly);
-        assert(budget.telemetry().protectedSourceIntervalMs > 75.0);
+        assert(budget.telemetry().protectedSourceIntervalMs < 45.0);
+
+        budget.observeSource(
+            80ms, SourceCadenceObservation::SourceOnly);
+        assert(budget.telemetry().protectedSourceIntervalMs > 70.0);
     }
 
     {
