@@ -380,11 +380,12 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         warmup_end = source.index("if (historyOnly)", warmup_start)
         warmup = source[warmup_start:warmup_end]
         self.assertIn(
-            "SourceCadenceObservation::SourceOnly",
+            "SourceCadenceObservation::HistoryMaintenance",
             warmup,
-            "Copy-only Adreno warmup is the cleanest available source baseline",
+            "Host-fenced/reprime warmup includes LSFG compatibility work and must "
+            "never expand the clean source baseline.",
         )
-        self.assertNotIn("SourceCadenceObservation::HistoryMaintenance", warmup)
+        self.assertNotIn("SourceCadenceObservation::SourceOnly", warmup)
 
         history_start = source.index("if (historyOnly)", warmup_end)
         history_end = source.index(
