@@ -129,6 +129,71 @@ class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
         self.assertNotIn("presentContextWithCount(", escape_block)
         self.assertNotIn("submitAndWaitForAhbHandoff(", escape_block)
 
+    def test_adreno_protection_bypasses_do_not_masquerade_as_source_pair_corruption(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        for reason in (
+            "AdmissionBypass",
+            "OverloadBypass",
+            "RetirementBackpressure",
+            "FractionalGap",
+        ):
+            self.assertIn(reason, header)
+            self.assertIn(reason, source)
+
+        begin = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = source.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = source[begin:end]
+
+        overload = adreno[
+            adreno.index("if (protectedAdrenoPriorComputeOverBudget)"):
+            adreno.index("if (conservativeAdmissionRejectedHistoryGap)")
+        ]
+        self.assertIn(
+            "lastHistoryInvalidationReason_ =\n"
+            "                SourceHistoryInvalidationReason::None",
+            overload,
+        )
+        self.assertIn(
+            "SourceHistoryInvalidationReason::OverloadBypass",
+            overload,
+        )
+        self.assertNotIn(
+            "SourceHistoryInvalidationReason::SourcePairMismatch",
+            overload,
+        )
+
+        admission_start = adreno.index("if (conservativeAdmissionRejectedHistoryGap)")
+        admission_end = adreno.index("pass.preCopySemaphores.at(0)", admission_start)
+        admission = adreno[admission_start:admission_end]
+        self.assertIn(
+            "lastHistoryInvalidationReason_ =\n"
+            "                SourceHistoryInvalidationReason::None",
+            admission,
+        )
+        self.assertIn(
+            "SourceHistoryInvalidationReason::AdmissionBypass",
+            admission,
+        )
+        self.assertNotIn(
+            "SourceHistoryInvalidationReason::SourcePairMismatch",
+            admission,
+        )
+
+        # Warmup/preprocess work is not clean native source-only evidence.
+        warmup_start = adreno.index("if (sourceHistoryWarmupActive)")
+        warmup_end = adreno.index("this->lastDispatchedGeneratedFrameCount_ = generatedFrameCount", warmup_start)
+        warmup = adreno[warmup_start:warmup_end]
+        self.assertIn(
+            "SourceCadenceObservation::HistoryMaintenance",
+            warmup,
+        )
+        self.assertNotIn(
+            "SourceCadenceObservation::SourceOnly",
+            warmup,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
