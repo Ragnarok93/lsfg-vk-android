@@ -173,7 +173,18 @@ void SourceProtectionBudgetTracker::observeSource(
     constexpr double kSourceOnlyAlpha = 0.35;
     constexpr double kFasterActiveAlpha = 0.20;
 
+    telemetry_.lastObservation = observation;
+
     if (!hasBaseline_) {
+        // LSFG-active history/generated intervals already include compatibility
+        // work and cannot establish the protected source cadence. In particular,
+        // a fast resume/recreate sample must not become an immutable deadline
+        // that rejects every later generated opportunity.
+        if (observation != SourceCadenceObservation::SourceOnly) {
+            telemetry_.baselineValid = false;
+            telemetry_.protectedSourceIntervalMs = 0.0;
+            return;
+        }
         baselineIntervalMs_ = intervalMs;
         hasBaseline_ = true;
     } else if (observation == SourceCadenceObservation::SourceOnly) {
@@ -188,7 +199,6 @@ void SourceProtectionBudgetTracker::observeSource(
             kFasterActiveAlpha * (intervalMs - baselineIntervalMs_);
     }
 
-    telemetry_.lastObservation = observation;
     telemetry_.baselineValid = hasBaseline_;
     telemetry_.protectedSourceIntervalMs = baselineIntervalMs_;
 }
