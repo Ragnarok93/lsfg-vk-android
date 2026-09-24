@@ -256,7 +256,15 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         )
         self.assertIn("requiredHeadroom", swapchain)
         self.assertIn("residentMultiplier - 1", swapchain)
-        self.assertIn("activeConf.targeted", swapchain)
+        self.assertIn(
+            "if (!activeConf.enable || activeConf.multiplier <= 1)",
+            swapchain,
+            "Disabled targeted Android sessions must preserve the application's native swapchain.",
+        )
+        self.assertLess(
+            swapchain.index("if (!activeConf.enable || activeConf.multiplier <= 1)"),
+            swapchain.index("residentCapacityMultiplier(activeConf)"),
+        )
         self.assertIn("pCreateInfo->minImageCount + requiredHeadroom", swapchain)
         self.assertIn("requiredImageCount > maxImageCount", swapchain)
         self.assertIn("stage=swapchain-insufficient-headroom", swapchain)
