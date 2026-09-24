@@ -958,6 +958,34 @@ int main() {
         const auto tooExpensiveBatchHint =
             deferredPredictor.safeBatchGenerationHint(1, 28.0);
         assert(tooExpensiveBatchHint == 0);
+
+        // Protected Adreno blocks the source-present thread at private-device
+        // completion. GPU shader timestamps alone can therefore understate the
+        // real source-owned cost when queue residency expands under saturation.
+        // Train admission from that measured blocking completion boundary.
+        DeadlineAdmissionPredictor blockingPredictor;
+        blockingPredictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 12.0,
+            .opticalFlowMs = 19.0,
+            .totalLsfgMs = 24.0,
+            .generationCount = 1,
+            .valid = true,
+        });
+        const auto gpuOnlyDecision = blockingPredictor.predict(1, 37.0);
+        assert(gpuOnlyDecision.valid);
+        assert(gpuOnlyDecision.wouldAdmit);
+
+        blockingPredictor.observeBlockingCompletion(1, 69.0);
+        const auto blockingDecision = blockingPredictor.predict(1, 37.0);
+        assert(blockingDecision.valid);
+        assert(blockingDecision.predictedTotalLsfgMs > 68.9);
+        assert(!blockingDecision.wouldAdmit);
+
+        // Recovery from one saturated sample must be conservative so a single
+        // fast frame cannot immediately reopen the same hitch-producing batch.
+        blockingPredictor.observeBlockingCompletion(1, 24.0);
+        const auto recoveryDecision = blockingPredictor.predict(1, 80.0);
+        assert(recoveryDecision.predictedTotalLsfgMs > 60.0);
     }
 
     {
