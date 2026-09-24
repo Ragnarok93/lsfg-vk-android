@@ -2497,6 +2497,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generation_count=" << observation.generationCount
                       << " generated_work_sample="
                       << (observation.generatedWorkSample ? 1 : 0)
+                      << " retained_timing_sample="
+                      << (observation.retainedGeneratedTimingSample ? 1 : 0)
                       << " global_gpu_percent="
                       << observation.globalGpuUsagePercent
                       << " global_pressure_valid="
@@ -2507,9 +2509,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " output_satisfied="
                       << (observation.outputTargetSatisfied ? 1 : 0)
                       << " compute_pressure="
-                      << (observation.computeDeadlinePressure ? 1 : 0)
+                      << (flowTelemetry.computePressure ? 1 : 0)
                       << " wsi_pressure="
-                      << (observation.wsiPresentationPressure ? 1 : 0)
+                      << (flowTelemetry.wsiPressure ? 1 : 0)
                       << " wsi_loss_rate=" << observation.wsiLossRate
                       << '\n';
 #ifdef __ANDROID__
@@ -2518,9 +2520,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "LSFG_FLOW",
                 "runtime_session_id=%llu config_revision=%llu "
                 "previous=%.3f requested=%.3f reason=%s flow_ms=%.3f lsfg_ms=%.3f "
-                "budget_ms=%.3f generation_count=%zu gpu=%.1f pressure_valid=%d "
-                "output_fps=%.3f output_deficit=%d output_satisfied=%d "
-                "compute_pressure=%d wsi_pressure=%d wsi_loss_rate=%.3f",
+                "budget_ms=%.3f generation_count=%zu generated_work=%d retained_timing=%d "
+                "gpu=%.1f pressure_valid=%d output_fps=%.3f output_deficit=%d "
+                "output_satisfied=%d compute_pressure=%d wsi_pressure=%d wsi_loss_rate=%.3f",
                 static_cast<unsigned long long>(this->runtimeSessionId_),
                 static_cast<unsigned long long>(this->configRevision_),
                 static_cast<double>(previousScale),
@@ -2530,13 +2532,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 observation.totalLsfgMs,
                 observation.frameBudgetMs,
                 observation.generationCount,
+                observation.generatedWorkSample ? 1 : 0,
+                observation.retainedGeneratedTimingSample ? 1 : 0,
                 observation.globalGpuUsagePercent,
                 observation.globalPressureValid ? 1 : 0,
                 observation.outputFps,
                 observation.outputDeficit ? 1 : 0,
                 observation.outputTargetSatisfied ? 1 : 0,
-                observation.computeDeadlinePressure ? 1 : 0,
-                observation.wsiPresentationPressure ? 1 : 0,
+                flowTelemetry.computePressure ? 1 : 0,
+                flowTelemetry.wsiPressure ? 1 : 0,
                 observation.wsiLossRate);
 #endif
         }
