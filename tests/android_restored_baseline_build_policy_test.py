@@ -18,6 +18,7 @@ for token in FORBIDDEN_PROFILE_IMPORTS:
     assert token not in PROFILE, f"restored evidence profile must not compose {token}"
 
 FORBIDDEN_BUILD_INVOCATIONS = (
+    "scripts/adreno_android_config_reload.py",
     "scripts/adreno_nonblocking_generated_pipeline.py",
     "scripts/adreno_deferred_zero",
     "scripts/adreno_async_zero_history",
