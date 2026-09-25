@@ -840,8 +840,9 @@ namespace {
                     || configurationFileChanged(activeConf);
                 std::cerr << "lsfg-vk: init stage=config-transaction"
                           << " config_revision=" << configSnapshot.revision
-                          << " config_timestamp_ticks="
-                          << configSnapshot.timestamp.time_since_epoch().count()
+                          << " config_timestamp_ns="
+                          << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              configSnapshot.timestamp.time_since_epoch()).count()
                           << " changed_during_create="
                           << (state.configurationRecreatePending ? 1 : 0)
                           << "\n";
@@ -1261,8 +1262,9 @@ namespace {
         if (configurationRecreatePending) {
             std::cerr << "lsfg-vk: runtime stage=config-transaction-recreate"
                       << " config_revision=" << state->configurationRevision
-                      << " config_timestamp_ticks="
-                      << state->configurationTimestamp.time_since_epoch().count()
+                      << " config_timestamp_ns="
+                      << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          state->configurationTimestamp.time_since_epoch()).count()
                       << "\n";
             Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             return VK_ERROR_OUT_OF_DATE_KHR;
