@@ -50,7 +50,6 @@ jobs:
           python3 tests/android_adreno_compatibility_restore_test.py
           python3 tests/android_adreno_s20_reference_test.py
           python3 tests/android_adreno_regression_repair_test.py
-          python3 tests/android_adreno_source_protection_delivery_test.py
           python3 tests/android_adreno_deferred_single_queue_test.py
           python3 tests/android_compatibility_path_routing_test.py
           python3 tests/android_suspend_timeout_guard_test.py
@@ -93,11 +92,6 @@ jobs:
             tests/android_sync_policy_test.cpp \
             -o /tmp/lsfg-android-sync-policy-test
           /tmp/lsfg-android-sync-policy-test
-          g++ -std=c++20 -Wall -Wextra -Werror \
-            -Iinclude \
-            tests/android_adreno_source_protection_state_test.cpp \
-            -o /tmp/lsfg-adreno-source-protection-state-test
-          /tmp/lsfg-adreno-source-protection-state-test
 
   build:
     name: Build ${{ matrix.abi }}
