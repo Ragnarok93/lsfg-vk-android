@@ -1184,6 +1184,30 @@ int main() {
 
 
 
+
+    {
+        // Generation-first Adreno mode treats resource pressure as telemetry,
+        // not permission to suppress requested synthetic work. A constrained
+        // source must still be able to request more than one generated frame
+        // when the adaptive target requires it.
+        AdaptiveFrameScheduler scheduler(45, 3);
+        scheduler.setGenerationFirst(true);
+
+        std::size_t peak = 0;
+        for (int i = 0; i < 12; ++i)
+            peak = std::max(peak, scheduler.plan(70ms));
+
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(peak >= 2);
+
+        // A later severe source slowdown must not back the generation ceiling
+        // down simply because the device is constrained.
+        for (int i = 0; i < 8; ++i)
+            scheduler.plan(120ms);
+        assert(scheduler.telemetry().costLimit == 3);
+    }
+
+
     // Protected Adreno executes one admitted synthetic batch inside the real
     // source-owned interval. A fixed 2x request must therefore not compare the
     // complete private-device batch against half of the source interval.

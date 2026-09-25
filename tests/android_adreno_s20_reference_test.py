@@ -110,6 +110,30 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             source,
         )
 
+    def test_adreno_generation_first_never_uses_resource_pressure_as_a_generation_veto(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        scheduler = (ROOT / "src/adaptive_scheduler.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "const bool generationFirstAdreno = this->conservativeCrossDeviceSync_;",
+            source,
+        )
+        self.assertIn("setGenerationFirst", header)
+        self.assertIn("generationFirst_", scheduler)
+        self.assertIn(
+            "generationFirstAdreno\n"
+            "            ? requestedFixedGeneratedFrameCount",
+            source,
+            "Fixed Adreno must honor the selected multiplier even when the "
+            "source cadence slows under load.",
+        )
+        self.assertIn(
+            "&& !generationFirstAdreno",
+            source,
+            "Deadline/source-protection gates must be disabled on generation-first Adreno.",
+        )
+
     def test_adreno_fixed_source_protection_gap_is_direct_source_only(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
