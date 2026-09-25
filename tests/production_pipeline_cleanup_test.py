@@ -15,7 +15,6 @@ if match:
 required = [
     "adreno_suspend_timeout_guard.py",
     "adreno_android_runtime_residency.py",
-    "adreno_android_config_reload.py",
     "apply-adreno-evidence-profile.py",
     "apply-candidate-b-translation-cleanup.py",
     "apply-candidate-b4-beta4-predicate.py",
