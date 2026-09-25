@@ -33,7 +33,11 @@ struct AdrenoSourceProtectionTelemetry {
 
 class AdrenoSourceProtectionController {
 public:
-    static constexpr uint32_t kRecoveryFramesBeforeProbe = 4;
+    // SourceProtectionBudgetTracker requires six coherent source-only samples
+    // before it may promote a naturally slower baseline. Never schedule a
+    // reprime earlier than that promotion window or the host-fence warmup will
+    // interrupt the very evidence needed to establish recovery.
+    static constexpr uint32_t kRecoveryFramesBeforeProbe = 6;
 
     void reset() {
         telemetry_ = {};
@@ -59,13 +63,15 @@ public:
 
     [[nodiscard]] bool requestReprimeIfRecovered(
             bool sourceRecoveryValid,
+            bool syntheticCapacityRecovered,
             bool generationDemand) {
-        // Recovery is established by clean source-only cadence plus current
-        // demand. Do not require the old synthetic-cost predictor to approve
-        // the reprime: the following one-frame GenerationTrial exists
-        // specifically to refresh stale generated-work cost evidence.
+        // A reprime is itself source-visible work. Require independent proof
+        // that the real-source cadence is healthy and that one synthetic batch
+        // fits the source-owned interval. Cold-start bootstrap is represented
+        // by syntheticCapacityRecovered=true only while no cost estimate exists.
         if (telemetry_.phase != AdrenoSourceProtectionPhase::ProtectedSourceOnly
                 || !sourceRecoveryValid
+                || !syntheticCapacityRecovered
                 || !generationDemand
                 || telemetry_.recoveryFrames < kRecoveryFramesBeforeProbe) {
             return false;
@@ -73,22 +79,6 @@ public:
         telemetry_.phase = AdrenoSourceProtectionPhase::ReprimePending;
         telemetry_.reprimeRequests++;
         return true;
-    }
-
-    [[nodiscard]] std::size_t minimumGenerationTrial(
-            std::size_t plannedGeneration,
-            std::size_t admittedGeneration) const {
-        if (telemetry_.phase != AdrenoSourceProtectionPhase::GenerationTrial
-                || plannedGeneration == 0
-                || admittedGeneration > 0) {
-            return admittedGeneration;
-        }
-
-        // A stale predictor may reject the first candidate after source-only
-        // recovery. Permit exactly one synthetic frame so the trial can
-        // measure current blocking cost. The caller still requires a positive
-        // real-source budget before applying this floor.
-        return 1;
     }
 
     void onReprimeExecuted() {

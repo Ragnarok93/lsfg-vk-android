@@ -288,6 +288,20 @@ void SourceProtectionBudgetTracker::reset() {
     telemetry_ = {};
 }
 
+double sourceOwnedFramegenBatchBudgetMs(
+        double sourceIntervalMs,
+        double nominalBatchBudgetMs,
+        bool sourceProtectedExecution) {
+    const bool sourceIntervalValid =
+        sourceIntervalMs > 0.0 && std::isfinite(sourceIntervalMs);
+    const bool nominalValid =
+        nominalBatchBudgetMs > 0.0 && std::isfinite(nominalBatchBudgetMs);
+
+    if (sourceProtectedExecution && sourceIntervalValid)
+        return sourceIntervalMs;
+    return nominalValid ? nominalBatchBudgetMs : 0.0;
+}
+
 void DeadlineAdmissionPredictor::observe(
         const DeadlineAdmissionObservation& observation) {
     if (!observation.valid

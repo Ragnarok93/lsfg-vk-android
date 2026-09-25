@@ -1914,15 +1914,36 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     if (this->conservativeCrossDeviceSync_
             && this->adrenoSourceProtection_.protectedSourceOnly()) {
-        const bool protectedBaselineValid =
-            this->sourceProtectionBudgetTracker_.telemetry().baselineValid;
+        const auto& protectedSource =
+            this->sourceProtectionBudgetTracker_.telemetry();
+        const double observedSourceIntervalMs =
+            std::chrono::duration<double, std::milli>(
+                sourceInterval).count();
+        constexpr double kAdrenoSourceRecoveryTolerance = 1.10;
         const bool sourceRecoveryValid =
-            protectedBaselineValid
-            && (conf.adaptiveFramegen
-                || this->fixedSourceCadenceGovernor_.telemetry().baselineValid);
+            protectedSource.baselineValid
+            && observedSourceIntervalMs > 0.0
+            && std::isfinite(observedSourceIntervalMs)
+            && observedSourceIntervalMs
+                <= protectedSource.protectedSourceIntervalMs
+                    * kAdrenoSourceRecoveryTolerance;
+
+        // The first ever probe has no synthetic-cost estimate by definition.
+        // After one batch has been measured, however, source-only recovery must
+        // relax that measured capacity back to >=1 before another host-fence
+        // reprime is allowed. This prevents the reprime/probe storm seen on
+        // S20+ while still allowing a cold-start bootstrap.
+        const bool syntheticCapacityRecovered =
+            conf.adaptiveFramegen
+                ? (!this->deadlineAdmissionPredictor_.hasEstimate()
+                    || (safeGenerationHintValid && safeGenerationHint > 0))
+                : (this->fixedSourceCadenceGovernor_.telemetry().baselineValid
+                    && this->fixedSourceCadenceGovernor_.telemetry().generationLimit > 0);
         const bool generationDemand = plannedGeneratedFrameCount > 0;
         if (this->adrenoSourceProtection_.requestReprimeIfRecovered(
-                sourceRecoveryValid, generationDemand)) {
+                sourceRecoveryValid,
+                syntheticCapacityRecovered,
+                generationDemand)) {
             this->sourceHistoryWarmupRemaining_ = 1;
             this->requiresSourceHistoryWarmup_ = true;
             this->lastHistoryReprimeReason_ =
@@ -2169,28 +2190,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    // ReprimePending deliberately transitions to one minimum-cost
-    // GenerationTrial. Do not let stale generated-batch estimates create a
-    // circular lock where the probe needed to refresh those estimates can
-    // never execute. This floor is Adreno-only, applies once, requires current
-    // generation demand and a positive source-owned window, and never raises a
-    // trial above one synthetic frame.
-    if (this->conservativeCrossDeviceSync_
-            && this->adrenoSourceProtection_.generationTrial()
-            && sourceBudgetEffectiveMs > 0.0) {
-        const size_t trialGeneratedFrameCount =
-            this->adrenoSourceProtection_.minimumGenerationTrial(
-                plannedGeneratedFrameCount, generatedFrameCount);
-        if (trialGeneratedFrameCount > generatedFrameCount) {
-            generatedFrameCount = trialGeneratedFrameCount;
-            interpolationGenerationCount = std::max<size_t>(
-                1, interpolationGenerationCount);
-            this->deadlineBatchDecision_ =
-                this->deadlineAdmissionPredictor_.predict(
-                    generatedFrameCount, sourceBudgetEffectiveMs);
-        }
-    }
-
     const auto& outputCadenceForPresentation =
         this->lsfgOutputCadenceTracker_.snapshot();
     const bool presentationOutputDeficit =
@@ -2266,8 +2265,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 && this->deadlineBatchDecision_.effectiveUsableBudgetMs > 0.0) {
             budgetMs = this->deadlineBatchDecision_.effectiveUsableBudgetMs;
         } else {
-            budgetMs = adaptiveFlowFrameBudgetMs(
+            const double nominalBatchBudgetMs = adaptiveFlowFrameBudgetMs(
                 conf, sourceInterval, generatedFrameCount);
+            const double sourceIntervalMs =
+                std::chrono::duration<double, std::milli>(
+                    sourceInterval).count();
+            budgetMs = sourceOwnedFramegenBatchBudgetMs(
+                sourceIntervalMs,
+                nominalBatchBudgetMs,
+                this->conservativeCrossDeviceSync_);
         }
 
         if (this->conservativeCrossDeviceSync_ && budgetMs > 0.0) {

@@ -110,6 +110,14 @@ private:
 /// Chooses the minimum number of interpolation frames needed to approach an
 /// output FPS target. It owns no Vulkan objects, never paces source frames, and
 /// is independently testable.
+/// Select the fallback compute budget for one admitted frame-generation batch.
+/// On source-protected execution the whole real-source interval owns the batch;
+/// generic execution keeps its nominal per-slot budget.
+double sourceOwnedFramegenBatchBudgetMs(
+    double sourceIntervalMs,
+    double nominalBatchBudgetMs,
+    bool sourceProtectedExecution);
+
 struct DeadlineAdmissionObservation {
     double mipmapsMs{};
     double opticalFlowMs{};
