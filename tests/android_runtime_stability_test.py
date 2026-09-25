@@ -238,6 +238,51 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
         self.assertIn("action=reset-temporal-epoch", discontinuity)
 
+
+    def test_swapchain_configuration_is_one_immutable_transaction(self) -> None:
+        """Swapchain sizing and LsContext construction must consume the same config snapshot."""
+        config_header = (ROOT / "include/config/config.hpp").read_text(encoding="utf-8")
+        config_source = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
+        context_header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        context_source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("struct ConfigurationSnapshot", config_header)
+        self.assertIn("uint64_t revision", config_header)
+        self.assertIn("ConfigurationSnapshot snapshotTransaction()", config_header)
+        self.assertIn("activeConfigurationRevision", config_source)
+
+        constructor_start = context_source.index("LsContext::LsContext")
+        destructor_start = context_source.index("LsContext::~LsContext()", constructor_start)
+        constructor = context_source[constructor_start:destructor_start]
+        self.assertIn("const Config::ConfigurationSnapshot& configSnapshot", context_header)
+        self.assertIn("const Config::ConfigurationSnapshot& configSnapshot", constructor)
+        self.assertIn("const auto& conf = configSnapshot.configuration", constructor)
+        self.assertNotIn("std::this_thread::sleep_for", constructor)
+        self.assertNotIn("Config::updateConfig", constructor)
+        self.assertNotIn("Config::setActive", constructor)
+        self.assertNotIn("LSFG_3_1::finalize", constructor)
+        self.assertNotIn("LSFG_3_1P::finalize", constructor)
+
+        create_start = hooks.index("VkResult myvkCreateSwapchainKHR")
+        present_start = hooks.index("VkResult myvkQueuePresentKHR", create_start)
+        create = hooks[create_start:present_start]
+        self.assertIn("const auto configSnapshot = Config::snapshotTransaction()", create)
+        self.assertIn("const auto& activeConf = configSnapshot.configuration", create)
+        self.assertIn("swapchainImages, configSnapshot", create)
+        self.assertIn("configurationRevision", create)
+        self.assertIn("configurationTimestamp", create)
+        self.assertIn("configurationRecreatePending", create)
+        self.assertIn("Config::snapshotTransaction()", create)
+        self.assertIn("configurationFileChanged(activeConf)", create)
+        self.assertIn("config_revision=", create)
+        self.assertIn("config_timestamp_ticks=", create)
+
+        present = hooks[present_start:]
+        self.assertIn("configurationRecreatePending", present)
+        self.assertIn("VK_ERROR_OUT_OF_DATE_KHR", present)
+
+
     def test_present_hook_debounces_fs_and_reuses_wait_storage(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         self.assertIn("Clock::time_point nextConfigPoll", source)
