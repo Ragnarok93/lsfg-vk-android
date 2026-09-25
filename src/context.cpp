@@ -2723,11 +2723,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return false;
     };
 
-    const auto nextDisplayTimingPresentId = [&]() {
-        uint32_t presentId = this->adaptivePresentId_++;
-        if (presentId == 0) {
-            presentId = 1;
-            this->adaptivePresentId_ = 2;
+    const auto nextGeneratedDisplayTimingPresentId = [&]() {
+        uint32_t presentId = this->generatedDisplayPresentId_++;
+        // Keep generated telemetry in the high-half namespace so a future
+        // source-pacing ID stream remains trivially distinguishable.
+        if (presentId == 0 || (presentId & 0x80000000U) == 0) {
+            presentId = 0x80000001U;
+            this->generatedDisplayPresentId_ = 0x80000002U;
         }
         return presentId;
     };
@@ -2756,7 +2758,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
 
         presentTime = VkPresentTimeGOOGLE{
-            .presentID = nextDisplayTimingPresentId(),
+            .presentID = nextGeneratedDisplayTimingPresentId(),
             // Zero is explicitly telemetry-only: the presentation engine may
             // display at any time, so confirmation does not change cadence.
             .desiredPresentTime = effectiveDesiredTimeNs,
@@ -2786,8 +2788,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         while (this->generatedDisplayPendingSet_.size()
                 > kGeneratedDisplayPendingLimit) {
             while (!this->generatedDisplayPendingIds_.empty()
-                    && !this->generatedDisplayPendingSet_.contains(
-                        this->generatedDisplayPendingIds_.front())) {
+                    && this->generatedDisplayPendingSet_.find(
+                        this->generatedDisplayPendingIds_.front())
+                        == this->generatedDisplayPendingSet_.end()) {
                 this->generatedDisplayPendingIds_.pop_front();
             }
             if (this->generatedDisplayPendingIds_.empty())
@@ -2853,8 +2856,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
 
         while (!this->generatedDisplayPendingIds_.empty()
-                && !this->generatedDisplayPendingSet_.contains(
-                    this->generatedDisplayPendingIds_.front())) {
+                && this->generatedDisplayPendingSet_.find(
+                    this->generatedDisplayPendingIds_.front())
+                    == this->generatedDisplayPendingSet_.end()) {
             this->generatedDisplayPendingIds_.pop_front();
         }
     };
@@ -2877,8 +2881,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const uint64_t effectiveDesiredTimeNs =
             desiredPresentTimeNs > nowNs ? desiredPresentTimeNs : 0;
 
+        uint32_t presentId = this->adaptivePresentId_++;
+        if (presentId == 0) {
+            presentId = 1;
+            this->adaptivePresentId_ = 2;
+        }
         presentTime = VkPresentTimeGOOGLE{
-            .presentID = nextDisplayTimingPresentId(),
+            .presentID = presentId,
             .desiredPresentTime = effectiveDesiredTimeNs,
         };
         presentTimes = VkPresentTimesInfoGOOGLE{
@@ -3049,6 +3058,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_display_not_shown=" << metrics.windowGeneratedDisplayNotShown
                       << " generated_display_pending=" << generatedDisplayPending
                       << " generated_display_unknown=" << metrics.windowGeneratedDisplayUnknown
+                      << " generated_display_confirmed_total="
+                      << metrics.totalGeneratedDisplayConfirmed
+                      << " generated_display_not_shown_total="
+                      << metrics.totalGeneratedDisplayNotShown
+                      << " generated_display_unknown_total="
+                      << metrics.totalGeneratedDisplayUnknown
                       << " display_timing_query_failures="
                       << metrics.windowDisplayTimingQueryFailures
                       << " generated_delivery_backend="
@@ -3070,7 +3085,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "generated_copy_submitted=%llu generated_wsi_submitted=%llu "
                 "generated_wsi_accepted=%llu generated_display_confirmed=%llu "
                 "generated_display_not_shown=%llu generated_display_pending=%llu "
-                "generated_display_unknown=%llu display_timing_query_failures=%llu "
+                "generated_display_unknown=%llu generated_display_confirmed_total=%llu "
+                "generated_display_not_shown_total=%llu generated_display_unknown_total=%llu "
+                "display_timing_query_failures=%llu "
                 "generated_delivery_backend=%s generated_delivery_confidence=%s "
                 "history_invalidation_reason=%s history_reprime_reason=%s",
                 static_cast<unsigned long long>(metrics.windowGeneratedDispatched),
@@ -3082,6 +3099,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 static_cast<unsigned long long>(metrics.windowGeneratedDisplayNotShown),
                 static_cast<unsigned long long>(generatedDisplayPending),
                 static_cast<unsigned long long>(metrics.windowGeneratedDisplayUnknown),
+                static_cast<unsigned long long>(metrics.totalGeneratedDisplayConfirmed),
+                static_cast<unsigned long long>(metrics.totalGeneratedDisplayNotShown),
+                static_cast<unsigned long long>(metrics.totalGeneratedDisplayUnknown),
                 static_cast<unsigned long long>(metrics.windowDisplayTimingQueryFailures),
                 this->generatedDisplayConfirmationEnabled_
                     ? "google-display-timing" : "none",
