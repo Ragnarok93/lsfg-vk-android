@@ -37,7 +37,6 @@ DIST_DIR="${DIST_DIR:-${BUILD_DIR}/dist}"
 
 python3 "${REPO_ROOT}/scripts/adreno_suspend_timeout_guard.py" --root "${REPO_ROOT}"
 python3 "${REPO_ROOT}/scripts/adreno_android_runtime_residency.py" --root "${REPO_ROOT}"
-python3 "${REPO_ROOT}/scripts/adreno_android_config_reload.py" --root "${REPO_ROOT}"
 # Keep production builds on the restored source baseline. The retained evidence
 # profile is diagnostic-only; experimental DeferredZero/nonblocking stacks are
 # intentionally not composed into the build.
