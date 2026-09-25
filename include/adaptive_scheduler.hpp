@@ -381,7 +381,7 @@ private:
     void resetUnmetDemand();
     void updateSourceRate(double intervalSeconds);
     [[nodiscard]] double robustSourceIntervalSeconds() const;
-    void updateCostLimit(double wantedGeneratedFrames, double intervalSeconds);
+    void updateCostLimit(double wantedGeneratedFrames);
 
     uint32_t targetFps_{};
     std::size_t maxGeneratedFrames_{};
