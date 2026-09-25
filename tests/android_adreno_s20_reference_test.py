@@ -60,46 +60,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn('"generated-before-source-same-call"', source)
         self.assertIn('" synthetic_queue="', compatibility_log)
         self.assertIn('" deadline_semantics="', compatibility_log)
-        self.assertIn('"source-protection"', compatibility_log)
-
-    def test_adreno_generation_first_keeps_source_protection_as_telemetry_only(self) -> None:
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-
-        policy_start = source.index("const bool sourceProtectionBatchAdmission")
-        policy_end = source.index("double computeReadyBudgetMs", policy_start)
-        policy = source[policy_start:policy_end]
-        self.assertIn(
-            "const bool sourceProtectionBatchAdmission ="
-            "\n        this->conservativeCrossDeviceSync_;",
-            policy,
-        )
-        self.assertIn(
-            "const bool generationFirstAdreno = this->conservativeCrossDeviceSync_;",
-            policy,
-        )
-        self.assertIn(
-            'generationFirstAdreno\n'
-            '            ? "generation-first"',
-            policy,
-        )
-
-        # The historical governors/predictors remain available for diagnostics
-        # and non-Adreno paths, but every mutating admission gate is explicitly
-        # disabled when generation-first Adreno is active.
-        admission_start = source.index("// Active deadline admission")
-        admission_end = source.index(
-            "const auto& outputCadenceForPresentation", admission_start
-        )
-        admission = source[admission_start:admission_end]
-        self.assertIn("&& !generationFirstAdreno", admission)
-        self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
-        self.assertIn(
-            "generationFirstAdreno\n"
-            "            ? requestedFixedGeneratedFrameCount",
-            source,
-        )
-        self.assertIn("conservativeFixedSourceProtectionGap", source)
-        self.assertIn("&& !generationFirstAdreno", source)
+        self.assertIn('"generation-first"', compatibility_log)
 
     def test_adreno_generation_first_never_uses_resource_pressure_as_a_generation_veto(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -112,6 +73,11 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         )
         self.assertIn("setGenerationFirst", header)
         self.assertIn("generationFirst_", scheduler)
+        self.assertNotIn("SourceProtectionBudgetTracker", header)
+        self.assertNotIn("AdrenoSourceProtectionController", source)
+        self.assertNotIn("setSourceProtectionBaseline", scheduler)
+        self.assertNotIn("conservativeFixedSourceProtectionGap", source)
+        self.assertNotIn("conservativeAdmissionRejectedHistoryGap", source)
         self.assertIn(
             "generationFirstAdreno\n"
             "            ? requestedFixedGeneratedFrameCount",
@@ -123,27 +89,6 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             "&& !generationFirstAdreno",
             source,
             "Deadline/source-protection gates must be disabled on generation-first Adreno.",
-        )
-
-    def test_adreno_fixed_source_protection_gap_is_direct_source_only(self) -> None:
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-
-        gap_start = source.index("if (conservativeFixedSourceProtectionGap)")
-        gap_end = source.index("pass.preCopySemaphores.at(0)", gap_start)
-        gap = source[gap_start:gap_end]
-
-        self.assertIn("SourceCadenceObservation::SourceOnly", gap)
-        self.assertIn("previousSourceCopySignalValid_ = false", gap)
-        self.assertIn("sourceHistoryWarmupRemaining_ = 0", gap)
-        self.assertIn("requiresSourceHistoryWarmup_ = false", gap)
-        self.assertIn("AdrenoSourceProtectionBackoffReason::FixedCadence", gap)
-        self.assertIn("reprime=deferred", gap)
-        self.assertIn("game-render-fixed-source-protection", gap)
-        self.assertNotIn(
-            "presentContextWithCount(",
-            gap,
-            "A Fixed source-protection gap must not add LSFG history work to "
-            "the cadence sample used for baseline/backoff recovery.",
         )
 
     def test_fixed_mode_restores_cadence_governor_without_source_pacing(self) -> None:
@@ -411,9 +356,9 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn('" execution_reference="', constructor_log)
         self.assertIn('"364178af-sep18"', constructor_log)
         self.assertIn('" governor_adapter="', constructor_log)
-        self.assertIn('"source-protected"', constructor_log)
+        self.assertIn('"target-authoritative"', constructor_log)
         self.assertIn('" fixed_generation="', constructor_log)
-        self.assertIn('"source-cadence-governed"', constructor_log)
+        self.assertIn('"requested-ceiling"', constructor_log)
 
 
     def test_xclipse_async_selection_remains_capability_driven(self) -> None:
