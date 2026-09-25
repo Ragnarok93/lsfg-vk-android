@@ -1564,13 +1564,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     deferredPresentWaits.emplace_back(
                         deferredPass.prevPostCopySemaphores.at(i - 1).handle());
                 }
-                VkPresentTimeGOOGLE deferredPresentTime{};
-                VkPresentTimesInfoGOOGLE deferredPresentTimes{};
                 const VkPresentInfoKHR deferredPresentInfo{
                     .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                    .pNext = generatedDisplayConfirmationPNext(
-                        nullptr, 0,
-                        deferredPresentTime, deferredPresentTimes),
+                    .pNext = nullptr,
                     .waitSemaphoreCount =
                         static_cast<uint32_t>(deferredPresentWaits.size()),
                     .pWaitSemaphores = deferredPresentWaits.data(),
@@ -1605,7 +1601,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ++this->runtimeMetrics.totalGeneratedFrames;
                 ++this->runtimeMetrics.windowGeneratedWsiAccepted;
                 ++this->runtimeMetrics.totalGeneratedWsiAccepted;
-                trackGeneratedDisplayPresent(deferredPresentTime.presentID);
+                ++this->runtimeMetrics.windowGeneratedDisplayUnknown;
+                ++this->runtimeMetrics.totalGeneratedDisplayUnknown;
                 this->runtimeMetrics.windowGeneratedPresentMs +=
                     std::chrono::duration<double, std::milli>(
                         RuntimeMetrics::Clock::now()
