@@ -300,6 +300,7 @@ private:
     // enables this instrumentation.
     bool generatedDisplayConfirmationEnabled_{false};
     PFN_vkGetPastPresentationTimingGOOGLE getPastPresentationTimingGoogle_{nullptr};
+    uint32_t generatedDisplayPresentId_{0x80000001U};
     std::deque<uint32_t> generatedDisplayPendingIds_;
     std::unordered_set<uint32_t> generatedDisplayPendingSet_;
     static constexpr std::size_t kGeneratedDisplayPendingLimit = 512;
