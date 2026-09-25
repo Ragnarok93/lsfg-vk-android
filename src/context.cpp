@@ -594,8 +594,9 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     const auto& conf = configSnapshot.configuration;
     std::cerr << "lsfg-vk: init stage=ls-context-config"
               << " config_revision=" << configSnapshot.revision
-              << " config_timestamp_ticks="
-              << configSnapshot.timestamp.time_since_epoch().count()
+              << " config_timestamp_ns="
+              << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              configSnapshot.timestamp.time_since_epoch()).count()
               << "\n";
 
     const size_t runtimeMultiplier = residentCapacityMultiplier(conf);
