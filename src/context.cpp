@@ -3398,8 +3398,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 SourceHistoryInvalidationReason::OverloadBypass;
             this->deadlineBatchDecision_ = {};
             updateAdaptiveFlowGovernor();
-            if (conf.adaptiveFramegen)
-                this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
             metrics.windowAdaptiveZeroGenerationCycles++;
             metrics.totalAdaptiveZeroGenerationCycles++;
 
@@ -3432,6 +3430,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     bypassResult,
                     "Failed protected Adreno overload source-only present");
             }
+            if (conf.adaptiveFramegen)
+                this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
             if (firstPresentDiagnostic) {
                 std::cerr
                     << "lsfg-vk: runtime stage=adreno-overload-source-bypass"
@@ -3525,7 +3525,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 SourceHistoryInvalidationReason::AdmissionBypass;
             this->deadlineBatchDecision_ = {};
             updateAdaptiveFlowGovernor();
-            this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
             metrics.windowAdaptiveZeroGenerationCycles++;
             metrics.totalAdaptiveZeroGenerationCycles++;
 
@@ -3558,6 +3557,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     bypassResult,
                     "Failed protected Adreno admission source-only present");
             }
+            this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
             if (firstPresentDiagnostic) {
                 std::cerr
                     << "lsfg-vk: runtime stage=adreno-admission-source-bypass"
