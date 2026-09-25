@@ -71,52 +71,16 @@ enum class SourceCadenceObservation {
 
 const char* sourceCadenceObservationName(SourceCadenceObservation observation);
 
-struct SourceProtectionBudgetTelemetry {
-    double protectedSourceIntervalMs{};
-    double serializedCopyReserveMs{};
-    SourceCadenceObservation lastObservation{SourceCadenceObservation::SourceOnly};
-    bool baselineValid{false};
-    bool copyCostValid{false};
-};
-
-/// Protects a source-owned execution budget from self-inflation by generated
-/// or history-maintenance work. Only a genuine source-only observation may
-/// move the protected baseline slower; LSFG-active cycles may only prove that
-/// the source is naturally faster. The reserve is the incremental LSFG source
-/// copy cost, never the host-fence wall wait that also contains game rendering.
-class SourceProtectionBudgetTracker {
-public:
-    void observeSource(
-        std::chrono::nanoseconds sourceInterval,
-        SourceCadenceObservation observation);
-    void observeSerializedCopyCost(double copyCostMs);
-    [[nodiscard]] double clampTimelineBudget(double timelineBudgetMs) const;
-    void reset();
-
-    [[nodiscard]] const SourceProtectionBudgetTelemetry& telemetry() const {
-        return telemetry_;
-    }
-
-private:
-    bool hasBaseline_{false};
-    bool hasCopyCostEstimate_{false};
-    double baselineIntervalMs_{};
-    double serializedCopyReserveMs_{};
-    double slowerSourceCandidateMs_{};
-    unsigned slowerSourceCandidateSamples_{};
-    SourceProtectionBudgetTelemetry telemetry_{};
-};
-
 /// Chooses the minimum number of interpolation frames needed to approach an
 /// output FPS target. It owns no Vulkan objects, never paces source frames, and
 /// is independently testable.
 /// Select the fallback compute budget for one admitted frame-generation batch.
 /// On source-protected execution the whole real-source interval owns the batch;
 /// generic execution keeps its nominal per-slot budget.
-double sourceOwnedFramegenBatchBudgetMs(
+double framegenBatchBudgetMs(
     double sourceIntervalMs,
     double nominalBatchBudgetMs,
-    bool sourceProtectedExecution);
+    bool fullSourceIntervalBudget);
 
 struct DeadlineAdmissionObservation {
     double mipmapsMs{};
@@ -167,11 +131,11 @@ public:
     /// hint only; per-cycle admission remains authoritative.
     [[nodiscard]] std::size_t safeGenerationHint(
         std::size_t maxGenerationCount, double sourceIntervalMs) const;
-    /// Deferred/source-protected execution may complete generated work any time
-    /// before the next real-source boundary. Unlike safeGenerationHint(), this
-    /// does not reinterpret ideal interpolation slots as compute deadlines.
+    /// Batch-boundary execution may complete generated work any time before the
+    /// next real-source boundary. Unlike safeGenerationHint(), this does not
+    /// reinterpret ideal interpolation slots as compute deadlines.
     [[nodiscard]] std::size_t safeBatchGenerationHint(
-        std::size_t maxGenerationCount, double sourceProtectionBudgetMs) const;
+        std::size_t maxGenerationCount, double batchBudgetMs) const;
     [[nodiscard]] bool hasEstimate() const { return hasEstimate_; }
     void reset();
 
@@ -405,11 +369,6 @@ public:
     /// telemetry only and may not lower the synthetic generation ceiling.
     void setGenerationFirst(bool enabled);
 
-    /// Supply the last clean, LSFG-independent source interval. When valid,
-    /// source protection has priority over target seeking: synthetic cost may
-    /// not rise while the observed source cadence is materially degraded.
-    void setSourceProtectionBaseline(double intervalMs, bool valid);
-
     void reset();
 
     [[nodiscard]] uint32_t targetFps() const { return targetFps_; }
@@ -452,13 +411,6 @@ private:
     double observedTimeSeconds_{};
     std::size_t costLimit_{};
 
-    bool sourceProtectionBaselineValid_{false};
-    double sourceProtectionBaselineSeconds_{};
-    unsigned sourceDegradationSamples_{};
-    double sourceProtectionHoldUntilSeconds_{};
-
-    // Target demand may raise the ceiling only while source protection is
-    // healthy. A clean baseline is authoritative over self-inflicted slowdown.
     double unmetDemandSinceSeconds_{-1.0};
 
     AdaptiveSchedulerTelemetry telemetry_{};
