@@ -33,7 +33,7 @@ The source at that revision directly establishes the following behavior:
 - A zero-generation Adaptive cycle still calls the zero-count framegen path,
   advances temporal history, and presents the real source normally.
 
-The synchronization topology is therefore:
+The raw-source synchronization topology at that commit is therefore:
 
 ```text
 game rendering
@@ -43,6 +43,14 @@ game rendering
   -> generated presents
   -> matching source present
 ```
+
+The September 18 Android artifact was build-composed with
+`scripts/adreno_syncfd_handoff.py`. On the S20+/Turnip wrapper that artifact
+reported OPAQUE_FD unavailable and SYNC_FD available, so ordinary generated
+cycles used a post-submit SYNC_FD GPU semaphore while retaining the same bounded
+host completion on the generated side. The protected behavioral invariant is
+therefore **GPU-semaphore source handoff without a source-upload host wait**,
+using the external-FD payload actually advertised by both devices.
 
 The protected Adreno route must preserve that division of responsibility:
 conservative generated-frame completion does **not** imply serializing the
@@ -80,7 +88,7 @@ invariants:
 
 | Area | Protected Adreno behavior |
 | --- | --- |
-| Ordinary generated source handoff | OPAQUE_FD GPU semaphore |
+| Ordinary generated source handoff | Capability-selected external-FD GPU semaphore; SYNC_FD on the S20+/Turnip build when advertised, OPAQUE_FD fallback where supported |
 | Warmup/history/source-only source handoff | Conservative host fence where required |
 | Generated completion | Bounded host `waitContext()` |
 | Generated delivery | Generated frames then matching source, same intercepted call |
@@ -100,7 +108,7 @@ The runtime synchronization policy identifier for this route is
 The following mechanisms are invalidated for the protected Adreno route and
 must not be re-enabled without new reproducible device evidence:
 
-- SYNC_FD source input on ordinary generated Adreno cycles;
+- forcing an external semaphore payload the active game/private devices do not advertise, including forcing OPAQUE_FD on the S20+/Turnip wrapper when it reports OPAQUE_FD unsupported;
 - asynchronous/deferred generated completion across later source calls;
 - retaining or buffering an application source swapchain image or application
   present wait across intercepted calls;
@@ -155,7 +163,7 @@ A device qualification run must make the route identifiable without inference.
 For protected Adreno, initialization/runtime logs must expose at least:
 
 - `path=adreno-latest-known-good`;
-- `handoff=opaque-fd`;
+- `handoff=sync-fd` on the S20+/Turnip wrapper when SYNC_FD is the advertised compatible payload, or `handoff=opaque-fd` where OPAQUE_FD is the selected supported payload;
 - `completion=host-wait`;
 - generated-before-source same-call presentation;
 - `synthetic_queue=0`;
@@ -200,10 +208,12 @@ many** synthetic frames are requested.
 Once a generated Adreno cycle is admitted, the downstream transaction is frozen
 to the September 18 reference:
 
-1. Export the reusable OPAQUE_FD source-handoff semaphore before submission.
+1. Create the capability-selected exportable source-handoff semaphore.
 2. Submit the source AHB copy on the application graphics queue with the reusable
-   handoff fence attached, without host-waiting that fence.
-3. Dispatch private framegen using that OPAQUE_FD input.
+   handoff fence attached, without host-waiting that fence; for SYNC_FD, export
+   only after that signal operation is pending so the FD represents that exact
+   completion point.
+3. Dispatch private framegen using the selected external-FD GPU semaphore input.
 4. Perform bounded host completion before the game device reads generated AHBs.
 5. Acquire generated swapchain images with the historical bounded wait.
 6. Present generated images before the matching real source in the same
