@@ -192,7 +192,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         end = source.index("const auto nextAdaptiveFlowBatch", start)
         budget = source[start:end]
 
-        self.assertIn("protectedAdrenoTargetBudgetMs", budget)
+        self.assertIn("generationFirstTargetBudgetMs", budget)
         self.assertIn("this->conservativeCrossDeviceSync_", budget)
         self.assertIn("conf.fpsLimit > 0", budget)
         self.assertIn("std::min", budget)
