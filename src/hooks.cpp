@@ -414,6 +414,7 @@ namespace {
         uint64_t configurationRevision{0};
         std::chrono::time_point<std::chrono::file_clock> configurationTimestamp{};
         bool configurationRecreatePending{false};
+        bool configurationTransactionValidated{false};
         // Serializes a present against swapchain retirement and protects the
         // per-swapchain runtime counters. The global map lock is never held
         // while frame generation or downstream Vulkan calls run.
@@ -1174,7 +1175,17 @@ namespace {
         if (!deviceInfo)
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
 
-        auto conf = Config::snapshot();
+        const auto presentConfigSnapshot = Config::snapshotTransaction();
+        auto conf = presentConfigSnapshot.configuration;
+        if (!state->configurationTransactionValidated) {
+            const bool transactionChanged =
+                presentConfigSnapshot.revision != state->configurationRevision
+                || presentConfigSnapshot.timestamp != state->configurationTimestamp
+                || configurationFileChanged(conf);
+            if (transactionChanged)
+                state->configurationRecreatePending = true;
+            state->configurationTransactionValidated = true;
+        }
         const bool configurationRecreatePending =
             state->configurationRecreatePending;
 #ifdef __ANDROID__
