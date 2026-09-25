@@ -16,9 +16,9 @@ class AndroidDisplayConfirmationTelemetryTest(unittest.TestCase):
         self.assertIn("generatedDisplayConfirmationEnabled_", header)
         self.assertIn("getPastPresentationTimingGoogle_", header)
         self.assertIn("generatedDisplayPendingIds_", header)
-        self.assertIn("!this->conservativeCrossDeviceSync_", source)
-        self.assertIn('backend=google-display-timing', source)
-        self.assertIn(".desiredPresentTime = 0", source)
+        self.assertIn("&& !this->conservativeCrossDeviceSync_", source)
+        self.assertIn('? "google-display-timing"', source)
+        self.assertIn("uint64_t effectiveDesiredTimeNs = 0", source)
 
     def test_generated_presents_receive_unique_ids_and_are_polled_asynchronously(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -45,9 +45,9 @@ class AndroidDisplayConfirmationTelemetryTest(unittest.TestCase):
 
     def test_adreno_proven_path_is_not_instrumented_with_present_timing(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        enable = source.index("generatedDisplayConfirmationEnabled_")
-        block = source[enable:enable + 1400]
-        self.assertIn("!this->conservativeCrossDeviceSync_", block)
+        enable = source.index("if (info.androidDisplayTimingSupported")
+        block = source[enable:enable + 1800]
+        self.assertIn("&& !this->conservativeCrossDeviceSync_", block)
 
 
 if __name__ == "__main__":
