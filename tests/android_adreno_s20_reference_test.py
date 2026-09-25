@@ -119,7 +119,10 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
 
         self.assertIn("SourceCadenceObservation::SourceOnly", gap)
         self.assertIn("previousSourceCopySignalValid_ = false", gap)
-        self.assertIn("sourceHistoryWarmupRemaining_ = 1", gap)
+        self.assertIn("sourceHistoryWarmupRemaining_ = 0", gap)
+        self.assertIn("requiresSourceHistoryWarmup_ = false", gap)
+        self.assertIn("AdrenoSourceProtectionBackoffReason::FixedCadence", gap)
+        self.assertIn("reprime=deferred", gap)
         self.assertIn("game-render-fixed-source-protection", gap)
         self.assertNotIn(
             "presentContextWithCount(",
