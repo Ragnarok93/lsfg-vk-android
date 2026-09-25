@@ -33,34 +33,38 @@ class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
             selection,
         )
 
-    def test_disabled_targeted_android_swapchain_stays_resident_and_bypasses_framegen(self) -> None:
+    def test_disabled_targeted_android_swapchain_releases_framegen_context(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        create_start = hooks.index("const auto createPassThrough")
-        create_end = hooks.index("#ifdef __ANDROID__", create_start + 1000)
-        create_region = hooks[create_start:create_end]
-        self.assertIn(
-            "activeConf.multiplier <= 1 && !activeConf.targeted",
-            create_region,
-        )
-        self.assertNotIn(
-            "if (!activeConf.enable || activeConf.multiplier <= 1)",
-            create_region,
-        )
-
         recreation_start = hooks.index("bool requiresSwapchainRecreation")
         recreation_end = hooks.index("bool supportsDeviceExtension", recreation_start)
         recreation = hooks[recreation_start:recreation_end]
-        self.assertNotIn("generationActivityChanged", recreation)
-        self.assertNotIn("(previous.multiplier > 1) != (next.multiplier > 1)", recreation)
+        self.assertIn("generationActivityChanged", recreation)
+        self.assertIn(
+            "(previous.multiplier > 1) != (next.multiplier > 1)",
+            recreation,
+        )
 
-        present_start = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
-        present_end = hooks.index("try {", present_start)
-        present = hooks[present_start:present_end]
-        self.assertIn("state->context->enterSourceOnlyBypass()", present)
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", present)
+        source_only_start = hooks.index("const auto createSourceOnly")
+        source_only_end = hooks.index("#ifdef __ANDROID__", source_only_start)
+        source_only = hooks[source_only_start:source_only_end]
+        self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only)
+        self.assertIn("choosePresentMode(", source_only)
+        self.assertNotIn("LsContext", source_only)
+        self.assertNotIn("requiredTransferUsage", source_only)
+        self.assertNotIn("residentCapacityMultiplier", source_only)
+
+        self.assertIn(
+            "if (activeConf.targeted && activeConf.multiplier <= 1)",
+            hooks,
+        )
+        self.assertIn('return createSourceOnly("generation-off")', hooks)
+        self.assertNotIn("state->context->enterSourceOnlyBypass()", hooks)
+
+        # The lifecycle helper remains valid for true context reset paths; Off
+        # simply no longer invokes it every frame on a resident LSFG swapchain.
         self.assertIn("void enterSourceOnlyBypass();", header)
         self.assertIn("void LsContext::enterSourceOnlyBypass()", context)
 
