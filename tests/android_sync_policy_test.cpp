@@ -44,7 +44,7 @@ int main() {
         == FramegenCompatibilityPath::Generic);
 
     assert(std::string_view(crossDeviceSyncPolicyName(true))
-        == "adreno-source-protected-host-completion");
+        == "adreno-generation-first-host-completion");
     assert(std::string_view(crossDeviceSyncPolicyName(false))
         == "capability-async");
 
