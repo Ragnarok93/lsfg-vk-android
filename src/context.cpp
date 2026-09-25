@@ -951,7 +951,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
               << (this->syntheticQueue_ != VK_NULL_HANDLE ? 1 : 0)
               << " deadline_semantics="
               << (this->conservativeCrossDeviceSync_
-                    ? "source-protection"
+                    ? "generation-first"
                     : "synthetic-slot")
               << " execution_reference="
               << (this->conservativeCrossDeviceSync_
@@ -959,11 +959,11 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     : "current-capability")
               << " governor_adapter="
               << (this->conservativeCrossDeviceSync_
-                    ? "source-protected"
+                    ? "target-authoritative"
                     : "native-current")
               << " fixed_generation="
               << (this->conservativeCrossDeviceSync_
-                    ? "source-cadence-governed"
+                    ? "requested-ceiling"
                     : "native-current")
               << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
               << '\n';
@@ -1827,15 +1827,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         conf.multiplier > 1
             ? static_cast<size_t>(conf.multiplier - 1)
             : 0;
-    const bool sourceProtectionBatchAdmission =
-        this->conservativeCrossDeviceSync_;
     const bool generationFirstAdreno = this->conservativeCrossDeviceSync_;
     const char* deadlineSemantics =
-        generationFirstAdreno
-            ? "generation-first"
-            : (sourceProtectionBatchAdmission
-                ? "source-protection"
-                : "synthetic-slot");
+        generationFirstAdreno ? "generation-first" : "synthetic-slot";
     double computeReadyBudgetMs = 0.0;
     double presentationSlotBudgetMs = 0.0;
     double sourceBudgetRawMs = 0.0;
@@ -1847,28 +1841,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ? SourceCadenceObservation::Generated
                 : SourceCadenceObservation::SourceOnly);
 
-    // Learn source cadence before target planning. Only the previous cycle's
-    // classification may authorize baseline growth, so generated/history work
-    // cannot teach Adaptive that LSFG's own slowdown is a larger budget.
-    if (sourceProtectionBatchAdmission && sourceInterval.count() > 0) {
-        const double observedSourceIntervalMs =
-            std::chrono::duration<double, std::milli>(sourceInterval).count();
-        if (observedSourceIntervalMs < kRuntimeTimingDiscontinuityMs) {
-            this->sourceProtectionBudgetTracker_.observeSource(
-                sourceInterval, previousSourceCadenceObservation);
-        }
-    }
-    const auto& sourceProtectionBeforePlan =
-        this->sourceProtectionBudgetTracker_.telemetry();
-    this->adaptiveScheduler_.setSourceProtectionBaseline(
-        sourceProtectionBeforePlan.protectedSourceIntervalMs,
-        sourceProtectionBatchAdmission
-            && !generationFirstAdreno
-            && sourceProtectionBeforePlan.baselineValid);
-
-    // Capacity feedback is advisory and comes from the previous measured GPU
-    // cost/timeline. It may accelerate one scheduler level only after repeated
-    // safe evidence; per-cycle deadline admission remains authoritative.
+    // Capacity feedback remains advisory. On generation-first Adreno it is
+    // diagnostics only; configured target demand stays authoritative.
     double capacityIntervalMs = 0.0;
     if (conf.adaptiveFramegen && this->currentSourceTimeline_.valid
             && this->currentSourceTimeline_.intervalNs > 0) {
@@ -1881,22 +1855,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (observedIntervalMs < kRuntimeTimingDiscontinuityMs)
             capacityIntervalMs = observedIntervalMs;
     }
-    const double protectedCapacityIntervalMs =
-        sourceProtectionBatchAdmission
-            ? this->sourceProtectionBudgetTracker_.clampTimelineBudget(
-                capacityIntervalMs)
-            : capacityIntervalMs;
     const bool safeGenerationHintValid =
         conf.adaptiveFramegen
         && maxAdaptiveGeneratedFrames > 0
-        && protectedCapacityIntervalMs > 0.0
-        && (!sourceProtectionBatchAdmission
-            || this->sourceProtectionBudgetTracker_.telemetry().baselineValid)
+        && capacityIntervalMs > 0.0
         && this->deadlineAdmissionPredictor_.hasEstimate();
     const size_t safeGenerationHint = safeGenerationHintValid
-        ? (sourceProtectionBatchAdmission
+        ? (generationFirstAdreno
             ? this->deadlineAdmissionPredictor_.safeBatchGenerationHint(
-                maxAdaptiveGeneratedFrames, protectedCapacityIntervalMs)
+                maxAdaptiveGeneratedFrames, capacityIntervalMs)
             : this->deadlineAdmissionPredictor_.safeGenerationHint(
                 maxAdaptiveGeneratedFrames, capacityIntervalMs))
         : 0;
@@ -1922,49 +1889,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
-
-    if (generationFirstAdreno)
-        this->adrenoSourceProtection_.reset();
-
-    if (this->conservativeCrossDeviceSync_
-            && !generationFirstAdreno
-            && this->adrenoSourceProtection_.protectedSourceOnly()) {
-        const auto& protectedSource =
-            this->sourceProtectionBudgetTracker_.telemetry();
-        const double observedSourceIntervalMs =
-            std::chrono::duration<double, std::milli>(
-                sourceInterval).count();
-        constexpr double kAdrenoSourceRecoveryTolerance = 1.10;
-        const bool sourceRecoveryValid =
-            protectedSource.baselineValid
-            && observedSourceIntervalMs > 0.0
-            && std::isfinite(observedSourceIntervalMs)
-            && observedSourceIntervalMs
-                <= protectedSource.protectedSourceIntervalMs
-                    * kAdrenoSourceRecoveryTolerance;
-
-        // The first ever probe has no synthetic-cost estimate by definition.
-        // After one batch has been measured, however, source-only recovery must
-        // relax that measured capacity back to >=1 before another host-fence
-        // reprime is allowed. This prevents the reprime/probe storm seen on
-        // S20+ while still allowing a cold-start bootstrap.
-        const bool syntheticCapacityRecovered =
-            conf.adaptiveFramegen
-                ? (!this->deadlineAdmissionPredictor_.hasEstimate()
-                    || (safeGenerationHintValid && safeGenerationHint > 0))
-                : (this->fixedSourceCadenceGovernor_.telemetry().baselineValid
-                    && this->fixedSourceCadenceGovernor_.telemetry().generationLimit > 0);
-        const bool generationDemand = plannedGeneratedFrameCount > 0;
-        if (this->adrenoSourceProtection_.requestReprimeIfRecovered(
-                sourceRecoveryValid,
-                syntheticCapacityRecovered,
-                generationDemand)) {
-            this->sourceHistoryWarmupRemaining_ = 1;
-            this->requiresSourceHistoryWarmup_ = true;
-            this->lastHistoryReprimeReason_ =
-                SourceHistoryInvalidationReason::AdmissionBypass;
-        }
-    }
 
     const uint64_t sourceArrivalTimeNs = monotonicNowNs();
     // Scheduler discontinuities are cadence-relative. Do not reinterpret a
@@ -2027,32 +1951,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     const bool sourceHistoryWarmupActive =
         this->requiresSourceHistoryWarmup_
         && this->sourceHistoryWarmupRemaining_ > 0;
-    const bool sourceProtectionBaselineValid =
-        !sourceProtectionBatchAdmission
-        || this->sourceProtectionBudgetTracker_.telemetry().baselineValid;
-
-    // Active deadline admission remains Adaptive-only. Fixed mode protects the
-    // real-source cadence through FixedSourceCadenceGovernor before entering
-    // the compatibility island; it does not use Adaptive's GPU-cost predictor.
-    // Adaptive Adreno tests a complete candidate batch against the protected
-    // real-source boundary; Xclipse/generic Adaptive keeps ideal-slot admission.
-    // A rejected opportunity is dropped, never accumulated as catch-up debt.
+    // Active deadline admission remains Adaptive-only on non-generation-first
+    // paths. Rejected opportunities are consumed and never become catch-up debt.
     this->deadlineBatchDecision_ = {};
-    // Protected Adreno must not bootstrap from an LSFG-active interval. Until
-    // one genuine source-only interval establishes the source cadence, reject
-    // synthetic work and let the existing admission source-escape path collect
-    // uncontaminated baseline evidence.
-    if (conf.adaptiveFramegen
-            && !generationFirstAdreno
-            && sourceProtectionBatchAdmission && !sourceProtectionBaselineValid
-            && !sourceHistoryWarmupActive && generatedFrameCount > 0) {
-        metrics.windowAdmissionRejects += generatedFrameCount;
-        metrics.totalAdmissionRejects += generatedFrameCount;
-        generatedFrameCount = 0;
-    }
-
-    // Cost estimates are learned from completed batches below only after the
-    // protected source cadence is known.
     if (conf.adaptiveFramegen
             && !generationFirstAdreno
             && !sourceHistoryWarmupActive
@@ -2067,35 +1968,24 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 metrics.totalAdmissionRejects += generatedFrameCount;
                 generatedFrameCount = 0;
             } else {
-                const double rawSourceBudgetMs =
+                const double sourceBudgetMs =
                     static_cast<double>(
                         this->currentSourceTimeline_.sourceDesiredTimeNs - admissionNowNs)
                     / 1'000'000.0;
-                const double sourceBudgetMs =
-                    sourceProtectionBaselineValid && sourceProtectionBatchAdmission
-                        ? this->sourceProtectionBudgetTracker_.clampTimelineBudget(
-                            rawSourceBudgetMs)
-                        : rawSourceBudgetMs;
-                sourceBudgetRawMs = rawSourceBudgetMs;
+                sourceBudgetRawMs = sourceBudgetMs;
                 sourceBudgetEffectiveMs = sourceBudgetMs;
                 computeReadyBudgetMs = sourceBudgetMs;
                 const auto plannedBatchDecision =
                     this->deadlineAdmissionPredictor_.predict(
                         generatedFrameCount, sourceBudgetMs);
 
-                // Preserve the historical opportunity counters as predictor
-                // diagnostics, but the decision below is now authoritative.
                 if (!plannedBatchDecision.valid && generatedFrameCount > 1) {
                     const size_t rejectedGeneratedFrameCount =
                         generatedFrameCount - 1;
-                    metrics.windowGeneratedLateDrops +=
-                        rejectedGeneratedFrameCount;
-                    metrics.totalGeneratedLateDrops +=
-                        rejectedGeneratedFrameCount;
-                    metrics.windowAdmissionRejects +=
-                        rejectedGeneratedFrameCount;
-                    metrics.totalAdmissionRejects +=
-                        rejectedGeneratedFrameCount;
+                    metrics.windowGeneratedLateDrops += rejectedGeneratedFrameCount;
+                    metrics.totalGeneratedLateDrops += rejectedGeneratedFrameCount;
+                    metrics.windowAdmissionRejects += rejectedGeneratedFrameCount;
+                    metrics.totalAdmissionRejects += rejectedGeneratedFrameCount;
                     generatedFrameCount = 1;
                 } else if (plannedBatchDecision.valid) {
                     for (size_t slot = 0; slot < generatedFrameCount; ++slot) {
@@ -2117,83 +2007,55 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                                 slot + 1, slotBudgetMs);
                         if (!slotDecision.valid)
                             continue;
-
                         ++metrics.windowDeadlineShadowOpportunities;
                         ++metrics.totalDeadlineShadowOpportunities;
-                        if (slotDecision.wouldAdmit) {
+                        if (slotDecision.wouldAdmit)
                             ++metrics.windowDeadlineShadowWouldAdmit;
-                        } else {
+                        else {
                             ++metrics.windowDeadlineShadowWouldReject;
                             ++metrics.totalDeadlineShadowWouldReject;
                         }
                     }
 
                     size_t admittedGeneratedFrameCount = 0;
-                    if (sourceProtectionBatchAdmission) {
-                        // Deferred single-queue Adreno protects the next real
-                        // source boundary. Ideal interpolation timestamps are
-                        // presentation slots, not private-device completion
-                        // deadlines. Test complete candidate batches against the
-                        // remaining source-owned budget.
-                        for (size_t candidate = generatedFrameCount;
-                                candidate > 0; --candidate) {
-                            const auto batchDecision =
+                    for (size_t candidate = generatedFrameCount;
+                            candidate > 0; --candidate) {
+                        bool candidateFits = true;
+                        for (size_t slot = 0; slot < candidate; ++slot) {
+                            const double interpolationFraction =
+                                static_cast<double>(slot + 1)
+                                / static_cast<double>(candidate + 1);
+                            const uint64_t slotDeadlineNs =
+                                this->sourceTimeline_.syntheticDesiredTimeNs(
+                                    this->currentSourceTimeline_,
+                                    interpolationFraction);
+                            const double slotBudgetMs =
+                                slotDeadlineNs > admissionNowNs
+                                    ? static_cast<double>(
+                                        slotDeadlineNs - admissionNowNs)
+                                        / 1'000'000.0
+                                    : 0.0;
+                            const auto slotDecision =
                                 this->deadlineAdmissionPredictor_.predict(
-                                    candidate, sourceBudgetMs);
-                            if (batchDecision.valid
-                                    && batchDecision.wouldAdmit) {
-                                admittedGeneratedFrameCount = candidate;
+                                    slot + 1, slotBudgetMs);
+                            if (!slotDecision.valid || !slotDecision.wouldAdmit) {
+                                candidateFits = false;
                                 break;
                             }
                         }
-                    } else {
-                        for (size_t candidate = generatedFrameCount;
-                                candidate > 0; --candidate) {
-                            bool candidateFits = true;
-                            for (size_t slot = 0; slot < candidate; ++slot) {
-                                // Existing Xclipse/capability-async policy:
-                                // every generated prefix must still meet the
-                                // ideal slot it owns.
-                                const double interpolationFraction =
-                                    static_cast<double>(slot + 1)
-                                    / static_cast<double>(candidate + 1);
-                                const uint64_t slotDeadlineNs =
-                                    this->sourceTimeline_.syntheticDesiredTimeNs(
-                                        this->currentSourceTimeline_,
-                                        interpolationFraction);
-                                const double slotBudgetMs =
-                                    slotDeadlineNs > admissionNowNs
-                                        ? static_cast<double>(
-                                            slotDeadlineNs - admissionNowNs)
-                                            / 1'000'000.0
-                                        : 0.0;
-                                const auto slotDecision =
-                                    this->deadlineAdmissionPredictor_.predict(
-                                        slot + 1, slotBudgetMs);
-                                if (!slotDecision.valid
-                                        || !slotDecision.wouldAdmit) {
-                                    candidateFits = false;
-                                    break;
-                                }
-                            }
-                            if (candidateFits) {
-                                admittedGeneratedFrameCount = candidate;
-                                break;
-                            }
+                        if (candidateFits) {
+                            admittedGeneratedFrameCount = candidate;
+                            break;
                         }
                     }
 
                     if (admittedGeneratedFrameCount < generatedFrameCount) {
                         const size_t rejectedGeneratedFrameCount =
                             generatedFrameCount - admittedGeneratedFrameCount;
-                        metrics.windowGeneratedLateDrops +=
-                            rejectedGeneratedFrameCount;
-                        metrics.totalGeneratedLateDrops +=
-                            rejectedGeneratedFrameCount;
-                        metrics.windowAdmissionRejects +=
-                            rejectedGeneratedFrameCount;
-                        metrics.totalAdmissionRejects +=
-                            rejectedGeneratedFrameCount;
+                        metrics.windowGeneratedLateDrops += rejectedGeneratedFrameCount;
+                        metrics.totalGeneratedLateDrops += rejectedGeneratedFrameCount;
+                        metrics.windowAdmissionRejects += rejectedGeneratedFrameCount;
+                        metrics.totalAdmissionRejects += rejectedGeneratedFrameCount;
                         generatedFrameCount = admittedGeneratedFrameCount;
                     }
 
@@ -2207,7 +2069,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    const auto& outputCadenceForPresentation =
+    const auto& outputCadenceForPresentation =    const auto& outputCadenceForPresentation =
         this->lsfgOutputCadenceTracker_.snapshot();
     const bool presentationOutputDeficit =
         conf.adaptiveFramegen
@@ -2289,19 +2151,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const double sourceIntervalMs =
                 std::chrono::duration<double, std::milli>(
                     sourceInterval).count();
-            budgetMs = sourceOwnedFramegenBatchBudgetMs(
+            budgetMs = framegenBatchBudgetMs(
                 sourceIntervalMs,
                 nominalBatchBudgetMs,
                 this->conservativeCrossDeviceSync_);
         }
 
-        if (this->conservativeCrossDeviceSync_ && budgetMs > 0.0) {
-            budgetMs =
-                this->sourceProtectionBudgetTracker_.clampTimelineBudget(
-                    budgetMs);
-        }
-
-        const double protectedAdrenoTargetBudgetMs =
+        const double generationFirstTargetBudgetMs =
             this->conservativeCrossDeviceSync_
             && conf.adaptiveFramegen
             && conf.fpsLimit > 0
@@ -2310,10 +2166,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     * static_cast<double>(generatedFrameCount + 1)
                     / static_cast<double>(conf.fpsLimit)
                 : 0.0;
-        if (protectedAdrenoTargetBudgetMs > 0.0) {
+        if (generationFirstTargetBudgetMs > 0.0) {
             budgetMs = budgetMs > 0.0
-                ? std::min(budgetMs, protectedAdrenoTargetBudgetMs)
-                : protectedAdrenoTargetBudgetMs;
+                ? std::min(budgetMs, generationFirstTargetBudgetMs)
+                : generationFirstTargetBudgetMs;
         }
         return budgetMs;
     }();
@@ -2341,21 +2197,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->adaptivePresentPeriodNs_ = 0;
     }
 
-    if (this->conservativeCrossDeviceSync_ && !generationFirstAdreno) {
-        if (this->adrenoSourceProtection_.protectedSourceOnly()) {
-            generatedFrameCount = 0;
-            interpolationGenerationCount = 0;
-        } else if (this->adrenoSourceProtection_.generationTrial()
-                && generatedFrameCount > 1) {
-            // Re-entry probes the minimum useful synthetic cost. A successful
-            // source-safe trial may return the ordinary governors to control on
-            // the next source interval.
-            generatedFrameCount = 1;
-            interpolationGenerationCount = 1;
-        }
-    }
-
-    enum class AndroidFrameCycleMode {
+    enum class AndroidFrameCycleMode {    enum class AndroidFrameCycleMode {
         Generate,
         HistoryOnly,
     };
@@ -2368,35 +2210,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             ? AndroidFrameCycleMode::HistoryOnly
             : AndroidFrameCycleMode::Generate;
 
-    // Fixed mode also needs uncontaminated source-only evidence. Immediately
-    // after a temporal/config reset there is no protected baseline, and after a
-    // governor backoff a zero generated count means synthetic work has already
-    // harmed source cadence. In both cases bypass AHB/private-framegen work for
-    // this cycle so the next interval measures the game itself.
-    const bool conservativeFixedSourceProtectionGap =
-        this->conservativeCrossDeviceSync_
-        && !generationFirstAdreno
-        && !conf.adaptiveFramegen
-        && requestedFixedGeneratedFrameCount > 0
-        && !sourceTimelineDiscontinuity
-        && (!sourceProtectionBaselineValid
-            || (!sourceHistoryWarmupActive
-                && this->fixedSourceCadenceGovernor_.telemetry().baselineValid
-                && plannedGeneratedFrameCount == 0));
-
-    // Ordinary fractional/zero-demand Adaptive gaps preserve temporal
-    // history. A rejected synthetic opportunity is different: on protected
-    // Adreno it is an emergency source-protection escape and must return a
-    // real source frame without entering AHB/private-framegen maintenance.
-    const bool conservativeAdmissionRejectedHistoryGap =
-        this->conservativeCrossDeviceSync_
-        && !generationFirstAdreno
-        && conf.adaptiveFramegen
-        && !sourceHistoryWarmupActive
-        && !sourceTimelineDiscontinuity
-        && plannedGeneratedFrameCount > 0
-        && generatedFrameCount == 0;
-    const bool conservativeFractionalHistoryGap =
+    // Generation-first Adreno still advances private history across ordinary
+    // fractional/zero-demand Adaptive gaps.
+    const bool conservativeFractionalHistoryGap =    const bool conservativeFractionalHistoryGap =
         this->conservativeCrossDeviceSync_
         && conf.adaptiveFramegen
         && !sourceHistoryWarmupActive
@@ -2418,7 +2234,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && generatedFrameCount == 0
         && (conservativeFractionalHistoryGap
             || conservativeZeroDemandHistoryGap);
-    // Fixed source-protection rejection is still a history-maintenance
+    // Fixed generation rejection is still a history-maintenance
     // cycle. Whether the governor planned zero work or deadline admission
     // reduced planned work to zero, keep the source pair coherent instead of
     // reclassifying the cycle as a true source-only bypass.
@@ -3226,8 +3042,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     : 0.0;
             const auto& presentationTelemetry =
                 this->generatedPresentationCapacityTracker_.telemetry();
-            const auto& sourceProtectionTelemetry =
-                this->sourceProtectionBudgetTracker_.telemetry();
 
             std::cerr << "lsfg-vk: metrics"
                       << " runtime_session_id=" << this->runtimeSessionId_
@@ -3311,40 +3125,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
                       << " source_interval_avg_ms=" << sourceIntervalAvgMs
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
-                      << " source_protected_interval_ms="
-                      << sourceProtectionTelemetry.protectedSourceIntervalMs
-                      << " source_budget_raw_ms=" << sourceBudgetRawMs
-                      << " source_budget_effective_ms=" << sourceBudgetEffectiveMs
-                      << " source_budget_copy_reserve_ms="
-                      << sourceProtectionTelemetry.serializedCopyReserveMs
-                      << " source_budget_observation="
-                      << sourceCadenceObservationName(
-                            sourceProtectionTelemetry.lastObservation)
-                      << " source_protection_baseline_valid="
-                      << (sourceProtectionTelemetry.baselineValid ? 1 : 0)
-                      << " source_protection_copy_cost_valid="
-                      << (sourceProtectionTelemetry.copyCostValid ? 1 : 0)
-                      << " adreno_source_protection_state="
-                      << AdrenoSourceProtectionController::phaseName(
-                          this->adrenoSourceProtection_.telemetry().phase)
-                      << " adreno_source_protection_backoff="
-                      << AdrenoSourceProtectionController::backoffReasonName(
-                          this->adrenoSourceProtection_.telemetry().backoffReason)
-                      << " adreno_source_only_recovery_frames="
-                      << this->adrenoSourceProtection_.telemetry().sourceOnlyRecoveryFrames
-                      << " adreno_reprime_requests="
-                      << this->adrenoSourceProtection_.telemetry().reprimeRequests
-                      << " adreno_reprimes_executed="
-                      << this->adrenoSourceProtection_.telemetry().reprimesExecuted
-                      << " adreno_generation_probes="
-                      << this->adrenoSourceProtection_.telemetry().generationProbes
-                      << " adreno_probe_successes="
-                      << this->adrenoSourceProtection_.telemetry().probeSuccesses
-                      << " adreno_probe_failures="
-                      << this->adrenoSourceProtection_.telemetry().probeFailures
-                      << " adreno_source_only_bypasses="
-                      << this->adrenoSourceProtection_.telemetry().sourceOnlyBypasses
-                      << " source_deadline_error_avg_ms=" << sourceDeadlineErrorAvgMs
+                      << " source_deadline_error_avg_ms="                      << " source_deadline_error_avg_ms=" << sourceDeadlineErrorAvgMs
                       << " source_deadline_error_max_ms="
                       << metrics.windowSourceDeadlineErrorMaxMs
                       << " source_timeline_rebases="
@@ -3575,15 +3356,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ANDROID_LOG_INFO,
                 "LSFG_METRICS",
                 "source_budget_raw_ms=%.3f source_budget_effective_ms=%.3f "
-                "source_budget_copy_reserve_ms=%.3f source_budget_observation=%s "
                 "history_preprocess_submit_avg_ms=%.3f "
                 "history_preprocess_host_wait_avg_ms=%.3f "
                 "history_async_releases=%llu history_host_completions=%llu",
                 sourceBudgetRawMs,
                 sourceBudgetEffectiveMs,
-                sourceProtectionTelemetry.serializedCopyReserveMs,
-                sourceCadenceObservationName(
-                    sourceProtectionTelemetry.lastObservation),
                 historyPreprocessSubmitAvgMs,
                 historyPreprocessHostWaitAvgMs,
                 static_cast<unsigned long long>(
@@ -3675,18 +3452,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         return result;
     };
 
-    const bool protectedAdrenoPriorComputeOverBudget =
-        this->conservativeCrossDeviceSync_
-        && !generationFirstAdreno
-        && !sourceHistoryWarmupActive
-        && this->lastSourceCadenceObservation_
-            == SourceCadenceObservation::Generated
-        && this->adaptiveFlowGeneratedTimingValid_
-        && this->adaptiveFlowRetainedBudgetMs_ > 0.0
-        && this->adaptiveFlowRetainedTotalLsfgMs_
-            > this->adaptiveFlowRetainedBudgetMs_;
-
-    // BEGIN ADRENO_364178AF_EXECUTION
+    // BEGIN ADRENO_364178AF_EXECUTION    // BEGIN ADRENO_364178AF_EXECUTION
     // The Qualcomm/Turnip execution path below intentionally preserves the
     // September 18 364178af transport/presentation topology. Modern scheduling
     // is allowed to choose generatedFrameCount, interpolationGenerationCount,
@@ -3694,272 +3460,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // source ownership, cross-device completion, WSI acquisition, queue choice,
     // or generated-before-source ordering inside it.
     if (this->conservativeCrossDeviceSync_) {
-        // A generation trial that cannot be admitted returns directly to
-        // protected source-only mode; it must not fall through into a zero-count
-        // host-fence history cycle.
-        if (this->adrenoSourceProtection_.generationTrial()
-                && generatedFrameCount == 0) {
-            this->adrenoSourceProtection_.enterProtection(
-                AdrenoSourceProtectionBackoffReason::TrialFailed);
-            this->sourceHistoryWarmupRemaining_ = 0;
-            this->requiresSourceHistoryWarmup_ = false;
-        }
-
-        if (this->adrenoSourceProtection_.protectedSourceOnly()) {
-            this->lastDispatchedGeneratedFrameCount_ = 0;
-            this->lastSourceCadenceObservation_ =
-                SourceCadenceObservation::SourceOnly;
-            this->lastGeneratedFrameCount_ = 0;
-            this->previousSourceCopySignalValid_ = false;
-            this->deadlineBatchDecision_ = {};
-            this->adrenoSourceProtection_.observeProtectedSourceOnly();
-            updateAdaptiveFlowGovernor();
-            metrics.windowAdaptiveZeroGenerationCycles++;
-            metrics.totalAdaptiveZeroGenerationCycles++;
-
-            VkPresentTimeGOOGLE protectedPresentTime{};
-            VkPresentTimesInfoGOOGLE protectedPresentTimes{};
-            const VkPresentInfoKHR protectedPresentInfo{
-                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                .pNext = adaptivePresentPNext(
-                    pNext,
-                    this->currentSourceTimeline_.sourceDesiredTimeNs,
-                    protectedPresentTime,
-                    protectedPresentTimes),
-                .waitSemaphoreCount =
-                    static_cast<uint32_t>(gameRenderSemaphores.size()),
-                .pWaitSemaphores = gameRenderSemaphores.empty()
-                    ? nullptr : gameRenderSemaphores.data(),
-                .swapchainCount = 1,
-                .pSwapchains = &this->swapchain,
-                .pImageIndices = &presentIdx,
-            };
-            const auto protectedResult =
-                Layer::ovkQueuePresentKHR(queue, &protectedPresentInfo);
-            if (isAdrenoWsiRetirementResult(protectedResult))
-                return protectedResult;
-            if (protectedResult != VK_SUCCESS
-                    && protectedResult != VK_SUBOPTIMAL_KHR) {
-                metrics.windowSourcePresentFailures++;
-                metrics.totalSourcePresentFailures++;
-                throw LSFG::vulkan_error(
-                    protectedResult,
-                    "Failed protected Adreno source-only present");
-            }
-            if (conf.adaptiveFramegen)
-                this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
-            return finishSourcePresent(
-                protectedResult, "game-render-protected-source-only");
-        }
-
-        // The host-fence path necessarily waits through the application's
-        // render dependency before the AHB copy can complete. If the previous
-        // real generated cycle already proved that private LSFG compute alone
-        // exceeded the protected source budget, do not submit another AHB copy
-        // and turn that producer dependency into another blocking CPU wait.
-        // Escape exactly one cycle, then require one real-source history copy
-        // before generation resumes. lastSourceCadenceObservation_ makes this
-        // a one-shot circuit breaker rather than a stale-timing loop.
-        if (protectedAdrenoPriorComputeOverBudget) {
-            this->lastDispatchedGeneratedFrameCount_ = 0;
-            this->lastSourceCadenceObservation_ =
-                SourceCadenceObservation::SourceOnly;
-            this->lastGeneratedFrameCount_ = 0;
-            this->previousSourceCopySignalValid_ = false;
-            this->sourceHistoryWarmupRemaining_ = 0;
-            this->requiresSourceHistoryWarmup_ = false;
-            this->adrenoSourceProtection_.enterProtection(
-                AdrenoSourceProtectionBackoffReason::ComputeOverBudget);
-            this->lastHistoryInvalidationReason_ =
-                SourceHistoryInvalidationReason::None;
-            this->lastHistoryReprimeReason_ =
-                SourceHistoryInvalidationReason::OverloadBypass;
-            this->deadlineBatchDecision_ = {};
-            updateAdaptiveFlowGovernor();
-            metrics.windowAdaptiveZeroGenerationCycles++;
-            metrics.totalAdaptiveZeroGenerationCycles++;
-
-            VkPresentTimeGOOGLE bypassPresentTime{};
-            VkPresentTimesInfoGOOGLE bypassPresentTimes{};
-            const VkPresentInfoKHR bypassPresentInfo{
-                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                .pNext = adaptivePresentPNext(
-                    pNext,
-                    this->currentSourceTimeline_.sourceDesiredTimeNs,
-                    bypassPresentTime,
-                    bypassPresentTimes),
-                .waitSemaphoreCount =
-                    static_cast<uint32_t>(gameRenderSemaphores.size()),
-                .pWaitSemaphores = gameRenderSemaphores.empty()
-                    ? nullptr : gameRenderSemaphores.data(),
-                .swapchainCount = 1,
-                .pSwapchains = &this->swapchain,
-                .pImageIndices = &presentIdx,
-            };
-            const auto bypassResult =
-                Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo);
-            if (isAdrenoWsiRetirementResult(bypassResult))
-                return bypassResult;
-            if (bypassResult != VK_SUCCESS
-                    && bypassResult != VK_SUBOPTIMAL_KHR) {
-                metrics.windowSourcePresentFailures++;
-                metrics.totalSourcePresentFailures++;
-                throw LSFG::vulkan_error(
-                    bypassResult,
-                    "Failed protected Adreno overload source-only present");
-            }
-            if (conf.adaptiveFramegen)
-                this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
-            if (firstPresentDiagnostic) {
-                std::cerr
-                    << "lsfg-vk: runtime stage=adreno-overload-source-bypass"
-                    << " prior_lsfg_ms="
-                    << this->adaptiveFlowRetainedTotalLsfgMs_
-                    << " source_budget_ms="
-                    << this->adaptiveFlowRetainedBudgetMs_
-                    << " reprime=deferred" << " protection_state="
-                    << AdrenoSourceProtectionController::phaseName(
-                        this->adrenoSourceProtection_.telemetry().phase)
-                    << "\n";
-            }
-            return finishSourcePresent(
-                bypassResult, "game-render-overload-bypass");
-        }
-
-        if (conservativeFixedSourceProtectionGap) {
-            this->lastDispatchedGeneratedFrameCount_ = 0;
-            this->lastSourceCadenceObservation_ =
-                SourceCadenceObservation::SourceOnly;
-            this->lastGeneratedFrameCount_ = 0;
-            this->previousSourceCopySignalValid_ = false;
-            // Direct presentation intentionally leaves private AHB history
-            // stale. Do not schedule a warmup until sustained recovery evidence
-            // authorizes a deliberate generation probe.
-            this->sourceHistoryWarmupRemaining_ = 0;
-            this->requiresSourceHistoryWarmup_ = false;
-            this->adrenoSourceProtection_.enterProtection(
-                AdrenoSourceProtectionBackoffReason::FixedCadence);
-            this->lastHistoryInvalidationReason_ =
-                SourceHistoryInvalidationReason::None;
-            this->lastHistoryReprimeReason_ =
-                SourceHistoryInvalidationReason::AdmissionBypass;
-            this->deadlineBatchDecision_ = {};
-            updateAdaptiveFlowGovernor();
-
-            VkPresentTimeGOOGLE bypassPresentTime{};
-            VkPresentTimesInfoGOOGLE bypassPresentTimes{};
-            const VkPresentInfoKHR bypassPresentInfo{
-                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                .pNext = adaptivePresentPNext(
-                    pNext,
-                    this->currentSourceTimeline_.sourceDesiredTimeNs,
-                    bypassPresentTime,
-                    bypassPresentTimes),
-                .waitSemaphoreCount =
-                    static_cast<uint32_t>(gameRenderSemaphores.size()),
-                .pWaitSemaphores = gameRenderSemaphores.empty()
-                    ? nullptr : gameRenderSemaphores.data(),
-                .swapchainCount = 1,
-                .pSwapchains = &this->swapchain,
-                .pImageIndices = &presentIdx,
-            };
-            const auto bypassResult =
-                Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo);
-            if (isAdrenoWsiRetirementResult(bypassResult))
-                return bypassResult;
-            if (bypassResult != VK_SUCCESS
-                    && bypassResult != VK_SUBOPTIMAL_KHR) {
-                metrics.windowSourcePresentFailures++;
-                metrics.totalSourcePresentFailures++;
-                throw LSFG::vulkan_error(
-                    bypassResult,
-                    "Failed protected Adreno Fixed source-only present");
-            }
-            if (firstPresentDiagnostic) {
-                std::cerr
-                    << "lsfg-vk: runtime stage=adreno-fixed-source-protection"
-                    << " baseline_valid="
-                    << (sourceProtectionBaselineValid ? 1 : 0)
-                    << " fixed_limit="
-                    << this->fixedSourceCadenceGovernor_.telemetry().generationLimit
-                    << " reprime=deferred" << " protection_state="
-                    << AdrenoSourceProtectionController::phaseName(
-                        this->adrenoSourceProtection_.telemetry().phase)
-                    << "\n";
-            }
-            return finishSourcePresent(
-                bypassResult, "game-render-fixed-source-protection");
-        }
-
-        // A rejected synthetic opportunity is source protection, not temporal
-        // maintenance. Do not copy into the AHB pair and then host-wait through
-        // a zero-count private framegen pass: that was the feedback loop that
-        // collapsed the S20+ source cadence. Present the real source directly,
-        // mark this as an authoritative source-only observation, and request
-        // exactly one real-source reprime before generation resumes.
-        if (conservativeAdmissionRejectedHistoryGap) {
-            this->lastDispatchedGeneratedFrameCount_ = 0;
-            this->lastSourceCadenceObservation_ =
-                SourceCadenceObservation::SourceOnly;
-            this->lastGeneratedFrameCount_ = 0;
-            this->previousSourceCopySignalValid_ = false;
-            this->sourceHistoryWarmupRemaining_ = 0;
-            this->requiresSourceHistoryWarmup_ = false;
-            this->adrenoSourceProtection_.enterProtection(
-                AdrenoSourceProtectionBackoffReason::AdmissionRejected);
-            this->lastHistoryInvalidationReason_ =
-                SourceHistoryInvalidationReason::None;
-            this->lastHistoryReprimeReason_ =
-                SourceHistoryInvalidationReason::AdmissionBypass;
-            this->deadlineBatchDecision_ = {};
-            updateAdaptiveFlowGovernor();
-            metrics.windowAdaptiveZeroGenerationCycles++;
-            metrics.totalAdaptiveZeroGenerationCycles++;
-
-            VkPresentTimeGOOGLE bypassPresentTime{};
-            VkPresentTimesInfoGOOGLE bypassPresentTimes{};
-            const VkPresentInfoKHR bypassPresentInfo{
-                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                .pNext = adaptivePresentPNext(
-                    pNext,
-                    this->currentSourceTimeline_.sourceDesiredTimeNs,
-                    bypassPresentTime,
-                    bypassPresentTimes),
-                .waitSemaphoreCount =
-                    static_cast<uint32_t>(gameRenderSemaphores.size()),
-                .pWaitSemaphores = gameRenderSemaphores.empty()
-                    ? nullptr : gameRenderSemaphores.data(),
-                .swapchainCount = 1,
-                .pSwapchains = &this->swapchain,
-                .pImageIndices = &presentIdx,
-            };
-            const auto bypassResult =
-                Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo);
-            if (isAdrenoWsiRetirementResult(bypassResult))
-                return bypassResult;
-            if (bypassResult != VK_SUCCESS
-                    && bypassResult != VK_SUBOPTIMAL_KHR) {
-                metrics.windowSourcePresentFailures++;
-                metrics.totalSourcePresentFailures++;
-                throw LSFG::vulkan_error(
-                    bypassResult,
-                    "Failed protected Adreno admission source-only present");
-            }
-            this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
-            if (firstPresentDiagnostic) {
-                std::cerr
-                    << "lsfg-vk: runtime stage=adreno-admission-source-bypass"
-                    << " planned=" << plannedGeneratedFrameCount
-                    << " admitted=" << generatedFrameCount
-                    << " reprime=deferred" << " protection_state="
-                    << AdrenoSourceProtectionController::phaseName(
-                        this->adrenoSourceProtection_.telemetry().phase)
-                    << "\n";
-            }
-            return finishSourcePresent(
-                bypassResult, "game-render-admission-bypass");
-        }
-
         pass.preCopySemaphores.at(0) = Mini::Semaphore(info.device);
         pass.preCopySemaphores.at(1) = Mini::Semaphore(info.device);
         pass.preCopyBuf = Mini::CommandBuffer(info.device, this->cmdPool);
@@ -4208,15 +3708,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     warmupResult,
                     "Failed September 18 Adreno source-history warmup");
             }
-            if (this->adrenoSourceProtection_.reprimePending())
-                this->adrenoSourceProtection_.onReprimeExecuted();
             if (firstPresentDiagnostic)
                 std::cerr
                     << "lsfg-vk: runtime stage=source-history-warmup"
                     << " adreno_execution=364178af"
-                    << " protection_state="
-                    << AdrenoSourceProtectionController::phaseName(
-                        this->adrenoSourceProtection_.telemetry().phase)
                     << "\n";
             return finishSourcePresent(
                 warmupResult, "pre-copy-adreno-364178af-warmup");
@@ -4448,8 +3943,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->lastGeneratedFrameCount_ = generatedFrameCount;
         if (generatedFrameCount > 0) {
             this->deadlineAdmissionPredictor_.observeDeliverySuccess();
-            if (this->adrenoSourceProtection_.generationTrial())
-                this->adrenoSourceProtection_.onTrialSucceeded();
         }
         return finishSourcePresent(
             res, "prev-post-copy-adreno-364178af");
@@ -5570,7 +5063,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
         // Preserve the September 18 Adreno WSI transaction: once the
-        // source-protection governors admit a generated batch, generated-image
+        // generation planners admit a generated batch, generated-image
         // acquisition uses the same bounded wait as 364178af. The newer
         // nonblocking/drop policy remains isolated to Xclipse/generic.
         const uint64_t generatedAcquireTimeoutNs =
@@ -5913,7 +5406,6 @@ void LsContext::resetAdaptiveSourceEpoch(
         bool resetScheduler,
         SourceHistoryInvalidationReason reason) {
     if (this->conservativeCrossDeviceSync_)
-        this->adrenoSourceProtection_.reset();
     // Any source-timeline epoch change invalidates synthetic pixels produced
     // against the previous cadence/history. Keep the private-device batch
     // release alive until it retires so shared AHB reuse remains ordered.
@@ -5929,7 +5421,6 @@ void LsContext::resetAdaptiveSourceEpoch(
     if (resetScheduler)
         this->adaptiveScheduler_.reset();
     this->fixedSourceCadenceGovernor_.reset();
-    this->sourceProtectionBudgetTracker_.reset();
     this->advanceAdaptiveFlowTimingEpoch();
     this->deadlineAdmissionPredictor_.reset();
     this->generatedPresentationCapacityTracker_.reset();
@@ -5982,7 +5473,6 @@ void LsContext::resetAdaptiveSourceEpoch(
 
 void LsContext::enterSourceOnlyBypass() {
     if (this->conservativeCrossDeviceSync_)
-        this->adrenoSourceProtection_.reset();
     // Explicit Off/source-only transitions invalidate deferred synthetic output,
     // but never discard the private-device batch release itself. The latter must
     // still retire before either shared input AHB can be reused.
@@ -5998,7 +5488,6 @@ void LsContext::enterSourceOnlyBypass() {
     this->advanceAdaptiveFlowTimingEpoch();
     this->adaptiveScheduler_.reset();
     this->fixedSourceCadenceGovernor_.reset();
-    this->sourceProtectionBudgetTracker_.reset();
     this->deadlineAdmissionPredictor_.reset();
     this->adaptiveFlowController_.reset();
     this->sourceTimeline_.reset();
