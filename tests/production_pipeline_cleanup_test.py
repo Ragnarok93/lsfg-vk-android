@@ -45,6 +45,7 @@ for stale in (
         raise SystemExit(f"retained runtime composer still contains profiler code: {stale}")
 
 removed = [
+    "scripts/adreno_android_config_reload.py",
     "scripts/apply-b12-dual-stage-profile.py",
     "scripts/apply-zero-stage-profile.py",
     "scripts/apply-candidate-b3-beta4-analysis.py",
