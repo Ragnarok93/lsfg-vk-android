@@ -2776,8 +2776,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             return;
         }
 
-        const auto [_, inserted] =
-            this->generatedDisplayPendingSet_.insert(presentId);
+        const bool inserted =
+            this->generatedDisplayPendingSet_.insert(presentId).second;
         if (!inserted)
             return;
         this->generatedDisplayPendingIds_.push_back(presentId);
