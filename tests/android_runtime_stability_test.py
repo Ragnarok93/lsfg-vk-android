@@ -282,7 +282,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("Config::snapshotTransaction()", create)
         self.assertIn("configurationFileChanged(activeConf)", create)
         self.assertIn("config_revision=", create)
-        self.assertIn("config_timestamp_ticks=", create)
+        self.assertIn("config_timestamp_ns=", create)
 
         present = hooks[present_start:]
         self.assertIn("configurationRecreatePending", present)
