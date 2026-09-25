@@ -18,6 +18,9 @@ concurrency:
 env:
   ANDROID_NDK_VERSION: 27.3.13750724
   ANDROID_PLATFORM: android-28
+  # Feature/fix branches are validation-only: never spend CI on a Release build.
+  # Release configuration remains restricted to the release branch and version tags.
+  ANDROID_BUILD_TYPE: ${{ (github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')) && 'Release' || 'Debug' }}
 
 jobs:
   capability-policy:
@@ -128,7 +131,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          bash ./scripts/build/android.sh Release 2>&1 | tee "android-build-${ANDROID_ABI}.log"
+          bash ./scripts/build/android.sh "${ANDROID_BUILD_TYPE}" 2>&1 | tee "android-build-${ANDROID_ABI}.log"
 
       - name: Upload ${{ matrix.abi }} build log
         if: always()
