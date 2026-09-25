@@ -93,6 +93,11 @@ jobs:
             tests/android_sync_policy_test.cpp \
             -o /tmp/lsfg-android-sync-policy-test
           /tmp/lsfg-android-sync-policy-test
+          g++ -std=c++20 -Wall -Wextra -Werror \
+            -Iinclude \
+            tests/android_adreno_source_protection_state_test.cpp \
+            -o /tmp/lsfg-adreno-source-protection-state-test
+          /tmp/lsfg-adreno-source-protection-state-test
 
   build:
     name: Build ${{ matrix.abi }}
