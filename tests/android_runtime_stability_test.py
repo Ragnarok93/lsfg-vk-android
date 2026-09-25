@@ -269,7 +269,13 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         create = hooks[create_start:present_start]
         self.assertIn("const auto configSnapshot = Config::snapshotTransaction()", create)
         self.assertIn("const auto& activeConf = configSnapshot.configuration", create)
-        self.assertIn("swapchainImages, configSnapshot", create)
+        context_call_start = create.index("state->context = std::make_shared<LsContext>")
+        context_call_end = create.index(
+            "finalizeConfigurationTransaction(*state)", context_call_start
+        )
+        context_call = create[context_call_start:context_call_end]
+        self.assertIn("swapchainImages,", context_call)
+        self.assertIn("configSnapshot", context_call)
         self.assertIn("configurationRevision", create)
         self.assertIn("configurationTimestamp", create)
         self.assertIn("configurationRecreatePending", create)
