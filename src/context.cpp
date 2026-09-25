@@ -1916,15 +1916,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             && this->adrenoSourceProtection_.protectedSourceOnly()) {
         const bool protectedBaselineValid =
             this->sourceProtectionBudgetTracker_.telemetry().baselineValid;
-        const bool recoveryEvidence =
+        const bool sourceRecoveryValid =
             protectedBaselineValid
-            && plannedGeneratedFrameCount > 0
             && (conf.adaptiveFramegen
-                ? (safeGenerationHintValid && safeGenerationHint > 0)
-                : (this->fixedSourceCadenceGovernor_.telemetry().baselineValid
-                    && this->fixedSourceCadenceGovernor_.telemetry().generationLimit > 0));
+                || this->fixedSourceCadenceGovernor_.telemetry().baselineValid);
+        const bool generationDemand = plannedGeneratedFrameCount > 0;
         if (this->adrenoSourceProtection_.requestReprimeIfRecovered(
-                recoveryEvidence)) {
+                sourceRecoveryValid, generationDemand)) {
             this->sourceHistoryWarmupRemaining_ = 1;
             this->requiresSourceHistoryWarmup_ = true;
             this->lastHistoryReprimeReason_ =
@@ -2168,6 +2166,28 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     }
                 }
             }
+        }
+    }
+
+    // ReprimePending deliberately transitions to one minimum-cost
+    // GenerationTrial. Do not let stale generated-batch estimates create a
+    // circular lock where the probe needed to refresh those estimates can
+    // never execute. This floor is Adreno-only, applies once, requires current
+    // generation demand and a positive source-owned window, and never raises a
+    // trial above one synthetic frame.
+    if (this->conservativeCrossDeviceSync_
+            && this->adrenoSourceProtection_.generationTrial()
+            && sourceBudgetEffectiveMs > 0.0) {
+        const size_t trialGeneratedFrameCount =
+            this->adrenoSourceProtection_.minimumGenerationTrial(
+                plannedGeneratedFrameCount, generatedFrameCount);
+        if (trialGeneratedFrameCount > generatedFrameCount) {
+            generatedFrameCount = trialGeneratedFrameCount;
+            interpolationGenerationCount = std::max<size_t>(
+                1, interpolationGenerationCount);
+            this->deadlineBatchDecision_ =
+                this->deadlineAdmissionPredictor_.predict(
+                    generatedFrameCount, sourceBudgetEffectiveMs);
         }
     }
 

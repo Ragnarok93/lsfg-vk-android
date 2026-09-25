@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 enum class AdrenoSourceProtectionPhase {
@@ -56,15 +57,38 @@ public:
             telemetry_.recoveryFrames++;
     }
 
-    [[nodiscard]] bool requestReprimeIfRecovered(bool recoveryEvidence) {
+    [[nodiscard]] bool requestReprimeIfRecovered(
+            bool sourceRecoveryValid,
+            bool generationDemand) {
+        // Recovery is established by clean source-only cadence plus current
+        // demand. Do not require the old synthetic-cost predictor to approve
+        // the reprime: the following one-frame GenerationTrial exists
+        // specifically to refresh stale generated-work cost evidence.
         if (telemetry_.phase != AdrenoSourceProtectionPhase::ProtectedSourceOnly
-                || !recoveryEvidence
+                || !sourceRecoveryValid
+                || !generationDemand
                 || telemetry_.recoveryFrames < kRecoveryFramesBeforeProbe) {
             return false;
         }
         telemetry_.phase = AdrenoSourceProtectionPhase::ReprimePending;
         telemetry_.reprimeRequests++;
         return true;
+    }
+
+    [[nodiscard]] std::size_t minimumGenerationTrial(
+            std::size_t plannedGeneration,
+            std::size_t admittedGeneration) const {
+        if (telemetry_.phase != AdrenoSourceProtectionPhase::GenerationTrial
+                || plannedGeneration == 0
+                || admittedGeneration > 0) {
+            return admittedGeneration;
+        }
+
+        // A stale predictor may reject the first candidate after source-only
+        // recovery. Permit exactly one synthetic frame so the trial can
+        // measure current blocking cost. The caller still requires a positive
+        // real-source budget before applying this floor.
+        return 1;
     }
 
     void onReprimeExecuted() {
