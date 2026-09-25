@@ -170,6 +170,7 @@ public:
 private:
     struct BatchCostEstimate {
         bool valid{false};
+        bool blockingCompletionObserved{false};
         double mipmapsMs{};
         double opticalFlowMs{};
         double gpuTotalLsfgMs{};
