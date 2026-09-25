@@ -9,6 +9,7 @@
 
 #include "hooks.hpp"
 #include "android_sync_policy.hpp"
+#include "adreno_source_protection.hpp"
 #include "adaptive_scheduler.hpp"
 #include "adaptive_flow_controller.hpp"
 #include "mini/commandbuffer.hpp"
@@ -238,6 +239,7 @@ private:
     AdaptiveFrameScheduler adaptiveScheduler_;
     FixedSourceCadenceGovernor fixedSourceCadenceGovernor_;
     SourceProtectionBudgetTracker sourceProtectionBudgetTracker_;
+    AdrenoSourceProtectionController adrenoSourceProtection_;
     std::size_t lastDispatchedGeneratedFrameCount_{0};
     // Classifies the interval observed at the next intercepted source present.
     // Only a true LSFG-bypass source interval may expand the protected baseline.
