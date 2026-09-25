@@ -2069,7 +2069,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
-    const auto& outputCadenceForPresentation =    const auto& outputCadenceForPresentation =
+    const auto& outputCadenceForPresentation =
         this->lsfgOutputCadenceTracker_.snapshot();
     const bool presentationOutputDeficit =
         conf.adaptiveFramegen
@@ -2197,7 +2197,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->adaptivePresentPeriodNs_ = 0;
     }
 
-    enum class AndroidFrameCycleMode {    enum class AndroidFrameCycleMode {
+    enum class AndroidFrameCycleMode {
         Generate,
         HistoryOnly,
     };
@@ -2212,7 +2212,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     // Generation-first Adreno still advances private history across ordinary
     // fractional/zero-demand Adaptive gaps.
-    const bool conservativeFractionalHistoryGap =    const bool conservativeFractionalHistoryGap =
+    const bool conservativeFractionalHistoryGap =
         this->conservativeCrossDeviceSync_
         && conf.adaptiveFramegen
         && !sourceHistoryWarmupActive
