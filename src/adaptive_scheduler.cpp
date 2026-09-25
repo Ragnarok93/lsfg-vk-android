@@ -1221,10 +1221,24 @@ void AdaptiveFrameScheduler::setSafeGenerationHint(
         : 0;
 }
 
+void AdaptiveFrameScheduler::setGenerationFirst(bool enabled) {
+    generationFirst_ = enabled;
+    if (!generationFirst_)
+        return;
+
+    costLimit_ = maxGeneratedFrames_;
+    sourceProtectionBaselineValid_ = false;
+    sourceProtectionBaselineSeconds_ = 0.0;
+    sourceDegradationSamples_ = 0;
+    sourceProtectionHoldUntilSeconds_ = 0.0;
+    resetUnmetDemand();
+}
+
 void AdaptiveFrameScheduler::setSourceProtectionBaseline(
         double intervalMs, bool valid) {
     sourceProtectionBaselineValid_ =
-        valid && intervalMs > 0.0 && std::isfinite(intervalMs);
+        !generationFirst_
+        && valid && intervalMs > 0.0 && std::isfinite(intervalMs);
     sourceProtectionBaselineSeconds_ = sourceProtectionBaselineValid_
         ? intervalMs / 1000.0
         : 0.0;
@@ -1451,6 +1465,14 @@ void AdaptiveFrameScheduler::updateCostLimit(
         return;
     }
 
+    if (generationFirst_) {
+        costLimit_ = maxGeneratedFrames_;
+        sourceDegradationSamples_ = 0;
+        sourceProtectionHoldUntilSeconds_ = 0.0;
+        resetUnmetDemand();
+        return;
+    }
+
     if (costLimit_ == 0)
         costLimit_ = 1;
     costLimit_ = std::min(costLimit_, maxGeneratedFrames_);
@@ -1545,7 +1567,9 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
     safeGenerationHintValid_ = false;
     stableCadenceSamples_ = 0;
     observedTimeSeconds_ = 0.0;
-    costLimit_ = maxGeneratedFrames_ == 0 ? 0 : 1;
+    costLimit_ = maxGeneratedFrames_ == 0
+        ? 0
+        : (generationFirst_ ? maxGeneratedFrames_ : 1);
     sourceProtectionBaselineValid_ = false;
     sourceProtectionBaselineSeconds_ = 0.0;
     sourceDegradationSamples_ = 0;

@@ -1800,6 +1800,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     this->adaptiveScheduler_.configure(
         conf.adaptiveFramegen ? conf.fpsLimit : 0,
         maxAdaptiveGeneratedFrames);
+    this->adaptiveScheduler_.setGenerationFirst(
+        this->conservativeCrossDeviceSync_);
     this->generatedPresentationCapacityTracker_.configure(
         conf.adaptiveFramegen ? maxAdaptiveGeneratedFrames : 0);
     this->lsfgOutputCadenceTracker_.configure(
@@ -1827,10 +1829,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             : 0;
     const bool sourceProtectionBatchAdmission =
         this->conservativeCrossDeviceSync_;
+    const bool generationFirstAdreno = this->conservativeCrossDeviceSync_;
     const char* deadlineSemantics =
-        sourceProtectionBatchAdmission
-            ? "source-protection"
-            : "synthetic-slot";
+        generationFirstAdreno
+            ? "generation-first"
+            : (sourceProtectionBatchAdmission
+                ? "source-protection"
+                : "synthetic-slot");
     double computeReadyBudgetMs = 0.0;
     double presentationSlotBudgetMs = 0.0;
     double sourceBudgetRawMs = 0.0;
@@ -1858,6 +1863,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     this->adaptiveScheduler_.setSourceProtectionBaseline(
         sourceProtectionBeforePlan.protectedSourceIntervalMs,
         sourceProtectionBatchAdmission
+            && !generationFirstAdreno
             && sourceProtectionBeforePlan.baselineValid);
 
     // Capacity feedback is advisory and comes from the previous measured GPU
@@ -1900,19 +1906,28 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     if (conf.adaptiveFramegen)
         this->fixedSourceCadenceGovernor_.reset();
-    size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
-        ? this->adaptiveScheduler_.plan(sourceInterval)
+    const size_t governedFixedGeneratedFrameCount = conf.adaptiveFramegen
+        ? 0
         : this->fixedSourceCadenceGovernor_.plan(
             sourceInterval,
             requestedFixedGeneratedFrameCount,
             this->lastDispatchedGeneratedFrameCount_,
             !this->requiresSourceHistoryWarmup_,
             previousSourceCadenceObservation);
+    size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
+        ? this->adaptiveScheduler_.plan(sourceInterval)
+        : (generationFirstAdreno
+            ? requestedFixedGeneratedFrameCount
+            : governedFixedGeneratedFrameCount);
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
+    if (generationFirstAdreno)
+        this->adrenoSourceProtection_.reset();
+
     if (this->conservativeCrossDeviceSync_
+            && !generationFirstAdreno
             && this->adrenoSourceProtection_.protectedSourceOnly()) {
         const auto& protectedSource =
             this->sourceProtectionBudgetTracker_.telemetry();
@@ -2028,6 +2043,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // synthetic work and let the existing admission source-escape path collect
     // uncontaminated baseline evidence.
     if (conf.adaptiveFramegen
+            && !generationFirstAdreno
             && sourceProtectionBatchAdmission && !sourceProtectionBaselineValid
             && !sourceHistoryWarmupActive && generatedFrameCount > 0) {
         metrics.windowAdmissionRejects += generatedFrameCount;
@@ -2038,6 +2054,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // Cost estimates are learned from completed batches below only after the
     // protected source cadence is known.
     if (conf.adaptiveFramegen
+            && !generationFirstAdreno
             && !sourceHistoryWarmupActive
             && generatedFrameCount > 0
             && this->currentSourceTimeline_.valid) {
@@ -2226,7 +2243,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // WSI capacity is a separate downstream constraint from GPU generation
     // capacity. Apply its provisional cap before expensive framegen dispatch;
     // a suppressed slot is consumed and never repaid. Fixed mode is untouched.
-    if (conf.adaptiveFramegen && generatedFrameCount > 0) {
+    if (conf.adaptiveFramegen
+            && !generationFirstAdreno
+            && generatedFrameCount > 0) {
         const size_t presentationCappedGeneratedFrameCount =
             this->generatedPresentationCapacityTracker_.limit(
                 generatedFrameCount, presentationCapacityContext);
@@ -2322,7 +2341,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->adaptivePresentPeriodNs_ = 0;
     }
 
-    if (this->conservativeCrossDeviceSync_) {
+    if (this->conservativeCrossDeviceSync_ && !generationFirstAdreno) {
         if (this->adrenoSourceProtection_.protectedSourceOnly()) {
             generatedFrameCount = 0;
             interpolationGenerationCount = 0;
@@ -2356,6 +2375,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // this cycle so the next interval measures the game itself.
     const bool conservativeFixedSourceProtectionGap =
         this->conservativeCrossDeviceSync_
+        && !generationFirstAdreno
         && !conf.adaptiveFramegen
         && requestedFixedGeneratedFrameCount > 0
         && !sourceTimelineDiscontinuity
@@ -2370,6 +2390,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // real source frame without entering AHB/private-framegen maintenance.
     const bool conservativeAdmissionRejectedHistoryGap =
         this->conservativeCrossDeviceSync_
+        && !generationFirstAdreno
         && conf.adaptiveFramegen
         && !sourceHistoryWarmupActive
         && !sourceTimelineDiscontinuity
@@ -3656,6 +3677,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
     const bool protectedAdrenoPriorComputeOverBudget =
         this->conservativeCrossDeviceSync_
+        && !generationFirstAdreno
         && !sourceHistoryWarmupActive
         && this->lastSourceCadenceObservation_
             == SourceCadenceObservation::Generated

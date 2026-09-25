@@ -401,6 +401,10 @@ public:
     /// ordinary sustained-demand governor.
     void setSafeGenerationHint(std::size_t hint, bool valid);
 
+    /// Make target demand authoritative. Resource/cadence estimates remain
+    /// telemetry only and may not lower the synthetic generation ceiling.
+    void setGenerationFirst(bool enabled);
+
     /// Supply the last clean, LSFG-independent source interval. When valid,
     /// source protection has priority over target seeking: synthetic cost may
     /// not rise while the observed source cadence is materially degraded.
@@ -441,6 +445,7 @@ private:
 
     std::size_t safeGenerationHint_{};
     bool safeGenerationHintValid_{false};
+    bool generationFirst_{false};
     unsigned capacityRaiseSamples_{};
     unsigned stableCadenceSamples_{};
 
