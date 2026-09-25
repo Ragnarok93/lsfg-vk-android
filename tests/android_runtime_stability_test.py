@@ -460,12 +460,9 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("FixedSourceCadenceGovernor", scheduler)
         self.assertIn("fixedSourceCadenceGovernor_", header)
         self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
-        self.assertIn("fixedAdrenoHistoricalGeneration", source)
-        self.assertIn(
-            "fixedAdrenoHistoricalGeneration\n"
-            "            ? requestedFixedGeneratedFrameCount",
-            source,
-        )
+        self.assertNotIn("fixedAdrenoHistoricalGeneration", source)
+        self.assertIn("conservativeFixedSourceProtectionGap", source)
+        self.assertIn("game-render-fixed-source-protection", source)
         self.assertIn("fixed_generation_limit=", source)
         self.assertIn("FixedSourceCadenceGovernor::plan", scheduler_source)
         self.assertNotIn("sleep_for", scheduler + scheduler_source)
