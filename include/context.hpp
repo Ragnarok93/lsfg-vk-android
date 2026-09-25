@@ -9,7 +9,6 @@
 
 #include "hooks.hpp"
 #include "android_sync_policy.hpp"
-#include "adreno_source_protection.hpp"
 #include "adaptive_scheduler.hpp"
 #include "adaptive_flow_controller.hpp"
 #include "mini/commandbuffer.hpp"
@@ -238,11 +237,8 @@ private:
 
     AdaptiveFrameScheduler adaptiveScheduler_;
     FixedSourceCadenceGovernor fixedSourceCadenceGovernor_;
-    SourceProtectionBudgetTracker sourceProtectionBudgetTracker_;
-    AdrenoSourceProtectionController adrenoSourceProtection_;
     std::size_t lastDispatchedGeneratedFrameCount_{0};
-    // Classifies the interval observed at the next intercepted source present.
-    // Only a true LSFG-bypass source interval may expand the protected baseline.
+    // Classifies the previous intercepted source cycle for cadence/governor diagnostics.
     SourceCadenceObservation lastSourceCadenceObservation_{
         SourceCadenceObservation::SourceOnly};
     AdaptiveFlowController adaptiveFlowController_;
@@ -332,8 +328,7 @@ private:
     bool framegenInFlight_{false};
     bool framegenOutputEligible_{false};
 
-    // Qualcomm/Adreno keeps protected source/history handling for zero,
-    // reprime, and source-only cycles.
+    // Qualcomm/Adreno uses the compatibility transport/presentation path.
     AndroidSyncPolicy::FramegenCompatibilityPath compatibilityPath_{
         AndroidSyncPolicy::FramegenCompatibilityPath::Generic};
     bool conservativeCrossDeviceSync_{false};
@@ -370,8 +365,8 @@ private:
     // Optional fast path only. Prefer one-shot SYNC_FD on Android, retain
     // OPAQUE_FD compatibility, and fall back to the established host fence.
     bool asyncAhbHandoffEnabled_{false};
-    // Protected Adreno may export only zero-generation history release as a
-    // SYNC_FD. Generated-frame completion remains on the proven bounded host
+    // Adreno may export zero-generation history release as a SYNC_FD.
+    // Generated-frame completion remains on the proven bounded host
     // wait; Xclipse/generic keep their existing async generated path.
     bool asyncHistoryCompletionEnabled_{false};
     bool asyncFramegenCompletionEnabled_{false};
