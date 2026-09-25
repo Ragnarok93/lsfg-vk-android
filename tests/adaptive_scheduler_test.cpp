@@ -993,6 +993,23 @@ int main() {
         // below that cost, until a cautious probe can become admissible again.
         const auto stillBlocked = blockingPredictor.predict(1, 37.0);
         assert(!stillBlocked.wouldAdmit);
+
+        // The GPU timestamp for the same completed batch is descriptive, not
+        // recovery evidence. When it arrives after a 69 ms blocking completion,
+        // it must not immediately dilute that source-owned cost back toward
+        // the 24 ms shader time.
+        DeadlineAdmissionPredictor sameBatchPredictor;
+        sameBatchPredictor.observeBlockingCompletion(1, 69.0);
+        sameBatchPredictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 12.0,
+            .opticalFlowMs = 19.0,
+            .totalLsfgMs = 24.0,
+            .generationCount = 1,
+            .valid = true,
+        });
+        const auto sameBatchDecision = sameBatchPredictor.predict(1, 37.0);
+        assert(sameBatchDecision.predictedTotalLsfgMs > 68.9);
+        assert(!sameBatchDecision.wouldAdmit);
         for (int i = 0; i < 16; ++i)
             blockingPredictor.observeSourceOnlyRecovery();
         const auto recoveredProbe = blockingPredictor.predict(1, 37.0);
