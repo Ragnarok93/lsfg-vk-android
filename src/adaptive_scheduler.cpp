@@ -23,13 +23,6 @@ constexpr uint64_t kSourceTimelineDiscontinuityRatio = 8ULL;
 // generation-count veto. Adaptive continues pursuing the configured output
 // target up to maxGeneratedFrames_ even when the source slows under load.
 constexpr double kSustainedDemandSeconds = 0.600;
-constexpr double kProtectedSourceModerateRatio = 1.30;
-constexpr double kProtectedSourceSevereRatio = 1.75;
-constexpr double kProtectedSourceRecoveryRatio = 1.10;
-constexpr unsigned kProtectedSourceModerateSamples = 2;
-constexpr double kProtectedSourceHoldSeconds = 0.600;
-constexpr unsigned kSourceExpansionSamplesRequired = 6;
-constexpr double kSourceExpansionConsistencyRatio = 0.15;
 } // namespace
 
 SourceTimelineSample SourceProtectedTimeline::observe(
@@ -169,135 +162,16 @@ const char* sourceCadenceObservationName(
     return "unknown";
 }
 
-void SourceProtectionBudgetTracker::observeSource(
-        std::chrono::nanoseconds sourceInterval,
-        SourceCadenceObservation observation) {
-    const double intervalMs =
-        std::chrono::duration<double, std::milli>(sourceInterval).count();
-    if (!(intervalMs > 0.0) || !std::isfinite(intervalMs))
-        return;
-
-    constexpr double kFasterSourceAlpha = 0.25;
-    constexpr double kFasterActiveAlpha = 0.12;
-
-    telemetry_.lastObservation = observation;
-
-    if (!hasBaseline_) {
-        // Only a genuinely direct/source-only interval may establish the
-        // protected cadence. Host-fenced warmup, history maintenance and
-        // generated cycles already contain LSFG work.
-        if (observation != SourceCadenceObservation::SourceOnly) {
-            telemetry_.baselineValid = false;
-            telemetry_.protectedSourceIntervalMs = 0.0;
-            return;
-        }
-        baselineIntervalMs_ = intervalMs;
-        hasBaseline_ = true;
-        slowerSourceCandidateMs_ = 0.0;
-        slowerSourceCandidateSamples_ = 0;
-    } else if (observation == SourceCadenceObservation::SourceOnly) {
-        if (intervalMs <= baselineIntervalMs_) {
-            // Faster clean evidence is safe to adopt promptly.
-            baselineIntervalMs_ +=
-                kFasterSourceAlpha * (intervalMs - baselineIntervalMs_);
-            slowerSourceCandidateMs_ = 0.0;
-            slowerSourceCandidateSamples_ = 0;
-        } else {
-            // A few slow source-only samples can still include a transient
-            // present stall. Require a coherent run before allowing the
-            // protected interval to grow; LSFG-active samples can never enter
-            // this promotion path.
-            const bool candidateConsistent =
-                slowerSourceCandidateSamples_ > 0
-                && slowerSourceCandidateMs_ > 0.0
-                && std::abs(intervalMs - slowerSourceCandidateMs_)
-                    <= slowerSourceCandidateMs_
-                        * kSourceExpansionConsistencyRatio;
-            if (!candidateConsistent) {
-                slowerSourceCandidateMs_ = intervalMs;
-                slowerSourceCandidateSamples_ = 1;
-            } else {
-                ++slowerSourceCandidateSamples_;
-                slowerSourceCandidateMs_ +=
-                    (intervalMs - slowerSourceCandidateMs_)
-                    / static_cast<double>(slowerSourceCandidateSamples_);
-            }
-            if (slowerSourceCandidateSamples_
-                    >= kSourceExpansionSamplesRequired) {
-                baselineIntervalMs_ = slowerSourceCandidateMs_;
-                slowerSourceCandidateMs_ = 0.0;
-                slowerSourceCandidateSamples_ = 0;
-            }
-        }
-    } else {
-        // Generated/history work may only prove that the source is naturally
-        // faster. It may never make the protected cadence slower.
-        slowerSourceCandidateMs_ = 0.0;
-        slowerSourceCandidateSamples_ = 0;
-        if (intervalMs < baselineIntervalMs_) {
-            baselineIntervalMs_ +=
-                kFasterActiveAlpha * (intervalMs - baselineIntervalMs_);
-        }
-    }
-
-    telemetry_.baselineValid = hasBaseline_;
-    telemetry_.protectedSourceIntervalMs = baselineIntervalMs_;
-}
-
-void SourceProtectionBudgetTracker::observeSerializedCopyCost(double copyCostMs) {
-    if (!(copyCostMs >= 0.0) || !std::isfinite(copyCostMs))
-        return;
-
-    constexpr double kPressureRiseAlpha = 0.50;
-    constexpr double kRecoveryAlpha = 0.20;
-    if (!hasCopyCostEstimate_) {
-        serializedCopyReserveMs_ = copyCostMs;
-        hasCopyCostEstimate_ = true;
-    } else {
-        const double alpha = copyCostMs > serializedCopyReserveMs_
-            ? kPressureRiseAlpha
-            : kRecoveryAlpha;
-        serializedCopyReserveMs_ +=
-            alpha * (copyCostMs - serializedCopyReserveMs_);
-    }
-
-    telemetry_.copyCostValid = hasCopyCostEstimate_;
-    telemetry_.serializedCopyReserveMs = serializedCopyReserveMs_;
-}
-
-double SourceProtectionBudgetTracker::clampTimelineBudget(
-        double timelineBudgetMs) const {
-    if (!(timelineBudgetMs > 0.0) || !std::isfinite(timelineBudgetMs))
-        return 0.0;
-
-    double protectedBudgetMs = timelineBudgetMs;
-    if (hasBaseline_)
-        protectedBudgetMs = std::min(protectedBudgetMs, baselineIntervalMs_);
-    if (hasCopyCostEstimate_)
-        protectedBudgetMs -= serializedCopyReserveMs_;
-    return std::max(0.0, protectedBudgetMs);
-}
-
-void SourceProtectionBudgetTracker::reset() {
-    hasBaseline_ = false;
-    hasCopyCostEstimate_ = false;
-    baselineIntervalMs_ = 0.0;
-    serializedCopyReserveMs_ = 0.0;
-    slowerSourceCandidateMs_ = 0.0;
-    slowerSourceCandidateSamples_ = 0;
-    telemetry_ = {};
-}
-
-double sourceOwnedFramegenBatchBudgetMs(
+double framegenBatchBudgetMs(
         double sourceIntervalMs,
         double nominalBatchBudgetMs,
-        bool sourceProtectedExecution) {
+        bool fullSourceIntervalBudget) {
     const bool sourceIntervalValid =
         sourceIntervalMs > 0.0 && std::isfinite(sourceIntervalMs);
     const bool nominalValid =
         nominalBatchBudgetMs > 0.0 && std::isfinite(nominalBatchBudgetMs);
 
-    if (sourceProtectedExecution && sourceIntervalValid)
+    if (fullSourceIntervalBudget && sourceIntervalValid)
         return sourceIntervalMs;
     return nominalValid ? nominalBatchBudgetMs : 0.0;
 }
@@ -515,18 +389,18 @@ std::size_t DeadlineAdmissionPredictor::safeGenerationHint(
 
 std::size_t DeadlineAdmissionPredictor::safeBatchGenerationHint(
         std::size_t maxGenerationCount,
-        double sourceProtectionBudgetMs) const {
+        double batchBudgetMs) const {
     if (!hasEstimate_
             || maxGenerationCount == 0
-            || !(sourceProtectionBudgetMs > 0.0)
-            || !std::isfinite(sourceProtectionBudgetMs)) {
+            || !(batchBudgetMs > 0.0)
+            || !std::isfinite(batchBudgetMs)) {
         return 0;
     }
 
     for (std::size_t candidate = maxGenerationCount;
             candidate > 0; --candidate) {
         const auto decision = predict(
-            candidate, sourceProtectionBudgetMs);
+            candidate, batchBudgetMs);
         if (decision.valid && decision.wouldAdmit)
             return candidate;
     }
@@ -1227,25 +1101,7 @@ void AdaptiveFrameScheduler::setGenerationFirst(bool enabled) {
         return;
 
     costLimit_ = maxGeneratedFrames_;
-    sourceProtectionBaselineValid_ = false;
-    sourceProtectionBaselineSeconds_ = 0.0;
-    sourceDegradationSamples_ = 0;
-    sourceProtectionHoldUntilSeconds_ = 0.0;
     resetUnmetDemand();
-}
-
-void AdaptiveFrameScheduler::setSourceProtectionBaseline(
-        double intervalMs, bool valid) {
-    sourceProtectionBaselineValid_ =
-        !generationFirst_
-        && valid && intervalMs > 0.0 && std::isfinite(intervalMs);
-    sourceProtectionBaselineSeconds_ = sourceProtectionBaselineValid_
-        ? intervalMs / 1000.0
-        : 0.0;
-    if (!sourceProtectionBaselineValid_) {
-        sourceDegradationSamples_ = 0;
-        sourceProtectionHoldUntilSeconds_ = 0.0;
-    }
 }
 
 std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval) {
@@ -1317,7 +1173,7 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
         telemetry_.configWarmStart = true;
     }
 
-    updateCostLimit(wantedGenerated, intervalSeconds);
+    updateCostLimit(wantedGenerated);
     telemetry_.costLimit = costLimit_;
 
     // Drive synthetic opportunities from elapsed source time rather than
@@ -1458,7 +1314,7 @@ void AdaptiveFrameScheduler::updateSourceRate(double intervalSeconds) {
 }
 
 void AdaptiveFrameScheduler::updateCostLimit(
-        double wantedGeneratedFrames, double intervalSeconds) {
+        double wantedGeneratedFrames) {
     if (maxGeneratedFrames_ == 0) {
         costLimit_ = 0;
         resetUnmetDemand();
@@ -1467,8 +1323,6 @@ void AdaptiveFrameScheduler::updateCostLimit(
 
     if (generationFirst_) {
         costLimit_ = maxGeneratedFrames_;
-        sourceDegradationSamples_ = 0;
-        sourceProtectionHoldUntilSeconds_ = 0.0;
         resetUnmetDemand();
         return;
     }
@@ -1476,49 +1330,6 @@ void AdaptiveFrameScheduler::updateCostLimit(
     if (costLimit_ == 0)
         costLimit_ = 1;
     costLimit_ = std::min(costLimit_, maxGeneratedFrames_);
-
-    if (sourceProtectionBaselineValid_
-            && sourceProtectionBaselineSeconds_ > 0.0
-            && intervalSeconds > 0.0) {
-        const double degradationRatio =
-            intervalSeconds / sourceProtectionBaselineSeconds_;
-        if (degradationRatio >= kProtectedSourceSevereRatio) {
-            if (costLimit_ > 1) {
-                costLimit_ = 1;
-                telemetry_.costBackedOff = true;
-            }
-            sourceDegradationSamples_ = 0;
-            sourceProtectionHoldUntilSeconds_ = std::max(
-                sourceProtectionHoldUntilSeconds_,
-                observedTimeSeconds_ + kProtectedSourceHoldSeconds);
-            resetUnmetDemand();
-            return;
-        }
-        if (degradationRatio >= kProtectedSourceModerateRatio) {
-            ++sourceDegradationSamples_;
-            sourceProtectionHoldUntilSeconds_ = std::max(
-                sourceProtectionHoldUntilSeconds_,
-                observedTimeSeconds_ + kProtectedSourceHoldSeconds);
-            if (sourceDegradationSamples_
-                    >= kProtectedSourceModerateSamples
-                    && costLimit_ > 1) {
-                --costLimit_;
-                telemetry_.costBackedOff = true;
-                sourceDegradationSamples_ = 0;
-            }
-            resetUnmetDemand();
-            return;
-        }
-        if (degradationRatio <= kProtectedSourceRecoveryRatio)
-            sourceDegradationSamples_ = 0;
-
-        if (observedTimeSeconds_ < sourceProtectionHoldUntilSeconds_) {
-            resetUnmetDemand();
-            return;
-        }
-    } else {
-        sourceDegradationSamples_ = 0;
-    }
 
     if (costLimit_ >= maxGeneratedFrames_) {
         resetUnmetDemand();
@@ -1570,10 +1381,6 @@ void AdaptiveFrameScheduler::resetRuntimeState() {
     costLimit_ = maxGeneratedFrames_ == 0
         ? 0
         : (generationFirst_ ? maxGeneratedFrames_ : 1);
-    sourceProtectionBaselineValid_ = false;
-    sourceProtectionBaselineSeconds_ = 0.0;
-    sourceDegradationSamples_ = 0;
-    sourceProtectionHoldUntilSeconds_ = 0.0;
     resetUnmetDemand();
     telemetry_ = {};
     telemetry_.costLimit = costLimit_;
