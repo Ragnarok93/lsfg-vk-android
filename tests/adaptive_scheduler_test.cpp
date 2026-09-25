@@ -986,6 +986,20 @@ int main() {
         blockingPredictor.observeBlockingCompletion(1, 24.0);
         const auto recoveryDecision = blockingPredictor.predict(1, 80.0);
         assert(recoveryDecision.predictedTotalLsfgMs > 60.0);
+
+        // Once generated work is suppressed, no new completion samples exist.
+        // Clean protected source-only cycles must therefore relax only the
+        // queue-residency penalty toward the last measured GPU cost, never
+        // below that cost, until a cautious probe can become admissible again.
+        const auto stillBlocked = blockingPredictor.predict(1, 37.0);
+        assert(!stillBlocked.wouldAdmit);
+        for (int i = 0; i < 16; ++i)
+            blockingPredictor.observeSourceOnlyRecovery();
+        const auto recoveredProbe = blockingPredictor.predict(1, 37.0);
+        assert(recoveredProbe.valid);
+        assert(recoveredProbe.predictedTotalLsfgMs >= 23.9);
+        assert(recoveredProbe.predictedTotalLsfgMs < 33.0);
+        assert(recoveredProbe.wouldAdmit);
     }
 
     {
