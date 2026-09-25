@@ -3277,6 +3277,26 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (sourceProtectionTelemetry.baselineValid ? 1 : 0)
                       << " source_protection_copy_cost_valid="
                       << (sourceProtectionTelemetry.copyCostValid ? 1 : 0)
+                      << " adreno_source_protection_state="
+                      << AdrenoSourceProtectionController::phaseName(
+                          this->adrenoSourceProtection_.telemetry().phase)
+                      << " adreno_source_protection_backoff="
+                      << AdrenoSourceProtectionController::backoffReasonName(
+                          this->adrenoSourceProtection_.telemetry().backoffReason)
+                      << " adreno_source_only_recovery_frames="
+                      << this->adrenoSourceProtection_.telemetry().sourceOnlyRecoveryFrames
+                      << " adreno_reprime_requests="
+                      << this->adrenoSourceProtection_.telemetry().reprimeRequests
+                      << " adreno_reprimes_executed="
+                      << this->adrenoSourceProtection_.telemetry().reprimesExecuted
+                      << " adreno_generation_probes="
+                      << this->adrenoSourceProtection_.telemetry().generationProbes
+                      << " adreno_probe_successes="
+                      << this->adrenoSourceProtection_.telemetry().probeSuccesses
+                      << " adreno_probe_failures="
+                      << this->adrenoSourceProtection_.telemetry().probeFailures
+                      << " adreno_source_only_bypasses="
+                      << this->adrenoSourceProtection_.telemetry().sourceOnlyBypasses
                       << " source_deadline_error_avg_ms=" << sourceDeadlineErrorAvgMs
                       << " source_deadline_error_max_ms="
                       << metrics.windowSourceDeadlineErrorMaxMs
@@ -3749,7 +3769,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     << this->adaptiveFlowRetainedTotalLsfgMs_
                     << " source_budget_ms="
                     << this->adaptiveFlowRetainedBudgetMs_
-                    << " reprime=1\n";
+                    << " reprime=deferred" << " protection_state="
+                    << AdrenoSourceProtectionController::phaseName(
+                        this->adrenoSourceProtection_.telemetry().phase)
+                    << "\n";
             }
             return finishSourcePresent(
                 bypassResult, "game-render-overload-bypass");
@@ -3811,7 +3834,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     << (sourceProtectionBaselineValid ? 1 : 0)
                     << " fixed_limit="
                     << this->fixedSourceCadenceGovernor_.telemetry().generationLimit
-                    << " reprime=1\n";
+                    << " reprime=deferred" << " protection_state="
+                    << AdrenoSourceProtectionController::phaseName(
+                        this->adrenoSourceProtection_.telemetry().phase)
+                    << "\n";
             }
             return finishSourcePresent(
                 bypassResult, "game-render-fixed-source-protection");
@@ -3877,7 +3903,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     << "lsfg-vk: runtime stage=adreno-admission-source-bypass"
                     << " planned=" << plannedGeneratedFrameCount
                     << " admitted=" << generatedFrameCount
-                    << " reprime=1\n";
+                    << " reprime=deferred" << " protection_state="
+                    << AdrenoSourceProtectionController::phaseName(
+                        this->adrenoSourceProtection_.telemetry().phase)
+                    << "\n";
             }
             return finishSourcePresent(
                 bypassResult, "game-render-admission-bypass");
@@ -5835,6 +5864,8 @@ void LsContext::advanceAdaptiveFlowTimingEpoch() {
 void LsContext::resetAdaptiveSourceEpoch(
         bool resetScheduler,
         SourceHistoryInvalidationReason reason) {
+    if (this->conservativeCrossDeviceSync_)
+        this->adrenoSourceProtection_.reset();
     // Any source-timeline epoch change invalidates synthetic pixels produced
     // against the previous cadence/history. Keep the private-device batch
     // release alive until it retires so shared AHB reuse remains ordered.
@@ -5902,6 +5933,8 @@ void LsContext::resetAdaptiveSourceEpoch(
 }
 
 void LsContext::enterSourceOnlyBypass() {
+    if (this->conservativeCrossDeviceSync_)
+        this->adrenoSourceProtection_.reset();
     // Explicit Off/source-only transitions invalidate deferred synthetic output,
     // but never discard the private-device batch release itself. The latter must
     // still retire before either shared input AHB can be reused.
