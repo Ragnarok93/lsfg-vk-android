@@ -113,7 +113,7 @@ inline const char* compatibilityVendorName(
 
 inline const char* crossDeviceSyncPolicyName(bool conservative) noexcept {
     return conservative
-        ? "adreno-source-protected-host-completion"
+        ? "adreno-generation-first-host-completion"
         : "capability-async";
 }
 
