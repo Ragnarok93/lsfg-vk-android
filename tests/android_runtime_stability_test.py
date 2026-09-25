@@ -289,6 +289,28 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("VK_ERROR_OUT_OF_DATE_KHR", present)
 
 
+
+    def test_swapchain_config_transaction_is_revalidated_at_first_present(self) -> None:
+        """A config change after construction but before publication must force one coherent recreation."""
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        self.assertIn("configurationTransactionValidated", hooks)
+
+        present_start = hooks.index("VkResult myvkQueuePresentKHR")
+        present = hooks[present_start:]
+        self.assertIn("const auto presentConfigSnapshot = Config::snapshotTransaction()", present)
+        self.assertIn(
+            "presentConfigSnapshot.revision != state->configurationRevision",
+            present,
+        )
+        self.assertIn(
+            "presentConfigSnapshot.timestamp != state->configurationTimestamp",
+            present,
+        )
+        self.assertIn("state->configurationTransactionValidated = true", present)
+        self.assertIn("state->configurationRecreatePending = true", present)
+        self.assertIn("VK_ERROR_OUT_OF_DATE_KHR", present)
+
+
     def test_present_hook_debounces_fs_and_reuses_wait_storage(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         self.assertIn("Clock::time_point nextConfigPoll", source)
