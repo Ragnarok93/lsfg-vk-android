@@ -32,7 +32,10 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         first_copy = adreno.index("copySwapchainToExternalAhb", escape)
         escape_block = adreno[escape:first_copy]
         self.assertIn("SourceCadenceObservation::SourceOnly", escape_block)
-        self.assertIn("sourceHistoryWarmupRemaining_ = 1", escape_block)
+        self.assertIn("sourceHistoryWarmupRemaining_ = 0", escape_block)
+        self.assertIn("requiresSourceHistoryWarmup_ = false", escape_block)
+        self.assertIn("AdrenoSourceProtectionBackoffReason::AdmissionRejected", escape_block)
+        self.assertIn("reprime=deferred", escape_block)
         self.assertIn("game-render-admission-bypass", escape_block)
         self.assertNotIn("presentContextWithCount(", escape_block)
 
