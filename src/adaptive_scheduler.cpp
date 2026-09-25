@@ -312,6 +312,16 @@ void DeadlineAdmissionPredictor::observe(
         conservativeBlend(estimate.mipmapsMs, observation.mipmapsMs);
     estimate.opticalFlowMs =
         conservativeBlend(estimate.opticalFlowMs, observation.opticalFlowMs);
+    const bool hadGpuEstimate =
+        std::isfinite(estimate.gpuTotalLsfgMs)
+        && estimate.gpuTotalLsfgMs > 0.0;
+    if (!hadGpuEstimate || observation.totalLsfgMs >= estimate.gpuTotalLsfgMs) {
+        estimate.gpuTotalLsfgMs = observation.totalLsfgMs;
+    } else {
+        estimate.gpuTotalLsfgMs +=
+            kRecoveryEwmaAlpha
+            * (observation.totalLsfgMs - estimate.gpuTotalLsfgMs);
+    }
     estimate.totalLsfgMs =
         conservativeBlend(estimate.totalLsfgMs, observation.totalLsfgMs);
     estimate.valid = true;
@@ -339,6 +349,24 @@ void DeadlineAdmissionPredictor::observeBlockingCompletion(
     }
     estimate.valid = true;
     hasEstimate_ = true;
+}
+
+void DeadlineAdmissionPredictor::observeSourceOnlyRecovery() {
+    for (auto& estimate : batchEstimates_) {
+        if (!estimate.valid
+                || !std::isfinite(estimate.gpuTotalLsfgMs)
+                || !(estimate.gpuTotalLsfgMs > 0.0)
+                || !std::isfinite(estimate.totalLsfgMs)
+                || estimate.totalLsfgMs <= estimate.gpuTotalLsfgMs) {
+            continue;
+        }
+
+        estimate.totalLsfgMs +=
+            kRecoveryEwmaAlpha
+            * (estimate.gpuTotalLsfgMs - estimate.totalLsfgMs);
+        estimate.totalLsfgMs = std::max(
+            estimate.totalLsfgMs, estimate.gpuTotalLsfgMs);
+    }
 }
 
 void DeadlineAdmissionPredictor::observeDeliveryMiss(double latenessMs) {
