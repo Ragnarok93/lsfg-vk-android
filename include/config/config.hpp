@@ -47,6 +47,16 @@ namespace Config {
         std::chrono::time_point<std::chrono::file_clock> timestamp;
     };
 
+    /// Immutable-by-value configuration identity for one swapchain/context transaction.
+    struct ConfigurationSnapshot {
+        Configuration configuration;
+        uint64_t revision{0};
+        std::chrono::time_point<std::chrono::file_clock> timestamp;
+    };
+
+    /// Return the active configuration together with its publication identity.
+    ConfigurationSnapshot snapshotTransaction();
+
     /// Return a thread-safe snapshot of the active configuration.
     Configuration snapshot();
 

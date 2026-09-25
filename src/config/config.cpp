@@ -40,6 +40,16 @@ namespace {
     // race while installing the default configuration.
     std::mutex configurationUpdateMutex;
     Configuration activeConfiguration{};
+    uint64_t activeConfigurationRevision{0};
+}
+
+ConfigurationSnapshot Config::snapshotTransaction() {
+    std::lock_guard lock(configurationMutex);
+    return ConfigurationSnapshot{
+        .configuration = activeConfiguration,
+        .revision = activeConfigurationRevision,
+        .timestamp = activeConfiguration.timestamp,
+    };
 }
 
 Configuration Config::snapshot() {
@@ -50,6 +60,9 @@ Configuration Config::snapshot() {
 void Config::setActive(Configuration configuration) {
     std::lock_guard lock(configurationMutex);
     activeConfiguration = std::move(configuration);
+    ++activeConfigurationRevision;
+    if (activeConfigurationRevision == 0)
+        ++activeConfigurationRevision;
 }
 
 namespace {

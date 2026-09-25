@@ -411,6 +411,9 @@ namespace {
         VkPresentModeKHR present{VK_PRESENT_MODE_FIFO_KHR};
         VkPresentModeKHR configuredPresent{VK_PRESENT_MODE_FIFO_KHR};
         std::shared_ptr<LsContext> context;
+        uint64_t configurationRevision{0};
+        std::chrono::time_point<std::chrono::file_clock> configurationTimestamp{};
+        bool configurationRecreatePending{false};
         // Serializes a present against swapchain retirement and protects the
         // per-swapchain runtime counters. The global map lock is never held
         // while frame generation or downstream Vulkan calls run.
@@ -823,7 +826,25 @@ namespace {
             return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
         }
         Utils::resetLimitN("swapMap");
-        const auto activeConf = Config::snapshot();
+        const auto configSnapshot = Config::snapshotTransaction();
+        const auto& activeConf = configSnapshot.configuration;
+
+        const auto finalizeConfigurationTransaction =
+            [&](SwapchainState& state) {
+                state.configurationRevision = configSnapshot.revision;
+                state.configurationTimestamp = configSnapshot.timestamp;
+                const auto latestSnapshot = Config::snapshotTransaction();
+                state.configurationRecreatePending =
+                    latestSnapshot.revision != configSnapshot.revision
+                    || configurationFileChanged(activeConf);
+                std::cerr << "lsfg-vk: init stage=config-transaction"
+                          << " config_revision=" << configSnapshot.revision
+                          << " config_timestamp_ticks="
+                          << configSnapshot.timestamp.time_since_epoch().count()
+                          << " changed_during_create="
+                          << (state.configurationRecreatePending ? 1 : 0)
+                          << "\n";
+            };
 
         const auto createPassThrough = [&](const char* reason) -> VkResult {
             const auto res = Layer::ovkCreateSwapchainKHR(
@@ -835,6 +856,7 @@ namespace {
                     auto state = std::make_shared<SwapchainState>();
                     state->device = device;
                     state->deviceInfo = deviceInfo;
+                    finalizeConfigurationTransaction(*state);
                     publishSwapchainState(*pSwapchain, std::move(state));
                 } catch (const std::exception& e) {
                     Utils::logLimitN("swapMap", 5,
@@ -881,6 +903,7 @@ namespace {
                 state->deviceInfo = deviceInfo;
                 state->present = sourceOnlyCreateInfo.presentMode;
                 state->configuredPresent = configuredPresentMode;
+                finalizeConfigurationTransaction(*state);
                 publishSwapchainState(*pSwapchain, std::move(state));
             } catch (const std::exception& e) {
                 Utils::logLimitN("swapMap", 5,
@@ -1058,7 +1081,9 @@ namespace {
             state->present = createInfo.presentMode;
             state->configuredPresent = configuredPresentMode;
             state->context = std::make_shared<LsContext>(
-                *deviceInfo, *pSwapchain, pCreateInfo->imageExtent, swapchainImages);
+                *deviceInfo, *pSwapchain, pCreateInfo->imageExtent, swapchainImages,
+                configSnapshot);
+            finalizeConfigurationTransaction(*state);
             if (pCreateInfo->oldSwapchain)
                 retireSwapchainState(pCreateInfo->oldSwapchain);
             publishSwapchainState(*pSwapchain, std::move(state));
@@ -1150,6 +1175,8 @@ namespace {
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
 
         auto conf = Config::snapshot();
+        const bool configurationRecreatePending =
+            state->configurationRecreatePending;
 #ifdef __ANDROID__
         auto& runtimeStats = state->runtimeStats;
         const auto configPollNow = RuntimeOutputStats::Clock::now();
@@ -1170,8 +1197,9 @@ namespace {
                     Config::updateConfig(configFile);
                     Config::setActive(Config::getConfig(Utils::getProcessName()));
                     conf = Config::snapshot();
-                    recreateSwapchain = requiresSwapchainRecreation(
-                        previousConf, conf);
+                    recreateSwapchain =
+                        configurationRecreatePending
+                        || requiresSwapchainRecreation(previousConf, conf);
                     std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
                               << conf.multiplier
                               << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
@@ -1216,6 +1244,16 @@ namespace {
                 Layer::ovkQueuePresentKHR(queue, pPresentInfo);
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
+        }
+
+        if (configurationRecreatePending) {
+            std::cerr << "lsfg-vk: runtime stage=config-transaction-recreate"
+                      << " config_revision=" << state->configurationRevision
+                      << " config_timestamp_ticks="
+                      << state->configurationTimestamp.time_since_epoch().count()
+                      << "\n";
+            Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+            return VK_ERROR_OUT_OF_DATE_KHR;
         }
 
         if (!state->context) {

@@ -24,6 +24,10 @@
 #include <unordered_set>
 #include <vector>
 
+namespace Config {
+    struct ConfigurationSnapshot;
+}
+
 #ifdef __ANDROID__
 enum class SourceHistoryInvalidationReason {
     None,
@@ -102,7 +106,8 @@ public:
     /// @throws LSFG::vulkan_error if any Vulkan call fails.
     ///
     LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
-        VkExtent2D extent, const std::vector<VkImage>& swapchainImages);
+        VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
+        const Config::ConfigurationSnapshot& configSnapshot);
 
     ///
     /// Custom present logic.

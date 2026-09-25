@@ -32,7 +32,6 @@
 #include <memory>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <array>
 #include <cmath>
 #include <atomic>
@@ -587,42 +586,18 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
 } // namespace
 
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
-        VkExtent2D extent, const std::vector<VkImage>& swapchainImages)
+        VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
+        const Config::ConfigurationSnapshot& configSnapshot)
         : swapchain(swapchain), swapchainImages(swapchainImages),
           presentWaitRetirements_(swapchainImages.size()),
           extent(extent), device_(info.device), queue_(info.queue.second) {
-    // get updated configuration
-    auto conf = Config::snapshot();
-    if (!conf.config_file.empty()
-            && (
-                    !std::filesystem::exists(conf.config_file)
-                  || conf.timestamp != std::filesystem::last_write_time(conf.config_file)
-            )) {
-        std::cerr << "lsfg-vk: Rereading configuration, as it is no longer valid.\n";
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const auto& conf = configSnapshot.configuration;
+    std::cerr << "lsfg-vk: init stage=ls-context-config"
+              << " config_revision=" << configSnapshot.revision
+              << " config_timestamp_ticks="
+              << configSnapshot.timestamp.time_since_epoch().count()
+              << "\n";
 
-        // reread configuration
-        const std::string file = Utils::getConfigFile();
-        const auto name = Utils::getProcessName();
-        try {
-            Config::updateConfig(file);
-            Config::setActive(Config::getConfig(name));
-            conf = Config::snapshot();
-        } catch (const std::exception& e) {
-            std::cerr << "lsfg-vk: Failed to update configuration, continuing using old:\n";
-            std::cerr << "- " << e.what() << '\n';
-        }
-
-        LSFG_3_1P::finalize();
-        LSFG_3_1::finalize();
-
-        std::cerr << "lsfg-vk: configuration reloaded target=" << name.second
-                  << " multiplier=" << conf.multiplier
-                  << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
-                  << " target_fps=" << conf.fpsLimit << '\n';
-
-        if (conf.multiplier <= 1 && !conf.targeted) return;
-    }
     const size_t runtimeMultiplier = residentCapacityMultiplier(conf);
 
     // we could take the format from the swapchain,
