@@ -62,7 +62,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn('" deadline_semantics="', compatibility_log)
         self.assertIn('"source-protection"', compatibility_log)
 
-    def test_adreno_source_protection_governs_fixed_and_adaptive(self) -> None:
+    def test_adreno_generation_first_keeps_source_protection_as_telemetry_only(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         policy_start = source.index("const bool sourceProtectionBatchAdmission")
@@ -73,42 +73,33 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             "\n        this->conservativeCrossDeviceSync_;",
             policy,
         )
-        self.assertNotIn("deferredAdrenoCompletionEnabled_", policy)
+        self.assertIn(
+            "const bool generationFirstAdreno = this->conservativeCrossDeviceSync_;",
+            policy,
+        )
+        self.assertIn(
+            'generationFirstAdreno\n'
+            '            ? "generation-first"',
+            policy,
+        )
 
+        # The historical governors/predictors remain available for diagnostics
+        # and non-Adreno paths, but every mutating admission gate is explicitly
+        # disabled when generation-first Adreno is active.
         admission_start = source.index("// Active deadline admission")
         admission_end = source.index(
             "const auto& outputCadenceForPresentation", admission_start
         )
         admission = source[admission_start:admission_end]
-        self.assertIn("if (conf.adaptiveFramegen", admission)
-        self.assertNotIn(
-            "conf.adaptiveFramegen || sourceProtectionBatchAdmission",
-            admission,
-        )
-        self.assertNotIn("fixedAdrenoHistoricalGeneration", source)
+        self.assertIn("&& !generationFirstAdreno", admission)
+        self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
         self.assertIn(
-            "fixedSourceCadenceGovernor_.plan(",
-            source,
-            "Protected Adreno Fixed mode must use the source-cadence governor "
-            "instead of blindly dispatching multiplier-minus-one work.",
-        )
-        self.assertIn(
-            "conservativeFixedSourceProtectionGap",
-            source,
-            "When Fixed backs off or is rebuilding a clean baseline, Adreno "
-            "must present the real source directly rather than running a "
-            "zero-count private framegen maintenance pass.",
-        )
-        self.assertIn("sourceBudgetMs", admission)
-        self.assertIn(
-            "if (sourceProtectionBatchAdmission)",
-            admission,
-        )
-        self.assertIn(
-            "deadlineSemantics ="
-            "\n        sourceProtectionBatchAdmission",
+            "generationFirstAdreno\n"
+            "            ? requestedFixedGeneratedFrameCount",
             source,
         )
+        self.assertIn("conservativeFixedSourceProtectionGap", source)
+        self.assertIn("&& !generationFirstAdreno", source)
 
     def test_adreno_generation_first_never_uses_resource_pressure_as_a_generation_veto(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
