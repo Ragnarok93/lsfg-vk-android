@@ -537,10 +537,10 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         self.assertIn("runtimeWaitTimeoutNs()", generated)
         self.assertIn("waitContext", generated)
 
-    def test_runtime_policy_label_reports_source_protection_not_input_transport(self) -> None:
+    def test_runtime_policy_label_reports_generation_first_host_completion(self) -> None:
         policy = (ROOT / "include/android_sync_policy.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn("adreno-source-protected-host-completion", policy)
+        self.assertIn("adreno-generation-first-host-completion", policy)
         self.assertNotIn("opaque-fd-input-host-completion-adreno", policy)
         self.assertIn("capability-async", policy)
         self.assertIn("handoff=", source)
