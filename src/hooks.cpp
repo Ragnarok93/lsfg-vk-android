@@ -1197,9 +1197,10 @@ namespace {
                     Config::updateConfig(configFile);
                     Config::setActive(Config::getConfig(Utils::getProcessName()));
                     conf = Config::snapshot();
-                    recreateSwapchain =
-                        configurationRecreatePending
-                        || requiresSwapchainRecreation(previousConf, conf);
+                    recreateSwapchain = requiresSwapchainRecreation(
+                        previousConf, conf);
+                    if (configurationRecreatePending)
+                        recreateSwapchain = true;
                     std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
                               << conf.multiplier
                               << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
