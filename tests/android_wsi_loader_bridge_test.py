@@ -193,28 +193,32 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertNotIn("VkSemaphore lastPostCopySem =", android)
         self.assertIn("runtime stage=present-sync-ready", android)
 
-    def test_runtime_disable_keeps_targeted_context_resident_and_presents_natively(self) -> None:
+    def test_runtime_disable_keeps_layer_resident_but_releases_lsfg_context(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
+        self.assertIn("generationActivityChanged", hooks)
         self.assertIn(
-            "activeConf.multiplier <= 1 && !activeConf.targeted",
+            "(previous.multiplier > 1) != (next.multiplier > 1)",
             hooks,
         )
-        self.assertIn("init stage=swapchain-pass-through reason=", hooks)
-        self.assertIn("publishSwapchainState(*pSwapchain", hooks)
-        self.assertNotIn("generationActivityChanged", hooks)
-        self.assertIn("if (conf.targeted && conf.multiplier <= 1)", hooks)
-        self.assertIn("state->context->enterSourceOnlyBypass()", hooks)
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", hooks)
-
-        create_start = hooks.index("VkResult myvkCreateSwapchainKHR")
-        queue_start = hooks.index("VkResult myvkQueuePresentKHR", create_start)
-        create = hooks[create_start:queue_start]
-        disabled = create.index(
-            "activeConf.multiplier <= 1 && !activeConf.targeted"
+        self.assertIn("const auto createSourceOnly", hooks)
+        self.assertIn(
+            "if (activeConf.targeted && activeConf.multiplier <= 1)",
+            hooks,
         )
-        capacity = create.index("residentCapacityMultiplier(activeConf)")
-        self.assertLess(disabled, capacity)
+        self.assertIn('return createSourceOnly("generation-off")', hooks)
+        self.assertIn("publishSwapchainState(*pSwapchain", hooks)
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", hooks)
+        self.assertNotIn("state->context->enterSourceOnlyBypass()", hooks)
+
+        create_start = hooks.index("const auto createSourceOnly")
+        create_end = hooks.index("#ifdef __ANDROID__", create_start)
+        source_only = hooks[create_start:create_end]
+        self.assertIn("choosePresentMode(", source_only)
+        self.assertIn("sourceOnlyCreateInfo.presentMode", source_only)
+        self.assertNotIn("residentCapacityMultiplier", source_only)
+        self.assertNotIn("requiredTransferUsage", source_only)
+        self.assertNotIn("LsContext", source_only)
 
         reload_pos = hooks.index("init stage=config-reloaded multiplier=")
         context_lookup_pos = hooks.index("if (!state->context)")
