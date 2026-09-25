@@ -671,30 +671,42 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("adaptiveFramegen", helper)
         self.assertNotIn("fpsLimit", helper)
 
-    def test_gamenative_off_on_stays_inside_resident_target_context(self) -> None:
-        """2x/3x/4x and Off share resident capacity; Off uses native source-only present."""
+    def test_gamenative_off_recreates_true_source_only_swapchain(self) -> None:
+        """Off keeps the layer hot-loadable but removes the LSFG swapchain/context contract."""
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
 
         helper_start = hooks.index("bool requiresSwapchainRecreation")
         helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
         helper = hooks[helper_start:helper_end]
-        self.assertIn("const bool residentTarget = previous.targeted && next.targeted", helper)
-        self.assertNotIn("generationActivityChanged", helper)
-        self.assertNotIn("(previous.multiplier > 1) != (next.multiplier > 1)", helper)
-        self.assertIn("next.multiplier > residentCapacityMultiplier(previous)", helper)
+        self.assertIn("generationActivityChanged", helper)
+        self.assertIn(
+            "(previous.multiplier > 1) != (next.multiplier > 1)",
+            helper,
+        )
 
-        self.assertIn("kAndroidResidentMaxMultiplier = 4", hooks)
-        self.assertIn("residentMultiplier", hooks)
-        self.assertIn("kAndroidResidentMaxMultiplier = 4", context)
-        self.assertIn("size_t residentCapacityMultiplier", context)
-        self.assertIn("const size_t runtimeMultiplier = residentCapacityMultiplier(conf)", context)
-        self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
-        self.assertIn("if (conf.targeted && conf.multiplier <= 1)", hooks)
-        self.assertIn("state->context->enterSourceOnlyBypass()", hooks)
+        create_start = hooks.index("const auto createSourceOnly")
+        create_end = hooks.index("#ifdef __ANDROID__", create_start)
+        source_only_create = hooks[create_start:create_end]
+        self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only_create)
+        self.assertIn("choosePresentMode(", source_only_create)
+        self.assertIn("activeConf.e_present", source_only_create)
+        self.assertNotIn("residentCapacityMultiplier", source_only_create)
+        self.assertNotIn("requiredTransferUsage", source_only_create)
+        self.assertNotIn("LsContext", source_only_create)
+        self.assertNotIn("minImageCount =", source_only_create)
 
-        self.assertIn("runtime stage=config-reload-soft-toggle", hooks)
-        self.assertIn("recreateSwapchain=0", hooks)
+        self.assertIn(
+            "if (activeConf.targeted && activeConf.multiplier <= 1)",
+            hooks,
+        )
+        self.assertIn('return createSourceOnly("generation-off")', hooks)
+        self.assertNotIn("state->context->enterSourceOnlyBypass()", hooks)
+
+        # The target remains loader-resident for hot enable even though the Off
+        # swapchain itself is truly native/source-only.
+        self.assertIn(".targeted = true", config)
+        self.assertIn('publishRuntimeState(activeConf.config_file, "source_only"', hooks)
 
     def test_syncfd_source_export_failure_recreates_temporal_context(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
