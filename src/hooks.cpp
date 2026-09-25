@@ -909,6 +909,8 @@ namespace {
 #ifdef __ANDROID__
         if (activeConf.targeted && activeConf.multiplier <= 1)
             return createSourceOnly("generation-off");
+        if (activeConf.multiplier <= 1 && !activeConf.targeted)
+            return createPassThrough("disabled");
 #else
         if (activeConf.multiplier <= 1 && !activeConf.targeted)
             return createPassThrough("disabled");
