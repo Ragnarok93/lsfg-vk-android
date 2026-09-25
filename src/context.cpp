@@ -3398,6 +3398,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 SourceHistoryInvalidationReason::OverloadBypass;
             this->deadlineBatchDecision_ = {};
             updateAdaptiveFlowGovernor();
+            if (conf.adaptiveFramegen)
+                this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
             metrics.windowAdaptiveZeroGenerationCycles++;
             metrics.totalAdaptiveZeroGenerationCycles++;
 
@@ -3523,6 +3525,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 SourceHistoryInvalidationReason::AdmissionBypass;
             this->deadlineBatchDecision_ = {};
             updateAdaptiveFlowGovernor();
+            this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
             metrics.windowAdaptiveZeroGenerationCycles++;
             metrics.totalAdaptiveZeroGenerationCycles++;
 
