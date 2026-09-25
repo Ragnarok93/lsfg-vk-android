@@ -1912,6 +1912,26 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
+    if (this->conservativeCrossDeviceSync_
+            && this->adrenoSourceProtection_.protectedSourceOnly()) {
+        const bool protectedBaselineValid =
+            this->sourceProtectionBudgetTracker_.telemetry().baselineValid;
+        const bool recoveryEvidence =
+            protectedBaselineValid
+            && plannedGeneratedFrameCount > 0
+            && (conf.adaptiveFramegen
+                ? (safeGenerationHintValid && safeGenerationHint > 0)
+                : (this->fixedSourceCadenceGovernor_.telemetry().baselineValid
+                    && this->fixedSourceCadenceGovernor_.telemetry().generationLimit > 0));
+        if (this->adrenoSourceProtection_.requestReprimeIfRecovered(
+                recoveryEvidence)) {
+            this->sourceHistoryWarmupRemaining_ = 1;
+            this->requiresSourceHistoryWarmup_ = true;
+            this->lastHistoryReprimeReason_ =
+                SourceHistoryInvalidationReason::AdmissionBypass;
+        }
+    }
+
     const uint64_t sourceArrivalTimeNs = monotonicNowNs();
     // Scheduler discontinuities are cadence-relative. Do not reinterpret a
     // legitimately slow source as a timing failure through an absolute FPS
@@ -2274,6 +2294,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             / static_cast<uint64_t>(timingGenerationCount + 1);
     } else {
         this->adaptivePresentPeriodNs_ = 0;
+    }
+
+    if (this->conservativeCrossDeviceSync_) {
+        if (this->adrenoSourceProtection_.protectedSourceOnly()) {
+            generatedFrameCount = 0;
+            interpolationGenerationCount = 0;
+        } else if (this->adrenoSourceProtection_.generationTrial()
+                && generatedFrameCount > 1) {
+            // Re-entry probes the minimum useful synthetic cost. A successful
+            // source-safe trial may return the ordinary governors to control on
+            // the next source interval.
+            generatedFrameCount = 1;
+            interpolationGenerationCount = 1;
+        }
     }
 
     enum class AndroidFrameCycleMode {
@@ -3592,6 +3626,64 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // source ownership, cross-device completion, WSI acquisition, queue choice,
     // or generated-before-source ordering inside it.
     if (this->conservativeCrossDeviceSync_) {
+        // A generation trial that cannot be admitted returns directly to
+        // protected source-only mode; it must not fall through into a zero-count
+        // host-fence history cycle.
+        if (this->adrenoSourceProtection_.generationTrial()
+                && generatedFrameCount == 0) {
+            this->adrenoSourceProtection_.enterProtection(
+                AdrenoSourceProtectionBackoffReason::TrialFailed);
+            this->sourceHistoryWarmupRemaining_ = 0;
+            this->requiresSourceHistoryWarmup_ = false;
+        }
+
+        if (this->adrenoSourceProtection_.protectedSourceOnly()) {
+            this->lastDispatchedGeneratedFrameCount_ = 0;
+            this->lastSourceCadenceObservation_ =
+                SourceCadenceObservation::SourceOnly;
+            this->lastGeneratedFrameCount_ = 0;
+            this->previousSourceCopySignalValid_ = false;
+            this->deadlineBatchDecision_ = {};
+            this->adrenoSourceProtection_.observeProtectedSourceOnly();
+            updateAdaptiveFlowGovernor();
+            metrics.windowAdaptiveZeroGenerationCycles++;
+            metrics.totalAdaptiveZeroGenerationCycles++;
+
+            VkPresentTimeGOOGLE protectedPresentTime{};
+            VkPresentTimesInfoGOOGLE protectedPresentTimes{};
+            const VkPresentInfoKHR protectedPresentInfo{
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = adaptivePresentPNext(
+                    pNext,
+                    this->currentSourceTimeline_.sourceDesiredTimeNs,
+                    protectedPresentTime,
+                    protectedPresentTimes),
+                .waitSemaphoreCount =
+                    static_cast<uint32_t>(gameRenderSemaphores.size()),
+                .pWaitSemaphores = gameRenderSemaphores.empty()
+                    ? nullptr : gameRenderSemaphores.data(),
+                .swapchainCount = 1,
+                .pSwapchains = &this->swapchain,
+                .pImageIndices = &presentIdx,
+            };
+            const auto protectedResult =
+                Layer::ovkQueuePresentKHR(queue, &protectedPresentInfo);
+            if (isAdrenoWsiRetirementResult(protectedResult))
+                return protectedResult;
+            if (protectedResult != VK_SUCCESS
+                    && protectedResult != VK_SUBOPTIMAL_KHR) {
+                metrics.windowSourcePresentFailures++;
+                metrics.totalSourcePresentFailures++;
+                throw LSFG::vulkan_error(
+                    protectedResult,
+                    "Failed protected Adreno source-only present");
+            }
+            if (conf.adaptiveFramegen)
+                this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
+            return finishSourcePresent(
+                protectedResult, "game-render-protected-source-only");
+        }
+
         // The host-fence path necessarily waits through the application's
         // render dependency before the AHB copy can complete. If the previous
         // real generated cycle already proved that private LSFG compute alone
@@ -3606,8 +3698,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 SourceCadenceObservation::SourceOnly;
             this->lastGeneratedFrameCount_ = 0;
             this->previousSourceCopySignalValid_ = false;
-            this->sourceHistoryWarmupRemaining_ = 1;
-            this->requiresSourceHistoryWarmup_ = true;
+            this->sourceHistoryWarmupRemaining_ = 0;
+            this->requiresSourceHistoryWarmup_ = false;
+            this->adrenoSourceProtection_.enterProtection(
+                AdrenoSourceProtectionBackoffReason::ComputeOverBudget);
             this->lastHistoryInvalidationReason_ =
                 SourceHistoryInvalidationReason::None;
             this->lastHistoryReprimeReason_ =
@@ -3667,11 +3761,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 SourceCadenceObservation::SourceOnly;
             this->lastGeneratedFrameCount_ = 0;
             this->previousSourceCopySignalValid_ = false;
-            // Direct presentation does not refresh the private AHB history.
-            // Require exactly one copy-only source warmup before a later
-            // generated probe is allowed back into the September 18 island.
-            this->sourceHistoryWarmupRemaining_ = 1;
-            this->requiresSourceHistoryWarmup_ = true;
+            // Direct presentation intentionally leaves private AHB history
+            // stale. Do not schedule a warmup until sustained recovery evidence
+            // authorizes a deliberate generation probe.
+            this->sourceHistoryWarmupRemaining_ = 0;
+            this->requiresSourceHistoryWarmup_ = false;
+            this->adrenoSourceProtection_.enterProtection(
+                AdrenoSourceProtectionBackoffReason::FixedCadence);
             this->lastHistoryInvalidationReason_ =
                 SourceHistoryInvalidationReason::None;
             this->lastHistoryReprimeReason_ =
@@ -3733,8 +3829,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 SourceCadenceObservation::SourceOnly;
             this->lastGeneratedFrameCount_ = 0;
             this->previousSourceCopySignalValid_ = false;
-            this->sourceHistoryWarmupRemaining_ = 1;
-            this->requiresSourceHistoryWarmup_ = true;
+            this->sourceHistoryWarmupRemaining_ = 0;
+            this->requiresSourceHistoryWarmup_ = false;
+            this->adrenoSourceProtection_.enterProtection(
+                AdrenoSourceProtectionBackoffReason::AdmissionRejected);
             this->lastHistoryInvalidationReason_ =
                 SourceHistoryInvalidationReason::None;
             this->lastHistoryReprimeReason_ =
@@ -4033,10 +4131,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     warmupResult,
                     "Failed September 18 Adreno source-history warmup");
             }
+            if (this->adrenoSourceProtection_.reprimePending())
+                this->adrenoSourceProtection_.onReprimeExecuted();
             if (firstPresentDiagnostic)
                 std::cerr
                     << "lsfg-vk: runtime stage=source-history-warmup"
-                    << " adreno_execution=364178af\n";
+                    << " adreno_execution=364178af"
+                    << " protection_state="
+                    << AdrenoSourceProtectionController::phaseName(
+                        this->adrenoSourceProtection_.telemetry().phase)
+                    << "\n";
             return finishSourcePresent(
                 warmupResult, "pre-copy-adreno-364178af-warmup");
         }
@@ -4267,6 +4371,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->lastGeneratedFrameCount_ = generatedFrameCount;
         if (generatedFrameCount > 0) {
             this->deadlineAdmissionPredictor_.observeDeliverySuccess();
+            if (this->adrenoSourceProtection_.generationTrial())
+                this->adrenoSourceProtection_.onTrialSucceeded();
         }
         return finishSourcePresent(
             res, "prev-post-copy-adreno-364178af");
