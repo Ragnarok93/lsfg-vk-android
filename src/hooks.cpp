@@ -75,6 +75,11 @@ namespace {
 #ifdef __ANDROID__
         const bool residentTarget = previous.targeted && next.targeted;
         if (residentTarget) {
+            // Off is layer-resident, not framegen-context-resident. Crossing
+            // the generation boundary must rebuild the real swapchain so an
+            // inactive FIFO path cannot inherit LSFG image-count/usage state.
+            const bool generationActivityChanged =
+                (previous.multiplier > 1) != (next.multiplier > 1);
             const bool adaptiveFlowModeChanged =
                 previous.adaptiveFlowScale != next.adaptiveFlowScale;
             const bool adaptiveFlowPresetChanged =
@@ -86,7 +91,8 @@ namespace {
             // A resident context is allocated for at least four
             // generated outputs. A larger hot-reloaded multiplier needs a new
             // swapchain/context before present can index those outputs.
-            return next.multiplier > residentCapacityMultiplier(previous)
+            return generationActivityChanged
+                || next.multiplier > residentCapacityMultiplier(previous)
                 || previous.dll != next.dll
                 || adaptiveFlowModeChanged
                 || adaptiveFlowPresetChanged
@@ -849,9 +855,64 @@ namespace {
             return res;
         };
 
-        if (!activeConf.enable
-                || (activeConf.multiplier <= 1 && !activeConf.targeted))
+        const auto createSourceOnly = [&](const char* reason) -> VkResult {
+            VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo;
+            const auto configuredPresentMode = activeConf.e_present;
+            sourceOnlyCreateInfo.presentMode = choosePresentMode(
+                deviceInfo->physicalDevice,
+                pCreateInfo->surface,
+                pCreateInfo->presentMode,
+                activeConf.e_present);
+
+            // Source-only is a true WSI passthrough state: retain the selected
+            // present mode, but do not inflate image count, add transfer usage,
+            // or instantiate the private LSFG/AHB context.
+            const auto res = Layer::ovkCreateSwapchainKHR(
+                device, &sourceOnlyCreateInfo, pAllocator, pSwapchain);
+            if (res != VK_SUCCESS)
+                return res;
+
+            if (pCreateInfo->oldSwapchain)
+                retireSwapchainState(pCreateInfo->oldSwapchain);
+
+            try {
+                auto state = std::make_shared<SwapchainState>();
+                state->device = device;
+                state->deviceInfo = deviceInfo;
+                state->present = sourceOnlyCreateInfo.presentMode;
+                state->configuredPresent = configuredPresentMode;
+                publishSwapchainState(*pSwapchain, std::move(state));
+            } catch (const std::exception& e) {
+                Utils::logLimitN("swapMap", 5,
+                    "Could not retain source-only swapchain state; continuing natively:\n- "
+                    + std::string(e.what()));
+            }
+#ifdef __ANDROID__
+            publishRuntimeState(activeConf.config_file, "source_only",
+                false, false, true, true, false, false, false,
+                static_cast<int>(activeConf.multiplier), activeConf.performance,
+                activeConf.adaptiveFramegen, activeConf.fpsLimit);
+#endif
+            std::cerr << "lsfg-vk: init stage=swapchain-source-only-pass-through"
+                      << " reason=" << reason
+                      << " requestedImages=" << pCreateInfo->minImageCount
+                      << " requestedPresentMode=" << pCreateInfo->presentMode
+                      << " configuredPresentMode=" << configuredPresentMode
+                      << " chosenPresentMode=" << sourceOnlyCreateInfo.presentMode
+                      << "\n";
+            return VK_SUCCESS;
+        };
+
+        if (!activeConf.enable)
             return createPassThrough("disabled");
+
+#ifdef __ANDROID__
+        if (activeConf.targeted && activeConf.multiplier <= 1)
+            return createSourceOnly("generation-off");
+#else
+        if (activeConf.multiplier <= 1 && !activeConf.targeted)
+            return createPassThrough("disabled");
+#endif
 
 #ifdef __ANDROID__
         if (!deviceInfo->androidAhbSupported) {
@@ -1181,22 +1242,6 @@ namespace {
             Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
-
-#ifdef __ANDROID__
-        if (conf.targeted && conf.multiplier <= 1) {
-            state->context->enterSourceOnlyBypass();
-            const auto res = Layer::ovkQueuePresentKHR(queue, pPresentInfo);
-            if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
-                recordSuccessfulOutputCycle(*state, *state->context,
-                    conf.config_file, 0, 1, conf.performance,
-                    conf.adaptiveFramegen, conf.fpsLimit);
-                Utils::resetLimitN("swapPresent");
-            } else {
-                recordOutputFailure(*state);
-            }
-            return res;
-        }
-#endif
 
         try {
 #ifdef __ANDROID__
