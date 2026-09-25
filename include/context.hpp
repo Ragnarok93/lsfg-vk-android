@@ -19,7 +19,9 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 #ifdef __ANDROID__
@@ -290,6 +292,18 @@ private:
     bool adaptiveDisplayTimingEnabled_{false};
     uint64_t adaptivePresentPeriodNs_{0};
     uint32_t adaptivePresentId_{1};
+
+    // Xclipse/generic display-confirmation telemetry. This is deliberately
+    // independent of adaptive presentation pacing: generated presents carry a
+    // unique VK_GOOGLE_display_timing ID with desiredPresentTime=0, then past
+    // timing records are polled asynchronously. The proven Adreno path never
+    // enables this instrumentation.
+    bool generatedDisplayConfirmationEnabled_{false};
+    PFN_vkGetPastPresentationTimingGOOGLE getPastPresentationTimingGoogle_{nullptr};
+    std::deque<uint32_t> generatedDisplayPendingIds_;
+    std::unordered_set<uint32_t> generatedDisplayPendingSet_;
+    static constexpr std::size_t kGeneratedDisplayPendingLimit = 512;
+
     SourceProtectedTimeline sourceTimeline_;
     SourceTimelineSample currentSourceTimeline_;
 
@@ -377,7 +391,9 @@ private:
         uint64_t windowGeneratedWsiSubmitted{0};
         uint64_t windowGeneratedWsiAccepted{0};
         uint64_t windowGeneratedDisplayConfirmed{0};
+        uint64_t windowGeneratedDisplayNotShown{0};
         uint64_t windowGeneratedDisplayUnknown{0};
+        uint64_t windowDisplayTimingQueryFailures{0};
         uint64_t windowSourcePresentFailures{0};
         uint64_t windowGeneratedPresentFailures{0};
         uint64_t totalSourceFrames{0};
@@ -388,7 +404,9 @@ private:
         uint64_t totalGeneratedWsiSubmitted{0};
         uint64_t totalGeneratedWsiAccepted{0};
         uint64_t totalGeneratedDisplayConfirmed{0};
+        uint64_t totalGeneratedDisplayNotShown{0};
         uint64_t totalGeneratedDisplayUnknown{0};
+        uint64_t totalDisplayTimingQueryFailures{0};
         uint64_t totalSourcePresentFailures{0};
         uint64_t totalGeneratedPresentFailures{0};
 
