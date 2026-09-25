@@ -143,6 +143,10 @@ public:
     /// admission cost rather than a presentation-only reserve.
     void observeBlockingCompletion(
         std::size_t generationCount, double completionMs);
+    /// During a protected source-only recovery cycle, relax only queue-residency
+    /// overhead toward the last measured GPU batch cost. Never decays below
+    /// measured GPU work and therefore cannot invent synthetic capacity.
+    void observeSourceOnlyRecovery();
     /// Learn unmodeled submit-to-delivery pressure only from a frame that was
     /// admitted but still missed its synthetic deadline/WSI opportunity.
     void observeDeliveryMiss(double latenessMs);
@@ -168,6 +172,7 @@ private:
         bool valid{false};
         double mipmapsMs{};
         double opticalFlowMs{};
+        double gpuTotalLsfgMs{};
         double totalLsfgMs{};
     };
 
