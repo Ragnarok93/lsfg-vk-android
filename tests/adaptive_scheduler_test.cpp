@@ -289,30 +289,6 @@ int main() {
         assert(scheduler.telemetry().costLimit == 2);
     }
 
-    {
-        // Once a clean source cadence is protected, source degradation overrides
-        // target seeking. A collapsing source must lower synthetic cost instead
-        // of raising 2 -> 3 because the target equation sees more demand.
-        AdaptiveFrameScheduler scheduler(120, 3);
-        scheduler.setSourceProtectionBaseline(40.0, true);
-        bool sawRaise = false;
-        for (int frame = 0; frame < 24; ++frame) {
-            scheduler.plan(40ms);
-            sawRaise = sawRaise || scheduler.telemetry().costRaised;
-            if (sawRaise)
-                break;
-        }
-        assert(sawRaise);
-
-        bool sawBackoff = false;
-        for (int frame = 0; frame < 4; ++frame) {
-            scheduler.plan(60ms);
-            sawBackoff = sawBackoff || scheduler.telemetry().costBackedOff;
-        }
-        assert(sawBackoff);
-        assert(scheduler.telemetry().costLimit <= 2);
-        assert(scheduler.telemetry().wantedGeneratedFrames >= 2.0);
-    }
 
     {
         // A natural source-rate transition with no preceding cost raise must
@@ -389,31 +365,6 @@ int main() {
         assert(generated >= 2);
     }
 
-    {
-        // A Quick Menu warm start may seed the requested target, but an
-        // established protected source cadence remains the higher-priority
-        // contract. Severe post-enable degradation must unwind the warm start.
-        AdaptiveFrameScheduler scheduler(45, 3);
-        scheduler.setSourceProtectionBaseline(40.0, true);
-        for (int frame = 0; frame < 12; ++frame)
-            scheduler.plan(40ms);
-        scheduler.configure(120, 3);
-        scheduler.setSourceProtectionBaseline(40.0, true);
-        assert(scheduler.plan(1s) == 0);
-        scheduler.setSourceProtectionBaseline(40.0, true);
-        scheduler.plan(40ms);
-        assert(scheduler.telemetry().configWarmStart);
-        assert(scheduler.telemetry().costLimit == 3);
-
-        bool backedOff = false;
-        for (int frame = 0; frame < 4; ++frame) {
-            scheduler.setSourceProtectionBaseline(40.0, true);
-            scheduler.plan(80ms);
-            backedOff = backedOff || scheduler.telemetry().costBackedOff;
-        }
-        assert(backedOff);
-        assert(scheduler.telemetry().costLimit < 3);
-    }
 
     {
         // First-time configuration is still a cold start; merely constructing
@@ -442,29 +393,6 @@ int main() {
         assert(!scheduler.telemetry().configWarmStart);
     }
 
-    {
-        // Source-protection is authoritative over target demand. Once the
-        // source stretches materially beyond a clean baseline, Adaptive must
-        // shed generated work and hold promotion until source cadence recovers.
-        AdaptiveFrameScheduler scheduler(60, 3);
-        scheduler.setSourceProtectionBaseline(40.0, true);
-        for (int frame = 0; frame < 48; ++frame) {
-            scheduler.setSourceProtectionBaseline(40.0, true);
-            scheduler.plan(40ms);
-        }
-        assert(scheduler.telemetry().costLimit >= 2);
-
-        bool sawProtectiveBackoff = false;
-        for (int frame = 0; frame < 8; ++frame) {
-            scheduler.setSourceProtectionBaseline(40.0, true);
-            scheduler.plan(55ms);
-            sawProtectiveBackoff =
-                sawProtectiveBackoff || scheduler.telemetry().costBackedOff;
-        }
-
-        assert(sawProtectiveBackoff);
-        assert(scheduler.telemetry().costLimit <= 2);
-    }
 
     {
         // Source rate by itself is never a reason to disable interpolation.
@@ -539,31 +467,6 @@ int main() {
         assert(scheduler.telemetry().fractionalPhase < 1.0);
     }
 
-    {
-        // Capacity may promote while source cadence is healthy, but it cannot
-        // defeat source protection after that cadence collapses.
-        AdaptiveFrameScheduler scheduler(120, 3);
-        scheduler.setSourceProtectionBaseline(40.0, true);
-        bool promoted = false;
-        for (int frame = 0; frame < 4; ++frame) {
-            scheduler.setSafeGenerationHint(2, true);
-            scheduler.setSourceProtectionBaseline(40.0, true);
-            scheduler.plan(40ms);
-            promoted = promoted || scheduler.telemetry().capacityPromoted;
-        }
-        assert(promoted);
-        assert(scheduler.telemetry().costLimit == 2);
-
-        bool backedOff = false;
-        for (int frame = 0; frame < 4; ++frame) {
-            scheduler.setSafeGenerationHint(2, true);
-            scheduler.setSourceProtectionBaseline(40.0, true);
-            scheduler.plan(80ms);
-            backedOff = backedOff || scheduler.telemetry().costBackedOff;
-        }
-        assert(backedOff);
-        assert(scheduler.telemetry().costLimit < 2);
-    }
 
     {
         // Build #383 regression: predictor capacity alone must not early-promote
@@ -594,32 +497,6 @@ int main() {
         assert(scheduler.telemetry().costLimit == 2);
     }
 
-    {
-        // A promoted level is provisional with respect to source protection.
-        // Severe degradation immediately revokes synthetic capacity even when
-        // predictor hints would otherwise keep promoting toward the target.
-        AdaptiveFrameScheduler scheduler(120, 3);
-        scheduler.setSourceProtectionBaseline(40.0, true);
-        bool promoted = false;
-        for (int frame = 0; frame < 8 && !promoted; ++frame) {
-            scheduler.setSafeGenerationHint(2, true);
-            scheduler.setSourceProtectionBaseline(40.0, true);
-            scheduler.plan(40ms);
-            promoted = promoted || scheduler.telemetry().capacityPromoted;
-        }
-        assert(promoted);
-        assert(scheduler.telemetry().costLimit == 2);
-
-        bool backedOff = false;
-        for (int frame = 0; frame < 3; ++frame) {
-            scheduler.setSafeGenerationHint(2, true);
-            scheduler.setSourceProtectionBaseline(40.0, true);
-            scheduler.plan(80ms);
-            backedOff = backedOff || scheduler.telemetry().costBackedOff;
-        }
-        assert(backedOff);
-        assert(scheduler.telemetry().costLimit == 1);
-    }
 
     {
         // A single long-but-not-discontinuous source hitch is consumed without
@@ -1019,59 +896,6 @@ int main() {
         assert(recoveredProbe.wouldAdmit);
     }
 
-    {
-        // Protected Adreno cadence may not be bootstrapped from LSFG-active
-        // maintenance or generated cycles. Those intervals already include
-        // LSFG work and can make the governor permanently protect an
-        // unrealistically fast source deadline.
-        SourceProtectionBudgetTracker budget;
-        budget.observeSource(
-            18ms, SourceCadenceObservation::HistoryMaintenance);
-        assert(!budget.telemetry().baselineValid);
-        assert(budget.clampTimelineBudget(40.0) > 39.9);
-        assert(budget.clampTimelineBudget(40.0) < 40.1);
-
-        budget.observeSource(
-            16ms, SourceCadenceObservation::Generated);
-        assert(!budget.telemetry().baselineValid);
-
-        // A genuine source-only observation establishes the baseline.
-        budget.observeSource(
-            40ms, SourceCadenceObservation::SourceOnly);
-        assert(budget.telemetry().baselineValid);
-        assert(budget.telemetry().protectedSourceIntervalMs > 39.9);
-        assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
-
-        budget.observeSerializedCopyCost(1.5);
-        assert(budget.telemetry().copyCostValid);
-        assert(budget.telemetry().serializedCopyReserveMs > 1.4);
-        assert(budget.telemetry().serializedCopyReserveMs < 1.6);
-        assert(budget.clampTimelineBudget(80.0) > 38.4);
-        assert(budget.clampTimelineBudget(80.0) < 38.6);
-
-        // LSFG-active cycles may tighten a clean baseline when the source is
-        // genuinely faster, but can never teach it a slower cadence.
-        for (int i = 0; i < 8; ++i)
-            budget.observeSource(
-                80ms, SourceCadenceObservation::HistoryMaintenance);
-        assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
-
-        for (int i = 0; i < 6; ++i)
-            budget.observeSource(
-                80ms, SourceCadenceObservation::Generated);
-        assert(budget.telemetry().protectedSourceIntervalMs < 40.1);
-
-        // One or a few slow direct-source intervals cannot inflate the
-        // protected cadence. Expansion requires sustained clean evidence.
-        for (int i = 0; i < 5; ++i)
-            budget.observeSource(
-                80ms, SourceCadenceObservation::SourceOnly);
-        assert(budget.telemetry().protectedSourceIntervalMs < 45.0);
-
-        budget.observeSource(
-            80ms, SourceCadenceObservation::SourceOnly);
-        assert(budget.telemetry().protectedSourceIntervalMs > 70.0);
-    }
 
     {
         // Fixed mode learns a source baseline without generated work, starts
@@ -1208,12 +1032,12 @@ int main() {
     }
 
 
-    // Protected Adreno executes one admitted synthetic batch inside the real
-    // source-owned interval. A fixed 2x request must therefore not compare the
+    // Generation-first Adreno executes one synthetic batch inside the real
+    // source interval. A fixed 2x request must therefore not compare the
     // complete private-device batch against half of the source interval.
-    assert(std::abs(sourceOwnedFramegenBatchBudgetMs(
+    assert(std::abs(framegenBatchBudgetMs(
         33.333, 16.666, true) - 33.333) < 0.001);
-    assert(std::abs(sourceOwnedFramegenBatchBudgetMs(
+    assert(std::abs(framegenBatchBudgetMs(
         33.333, 16.666, false) - 16.666) < 0.001);
 
     return 0;
