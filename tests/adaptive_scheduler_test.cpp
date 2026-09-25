@@ -1183,5 +1183,14 @@ int main() {
     }
 
 
+
+    // Protected Adreno executes one admitted synthetic batch inside the real
+    // source-owned interval. A fixed 2x request must therefore not compare the
+    // complete private-device batch against half of the source interval.
+    assert(std::abs(sourceOwnedFramegenBatchBudgetMs(
+        33.333, 16.666, true) - 33.333) < 0.001);
+    assert(std::abs(sourceOwnedFramegenBatchBudgetMs(
+        33.333, 16.666, false) - 16.666) < 0.001);
+
     return 0;
 }

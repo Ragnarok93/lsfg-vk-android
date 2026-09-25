@@ -5,57 +5,51 @@
 int main() {
     AdrenoSourceProtectionController state;
 
-    // Protection stays genuinely source-only across consecutive frames.
     state.enterProtection(AdrenoSourceProtectionBackoffReason::AdmissionRejected);
     assert(state.protectedSourceOnly());
-    for (uint32_t i = 0; i < 8; ++i) {
-        const bool reprime = state.requestReprimeIfRecovered(
-            false, true);
-        assert(!reprime);
+
+    // Four clean source-only frames are not enough to trigger another
+    // reprime. The source cadence tracker itself requires six coherent clean
+    // samples before it may promote a naturally slower baseline.
+    for (uint32_t i = 0; i < 5; ++i) {
         state.observeProtectedSourceOnly();
-        assert(state.protectedSourceOnly());
-        assert(!state.reprimePending());
+        assert(!state.requestReprimeIfRecovered(
+            true, false, true));
     }
     assert(state.telemetry().reprimeRequests == 0);
-    assert(state.telemetry().sourceOnlyRecoveryFrames == 8);
-    assert(!state.requestReprimeIfRecovered(true, false));
 
-    // Sustained clean-source recovery plus current generation demand authorizes
-    // one reprime. Old predictor capacity is intentionally not an input: the
-    // following minimum-cost trial is what refreshes that evidence.
-    assert(state.requestReprimeIfRecovered(true, true));
+    // Even after the cadence hold, stale/unsafe synthetic capacity must not
+    // cause a forced trial. Source-only recovery is allowed to relax the
+    // predictor until it can actually prove one generated frame fits.
+    state.observeProtectedSourceOnly();
+    assert(!state.requestReprimeIfRecovered(
+        true, false, true));
+    assert(state.telemetry().reprimeRequests == 0);
+
+    // Once both the real-source cadence and one-frame synthetic capacity have
+    // recovered, exactly one reprime may be scheduled.
+    assert(state.requestReprimeIfRecovered(
+        true, true, true));
     assert(state.reprimePending());
-    assert(!state.requestReprimeIfRecovered(true, true));
+    assert(!state.requestReprimeIfRecovered(
+        true, true, true));
     state.onReprimeExecuted();
     assert(state.generationTrial());
     assert(state.telemetry().reprimesExecuted == 1);
     assert(state.telemetry().generationProbes == 1);
 
-    // A failed trial returns to protected mode without scheduling another reprime.
+    // A failed trial returns to protected source-only and may not immediately
+    // re-arm just because source cadence is healthy. Capacity evidence must
+    // recover again first.
     state.enterProtection(AdrenoSourceProtectionBackoffReason::TrialFailed);
     assert(state.protectedSourceOnly());
     assert(state.telemetry().probeFailures == 1);
-    for (uint32_t i = 0; i < 3; ++i) {
+    for (uint32_t i = 0; i < 8; ++i) {
         state.observeProtectedSourceOnly();
-        assert(!state.requestReprimeIfRecovered(true, true));
+        assert(!state.requestReprimeIfRecovered(
+            true, false, true));
     }
     assert(state.telemetry().reprimeRequests == 1);
-
-    state.observeProtectedSourceOnly();
-    assert(state.requestReprimeIfRecovered(true, true));
-    state.onReprimeExecuted();
-
-    // The generation trial exists specifically to refresh stale synthetic-cost
-    // evidence. A stale predictor rejection must not erase the one-frame probe
-    // after source-only recovery and a deliberate reprime.
-    assert(state.minimumGenerationTrial(1, 0) == 1);
-    assert(state.minimumGenerationTrial(3, 0) == 1);
-    assert(state.minimumGenerationTrial(0, 0) == 0);
-
-    state.onTrialSucceeded();
-    assert(!state.protectedSourceOnly());
-    assert(state.telemetry().probeSuccesses == 1);
-    assert(state.telemetry().reprimesExecuted == 2);
 
     return 0;
 }
