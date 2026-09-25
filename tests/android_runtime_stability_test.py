@@ -446,7 +446,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("historyRequiresHostCompletionWait", history)
         self.assertNotIn("submitAndWaitForAhbHandoff", history)
 
-    def test_fixed_mode_restores_source_governor_without_source_pacing(self) -> None:
+    def test_fixed_mode_keeps_generation_first_without_source_pacing(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         scheduler = (ROOT / "include/adaptive_scheduler.hpp").read_text(
@@ -460,9 +460,9 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("FixedSourceCadenceGovernor", scheduler)
         self.assertIn("fixedSourceCadenceGovernor_", header)
         self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
+        self.assertIn("generationFirstAdreno", source)
+        self.assertIn("requestedFixedGeneratedFrameCount", source)
         self.assertNotIn("fixedAdrenoHistoricalGeneration", source)
-        self.assertIn("conservativeFixedSourceProtectionGap", source)
-        self.assertIn("game-render-fixed-source-protection", source)
         self.assertIn("fixed_generation_limit=", source)
         self.assertIn("FixedSourceCadenceGovernor::plan", scheduler_source)
         self.assertNotIn("sleep_for", scheduler + scheduler_source)
@@ -480,10 +480,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
         admission = source[admission_start:admission_end]
         self.assertIn("if (conf.adaptiveFramegen", admission)
-        self.assertNotIn(
-            "conf.adaptiveFramegen || sourceProtectionBatchAdmission",
-            admission,
-        )
+        self.assertNotIn("sourceProtectionBatchAdmission", admission)
 
     def test_adaptive_path_uses_variable_count_without_owning_source_pacing(self) -> None:
         scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
