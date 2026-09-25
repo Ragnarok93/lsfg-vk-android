@@ -322,8 +322,17 @@ void DeadlineAdmissionPredictor::observe(
             kRecoveryEwmaAlpha
             * (observation.totalLsfgMs - estimate.gpuTotalLsfgMs);
     }
-    estimate.totalLsfgMs =
-        conservativeBlend(estimate.totalLsfgMs, observation.totalLsfgMs);
+    if (!estimate.blockingCompletionObserved) {
+        estimate.totalLsfgMs =
+            conservativeBlend(estimate.totalLsfgMs, observation.totalLsfgMs);
+    } else if (!estimate.valid
+            || observation.totalLsfgMs > estimate.totalLsfgMs) {
+        // Once the protected source thread has measured a blocking completion,
+        // the same batch's GPU timestamp cannot be treated as recovery evidence.
+        // Only a later blocking completion or a clean source-only recovery cycle
+        // may relax that source-owned queue-residency penalty.
+        estimate.totalLsfgMs = observation.totalLsfgMs;
+    }
     estimate.valid = true;
     hasEstimate_ = true;
 }
@@ -338,6 +347,7 @@ void DeadlineAdmissionPredictor::observeBlockingCompletion(
     }
 
     auto& estimate = batchEstimates_.at(generationCount);
+    estimate.blockingCompletionObserved = true;
     if (!estimate.valid || completionMs >= estimate.totalLsfgMs) {
         estimate.totalLsfgMs = completionMs;
     } else {
@@ -354,6 +364,7 @@ void DeadlineAdmissionPredictor::observeBlockingCompletion(
 void DeadlineAdmissionPredictor::observeSourceOnlyRecovery() {
     for (auto& estimate : batchEstimates_) {
         if (!estimate.valid
+                || !estimate.blockingCompletionObserved
                 || !std::isfinite(estimate.gpuTotalLsfgMs)
                 || !(estimate.gpuTotalLsfgMs > 0.0)
                 || !std::isfinite(estimate.totalLsfgMs)
