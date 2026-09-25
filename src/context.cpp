@@ -827,6 +827,31 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->conservativeCrossDeviceSync_ =
         this->compatibilityPath_
             == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood;
+
+    // Presentation-engine confirmation is telemetry-only. VK_GOOGLE_display_timing
+    // was already enabled opportunistically at device creation; on Xclipse/generic
+    // paths resolve its asynchronous history query and leave desiredPresentTime=0
+    // so this cannot change present cadence. Keep the device-proven Adreno path
+    // completely untouched.
+    if (info.androidDisplayTimingSupported
+            && !this->conservativeCrossDeviceSync_) {
+        this->getPastPresentationTimingGoogle_ =
+            reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
+                Layer::ovkGetDeviceProcAddr(
+                    info.device, "vkGetPastPresentationTimingGOOGLE"));
+    }
+    this->generatedDisplayConfirmationEnabled_ =
+        this->getPastPresentationTimingGoogle_ != nullptr;
+    std::cerr << "lsfg-vk: display-confirmation"
+              << " capability=" << (info.androidDisplayTimingSupported ? 1 : 0)
+              << " protected_adreno="
+              << (this->conservativeCrossDeviceSync_ ? 1 : 0)
+              << " backend="
+              << (this->generatedDisplayConfirmationEnabled_
+                    ? "google-display-timing"
+                    : "unavailable")
+              << " pacing_changed=0\n";
+
     // The device-proven Adreno path never selects a synthetic queue.
     // Ordinary generated cycles use one-shot OPAQUE_FD source handoff and keep
     // completion on the bounded private-device host wait below.
@@ -1539,9 +1564,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     deferredPresentWaits.emplace_back(
                         deferredPass.prevPostCopySemaphores.at(i - 1).handle());
                 }
+                VkPresentTimeGOOGLE deferredPresentTime{};
+                VkPresentTimesInfoGOOGLE deferredPresentTimes{};
                 const VkPresentInfoKHR deferredPresentInfo{
                     .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                    .pNext = nullptr,
+                    .pNext = generatedDisplayConfirmationPNext(
+                        nullptr, 0,
+                        deferredPresentTime, deferredPresentTimes),
                     .waitSemaphoreCount =
                         static_cast<uint32_t>(deferredPresentWaits.size()),
                     .pWaitSemaphores = deferredPresentWaits.data(),
@@ -1576,8 +1605,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ++this->runtimeMetrics.totalGeneratedFrames;
                 ++this->runtimeMetrics.windowGeneratedWsiAccepted;
                 ++this->runtimeMetrics.totalGeneratedWsiAccepted;
-                ++this->runtimeMetrics.windowGeneratedDisplayUnknown;
-                ++this->runtimeMetrics.totalGeneratedDisplayUnknown;
+                trackGeneratedDisplayPresent(deferredPresentTime.presentID);
                 this->runtimeMetrics.windowGeneratedPresentMs +=
                     std::chrono::duration<double, std::milli>(
                         RuntimeMetrics::Clock::now()
@@ -2685,6 +2713,152 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    const auto chainHasGooglePresentTimes = [](const void* downstream) {
+        auto* node = reinterpret_cast<const VkBaseInStructure*>(downstream);
+        while (node != nullptr) {
+            if (node->sType == VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE)
+                return true;
+            node = node->pNext;
+        }
+        return false;
+    };
+
+    const auto nextDisplayTimingPresentId = [&]() {
+        uint32_t presentId = this->adaptivePresentId_++;
+        if (presentId == 0) {
+            presentId = 1;
+            this->adaptivePresentId_ = 2;
+        }
+        return presentId;
+    };
+
+    const auto generatedDisplayConfirmationPNext = [&](
+            const void* downstream,
+            uint64_t desiredPresentTimeNs,
+            VkPresentTimeGOOGLE& presentTime,
+            VkPresentTimesInfoGOOGLE& presentTimes) -> const void* {
+        const bool pacingRequested =
+            this->adaptiveDisplayTimingEnabled_ && desiredPresentTimeNs != 0;
+        if (!this->generatedDisplayConfirmationEnabled_ && !pacingRequested)
+            return downstream;
+
+        // A pNext chain may already contain the extension structure supplied by
+        // the application. Never duplicate an sType in that case; that present
+        // remains WSI-only telemetry rather than mutating application metadata.
+        if (chainHasGooglePresentTimes(downstream))
+            return downstream;
+
+        uint64_t effectiveDesiredTimeNs = 0;
+        if (pacingRequested) {
+            const uint64_t nowNs = monotonicNowNs();
+            if (nowNs != 0 && desiredPresentTimeNs > nowNs)
+                effectiveDesiredTimeNs = desiredPresentTimeNs;
+        }
+
+        presentTime = VkPresentTimeGOOGLE{
+            .presentID = nextDisplayTimingPresentId(),
+            // Zero is explicitly telemetry-only: the presentation engine may
+            // display at any time, so confirmation does not change cadence.
+            .desiredPresentTime = effectiveDesiredTimeNs,
+        };
+        presentTimes = VkPresentTimesInfoGOOGLE{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+            .pNext = downstream,
+            .swapchainCount = 1,
+            .pTimes = &presentTime,
+        };
+        return &presentTimes;
+    };
+
+    const auto trackGeneratedDisplayPresent = [&](uint32_t presentId) {
+        if (!this->generatedDisplayConfirmationEnabled_ || presentId == 0) {
+            metrics.windowGeneratedDisplayUnknown++;
+            metrics.totalGeneratedDisplayUnknown++;
+            return;
+        }
+
+        const auto [_, inserted] =
+            this->generatedDisplayPendingSet_.insert(presentId);
+        if (!inserted)
+            return;
+        this->generatedDisplayPendingIds_.push_back(presentId);
+
+        while (this->generatedDisplayPendingSet_.size()
+                > kGeneratedDisplayPendingLimit) {
+            while (!this->generatedDisplayPendingIds_.empty()
+                    && !this->generatedDisplayPendingSet_.contains(
+                        this->generatedDisplayPendingIds_.front())) {
+                this->generatedDisplayPendingIds_.pop_front();
+            }
+            if (this->generatedDisplayPendingIds_.empty())
+                break;
+            const uint32_t expiredId =
+                this->generatedDisplayPendingIds_.front();
+            this->generatedDisplayPendingIds_.pop_front();
+            if (this->generatedDisplayPendingSet_.erase(expiredId) != 0) {
+                metrics.windowGeneratedDisplayUnknown++;
+                metrics.totalGeneratedDisplayUnknown++;
+            }
+        }
+    };
+
+    const auto pollGeneratedDisplayConfirmations = [&]() {
+        if (!this->generatedDisplayConfirmationEnabled_
+                || this->getPastPresentationTimingGoogle_ == nullptr)
+            return;
+
+        uint32_t timingCount = 0;
+        VkResult timingResult = this->getPastPresentationTimingGoogle_(
+            this->device_, this->swapchain, &timingCount, nullptr);
+        if (timingResult != VK_SUCCESS && timingResult != VK_INCOMPLETE) {
+            metrics.windowDisplayTimingQueryFailures++;
+            metrics.totalDisplayTimingQueryFailures++;
+            Utils::logLimitN(
+                "displayTimingQuery",
+                5,
+                "vkGetPastPresentationTimingGOOGLE count query failed: "
+                    + std::to_string(static_cast<int>(timingResult)));
+            return;
+        }
+        if (timingCount == 0)
+            return;
+
+        std::vector<VkPastPresentationTimingGOOGLE> timings(timingCount);
+        timingResult = this->getPastPresentationTimingGoogle_(
+            this->device_, this->swapchain, &timingCount, timings.data());
+        if (timingResult != VK_SUCCESS && timingResult != VK_INCOMPLETE) {
+            metrics.windowDisplayTimingQueryFailures++;
+            metrics.totalDisplayTimingQueryFailures++;
+            Utils::logLimitN(
+                "displayTimingQuery",
+                5,
+                "vkGetPastPresentationTimingGOOGLE data query failed: "
+                    + std::to_string(static_cast<int>(timingResult)));
+            return;
+        }
+
+        timings.resize(timingCount);
+        for (const auto& timing : timings) {
+            if (this->generatedDisplayPendingSet_.erase(timing.presentID) == 0)
+                continue;
+            if (timing.actualPresentTime != 0) {
+                metrics.windowGeneratedDisplayConfirmed++;
+                metrics.totalGeneratedDisplayConfirmed++;
+            } else {
+                // MAILBOX is allowed to report a replaced/not-displayed image
+                // with zero actualPresentTime. Keep it distinct from "unknown".
+                metrics.windowGeneratedDisplayNotShown++;
+                metrics.totalGeneratedDisplayNotShown++;
+            }
+        }
+
+        while (!this->generatedDisplayPendingIds_.empty()
+                && !this->generatedDisplayPendingSet_.contains(
+                    this->generatedDisplayPendingIds_.front())) {
+            this->generatedDisplayPendingIds_.pop_front();
+        }
+    };
+
     const auto adaptivePresentPNext = [&](
             const void* downstream,
             uint64_t desiredPresentTimeNs,
@@ -2703,13 +2877,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const uint64_t effectiveDesiredTimeNs =
             desiredPresentTimeNs > nowNs ? desiredPresentTimeNs : 0;
 
-        uint32_t presentId = this->adaptivePresentId_++;
-        if (presentId == 0) {
-            presentId = 1;
-            this->adaptivePresentId_ = 2;
-        }
         presentTime = VkPresentTimeGOOGLE{
-            .presentID = presentId,
+            .presentID = nextDisplayTimingPresentId(),
             .desiredPresentTime = effectiveDesiredTimeNs,
         };
         presentTimes = VkPresentTimesInfoGOOGLE{
@@ -2738,6 +2907,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     const auto finishSourcePresent = [&](VkResult result, const char* sourceWait) -> VkResult {
+        // Nonblocking presentation-engine feedback for previously submitted
+        // generated frames. No queue/fence waits are introduced here.
+        pollGeneratedDisplayConfirmations();
         metrics.windowSourceFrames++;
         metrics.totalSourceFrames++;
         if (firstPresentDiagnostic) {
@@ -2778,7 +2950,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedWsiSubmitted = 0;
             metrics.windowGeneratedWsiAccepted = 0;
             metrics.windowGeneratedDisplayConfirmed = 0;
+            metrics.windowGeneratedDisplayNotShown = 0;
             metrics.windowGeneratedDisplayUnknown = 0;
+            metrics.windowDisplayTimingQueryFailures = 0;
             metrics.windowGeneratedLateDrops = 0;
             metrics.windowAdmissionRejects = 0;
             metrics.windowGeneratedDeadlineDrops = 0;
@@ -2851,12 +3025,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const double sourceFps = sourceCount / elapsedSeconds;
             const double generatedFps = generatedCount / elapsedSeconds;
             const double outputFps = (sourceCount + generatedCount) / elapsedSeconds;
+            const uint64_t generatedDisplayPending =
+                static_cast<uint64_t>(this->generatedDisplayPendingSet_.size());
             const char* generatedDeliveryConfidence =
                 metrics.windowGeneratedDisplayConfirmed > 0
-                    ? "display-confirmed"
-                    : (metrics.windowGeneratedWsiAccepted > 0
-                        ? "wsi-accepted-only"
-                        : "none");
+                    ? "display-timing-confirmed"
+                    : (this->generatedDisplayConfirmationEnabled_
+                        && generatedDisplayPending > 0
+                            ? "display-timing-pending"
+                            : (this->generatedDisplayConfirmationEnabled_
+                                && metrics.windowGeneratedDisplayNotShown > 0
+                                    ? "display-timing-no-visible-confirmation"
+                                    : (metrics.windowGeneratedWsiAccepted > 0
+                                        ? "wsi-accepted-only"
+                                        : "none")));
             std::cerr << "lsfg-vk: delivery-metrics"
                       << " generated_dispatched=" << metrics.windowGeneratedDispatched
                       << " generated_completed=" << metrics.windowGeneratedCompleted
@@ -2864,7 +3046,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_wsi_submitted=" << metrics.windowGeneratedWsiSubmitted
                       << " generated_wsi_accepted=" << metrics.windowGeneratedWsiAccepted
                       << " generated_display_confirmed=" << metrics.windowGeneratedDisplayConfirmed
+                      << " generated_display_not_shown=" << metrics.windowGeneratedDisplayNotShown
+                      << " generated_display_pending=" << generatedDisplayPending
                       << " generated_display_unknown=" << metrics.windowGeneratedDisplayUnknown
+                      << " display_timing_query_failures="
+                      << metrics.windowDisplayTimingQueryFailures
+                      << " generated_delivery_backend="
+                      << (this->generatedDisplayConfirmationEnabled_
+                            ? "google-display-timing"
+                            : "none")
                       << " generated_delivery_confidence=" << generatedDeliveryConfidence
                       << " history_invalidation_reason="
                       << sourceHistoryInvalidationReasonName(
@@ -2879,7 +3069,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "generated_dispatched=%llu generated_completed=%llu "
                 "generated_copy_submitted=%llu generated_wsi_submitted=%llu "
                 "generated_wsi_accepted=%llu generated_display_confirmed=%llu "
-                "generated_display_unknown=%llu generated_delivery_confidence=%s "
+                "generated_display_not_shown=%llu generated_display_pending=%llu "
+                "generated_display_unknown=%llu display_timing_query_failures=%llu "
+                "generated_delivery_backend=%s generated_delivery_confidence=%s "
                 "history_invalidation_reason=%s history_reprime_reason=%s",
                 static_cast<unsigned long long>(metrics.windowGeneratedDispatched),
                 static_cast<unsigned long long>(metrics.windowGeneratedCompleted),
@@ -2887,7 +3079,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 static_cast<unsigned long long>(metrics.windowGeneratedWsiSubmitted),
                 static_cast<unsigned long long>(metrics.windowGeneratedWsiAccepted),
                 static_cast<unsigned long long>(metrics.windowGeneratedDisplayConfirmed),
+                static_cast<unsigned long long>(metrics.windowGeneratedDisplayNotShown),
+                static_cast<unsigned long long>(generatedDisplayPending),
                 static_cast<unsigned long long>(metrics.windowGeneratedDisplayUnknown),
+                static_cast<unsigned long long>(metrics.windowDisplayTimingQueryFailures),
+                this->generatedDisplayConfirmationEnabled_
+                    ? "google-display-timing" : "none",
                 generatedDeliveryConfidence,
                 sourceHistoryInvalidationReasonName(
                     this->lastHistoryInvalidationReason_),
@@ -3310,7 +3507,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedWsiSubmitted = 0;
             metrics.windowGeneratedWsiAccepted = 0;
             metrics.windowGeneratedDisplayConfirmed = 0;
+            metrics.windowGeneratedDisplayNotShown = 0;
             metrics.windowGeneratedDisplayUnknown = 0;
+            metrics.windowDisplayTimingQueryFailures = 0;
             metrics.windowGeneratedLateDrops = 0;
             metrics.windowAdmissionRejects = 0;
             metrics.windowGeneratedDeadlineDrops = 0;
@@ -3981,7 +4180,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const void* generatedDownstreamPNext = i == 0 ? pNext : nullptr;
             const VkPresentInfoKHR presentInfo{
                 .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                .pNext = adaptivePresentPNext(
+                .pNext = generatedDisplayConfirmationPNext(
                     generatedDownstreamPNext,
                     syntheticDesiredTimeNs,
                     generatedPresentTime,
@@ -4007,8 +4206,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.totalGeneratedFrames++;
             metrics.windowGeneratedWsiAccepted++;
             metrics.totalGeneratedWsiAccepted++;
-            metrics.windowGeneratedDisplayUnknown++;
-            metrics.totalGeneratedDisplayUnknown++;
+            trackGeneratedDisplayPresent(generatedPresentTime.presentID);
             metrics.windowGeneratedPresentMs +=
                 std::chrono::duration<double, std::milli>(
                     RuntimeMetrics::Clock::now()
@@ -5255,7 +5453,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // generated Adreno present. Keep that ownership contract on the
             // protected path; Xclipse/generic retains the newer source-owned
             // downstream chain.
-            .pNext = adaptivePresentPNext(
+            .pNext = generatedDisplayConfirmationPNext(
                 generatedDownstreamPNext,
                 syntheticDesiredTimeNs,
                 generatedPresentTime,
@@ -5286,8 +5484,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.totalGeneratedFrames++;
         metrics.windowGeneratedWsiAccepted++;
         metrics.totalGeneratedWsiAccepted++;
-        metrics.windowGeneratedDisplayUnknown++;
-        metrics.totalGeneratedDisplayUnknown++;
+        trackGeneratedDisplayPresent(generatedPresentTime.presentID);
         metrics.windowGeneratedPresentMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - generatedPresentStart).count();
         if (firstPresentDiagnostic && i == 0) {
