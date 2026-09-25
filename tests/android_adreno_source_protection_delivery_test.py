@@ -36,22 +36,16 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertIn("game-render-admission-bypass", escape_block)
         self.assertNotIn("presentContextWithCount(", escape_block)
 
-    def test_fixed_adreno_uses_historical_generation_without_deadline_admission(self) -> None:
+    def test_fixed_adreno_uses_cadence_governor_without_adaptive_deadline_admission(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         selection_start = source.index("const size_t requestedFixedGeneratedFrameCount")
         selection_end = source.index("const auto& adaptiveTelemetry", selection_start)
         selection = source[selection_start:selection_end]
-        self.assertIn("fixedAdrenoHistoricalGeneration", selection)
-        self.assertIn("this->conservativeCrossDeviceSync_", selection)
-        self.assertIn("!conf.adaptiveFramegen", selection)
-        self.assertIn(
-            "fixedAdrenoHistoricalGeneration\n"
-            "            ? requestedFixedGeneratedFrameCount",
-            selection,
-            "Protected Adreno Fixed mode must restore September 18 multiplier-minus-one "
-            "generation before entering the compatibility execution island.",
-        )
+        self.assertNotIn("fixedAdrenoHistoricalGeneration", selection)
+        self.assertIn("fixedSourceCadenceGovernor_.plan(", selection)
+        self.assertIn("requestedFixedGeneratedFrameCount", selection)
+        self.assertIn("previousSourceCadenceObservation", selection)
 
         admission_start = source.index("// Active deadline admission")
         admission_end = source.index(
@@ -62,9 +56,8 @@ class AndroidAdrenoSourceProtectionDeliveryTest(unittest.TestCase):
         self.assertNotIn(
             "conf.adaptiveFramegen || sourceProtectionBatchAdmission",
             admission,
-            "Fixed Adreno must not be suppressed by the post-September-18 "
-            "deadline predictor.",
         )
+        self.assertIn("conservativeFixedSourceProtectionGap", source)
 
     def test_history_invalidation_has_explicit_reason(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
