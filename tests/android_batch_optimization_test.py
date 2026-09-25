@@ -30,23 +30,29 @@ class AndroidBatchOptimizationTest(unittest.TestCase):
             source = (ROOT / "framegen" / backend / "lsfg.cpp").read_text(encoding="utf-8")
             self.assertIn("if (contexts.empty())\n        resetRuntime();", source)
 
-    def test_android_config_reload_skips_legacy_100ms_sleep(self) -> None:
-        """GameNative writes config atomically; Android must not add a fixed transition stall."""
+    def test_android_config_reload_has_no_constructor_stall_or_build_patch(self) -> None:
+        """Config consistency is source-level now; Android must not reintroduce the legacy reload path."""
         transform = ROOT / "scripts/adreno_android_config_reload.py"
-        self.assertTrue(transform.exists(), "missing Android config reload hardening transform")
-        text = transform.read_text(encoding="utf-8")
-        for marker in (
-            "android-config-reload-no-sleep",
-            "std::this_thread::sleep_for(std::chrono::milliseconds(100));",
-            "#ifndef __ANDROID__",
-        ):
-            self.assertIn(marker, text)
+        self.assertFalse(
+            transform.exists(),
+            "obsolete Android config reload source transform must be removed",
+        )
 
         build = (ROOT / "scripts/build/android.sh").read_text(encoding="utf-8")
-        self.assertIn("adreno_android_config_reload.py", build)
-        config_patch = build.index("adreno_android_config_reload.py")
-        runtime_bundle = build.index("apply-adreno-evidence-profile.py")
-        self.assertLess(config_patch, runtime_bundle, "config hardening must precede retained runtime composition")
+        self.assertNotIn("adreno_android_config_reload.py", build)
+
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        constructor_start = source.index("LsContext::LsContext")
+        constructor_end = source.index("LsContext::~LsContext()", constructor_start)
+        constructor = source[constructor_start:constructor_end]
+        self.assertNotIn(
+            "std::this_thread::sleep_for(std::chrono::milliseconds(100))",
+            constructor,
+        )
+        self.assertNotIn("Config::updateConfig", constructor)
+        self.assertNotIn("Config::setActive", constructor)
+        self.assertNotIn("LSFG_3_1::finalize", constructor)
+        self.assertNotIn("LSFG_3_1P::finalize", constructor)
 
 
 
