@@ -106,7 +106,10 @@ class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
         self.assertLess(escape, first_copy)
         escape_block = adreno[escape:first_copy]
         self.assertIn("SourceCadenceObservation::SourceOnly", escape_block)
-        self.assertIn("sourceHistoryWarmupRemaining_ = 1", escape_block)
+        self.assertIn("sourceHistoryWarmupRemaining_ = 0", escape_block)
+        self.assertIn("requiresSourceHistoryWarmup_ = false", escape_block)
+        self.assertIn("AdrenoSourceProtectionBackoffReason::ComputeOverBudget", escape_block)
+        self.assertIn("reprime=deferred", escape_block)
         self.assertIn("game-render-overload-bypass", escape_block)
         self.assertNotIn("submitAndWaitForAhbHandoff(", escape_block)
 
@@ -123,8 +126,10 @@ class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
         escape_block = adreno[escape:first_copy]
         self.assertIn("SourceCadenceObservation::SourceOnly", escape_block)
         self.assertIn("gameRenderSemaphores", escape_block)
-        self.assertIn("sourceHistoryWarmupRemaining_ = 1", escape_block)
-        self.assertIn("requiresSourceHistoryWarmup_ = true", escape_block)
+        self.assertIn("sourceHistoryWarmupRemaining_ = 0", escape_block)
+        self.assertIn("requiresSourceHistoryWarmup_ = false", escape_block)
+        self.assertIn("AdrenoSourceProtectionBackoffReason::AdmissionRejected", escape_block)
+        self.assertIn("reprime=deferred", escape_block)
         self.assertIn("game-render-admission-bypass", escape_block)
         self.assertNotIn("presentContextWithCount(", escape_block)
         self.assertNotIn("submitAndWaitForAhbHandoff(", escape_block)
