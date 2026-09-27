@@ -214,8 +214,12 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         create_start = hooks.index("const auto createSourceOnly")
         create_end = hooks.index("#ifdef __ANDROID__", create_start)
         source_only = hooks[create_start:create_end]
-        self.assertIn("choosePresentMode(", source_only)
-        self.assertIn("sourceOnlyCreateInfo.presentMode", source_only)
+        self.assertIn(
+            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
+            source_only,
+        )
+        self.assertNotIn("choosePresentMode(", source_only)
+        self.assertNotIn("activeConf.e_present);", source_only)
         self.assertNotIn("residentCapacityMultiplier", source_only)
         self.assertNotIn("requiredTransferUsage", source_only)
         self.assertNotIn("LsContext", source_only)
