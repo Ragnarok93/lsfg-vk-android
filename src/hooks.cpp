@@ -970,15 +970,10 @@ namespace {
         }
 
         const size_t residentMultiplier = residentCapacityMultiplier(activeConf);
-        const uint32_t residentBatchImageCount =
-            static_cast<uint32_t>(residentMultiplier);
         const uint32_t requiredHeadroom = static_cast<uint32_t>(
             std::max<size_t>(1, residentMultiplier - 1));
-        const bool fifoSingleBatchCapacity =
-            createInfo.presentMode == VK_PRESENT_MODE_FIFO_KHR;
         const uint32_t maxImageCount = surfaceCapabilities.maxImageCount;
-        if (!fifoSingleBatchCapacity
-                && pCreateInfo->minImageCount > UINT32_MAX - requiredHeadroom) {
+        if (pCreateInfo->minImageCount > UINT32_MAX - requiredHeadroom) {
             std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom minImageCount="
                       << pCreateInfo->minImageCount
                       << " maxImageCount=" << maxImageCount
@@ -986,21 +981,14 @@ namespace {
                       << "; preserving original swapchain\n";
             return createPassThrough("headroom-overflow");
         }
-        const uint32_t fifoRequiredImageCount =
-            std::max<uint32_t>(pCreateInfo->minImageCount, residentBatchImageCount);
-        const uint32_t legacyRequiredImageCount =
-            pCreateInfo->minImageCount + requiredHeadroom;
         const uint32_t requiredImageCount =
-            fifoSingleBatchCapacity ? fifoRequiredImageCount : legacyRequiredImageCount;
+            pCreateInfo->minImageCount + requiredHeadroom;
         std::cerr << "lsfg-vk: init stage=swapchain-capacity minImageCount="
                   << pCreateInfo->minImageCount
                   << " maxImageCount=" << maxImageCount
                   << " requiredHeadroom=" << requiredHeadroom
                   << " requiredImageCount=" << requiredImageCount
-                  << " capacityPolicy="
-                  << (fifoSingleBatchCapacity
-                        ? "fifo-single-batch"
-                        : "legacy-headroom")
+                  << " capacityPolicy=legacy-headroom"
                   << " multiplier=" << activeConf.multiplier
                   << " residentMultiplier=" << residentMultiplier << "\n";
         if (maxImageCount != 0 && requiredImageCount > maxImageCount) {
@@ -1009,10 +997,7 @@ namespace {
                       << " maxImageCount=" << maxImageCount
                       << " requiredHeadroom=" << requiredHeadroom
                       << " requiredImageCount=" << requiredImageCount
-                      << " capacityPolicy="
-                      << (fifoSingleBatchCapacity
-                            ? "fifo-single-batch"
-                            : "legacy-headroom")
+                      << " capacityPolicy=legacy-headroom"
                       << "; preserving original swapchain\n";
             return createPassThrough("insufficient-headroom");
         }
@@ -1085,7 +1070,8 @@ namespace {
             state->present = createInfo.presentMode;
             state->configuredPresent = configuredPresentMode;
             state->context = std::make_shared<LsContext>(
-                *deviceInfo, *pSwapchain, pCreateInfo->imageExtent, swapchainImages);
+                *deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
+                swapchainImages, createInfo.presentMode);
             if (pCreateInfo->oldSwapchain)
                 retireSwapchainState(pCreateInfo->oldSwapchain);
             publishSwapchainState(*pSwapchain, std::move(state));
