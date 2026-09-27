@@ -1777,6 +1777,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->runtimeConfigSignature_ = currentConfigSignature;
         this->runtimeConfigSignatureValid_ = true;
         this->configRevision_ = nextRuntimeConfigRevision();
+        // One-shot context identity marker. Mode-boundary recreation should
+        // produce a new backend context id and a new runtime config revision.
+        std::cerr << "lsfg-vk: runtime stage=framegen-context-epoch"
+                  << " context_id="
+                  << (this->lsfgCtxId ? *this->lsfgCtxId : -1)
+                  << " config_revision=" << this->configRevision_
+                  << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
+                  << " multiplier=" << conf.multiplier
+                  << "\n";
     } else if (this->runtimeConfigSignature_ != currentConfigSignature) {
         this->runtimeConfigSignature_ = currentConfigSignature;
         this->configRevision_ = nextRuntimeConfigRevision();

@@ -80,6 +80,11 @@ namespace {
             // inactive FIFO path cannot inherit LSFG image-count/usage state.
             const bool generationActivityChanged =
                 (previous.multiplier > 1) != (next.multiplier > 1);
+            // Fixed and Adaptive use different temporal generation semantics.
+            // Crossing this boundary must replace the private LSFG context rather
+            // than carrying backend history through a resident soft reload.
+            const bool framegenModeChanged =
+                previous.adaptiveFramegen != next.adaptiveFramegen;
             const bool adaptiveFlowModeChanged =
                 previous.adaptiveFlowScale != next.adaptiveFlowScale;
             const bool adaptiveFlowPresetChanged =
@@ -92,6 +97,7 @@ namespace {
             // generated outputs. A larger hot-reloaded multiplier needs a new
             // swapchain/context before present can index those outputs.
             return generationActivityChanged
+                || framegenModeChanged
                 || next.multiplier > residentCapacityMultiplier(previous)
                 || previous.dll != next.dll
                 || adaptiveFlowModeChanged
@@ -1172,6 +1178,16 @@ namespace {
                     conf = Config::snapshot();
                     recreateSwapchain = requiresSwapchainRecreation(
                         previousConf, conf);
+                    const bool framegenModeChanged =
+                        previousConf.adaptiveFramegen != conf.adaptiveFramegen;
+                    if (framegenModeChanged) {
+                        std::cerr << "lsfg-vk: runtime mode_change="
+                                  << (conf.adaptiveFramegen
+                                        ? "fixed-to-adaptive"
+                                        : "adaptive-to-fixed")
+                                  << " recreate=" << (recreateSwapchain ? 1 : 0)
+                                  << "\n";
+                    }
                     std::cerr << "lsfg-vk: init stage=config-reloaded multiplier="
                               << conf.multiplier
                               << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
