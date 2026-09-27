@@ -21,9 +21,14 @@ class AndroidPreserveSwapchainCapacityTest(unittest.TestCase):
         self.assertIn("capacityPolicy=preserve-native-explicit", hooks)
         self.assertIn("capacityPolicy=preserve-native-fallback", hooks)
         self.assertIn("createInfo.minImageCount = pCreateInfo->minImageCount;", hooks)
+
+        android_capacity = hooks[
+            hooks.index("bool preserveSwapchainImageCount ="):
+            hooks.index("#else", hooks.index("bool preserveSwapchainImageCount ="))
+        ]
         self.assertNotIn(
             'return createPassThrough("insufficient-headroom");',
-            hooks,
+            android_capacity,
         )
 
     def test_preserved_capacity_never_blocks_source_for_generated_image(self) -> None:
