@@ -1112,6 +1112,16 @@ void AdaptiveFrameScheduler::setGenerationFirst(bool enabled) {
     resetUnmetDemand();
 }
 
+void AdaptiveFrameScheduler::setStrictFifoCadence(bool enabled) {
+    if (strictFifoCadence_ == enabled)
+        return;
+    strictFifoCadence_ = enabled;
+    // Present-mode transitions recreate the Android context, but keeping this
+    // setter self-contained prevents fractional debt if a future caller changes
+    // policy without reconstruction.
+    fractionalOpportunityPhase_ = 0.0;
+}
+
 std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval) {
     telemetry_.sourceRateSnapped = false;
     telemetry_.costRaised = false;
@@ -1196,15 +1206,32 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     // A single source hitch may consume elapsed wall time but it may not mint a
     // burst of synthetic target slots. Bound opportunity creation to the robust
     // predicted cadence and deliberately discard the excess elapsed time.
-    const double opportunityIntervalSeconds = std::min(
+    double opportunityIntervalSeconds = std::min(
         intervalSeconds,
         smoothedSourceIntervalSeconds_ * kOpportunityIntervalMaxRatio);
+    double generatedDemand =
+        static_cast<double>(targetFps_) * opportunityIntervalSeconds - 1.0;
+    if (strictFifoCadence_) {
+        // FIFO consumes every queued image, so raw source jitter must not
+        // directly create 0/2 or 1/3 burst patterns around an otherwise stable
+        // integer target ratio. Use the smoothed real-source cadence and snap
+        // small estimation error around integer generation densities.
+        opportunityIntervalSeconds = smoothedSourceIntervalSeconds_;
+        generatedDemand = std::clamp(
+            static_cast<double>(targetFps_) * opportunityIntervalSeconds - 1.0,
+            0.0,
+            static_cast<double>(maxGeneratedFrames_));
+        constexpr double kStrictFifoIntegerSnapWindow = 0.08;
+        const double nearestInteger = std::round(generatedDemand);
+        if (std::abs(generatedDemand - nearestInteger)
+                <= kStrictFifoIntegerSnapWindow) {
+            generatedDemand = nearestInteger;
+        }
+    }
     telemetry_.opportunityIntervalSeconds = opportunityIntervalSeconds;
-    const double intervalOutputDemand =
-        static_cast<double>(targetFps_) * opportunityIntervalSeconds;
     fractionalOpportunityPhase_ = std::max(
         0.0,
-        fractionalOpportunityPhase_ + intervalOutputDemand - 1.0);
+        fractionalOpportunityPhase_ + generatedDemand);
 
     // Nanosecond source intervals such as 33,333,333 ns cannot represent
     // exact rational frame periods in binary floating point. Snap values that
