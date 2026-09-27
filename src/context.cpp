@@ -4972,14 +4972,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // Protected Adreno retains its independent September 18 host-completion
     // boundary in the dedicated compatibility block above.
     bool framegenReady = true;
+    double framegenBlockingCompletionMs = 0.0;
     if (requireHostCompletionWait) {
         const auto waitIdleStart = RuntimeMetrics::Clock::now();
         const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
         framegenReady = conf.performance
             ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
             : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        framegenBlockingCompletionMs =
+            std::chrono::duration<double, std::milli>(
+                RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
     }
     if (requireHostCompletionWait && framegenReady) {
         metrics.windowGeneratedCompleted += generatedFrameCount;
