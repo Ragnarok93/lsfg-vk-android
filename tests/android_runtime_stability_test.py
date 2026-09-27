@@ -868,7 +868,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         """Strict FIFO must establish a completed generated batch before WSI when no native timing backend exists."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("bool requireHostCompletionWait")
-        end = source.index("// 3. Compatibility/error fallback only.", start)
+        end = source.index("bool framegenReady = true;", start)
         completion_policy = source[start:end]
 
         self.assertIn("fifoBoundedCompletion", completion_policy)
