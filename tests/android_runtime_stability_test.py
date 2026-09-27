@@ -867,7 +867,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
     def test_fifo_admitted_batch_is_not_amputated_by_post_dispatch_deadline(self) -> None:
         """Once FIFO work is admitted and dispatched, wall-clock slot expiry must not delete it."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("const uint64_t syntheticDesiredTimeNs")
+        generated_start = source.index("// 4. Generated presentation is opportunistic.")
+        start = source.index("const uint64_t syntheticDesiredTimeNs", generated_start)
         end = source.index("pass.acquireSemaphores.at(i)", start)
         pre_acquire = source[start:end]
 
