@@ -32,21 +32,24 @@ class AndroidPreserveSwapchainCapacityTest(unittest.TestCase):
             android_capacity,
         )
 
-    def test_preserved_capacity_never_blocks_source_for_generated_image(self) -> None:
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+    def test_native_capacity_reuses_existing_nonblocking_generic_wsi_policy(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("bool preserveSwapchainImageCount", header)
-        self.assertIn("bool preserveSwapchainImageCount_{false};", header)
-        self.assertIn("this->preserveSwapchainImageCount_", source)
-        self.assertRegex(
+        # The quirk is swapchain-only. Xclipse/generic already use zero-time
+        # generated acquisition, so no presentation/synchronization rewrite is
+        # required to make native capacity source-safe.
+        self.assertIn(
+            "this->conservativeCrossDeviceSync_\n"
+            "                ? runtimeWaitTimeoutNs()\n"
+            "                : 0",
             source,
-            r"generatedAcquireTimeoutNs\s*=\s*this->preserveSwapchainImageCount_\s*\?\s*0",
         )
-        self.assertRegex(
+        self.assertIn(
+            "!this->conservativeCrossDeviceSync_\n"
+            "                && (res == VK_NOT_READY || res == VK_TIMEOUT)",
             source,
-            r"\(this->preserveSwapchainImageCount_\s*\|\|\s*!this->conservativeCrossDeviceSync_\)\s*&&\s*\(res == VK_NOT_READY \|\| res == VK_TIMEOUT\)",
         )
+        self.assertNotIn("preserveSwapchainImageCount_", source)
 
     def test_capacity_policy_change_recreates_swapchain(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")

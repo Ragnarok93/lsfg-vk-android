@@ -1140,8 +1140,7 @@ namespace {
             state->configuredPresent = configuredPresentMode;
             state->context = std::make_shared<LsContext>(
                 *deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
-                swapchainImages, createInfo.presentMode,
-                preserveSwapchainImageCount);
+                swapchainImages, createInfo.presentMode);
             if (pCreateInfo->oldSwapchain)
                 retireSwapchainState(pCreateInfo->oldSwapchain);
             publishSwapchainState(*pSwapchain, std::move(state));
