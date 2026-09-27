@@ -64,8 +64,8 @@ class AndroidPreserveSwapchainCapacityTest(unittest.TestCase):
 
         self.assertIn("protectedAdrenoCapacityPath", hooks)
         self.assertIn('"legacy-headroom-adreno-protected"', hooks)
-        self.assertIn('"action=pass-through-adreno-protected"', hooks)
-        self.assertIn('"reason=adreno-protected-364178af"', hooks)
+        self.assertIn("action=pass-through-adreno-protected", hooks)
+        self.assertIn("reason=adreno-protected-364178af", hooks)
 
         android_capacity = hooks[
             hooks.index("const bool protectedAdrenoCapacity ="):
