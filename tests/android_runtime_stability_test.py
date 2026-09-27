@@ -770,10 +770,14 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
 
         self.assertIn(
-            "new int32_t(lsfgCreateContext(",
+            "ctxId = LSFG_3_1::createContextFromAHB(",
             context,
-            "A fresh wrapper must allocate a fresh private LSFG backend context",
+            "A fresh Android wrapper must allocate a fresh private LSFG backend context",
         )
+        self.assertIn("ctxId = LSFG_3_1P::createContextFromAHB(", context)
+        self.assertIn("ctxId = LSFG_3_1::createAdaptiveContextFromAHB(", context)
+        self.assertIn("ctxId = LSFG_3_1P::createAdaptiveContextFromAHB(", context)
+        self.assertIn("new int32_t(ctxId)", context)
         self.assertIn('stage=framegen-context-epoch', context)
         self.assertIn('" context_id="', context)
         self.assertIn('" config_revision="', context)
