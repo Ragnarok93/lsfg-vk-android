@@ -5030,6 +5030,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     size_t queuedGeneratedFrameCount = 0;
     size_t generatedWsiRejectedFrameCount = 0;
     bool generatedDeadlineObservationEligible = true;
+    const bool orderedFifoBatch =
+        this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR;
+    if (firstPresentDiagnostic && orderedFifoBatch && generatedFrameCount > 0) {
+        std::cerr << "lsfg-vk: runtime stage=fifo-ordered-batch"
+                  << " generated=" << generatedFrameCount
+                  << " post_dispatch_deadline=disabled"
+                  << " completion="
+                  << (this->asyncFramegenCompletionEnabled_ ? "gpu-sync" : "host")
+                  << "\n";
+    }
     for (size_t i = 0; i < generatedFrameCount; i++) {
         const auto generatedPresentStart = RuntimeMetrics::Clock::now();
         const double syntheticFraction =
@@ -5039,14 +5049,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->sourceTimeline_.syntheticDesiredTimeNs(
                 this->currentSourceTimeline_, syntheticFraction);
         const uint64_t syntheticAdmissionNowNs = monotonicNowNs();
-        // Post-dispatch rejection is source-safe whenever completion is GPU-side.
-        // Xclipse retains its existing path. Adreno joins it only while the r12
-        // SYNC_FD completion chain is active; host-fallback Adreno keeps the
-        // conservative pre-admission behavior.
+        // Strict FIFO is itself the downstream ordering clock. Once a batch has
+        // passed pre-dispatch admission and framegen has been submitted, do not
+        // amputate that ordered batch using an unobservable wall-clock scanout
+        // estimate. Mailbox remains opportunistic and may still reject late
+        // Adaptive synthetics before WSI submission.
         const bool strictFifoPresentation =
             this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR;
         const bool enforcePostDispatchSyntheticDeadline =
-            (conf.adaptiveFramegen || strictFifoPresentation)
+            conf.adaptiveFramegen
+            && !strictFifoPresentation
             && (!this->conservativeCrossDeviceSync_ || this->asyncFramegenCompletionEnabled_);
         if (enforcePostDispatchSyntheticDeadline
                 && syntheticDesiredTimeNs > 0
@@ -5055,15 +5067,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 static_cast<double>(
                     syntheticAdmissionNowNs - syntheticDesiredTimeNs)
                 / 1'000'000.0;
-            if (strictFifoPresentation) {
-                Utils::logLimitN(
-                    "fifoSyntheticDeadline",
-                    12,
-                    "fifo-slot synthetic_skipped=1 lateness_ms="
-                        + std::to_string(deliveryLatenessMs)
-                        + " adaptive="
-                        + std::to_string(conf.adaptiveFramegen ? 1 : 0));
-            }
             this->deadlineAdmissionPredictor_.observeDeliveryMiss(
                 deliveryLatenessMs);
             generatedDeadlineObservationEligible = false;
