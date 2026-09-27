@@ -3199,6 +3199,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
+                      << " adaptive_scheduled_density="
+                      << adaptiveTelemetry.scheduledGenerationDensity
+                      << " adaptive_integer_density_locked="
+                      << (adaptiveTelemetry.integerDensityLocked ? 1 : 0)
+                      << " adaptive_locked_generated="
+                      << adaptiveTelemetry.lockedGeneratedFrames
+                      << " adaptive_density_transition_evidence="
+                      << adaptiveTelemetry.densityTransitionEvidence
                       << " adaptive_cost_limit=" << adaptiveTelemetry.costLimit
                       << " adaptive_final_generated=" << adaptiveTelemetry.generatedFrames
                       << " adaptive_fractional_phase=" << adaptiveTelemetry.fractionalPhase
