@@ -587,10 +587,12 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
 } // namespace
 
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
-        VkExtent2D extent, const std::vector<VkImage>& swapchainImages)
+        VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
+        VkPresentModeKHR presentMode)
         : swapchain(swapchain), swapchainImages(swapchainImages),
           presentWaitRetirements_(swapchainImages.size()),
-          extent(extent), device_(info.device), queue_(info.queue.second) {
+          extent(extent), presentMode_(presentMode),
+          device_(info.device), queue_(info.queue.second) {
     // get updated configuration
     auto conf = Config::snapshot();
     if (!conf.config_file.empty()
@@ -5041,8 +5043,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // Xclipse retains its existing path. Adreno joins it only while the r12
         // SYNC_FD completion chain is active; host-fallback Adreno keeps the
         // conservative pre-admission behavior.
+        const bool strictFifoPresentation =
+            this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR;
         const bool enforcePostDispatchSyntheticDeadline =
-            conf.adaptiveFramegen
+            (conf.adaptiveFramegen || strictFifoPresentation)
             && (!this->conservativeCrossDeviceSync_ || this->asyncFramegenCompletionEnabled_);
         if (enforcePostDispatchSyntheticDeadline
                 && syntheticDesiredTimeNs > 0
@@ -5051,6 +5055,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 static_cast<double>(
                     syntheticAdmissionNowNs - syntheticDesiredTimeNs)
                 / 1'000'000.0;
+            if (strictFifoPresentation) {
+                Utils::logLimitN(
+                    "fifoSyntheticDeadline",
+                    12,
+                    "fifo-slot synthetic_skipped=1 lateness_ms="
+                        + std::to_string(deliveryLatenessMs)
+                        + " adaptive="
+                        + std::to_string(conf.adaptiveFramegen ? 1 : 0));
+            }
             this->deadlineAdmissionPredictor_.observeDeliveryMiss(
                 deliveryLatenessMs);
             generatedDeadlineObservationEligible = false;
