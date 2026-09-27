@@ -856,6 +856,14 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
 
 
+    def test_adaptive_density_latch_is_visible_in_runtime_telemetry(self) -> None:
+        """Device logs must distinguish cadence intent from downstream capacity cuts."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("adaptive_scheduled_density=", source)
+        self.assertIn("adaptive_integer_density_locked=", source)
+        self.assertIn("adaptive_locked_generated=", source)
+        self.assertIn("adaptive_density_transition_evidence=", source)
+
     def test_swapchain_capacity_restores_native_plus_generated_headroom(self) -> None:
         """FIFO and Mailbox both retain the proven native+synthetic headroom formula."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
