@@ -469,6 +469,33 @@ int main() {
 
 
     {
+        // Strict FIFO cannot replace already-queued images, so Adaptive must
+        // distribute fractional demand from the smoothed source cadence rather
+        // than turn one long source interval into a 2-frame synthetic burst.
+        // Around a stable ~30 FPS source and 60 FPS target, source jitter must
+        // stay at one generated frame per source once the cadence is learned.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        scheduler.setStrictFifoCadence(true);
+
+        for (int frame = 0; frame < 24; ++frame)
+            scheduler.plan((frame % 2 == 0) ? 32ms : 34ms);
+
+        std::size_t zeros = 0;
+        std::size_t bursts = 0;
+        for (int frame = 0; frame < 60; ++frame) {
+            const auto generated =
+                scheduler.plan((frame % 2 == 0) ? 28ms : 39ms);
+            if (generated == 0)
+                ++zeros;
+            if (generated > 1)
+                ++bursts;
+        }
+
+        assert(bursts == 0);
+        assert(zeros <= 3);
+    }
+
+    {
         // Build #383 regression: predictor capacity alone must not early-promote
         // while the recent real-source cadence is still alternating wildly.
         // The generic sustained-demand timer remains available, but the fast
