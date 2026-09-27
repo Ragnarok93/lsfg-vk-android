@@ -1000,6 +1000,12 @@ namespace {
         // policy so missing WSI capacity drops synthetic work instead of
         // delaying the application's source present.
         if (!preserveSwapchainImageCount && surfaceCannotFitHeadroom) {
+            std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom"
+                      << " minImageCount=" << pCreateInfo->minImageCount
+                      << " maxImageCount=" << maxImageCount
+                      << " requiredHeadroom=" << requiredHeadroom
+                      << " requiredImageCount=" << requiredImageCount
+                      << " action=preserve-native-fallback\n";
             preserveSwapchainImageCount = true;
             capacityPolicy = "preserve-native-fallback";
         }
@@ -1007,6 +1013,12 @@ namespace {
         // Preserve the existing desktop fallback unless the upstream quirk was
         // explicitly requested.
         if (!preserveSwapchainImageCount && surfaceCannotFitHeadroom) {
+            std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom"
+                      << " minImageCount=" << pCreateInfo->minImageCount
+                      << " maxImageCount=" << maxImageCount
+                      << " requiredHeadroom=" << requiredHeadroom
+                      << " requiredImageCount=" << requiredImageCount
+                      << " action=pass-through\n";
             if (headroomOverflow)
                 return createPassThrough("headroom-overflow");
             return createPassThrough("insufficient-headroom");
