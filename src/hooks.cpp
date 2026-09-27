@@ -1014,9 +1014,10 @@ namespace {
             return createPassThrough("insufficient-headroom");
 #endif
 
-        createInfo.minImageCount = preserveSwapchainImageCount
-            ? pCreateInfo->minImageCount
-            : requiredImageCount;
+        if (preserveSwapchainImageCount)
+            createInfo.minImageCount = pCreateInfo->minImageCount;
+        else
+            createInfo.minImageCount = requiredImageCount;
         std::cerr << "lsfg-vk: init stage=swapchain-capacity minImageCount="
                   << pCreateInfo->minImageCount
                   << " maxImageCount=" << maxImageCount
