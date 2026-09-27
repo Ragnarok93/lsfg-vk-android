@@ -884,7 +884,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
     def test_mailbox_keeps_adaptive_post_dispatch_deadline_rejection(self) -> None:
         """Mailbox remains opportunistic: Adaptive work may still be rejected after dispatch."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("const uint64_t syntheticDesiredTimeNs")
+        generated_start = source.index("// 4. Generated presentation is opportunistic.")
+        start = source.index("const uint64_t syntheticDesiredTimeNs", generated_start)
         end = source.index("pass.acquireSemaphores.at(i)", start)
         pre_acquire = source[start:end]
 
