@@ -23,6 +23,14 @@ constexpr uint64_t kSourceTimelineDiscontinuityRatio = 8ULL;
 // generation-count veto. Adaptive continues pursuing the configured output
 // target up to maxGeneratedFrames_ even when the source slows under load.
 constexpr double kSustainedDemandSeconds = 0.600;
+
+// Generation density is a cadence decision, not a raw frame-time reaction.
+// Acquire an integer-ratio regime quickly once smoothed demand is close, then
+// require wider and sustained evidence before leaving it.
+constexpr double kIntegerDensityAcquireWindow = 0.10;
+constexpr double kIntegerDensityReleaseWindow = 0.20;
+constexpr unsigned kIntegerDensityAcquireSamples = 4;
+constexpr unsigned kIntegerDensityReleaseSamples = 8;
 } // namespace
 
 SourceTimelineSample SourceProtectedTimeline::observe(
@@ -1112,6 +1120,72 @@ void AdaptiveFrameScheduler::setGenerationFirst(bool enabled) {
     resetUnmetDemand();
 }
 
+double AdaptiveFrameScheduler::stabilizeGenerationDensity(
+        double desiredDensity) {
+    desiredDensity = std::clamp(
+        desiredDensity,
+        0.0,
+        static_cast<double>(maxGeneratedFrames_));
+
+    if (integerDensityLocked_) {
+        const double lockedDensity =
+            static_cast<double>(lockedIntegerDensity_);
+        if (std::abs(desiredDensity - lockedDensity)
+                <= kIntegerDensityReleaseWindow) {
+            integerDensityReleaseSamples_ = 0;
+            integerDensityCandidate_ = 0;
+            integerDensityCandidateSamples_ = 0;
+            return lockedDensity;
+        }
+
+        ++integerDensityReleaseSamples_;
+        if (integerDensityReleaseSamples_ < kIntegerDensityReleaseSamples)
+            return lockedDensity;
+
+        integerDensityLocked_ = false;
+        lockedIntegerDensity_ = 0;
+        integerDensityReleaseSamples_ = 0;
+        integerDensityCandidate_ = 0;
+        integerDensityCandidateSamples_ = 0;
+        // Never carry integer-regime phase into a genuinely fractional regime.
+        fractionalOpportunityPhase_ = 0.0;
+    }
+
+    const double nearestInteger = std::round(desiredDensity);
+    const bool integerCandidateValid =
+        nearestInteger >= 1.0
+        && nearestInteger <= static_cast<double>(maxGeneratedFrames_)
+        && std::abs(desiredDensity - nearestInteger)
+            <= kIntegerDensityAcquireWindow;
+
+    if (!integerCandidateValid) {
+        integerDensityCandidate_ = 0;
+        integerDensityCandidateSamples_ = 0;
+        return desiredDensity;
+    }
+
+    const auto candidate =
+        static_cast<std::size_t>(nearestInteger);
+    if (integerDensityCandidate_ == candidate) {
+        ++integerDensityCandidateSamples_;
+    } else {
+        integerDensityCandidate_ = candidate;
+        integerDensityCandidateSamples_ = 1;
+    }
+
+    if (integerDensityCandidateSamples_ >= kIntegerDensityAcquireSamples) {
+        integerDensityLocked_ = true;
+        lockedIntegerDensity_ = candidate;
+        integerDensityCandidate_ = 0;
+        integerDensityCandidateSamples_ = 0;
+        integerDensityReleaseSamples_ = 0;
+        fractionalOpportunityPhase_ = 0.0;
+        return static_cast<double>(lockedIntegerDensity_);
+    }
+
+    return desiredDensity;
+}
+
 std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval) {
     telemetry_.sourceRateSnapped = false;
     telemetry_.costRaised = false;
@@ -1124,7 +1198,13 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     telemetry_.safeGenerationHint = safeGenerationHint_;
     telemetry_.generatedFrames = 0;
     telemetry_.wantedGeneratedFrames = 0.0;
+    telemetry_.scheduledGenerationDensity = 0.0;
     telemetry_.fractionalPhase = fractionalOpportunityPhase_;
+    telemetry_.integerDensityLocked = integerDensityLocked_;
+    telemetry_.lockedGeneratedFrames = lockedIntegerDensity_;
+    telemetry_.densityTransitionEvidence = integerDensityLocked_
+        ? integerDensityReleaseSamples_
+        : integerDensityCandidateSamples_;
     telemetry_.syntheticOpportunitiesCreated = 0;
 
     if (targetFps_ == 0 || maxGeneratedFrames_ == 0) {
@@ -1184,42 +1264,46 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     updateCostLimit(wantedGenerated);
     telemetry_.costLimit = costLimit_;
 
-    // Drive synthetic opportunities from elapsed source time rather than
-    // repeatedly fractionalizing the smoothed source-rate estimate. Every real
-    // source interval contributes the number of target-output frames that
-    // elapsed during that interval, then consumes one slot for the real source
-    // frame itself. The residual phase is the only state carried forward.
-    //
-    // This behaves like a time-domain error diffuser: long source intervals get
-    // interpolation immediately, short intervals get less, and rejected/capped
-    // whole opportunities are consumed now instead of becoming catch-up debt.
-    // A single source hitch may consume elapsed wall time but it may not mint a
-    // burst of synthetic target slots. Bound opportunity creation to the robust
-    // predicted cadence and deliberately discard the excess elapsed time.
-    const double opportunityIntervalSeconds = std::min(
-        intervalSeconds,
-        smoothedSourceIntervalSeconds_ * kOpportunityIntervalMaxRatio);
-    telemetry_.opportunityIntervalSeconds = opportunityIntervalSeconds;
-    const double intervalOutputDemand =
-        static_cast<double>(targetFps_) * opportunityIntervalSeconds;
-    fractionalOpportunityPhase_ = std::max(
-        0.0,
-        fractionalOpportunityPhase_ + intervalOutputDemand - 1.0);
+    // Generation density follows the protected/smoothed source cadence.
+    // Raw sourceInterval remains useful for cadence estimation, discontinuity
+    // detection, and pressure evidence, but it must not directly change the
+    // number of synthetics produced by one cycle.
+    const double scheduledDensity =
+        stabilizeGenerationDensity(wantedGenerated);
+    telemetry_.scheduledGenerationDensity = scheduledDensity;
+    telemetry_.opportunityIntervalSeconds =
+        smoothedSourceIntervalSeconds_;
+    telemetry_.integerDensityLocked = integerDensityLocked_;
+    telemetry_.lockedGeneratedFrames = lockedIntegerDensity_;
+    telemetry_.densityTransitionEvidence = integerDensityLocked_
+        ? integerDensityReleaseSamples_
+        : integerDensityCandidateSamples_;
 
-    // Nanosecond source intervals such as 33,333,333 ns cannot represent
-    // exact rational frame periods in binary floating point. Snap values that
-    // are within one part per million of the next whole opportunity so stable
-    // integer cadence ratios do not alternate 0/1 from representation error.
-    constexpr double kIntegerSnapEpsilon = 1e-6;
-    const auto wholeOpportunities = static_cast<std::size_t>(std::floor(
-        fractionalOpportunityPhase_ + kIntegerSnapEpsilon));
-    fractionalOpportunityPhase_ -= static_cast<double>(wholeOpportunities);
-    fractionalOpportunityPhase_ = std::clamp(
-        fractionalOpportunityPhase_, 0.0, 0.999999);
+    std::size_t wholeOpportunities = 0;
+    if (integerDensityLocked_) {
+        // An integer target/source regime is intentionally phase-free. Capacity
+        // may still lower this later, but ordinary source jitter cannot turn
+        // 3 generated/source into a 3/2/3 cadence pattern.
+        fractionalOpportunityPhase_ = 0.0;
+        wholeOpportunities = lockedIntegerDensity_;
+    } else {
+        // Genuine fractional ratios use deterministic error diffusion from the
+        // smoothed desired density. Downstream/cost rejection consumes the
+        // opportunity now; it never becomes catch-up debt.
+        fractionalOpportunityPhase_ = std::max(
+            0.0,
+            fractionalOpportunityPhase_ + scheduledDensity);
 
-    // The long-term cost governor remains the sustainable work ceiling. Any
-    // target-lattice opportunity above that ceiling is deliberately consumed,
-    // not deferred, so a later cheap frame cannot repay old generation debt.
+        constexpr double kIntegerSnapEpsilon = 1e-6;
+        wholeOpportunities = static_cast<std::size_t>(std::floor(
+            fractionalOpportunityPhase_ + kIntegerSnapEpsilon));
+        fractionalOpportunityPhase_ -=
+            static_cast<double>(wholeOpportunities);
+        fractionalOpportunityPhase_ = std::clamp(
+            fractionalOpportunityPhase_, 0.0, 0.999999);
+    }
+
+    // Desired cadence and sustainable capacity are separate decisions.
     const std::size_t opportunities = std::min(
         { wholeOpportunities, costLimit_, maxGeneratedFrames_ });
 
@@ -1378,6 +1462,11 @@ void AdaptiveFrameScheduler::updateCostLimit(
 
 void AdaptiveFrameScheduler::resetRuntimeState() {
     fractionalOpportunityPhase_ = 0.0;
+    integerDensityLocked_ = false;
+    lockedIntegerDensity_ = 0;
+    integerDensityCandidate_ = 0;
+    integerDensityCandidateSamples_ = 0;
+    integerDensityReleaseSamples_ = 0;
     smoothedSourceIntervalSeconds_ = 0.0;
     hasSmoothedInterval_ = false;
     reconfigureWarmStartPending_ = false;
