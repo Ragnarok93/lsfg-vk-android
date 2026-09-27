@@ -814,8 +814,12 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         create_end = hooks.index("#ifdef __ANDROID__", create_start)
         source_only_create = hooks[create_start:create_end]
         self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only_create)
-        self.assertIn("choosePresentMode(", source_only_create)
-        self.assertIn("activeConf.e_present", source_only_create)
+        self.assertIn(
+            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
+            source_only_create,
+        )
+        self.assertNotIn("choosePresentMode(", source_only_create)
+        self.assertNotIn("activeConf.e_present", source_only_create)
         self.assertNotIn("residentCapacityMultiplier", source_only_create)
         self.assertNotIn("requiredTransferUsage", source_only_create)
         self.assertNotIn("LsContext", source_only_create)
@@ -863,6 +867,20 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("fifoSingleBatchCapacity", capacity)
         self.assertNotIn("fifoRequiredImageCount", capacity)
         self.assertNotIn('"fifo-single-batch"', capacity)
+
+    def test_adaptive_fifo_uses_stable_scheduler_cadence(self) -> None:
+        """Adaptive FIFO must not turn raw source jitter into synthetic burst counts."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("setStrictFifoCadence(", source)
+        self.assertIn("this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR", source)
+        self.assertIn("!generationFirstAdreno", source)
+
+    def test_adaptive_fifo_uses_whole_batch_deadline_admission(self) -> None:
+        """FIFO admission protects the next source boundary as one batch, not per synthetic slot."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("strictFifoAdaptive", source)
+        self.assertIn("safeBatchGenerationHint(", source)
+        self.assertIn("fifo_batch_admission=1", source)
 
     def test_fifo_admitted_batch_is_not_amputated_by_post_dispatch_deadline(self) -> None:
         """Once FIFO work is admitted and dispatched, wall-clock slot expiry must not delete it."""
