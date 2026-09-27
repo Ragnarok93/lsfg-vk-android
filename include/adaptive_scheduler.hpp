@@ -200,7 +200,9 @@ public:
 private:
     bool hasBaseline_{false};
     double baselineIntervalSeconds_{};
-    std::size_t generationLimit_{1};
+    std::size_t generationLimit_{0};
+    std::size_t requestedGeneratedFrames_{0};
+    bool backedOffActive_{false};
     double pressureSeconds_{};
     double recoverySeconds_{};
     double cooldownSeconds_{};
