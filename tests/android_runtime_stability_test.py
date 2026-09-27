@@ -864,29 +864,54 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("fifoRequiredImageCount", capacity)
         self.assertNotIn('"fifo-single-batch"', capacity)
 
-    def test_fifo_deadline_guard_is_present_mode_scoped(self) -> None:
-        """Strict FIFO rejects stale synthetic work without pacing the source thread."""
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn("VkPresentModeKHR presentMode_", header)
-        self.assertIn(
-            "this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR",
-            source,
-        )
-        self.assertNotIn("waitForMonotonicDeadline", source)
-
-    def test_fifo_late_synthetic_is_dropped_in_fixed_and_adaptive(self) -> None:
-        """A missed FIFO slot is never queued stale, regardless of FG governor mode."""
+    def test_fifo_admitted_batch_is_not_amputated_by_post_dispatch_deadline(self) -> None:
+        """Once FIFO work is admitted and dispatched, wall-clock slot expiry must not delete it."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("const uint64_t syntheticDesiredTimeNs")
         end = source.index("pass.acquireSemaphores.at(i)", start)
         pre_acquire = source[start:end]
 
         self.assertIn("strictFifoPresentation", pre_acquire)
-        self.assertIn("syntheticAdmissionNowNs >= syntheticDesiredTimeNs", pre_acquire)
+        self.assertIn("conf.adaptiveFramegen", pre_acquire)
+        self.assertIn("!strictFifoPresentation", pre_acquire)
+        self.assertNotIn(
+            "conf.adaptiveFramegen || strictFifoPresentation",
+            pre_acquire,
+        )
+        self.assertNotIn("fifo-slot synthetic_skipped=1", pre_acquire)
+
+    def test_mailbox_keeps_adaptive_post_dispatch_deadline_rejection(self) -> None:
+        """Mailbox remains opportunistic: Adaptive work may still be rejected after dispatch."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("const uint64_t syntheticDesiredTimeNs")
+        end = source.index("pass.acquireSemaphores.at(i)", start)
+        pre_acquire = source[start:end]
+
+        self.assertIn(
+            "conf.adaptiveFramegen\n            && !strictFifoPresentation",
+            pre_acquire,
+        )
+        self.assertIn(
+            "syntheticAdmissionNowNs >= syntheticDesiredTimeNs",
+            pre_acquire,
+        )
         self.assertIn("generatedDeadlineObservationEligible = false", pre_acquire)
         self.assertIn("break;", pre_acquire)
-        self.assertIn("conf.adaptiveFramegen || strictFifoPresentation", pre_acquire)
+
+    def test_fifo_keeps_existing_wsi_and_source_priority_contract(self) -> None:
+        """The repair must not introduce host sleeps or alter the proven WSI ownership model."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        generated_start = source.index("// 4. Generated presentation is opportunistic.")
+        generated_end = source.index("// 5. Present the real game frame", generated_start)
+        generated = source[generated_start:generated_end]
+
+        self.assertIn("ovkAcquireNextImageKHR", generated)
+        self.assertIn("ovkQueuePresentKHR", generated)
+        self.assertIn("this->conservativeCrossDeviceSync_", generated)
+        self.assertNotIn("clock_nanosleep", generated)
+        self.assertNotIn("sleep_for", generated)
+        self.assertNotIn("waitForMonotonicDeadline", generated)
+
 
     def test_fifo_never_waits_the_real_source_on_a_host_deadline(self) -> None:
         """Source priority is preserved: FIFO cadence repair must not sleep vkQueuePresentKHR."""
