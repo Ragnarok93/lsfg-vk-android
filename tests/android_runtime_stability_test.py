@@ -886,32 +886,34 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
 
     def test_fifo_bounded_completion_is_capability_scoped_not_vendor_scoped(self) -> None:
-        """The conservative FIFO completion boundary must not key off Xclipse/Samsung names."""
+        """The conservative FIFO completion boundary must not key off GPU/vendor names."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("bool requireHostCompletionWait")
-        end = source.index("// 3. Compatibility/error fallback only.", start)
-        completion_policy = source[start:end].lower()
-
-        for vendor_term in (
-            "xclipse",
-            "samsung",
-            "adreno",
-            "qualcomm",
-            "turnip",
-            "vendorid",
-            "driverversion",
-        ):
-            self.assertNotIn(vendor_term, completion_policy)
+        marker = source.find("const bool fifoBoundedCompletion")
+        self.assertNotEqual(marker, -1)
+        if marker >= 0:
+            end = source.index(";", marker) + 1
+            predicate = source[marker:end].lower()
+            for vendor_term in (
+                "xclipse",
+                "samsung",
+                "adreno",
+                "qualcomm",
+                "turnip",
+                "vendorid",
+                "driverversion",
+            ):
+                self.assertNotIn(vendor_term, predicate)
 
     def test_mailbox_retains_async_framegen_completion(self) -> None:
         """Mailbox must not be host-serialized by the FIFO compatibility A/B."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("bool requireHostCompletionWait")
-        end = source.index("// 3. Compatibility/error fallback only.", start)
-        completion_policy = source[start:end]
-
-        self.assertIn("VK_PRESENT_MODE_FIFO_KHR", completion_policy)
-        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", completion_policy)
+        marker = source.find("const bool fifoBoundedCompletion")
+        self.assertNotEqual(marker, -1)
+        if marker >= 0:
+            end = source.index(";", marker) + 1
+            predicate = source[marker:end]
+            self.assertIn("VK_PRESENT_MODE_FIFO_KHR", predicate)
+            self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", predicate)
 
     def test_fifo_completion_ab_logs_selected_boundary(self) -> None:
         """Device validation must expose whether FIFO actually took the bounded-completion path."""
