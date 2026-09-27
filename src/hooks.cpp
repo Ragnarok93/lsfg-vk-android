@@ -951,11 +951,34 @@ namespace {
         }
 
         VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;
+        const auto configuredPresentMode = activeConf.e_present;
+        const bool recreatingExistingSwapchain = pCreateInfo->oldSwapchain != VK_NULL_HANDLE;
+        // Adaptive and Fixed FG share the same WSI contract. Present mode is
+        // resolved before image capacity so strict FIFO can bound queue depth
+        // without changing Mailbox or any other present mode.
+        createInfo.presentMode = recreatingExistingSwapchain
+            ? pCreateInfo->presentMode
+            : choosePresentMode(
+                deviceInfo->physicalDevice, pCreateInfo->surface,
+                pCreateInfo->presentMode, configuredPresentMode);
+        if (recreatingExistingSwapchain) {
+            std::cerr << "lsfg-vk: init stage=swapchain-hot-recreate-present-mode"
+                      << " adaptivePacing=0"
+                      << " gameMode=" << pCreateInfo->presentMode
+                      << " configuredMode=" << configuredPresentMode
+                      << " effectiveMode=" << createInfo.presentMode << "\n";
+        }
+
         const size_t residentMultiplier = residentCapacityMultiplier(activeConf);
+        const uint32_t residentBatchImageCount =
+            static_cast<uint32_t>(residentMultiplier);
         const uint32_t requiredHeadroom = static_cast<uint32_t>(
             std::max<size_t>(1, residentMultiplier - 1));
+        const bool fifoSingleBatchCapacity =
+            createInfo.presentMode == VK_PRESENT_MODE_FIFO_KHR;
         const uint32_t maxImageCount = surfaceCapabilities.maxImageCount;
-        if (pCreateInfo->minImageCount > UINT32_MAX - requiredHeadroom) {
+        if (!fifoSingleBatchCapacity
+                && pCreateInfo->minImageCount > UINT32_MAX - requiredHeadroom) {
             std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom minImageCount="
                       << pCreateInfo->minImageCount
                       << " maxImageCount=" << maxImageCount
@@ -963,11 +986,21 @@ namespace {
                       << "; preserving original swapchain\n";
             return createPassThrough("headroom-overflow");
         }
-        const uint32_t requiredImageCount = pCreateInfo->minImageCount + requiredHeadroom;
+        const uint32_t fifoRequiredImageCount =
+            std::max<uint32_t>(pCreateInfo->minImageCount, residentBatchImageCount);
+        const uint32_t legacyRequiredImageCount =
+            pCreateInfo->minImageCount + requiredHeadroom;
+        const uint32_t requiredImageCount =
+            fifoSingleBatchCapacity ? fifoRequiredImageCount : legacyRequiredImageCount;
         std::cerr << "lsfg-vk: init stage=swapchain-capacity minImageCount="
                   << pCreateInfo->minImageCount
                   << " maxImageCount=" << maxImageCount
                   << " requiredHeadroom=" << requiredHeadroom
+                  << " requiredImageCount=" << requiredImageCount
+                  << " capacityPolicy="
+                  << (fifoSingleBatchCapacity
+                        ? "fifo-single-batch"
+                        : "legacy-headroom")
                   << " multiplier=" << activeConf.multiplier
                   << " residentMultiplier=" << residentMultiplier << "\n";
         if (maxImageCount != 0 && requiredImageCount > maxImageCount) {
@@ -975,6 +1008,11 @@ namespace {
                       << pCreateInfo->minImageCount
                       << " maxImageCount=" << maxImageCount
                       << " requiredHeadroom=" << requiredHeadroom
+                      << " requiredImageCount=" << requiredImageCount
+                      << " capacityPolicy="
+                      << (fifoSingleBatchCapacity
+                            ? "fifo-single-batch"
+                            : "legacy-headroom")
                       << "; preserving original swapchain\n";
             return createPassThrough("insufficient-headroom");
         }
@@ -996,23 +1034,6 @@ namespace {
         std::cerr << "lsfg-vk: init stage=swapchain-blit-check-ready\n";
 
         createInfo.imageUsage |= requiredTransferUsage;
-
-        const auto configuredPresentMode = activeConf.e_present;
-        const bool recreatingExistingSwapchain = pCreateInfo->oldSwapchain != VK_NULL_HANDLE;
-        // Adaptive and Fixed FG share the same WSI contract. This restores the
-        // proven MAILBOX-capable path instead of forcing Adaptive onto FIFO.
-        createInfo.presentMode = recreatingExistingSwapchain
-            ? pCreateInfo->presentMode
-            : choosePresentMode(
-                deviceInfo->physicalDevice, pCreateInfo->surface,
-                pCreateInfo->presentMode, configuredPresentMode);
-        if (recreatingExistingSwapchain) {
-            std::cerr << "lsfg-vk: init stage=swapchain-hot-recreate-present-mode"
-                      << " adaptivePacing=0"
-                      << " gameMode=" << pCreateInfo->presentMode
-                      << " configuredMode=" << configuredPresentMode
-                      << " effectiveMode=" << createInfo.presentMode << "\n";
-        }
 
         std::cerr << "lsfg-vk: init stage=swapchain-downstream-create-begin images="
                   << createInfo.minImageCount
