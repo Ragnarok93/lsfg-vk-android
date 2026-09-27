@@ -864,48 +864,40 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("fifoRequiredImageCount", capacity)
         self.assertNotIn('"fifo-single-batch"', capacity)
 
-    def test_fifo_fallback_paces_absolute_slots_when_display_timing_is_unavailable(self) -> None:
-        """Strict FIFO must honor source-timeline slots instead of burst-submitting them."""
+    def test_fifo_deadline_guard_is_present_mode_scoped(self) -> None:
+        """Strict FIFO rejects stale synthetic work without pacing the source thread."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn("strictFifoHostPacing", source)
-        self.assertIn("waitForMonotonicDeadline", source)
-        self.assertIn("syntheticDesiredTimeNs", source)
-        self.assertIn("sourceDesiredTimeNs", source)
-        self.assertIn("fifo-slot", source)
-        self.assertIn("synthetic_skipped", source)
-
-    def test_fifo_fallback_is_present_mode_scoped_and_does_not_touch_mailbox(self) -> None:
-        """Host slot pacing is strict-FIFO-only; Mailbox keeps its existing path."""
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("VkPresentModeKHR presentMode_", header)
         self.assertIn(
             "this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR",
             source,
         )
-        self.assertIn("!this->adaptiveDisplayTimingEnabled_", source)
+        self.assertNotIn("waitForMonotonicDeadline", source)
 
-    def test_fifo_late_synthetic_is_dropped_before_wsi_submission(self) -> None:
-        """A missed FIFO synthetic slot is discarded rather than queued stale."""
+    def test_fifo_late_synthetic_is_dropped_in_fixed_and_adaptive(self) -> None:
+        """A missed FIFO slot is never queued stale, regardless of FG governor mode."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("const uint64_t syntheticDesiredTimeNs")
         end = source.index("pass.acquireSemaphores.at(i)", start)
         pre_acquire = source[start:end]
 
-        self.assertIn("strictFifoHostPacing", pre_acquire)
+        self.assertIn("strictFifoPresentation", pre_acquire)
         self.assertIn("syntheticAdmissionNowNs >= syntheticDesiredTimeNs", pre_acquire)
         self.assertIn("generatedDeadlineObservationEligible = false", pre_acquire)
         self.assertIn("break;", pre_acquire)
+        self.assertIn("conf.adaptiveFramegen || strictFifoPresentation", pre_acquire)
 
-    def test_fifo_source_wait_uses_absolute_source_deadline_without_source_drop(self) -> None:
-        """The real source may wait until its protected FIFO slot but is never dropped."""
+    def test_fifo_never_waits_the_real_source_on_a_host_deadline(self) -> None:
+        """Source priority is preserved: FIFO cadence repair must not sleep vkQueuePresentKHR."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("// 5. Present the real game frame")
         end = source.index("return finishSourcePresent", start)
         final_source = source[start:end]
 
-        self.assertIn("strictFifoHostPacing", final_source)
-        self.assertIn("waitForMonotonicDeadline", final_source)
-        self.assertIn("currentSourceTimeline_.sourceDesiredTimeNs", final_source)
-        self.assertNotIn("windowSourcePresentFailures++", final_source.split("waitForMonotonicDeadline", 1)[0])
+        self.assertNotIn("clock_nanosleep", final_source)
+        self.assertNotIn("sleep_for", final_source)
+        self.assertNotIn("waitForMonotonicDeadline", final_source)
 
 
 if __name__ == "__main__":
