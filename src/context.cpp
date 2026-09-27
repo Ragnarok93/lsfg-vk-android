@@ -2132,7 +2132,107 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 }
             }
         }
-    }Ms = budgetMs > 0.0
+    }
+
+    const auto& outputCadenceForPresentation =
+        this->lsfgOutputCadenceTracker_.snapshot();
+    const bool presentationOutputDeficit =
+        conf.adaptiveFramegen
+        && conf.fpsLimit > 0
+        && outputCadenceForPresentation.valid
+        && outputCadenceForPresentation.deficitConfirmed;
+    const uint64_t sourceDeadlineSlackNs = std::max<uint64_t>(
+        1'000'000ULL, this->currentSourceTimeline_.intervalNs / 8ULL);
+    const bool sourceInsidePresentationBudget =
+        conf.adaptiveFramegen
+        && this->currentSourceTimeline_.valid
+        && sourceInterval.count() > 0
+        && !sourceTimelineDiscontinuity
+        && !sourceHistoryWarmupActive
+        && this->currentSourceTimeline_.sourceDeadlineErrorNs
+            <= static_cast<int64_t>(sourceDeadlineSlackNs);
+    const auto& currentPresentationCapacity =
+        this->generatedPresentationCapacityTracker_.telemetry();
+    const bool higherPresentationCapacityProven =
+        currentPresentationCapacity.highestUsefulCapacity
+            > currentPresentationCapacity.generationCap;
+    const GeneratedPresentationCapacityContext presentationCapacityContext{
+        .outputDeficit = presentationOutputDeficit,
+        .deadlineCapacityValid = safeGenerationHintValid,
+        .safeGenerationHint = safeGenerationHint,
+        .schedulerCostLimit = adaptiveTelemetry.costLimit,
+        .sourceInsideBudget = sourceInsidePresentationBudget,
+        .sourceDeadlineErrorNs =
+            this->currentSourceTimeline_.sourceDeadlineErrorNs,
+        .higherCapacityProven = higherPresentationCapacityProven,
+    };
+
+    // WSI capacity is a separate downstream constraint from GPU generation
+    // capacity. Apply its provisional cap before expensive framegen dispatch;
+    // a suppressed slot is consumed and never repaid. Fixed mode is untouched.
+    if (conf.adaptiveFramegen
+            && !generationFirstAdreno
+            && generatedFrameCount > 0) {
+        const size_t presentationCappedGeneratedFrameCount =
+            this->generatedPresentationCapacityTracker_.limit(
+                generatedFrameCount, presentationCapacityContext);
+        if (presentationCappedGeneratedFrameCount < generatedFrameCount) {
+            const size_t cappedGeneratedFrames =
+                generatedFrameCount - presentationCappedGeneratedFrameCount;
+            metrics.windowGeneratedPresentationCapDrops +=
+                cappedGeneratedFrames;
+            metrics.totalGeneratedPresentationCapDrops +=
+                cappedGeneratedFrames;
+            generatedFrameCount = presentationCappedGeneratedFrameCount;
+        }
+    }
+
+    // Admission and presentation-cap limiting are complete before any framegen
+    // dispatch. Re-space the surviving batch evenly across the protected source
+    // interval; rejected opportunities are consumed and never become catch-up debt.
+    interpolationGenerationCount = generatedFrameCount;
+
+    // Flow GPU timestamps cover the complete submitted batch. Keep the budget
+    // and predictor value attached to that exact batch instead of comparing a
+    // delayed sample with the next source cycle's one-slot period.
+    if (conf.adaptiveFramegen && generatedFrameCount > 0
+            && this->deadlineBatchDecision_.valid) {
+        const auto finalBatchDecision = this->deadlineAdmissionPredictor_.predict(
+            generatedFrameCount,
+            this->deadlineBatchDecision_.usableBudgetMs);
+        if (finalBatchDecision.valid)
+            this->deadlineBatchDecision_ = finalBatchDecision;
+    }
+    const double adaptiveFlowBatchBudgetMs = [&]() {
+        double budgetMs = 0.0;
+        if (conf.adaptiveFramegen
+                && generatedFrameCount > 0
+                && this->deadlineBatchDecision_.valid
+                && this->deadlineBatchDecision_.effectiveUsableBudgetMs > 0.0) {
+            budgetMs = this->deadlineBatchDecision_.effectiveUsableBudgetMs;
+        } else {
+            const double nominalBatchBudgetMs = adaptiveFlowFrameBudgetMs(
+                conf, sourceInterval, generatedFrameCount);
+            const double sourceIntervalMs =
+                std::chrono::duration<double, std::milli>(
+                    sourceInterval).count();
+            budgetMs = framegenBatchBudgetMs(
+                sourceIntervalMs,
+                nominalBatchBudgetMs,
+                this->conservativeCrossDeviceSync_);
+        }
+
+        const double generationFirstTargetBudgetMs =
+            this->conservativeCrossDeviceSync_
+            && conf.adaptiveFramegen
+            && conf.fpsLimit > 0
+            && generatedFrameCount > 0
+                ? 1000.0
+                    * static_cast<double>(generatedFrameCount + 1)
+                    / static_cast<double>(conf.fpsLimit)
+                : 0.0;
+        if (generationFirstTargetBudgetMs > 0.0) {
+            budgetMs = budgetMs > 0.0
                 ? std::min(budgetMs, generationFirstTargetBudgetMs)
                 : generationFirstTargetBudgetMs;
         }
