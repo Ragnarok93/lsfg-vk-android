@@ -1808,11 +1808,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     bool excludeCurrentCycleFromTimingMetrics = false;
     const size_t maxAdaptiveGeneratedFrames =
         conf.multiplier > 1 ? static_cast<size_t>(conf.multiplier - 1) : 0;
+    const bool generationFirstAdreno = this->conservativeCrossDeviceSync_;
+    const bool strictFifoAdaptive =
+        conf.adaptiveFramegen
+        && !generationFirstAdreno
+        && this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR;
     this->adaptiveScheduler_.configure(
         conf.adaptiveFramegen ? conf.fpsLimit : 0,
         maxAdaptiveGeneratedFrames);
     this->adaptiveScheduler_.setGenerationFirst(
-        this->conservativeCrossDeviceSync_);
+        generationFirstAdreno);
+    this->adaptiveScheduler_.setStrictFifoCadence(
+        strictFifoAdaptive);
     this->generatedPresentationCapacityTracker_.configure(
         conf.adaptiveFramegen ? maxAdaptiveGeneratedFrames : 0);
     this->lsfgOutputCadenceTracker_.configure(
@@ -1838,7 +1845,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         conf.multiplier > 1
             ? static_cast<size_t>(conf.multiplier - 1)
             : 0;
-    const bool generationFirstAdreno = this->conservativeCrossDeviceSync_;
     const char* deadlineSemantics =
         generationFirstAdreno ? "generation-first" : "synthetic-slot";
     double computeReadyBudgetMs = 0.0;
@@ -1872,7 +1878,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && capacityIntervalMs > 0.0
         && this->deadlineAdmissionPredictor_.hasEstimate();
     const size_t safeGenerationHint = safeGenerationHintValid
-        ? (generationFirstAdreno
+        ? ((generationFirstAdreno || strictFifoAdaptive)
             ? this->deadlineAdmissionPredictor_.safeBatchGenerationHint(
                 maxAdaptiveGeneratedFrames, capacityIntervalMs)
             : this->deadlineAdmissionPredictor_.safeGenerationHint(
@@ -1990,7 +1996,55 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     this->deadlineAdmissionPredictor_.predict(
                         generatedFrameCount, sourceBudgetMs);
 
-                if (!plannedBatchDecision.valid && generatedFrameCount > 1) {
+                if (strictFifoAdaptive) {
+                    // FIFO consumes every queued image. Admission therefore
+                    // protects the next real-source boundary for the complete
+                    // synthetic batch instead of independently trimming early
+                    // interpolation slots and creating 0/1/2/3 burst cadence.
+                    presentationSlotBudgetMs = sourceBudgetMs;
+                    size_t admittedGeneratedFrameCount = generatedFrameCount;
+                    if (!plannedBatchDecision.valid && generatedFrameCount > 1) {
+                        admittedGeneratedFrameCount = 1;
+                    } else if (plannedBatchDecision.valid
+                            && !plannedBatchDecision.wouldAdmit) {
+                        admittedGeneratedFrameCount = 0;
+                        for (size_t candidate = generatedFrameCount;
+                                candidate > 0; --candidate) {
+                            const auto candidateDecision =
+                                this->deadlineAdmissionPredictor_.predict(
+                                    candidate, sourceBudgetMs);
+                            if (candidateDecision.valid
+                                    && candidateDecision.wouldAdmit) {
+                                admittedGeneratedFrameCount = candidate;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (admittedGeneratedFrameCount < generatedFrameCount) {
+                        const size_t rejectedGeneratedFrameCount =
+                            generatedFrameCount - admittedGeneratedFrameCount;
+                        metrics.windowGeneratedLateDrops += rejectedGeneratedFrameCount;
+                        metrics.totalGeneratedLateDrops += rejectedGeneratedFrameCount;
+                        metrics.windowAdmissionRejects += rejectedGeneratedFrameCount;
+                        metrics.totalAdmissionRejects += rejectedGeneratedFrameCount;
+                        generatedFrameCount = admittedGeneratedFrameCount;
+                    }
+
+                    if (generatedFrameCount > 0) {
+                        this->deadlineBatchDecision_ =
+                            this->deadlineAdmissionPredictor_.predict(
+                                generatedFrameCount, sourceBudgetMs);
+                    }
+                    if (this->frameIdx < 8) {
+                        std::cerr << "lsfg-vk: runtime stage=adaptive-fifo-cadence"
+                                  << " fifo_batch_admission=1"
+                                  << " planned=" << plannedGeneratedFrameCount
+                                  << " admitted=" << generatedFrameCount
+                                  << " source_budget_ms=" << sourceBudgetMs
+                                  << "\n";
+                    }
+                } else if (!plannedBatchDecision.valid && generatedFrameCount > 1) {
                     const size_t rejectedGeneratedFrameCount =
                         generatedFrameCount - 1;
                     metrics.windowGeneratedLateDrops += rejectedGeneratedFrameCount;
@@ -2078,107 +2132,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 }
             }
         }
-    }
-
-    const auto& outputCadenceForPresentation =
-        this->lsfgOutputCadenceTracker_.snapshot();
-    const bool presentationOutputDeficit =
-        conf.adaptiveFramegen
-        && conf.fpsLimit > 0
-        && outputCadenceForPresentation.valid
-        && outputCadenceForPresentation.deficitConfirmed;
-    const uint64_t sourceDeadlineSlackNs = std::max<uint64_t>(
-        1'000'000ULL, this->currentSourceTimeline_.intervalNs / 8ULL);
-    const bool sourceInsidePresentationBudget =
-        conf.adaptiveFramegen
-        && this->currentSourceTimeline_.valid
-        && sourceInterval.count() > 0
-        && !sourceTimelineDiscontinuity
-        && !sourceHistoryWarmupActive
-        && this->currentSourceTimeline_.sourceDeadlineErrorNs
-            <= static_cast<int64_t>(sourceDeadlineSlackNs);
-    const auto& currentPresentationCapacity =
-        this->generatedPresentationCapacityTracker_.telemetry();
-    const bool higherPresentationCapacityProven =
-        currentPresentationCapacity.highestUsefulCapacity
-            > currentPresentationCapacity.generationCap;
-    const GeneratedPresentationCapacityContext presentationCapacityContext{
-        .outputDeficit = presentationOutputDeficit,
-        .deadlineCapacityValid = safeGenerationHintValid,
-        .safeGenerationHint = safeGenerationHint,
-        .schedulerCostLimit = adaptiveTelemetry.costLimit,
-        .sourceInsideBudget = sourceInsidePresentationBudget,
-        .sourceDeadlineErrorNs =
-            this->currentSourceTimeline_.sourceDeadlineErrorNs,
-        .higherCapacityProven = higherPresentationCapacityProven,
-    };
-
-    // WSI capacity is a separate downstream constraint from GPU generation
-    // capacity. Apply its provisional cap before expensive framegen dispatch;
-    // a suppressed slot is consumed and never repaid. Fixed mode is untouched.
-    if (conf.adaptiveFramegen
-            && !generationFirstAdreno
-            && generatedFrameCount > 0) {
-        const size_t presentationCappedGeneratedFrameCount =
-            this->generatedPresentationCapacityTracker_.limit(
-                generatedFrameCount, presentationCapacityContext);
-        if (presentationCappedGeneratedFrameCount < generatedFrameCount) {
-            const size_t cappedGeneratedFrames =
-                generatedFrameCount - presentationCappedGeneratedFrameCount;
-            metrics.windowGeneratedPresentationCapDrops +=
-                cappedGeneratedFrames;
-            metrics.totalGeneratedPresentationCapDrops +=
-                cappedGeneratedFrames;
-            generatedFrameCount = presentationCappedGeneratedFrameCount;
-        }
-    }
-
-    // Admission and presentation-cap limiting are complete before any framegen
-    // dispatch. Re-space the surviving batch evenly across the protected source
-    // interval; rejected opportunities are consumed and never become catch-up debt.
-    interpolationGenerationCount = generatedFrameCount;
-
-    // Flow GPU timestamps cover the complete submitted batch. Keep the budget
-    // and predictor value attached to that exact batch instead of comparing a
-    // delayed sample with the next source cycle's one-slot period.
-    if (conf.adaptiveFramegen && generatedFrameCount > 0
-            && this->deadlineBatchDecision_.valid) {
-        const auto finalBatchDecision = this->deadlineAdmissionPredictor_.predict(
-            generatedFrameCount,
-            this->deadlineBatchDecision_.usableBudgetMs);
-        if (finalBatchDecision.valid)
-            this->deadlineBatchDecision_ = finalBatchDecision;
-    }
-    const double adaptiveFlowBatchBudgetMs = [&]() {
-        double budgetMs = 0.0;
-        if (conf.adaptiveFramegen
-                && generatedFrameCount > 0
-                && this->deadlineBatchDecision_.valid
-                && this->deadlineBatchDecision_.effectiveUsableBudgetMs > 0.0) {
-            budgetMs = this->deadlineBatchDecision_.effectiveUsableBudgetMs;
-        } else {
-            const double nominalBatchBudgetMs = adaptiveFlowFrameBudgetMs(
-                conf, sourceInterval, generatedFrameCount);
-            const double sourceIntervalMs =
-                std::chrono::duration<double, std::milli>(
-                    sourceInterval).count();
-            budgetMs = framegenBatchBudgetMs(
-                sourceIntervalMs,
-                nominalBatchBudgetMs,
-                this->conservativeCrossDeviceSync_);
-        }
-
-        const double generationFirstTargetBudgetMs =
-            this->conservativeCrossDeviceSync_
-            && conf.adaptiveFramegen
-            && conf.fpsLimit > 0
-            && generatedFrameCount > 0
-                ? 1000.0
-                    * static_cast<double>(generatedFrameCount + 1)
-                    / static_cast<double>(conf.fpsLimit)
-                : 0.0;
-        if (generationFirstTargetBudgetMs > 0.0) {
-            budgetMs = budgetMs > 0.0
+    }Ms = budgetMs > 0.0
                 ? std::min(budgetMs, generationFirstTargetBudgetMs)
                 : generationFirstTargetBudgetMs;
         }
@@ -2813,6 +2767,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << " performance=" << (conf.performance ? 1 : 0)
                   << " display_timing="
                   << (this->adaptiveDisplayTimingEnabled_ ? 1 : 0)
+                  << " adaptive_fifo_stable=" << (strictFifoAdaptive ? 1 : 0)
                   << " present_period_ns=" << this->adaptivePresentPeriodNs_
                   << " source_timeline_valid="
                   << (this->currentSourceTimeline_.valid ? 1 : 0)
