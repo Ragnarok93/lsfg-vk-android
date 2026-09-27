@@ -864,15 +864,14 @@ namespace {
         const auto createSourceOnly = [&](const char* reason) -> VkResult {
             VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo;
             const auto configuredPresentMode = activeConf.e_present;
-            sourceOnlyCreateInfo.presentMode = choosePresentMode(
-                deviceInfo->physicalDevice,
-                pCreateInfo->surface,
-                pCreateInfo->presentMode,
-                activeConf.e_present);
+            // Generation-off must restore the application's live WSI contract.
+            // Keep the stored LSFG FIFO/Mailbox preference only as configuration
+            // for the next generation-enabled recreation.
+            sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode;
 
-            // Source-only is a true WSI passthrough state: retain the selected
-            // present mode, but do not inflate image count, add transfer usage,
-            // or instantiate the private LSFG/AHB context.
+            // Source-only is a true WSI passthrough state: preserve the game's
+            // requested present mode, do not inflate image count, add transfer
+            // usage, or instantiate the private LSFG/AHB context.
             const auto res = Layer::ovkCreateSwapchainKHR(
                 device, &sourceOnlyCreateInfo, pAllocator, pSwapchain);
             if (res != VK_SUCCESS)
