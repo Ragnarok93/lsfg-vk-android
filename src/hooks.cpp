@@ -1006,12 +1006,11 @@ namespace {
 #else
         // Preserve the existing desktop fallback unless the upstream quirk was
         // explicitly requested.
-        if (!preserveSwapchainImageCount && headroomOverflow)
-            return createPassThrough("headroom-overflow");
-        if (!preserveSwapchainImageCount
-                && maxImageCount != 0
-                && requiredImageCount > maxImageCount)
+        if (!preserveSwapchainImageCount && surfaceCannotFitHeadroom) {
+            if (headroomOverflow)
+                return createPassThrough("headroom-overflow");
             return createPassThrough("insufficient-headroom");
+        }
 #endif
 
         if (preserveSwapchainImageCount)
