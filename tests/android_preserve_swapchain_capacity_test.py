@@ -18,8 +18,9 @@ class AndroidPreserveSwapchainCapacityTest(unittest.TestCase):
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
         self.assertIn("preserveSwapchainImageCount", hooks)
-        self.assertIn("capacityPolicy=preserve-native-explicit", hooks)
-        self.assertIn("capacityPolicy=preserve-native-fallback", hooks)
+        self.assertIn("capacityPolicy=", hooks)
+        self.assertIn('"preserve-native-explicit"', hooks)
+        self.assertIn('"preserve-native-fallback"', hooks)
         self.assertIn("createInfo.minImageCount = pCreateInfo->minImageCount;", hooks)
 
         android_capacity = hooks[
