@@ -371,6 +371,11 @@ public:
     /// telemetry only and may not lower the synthetic generation ceiling.
     void setGenerationFirst(bool enabled);
 
+    /// Strict FIFO cannot replace a queued image. Drive fractional generation
+    /// from the smoothed source cadence so one long/short source interval does
+    /// not become an immediate multi-synthetic burst or gap.
+    void setStrictFifoCadence(bool enabled);
+
     void reset();
 
     [[nodiscard]] uint32_t targetFps() const { return targetFps_; }
@@ -407,6 +412,7 @@ private:
     std::size_t safeGenerationHint_{};
     bool safeGenerationHintValid_{false};
     bool generationFirst_{false};
+    bool strictFifoCadence_{false};
     unsigned capacityRaiseSamples_{};
     unsigned stableCadenceSamples_{};
 
