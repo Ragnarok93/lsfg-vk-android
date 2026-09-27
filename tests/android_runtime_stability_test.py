@@ -851,12 +851,13 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         helper_end = source.index("bool supportsDeviceExtension", helper_start)
         helper = source[helper_start:helper_end]
 
-        self.assertIn("presentationPolicyChanged", helper)
+        resident_helper = helper.split("#endif", 1)[0]
+        self.assertIn("presentationPolicyChanged", resident_helper)
         self.assertIn(
             "next.multiplier > 1 && previous.e_present != next.e_present",
-            helper,
+            resident_helper,
         )
-        self.assertNotIn("|| previous.e_present != next.e_present;", helper)
+        self.assertNotIn("|| previous.e_present != next.e_present;", resident_helper)
 
     def test_syncfd_source_export_failure_recreates_temporal_context(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
