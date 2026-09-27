@@ -814,8 +814,15 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         create_end = hooks.index("#ifdef __ANDROID__", create_start)
         source_only_create = hooks[create_start:create_end]
         self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only_create)
-        self.assertIn("choosePresentMode(", source_only_create)
-        self.assertIn("activeConf.e_present", source_only_create)
+        self.assertIn(
+            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
+            source_only_create,
+        )
+        self.assertNotIn("choosePresentMode(", source_only_create)
+        self.assertNotIn(
+            "sourceOnlyCreateInfo.presentMode = activeConf.e_present",
+            source_only_create,
+        )
         self.assertNotIn("residentCapacityMultiplier", source_only_create)
         self.assertNotIn("requiredTransferUsage", source_only_create)
         self.assertNotIn("LsContext", source_only_create)
