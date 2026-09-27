@@ -453,6 +453,34 @@ int main() {
 
 
     {
+        // Genuine fractional demand remains phase-distributed, but it is driven
+        // by the smoothed source cadence rather than raw 25/40 ms jitter. A
+        // ~30 FPS source targeting 100 FPS needs about 2.33 synthetics/source,
+        // so every stable cycle should contain two or three, never one or four.
+        AdaptiveFrameScheduler scheduler(100, 3);
+        for (int frame = 0; frame < 72; ++frame)
+            scheduler.plan(33'333'333ns);
+        assert(scheduler.telemetry().costLimit == 3);
+
+        std::size_t total = 0;
+        bool sawTwo = false;
+        bool sawThree = false;
+        for (int frame = 0; frame < 30; ++frame) {
+            const auto generated =
+                scheduler.plan((frame % 2 == 0) ? 25ms : 40ms);
+            assert(generated >= 2);
+            assert(generated <= 3);
+            total += generated;
+            sawTwo = sawTwo || generated == 2;
+            sawThree = sawThree || generated == 3;
+        }
+
+        assert(sawTwo);
+        assert(sawThree);
+        assert(total >= 67 && total <= 73);
+    }
+
+    {
         // Build #383 regression: predictor capacity alone must not early-promote
         // while the recent real-source cadence is still alternating wildly.
         // The generic sustained-demand timer remains available, but the fast
