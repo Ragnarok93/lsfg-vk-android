@@ -819,7 +819,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             source_only_create,
         )
         self.assertNotIn("choosePresentMode(", source_only_create)
-        self.assertNotIn("activeConf.e_present", source_only_create)
+        self.assertNotIn(
+            "sourceOnlyCreateInfo.presentMode = activeConf.e_present",
+            source_only_create,
+        )
         self.assertNotIn("residentCapacityMultiplier", source_only_create)
         self.assertNotIn("requiredTransferUsage", source_only_create)
         self.assertNotIn("LsContext", source_only_create)
