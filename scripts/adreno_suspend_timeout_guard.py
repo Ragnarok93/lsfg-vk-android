@@ -13,8 +13,10 @@ OLD_WAIT = '''    if (requireHostCompletionWait) {
         framegenReady = conf.performance
             ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
             : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        framegenBlockingCompletionMs =
+            std::chrono::duration<double, std::milli>(
+                RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
     }
 '''
 
@@ -27,14 +29,18 @@ NEW_WAIT = '''    if (requireHostCompletionWait) {
                 : LSFG_3_1::waitContext(*this->lsfgCtxId, timeoutNs);
         };
         framegenReady = waitFramegenCompletion(framegenCompletionTimeoutNs);
+        framegenBlockingCompletionMs =
+            std::chrono::duration<double, std::milli>(
+                RuntimeMetrics::Clock::now() - waitIdleStart).count();
         bool framegenRecoveredAfterTimeout = false;
         const uint64_t framegenCompletionWaitElapsedNs =
             static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 RuntimeMetrics::Clock::now() - waitIdleStart).count());
 
         // SIGSTOP/SIGCONT can leave the first bounded fallback fence wait stale
-        // even when resumed GPU work is healthy. Any fallback timeout gets one
-        // fresh bounded recheck; steady-state SYNC_FD pacing never enters here.
+        // even when resumed GPU work is healthy. Any bounded completion timeout
+        // gets one fresh recheck. This also covers the FIFO-only completion A/B
+        // without turning lifecycle pause time into measured framegen cost.
         constexpr uint64_t resumeCompletionRecheckNs = 32'000'000ULL;
         if (!framegenReady) {
             const auto resumeRecheckStart = RuntimeMetrics::Clock::now();
@@ -46,19 +52,21 @@ NEW_WAIT = '''    if (requireHostCompletionWait) {
                       << " recovered=" << (framegenReady ? 1 : 0)
                       << " initial_wait_ms="
                       << (static_cast<double>(framegenCompletionWaitElapsedNs) / 1000000.0)
-                      << " recheck_ms=" << resumeRecheckMs << "\\n";
+                      << " recheck_ms=" << resumeRecheckMs << "\n";
         }
 
         if (!framegenRecoveredAfterTimeout) {
-            metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-                RuntimeMetrics::Clock::now() - waitIdleStart).count();
+            framegenBlockingCompletionMs =
+                std::chrono::duration<double, std::milli>(
+                    RuntimeMetrics::Clock::now() - waitIdleStart).count();
+            metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
         } else {
             // A SIGSTOP/SIGCONT recovery is lifecycle time, not framegen cost.
+            framegenBlockingCompletionMs = 0.0;
             excludeCurrentCycleFromTimingMetrics = true;
         }
     }
 '''
-
 def apply(root: Path) -> None:
     path = root / "src/context.cpp"
     text = path.read_text(encoding="utf-8")
