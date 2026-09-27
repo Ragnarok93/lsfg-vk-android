@@ -908,18 +908,24 @@ std::size_t FixedSourceCadenceGovernor::plan(
     constexpr double kPressureConfirmSeconds = 0.12;
     constexpr double kRecoveryConfirmSeconds = 0.30;
     constexpr double kBackoffCooldownSeconds = 0.50;
-    constexpr double kHistoryBaselineAlpha = 0.35;
-    constexpr double kFasterBaselineAlpha = 0.20;
+    constexpr double kSourceBaselineAlpha = 0.35;
     constexpr double kMaxEvidenceSeconds = 0.25;
 
     telemetry_.requestedGeneratedFrames = requestedGeneratedFrames;
     telemetry_.backedOff = false;
     telemetry_.raised = false;
 
+    const std::size_t previousRequested = requestedGeneratedFrames_;
+    const bool requestRaised =
+        requestedGeneratedFrames > previousRequested;
+    requestedGeneratedFrames_ = requestedGeneratedFrames;
+
     if (requestedGeneratedFrames == 0) {
         generationLimit_ = 0;
+        backedOffActive_ = false;
         pressureSeconds_ = 0.0;
         recoverySeconds_ = 0.0;
+        cooldownSeconds_ = 0.0;
         telemetry_.generationLimit = 0;
         telemetry_.baselineValid = hasBaseline_;
         telemetry_.baselineSourceFps =
@@ -929,8 +935,20 @@ std::size_t FixedSourceCadenceGovernor::plan(
         return 0;
     }
 
-    if (generationLimit_ > requestedGeneratedFrames)
+    // A newly requested higher Fixed multiplier is explicit user intent.
+    // Start at that requested cost immediately; only subsequent, confirmed
+    // source-cadence degradation may back it off.
+    if (requestRaised) {
         generationLimit_ = requestedGeneratedFrames;
+        backedOffActive_ = false;
+        pressureSeconds_ = 0.0;
+        recoverySeconds_ = 0.0;
+        cooldownSeconds_ = 0.0;
+    } else if (generationLimit_ > requestedGeneratedFrames) {
+        generationLimit_ = requestedGeneratedFrames;
+        if (generationLimit_ == requestedGeneratedFrames)
+            backedOffActive_ = false;
+    }
 
     const double intervalSeconds =
         std::chrono::duration<double>(sourceInterval).count();
@@ -943,10 +961,10 @@ std::size_t FixedSourceCadenceGovernor::plan(
         cooldownSeconds_ = std::max(0.0, cooldownSeconds_ - evidenceSeconds);
 
         if (!hasBaseline_) {
-            // The first valid interval is measurement only. This is especially
-            // important when switching from Adaptive to Fixed without a
-            // swapchain recreation: do not treat the old generated load as
-            // permission to jump immediately to a high Fixed multiplier.
+            // The first trustworthy source interval is measurement only.
+            // The configured Fixed multiplier has already seeded
+            // generationLimit_, but generation remains blocked until a clean
+            // baseline exists and the caller allows interpolation.
             baselineIntervalSeconds_ = intervalSeconds;
             hasBaseline_ = true;
             pressureSeconds_ = 0.0;
@@ -958,30 +976,25 @@ std::size_t FixedSourceCadenceGovernor::plan(
             return 0;
         }
 
-        const double intervalRatio =
+        double intervalRatio =
             intervalSeconds / baselineIntervalSeconds_;
         telemetry_.intervalRatio = intervalRatio;
 
         if (previousDispatchedGeneratedFrames == 0) {
             pressureSeconds_ = 0.0;
 
+            // Only a genuine source-only observation is allowed to move the
+            // baseline. History maintenance is still LSFG work and generated
+            // cycles must never normalize their own cost into the baseline.
             if (previousObservation == SourceCadenceObservation::SourceOnly) {
-                // A genuine source-only cycle may establish a naturally slower
-                // scene as well as a recovery.
-                baselineIntervalSeconds_ += kHistoryBaselineAlpha
+                baselineIntervalSeconds_ += kSourceBaselineAlpha
                     * (intervalSeconds - baselineIntervalSeconds_);
-            } else if (intervalSeconds < baselineIntervalSeconds_) {
-                // History maintenance is still LSFG-active. It may tighten the
-                // baseline but must not normalize its own slowdown.
-                baselineIntervalSeconds_ += kFasterBaselineAlpha
-                    * (intervalSeconds - baselineIntervalSeconds_);
+                intervalRatio = intervalSeconds / baselineIntervalSeconds_;
+                telemetry_.intervalRatio = intervalRatio;
             }
 
-            const double protectedIntervalRatio =
-                intervalSeconds / baselineIntervalSeconds_;
-            telemetry_.intervalRatio = protectedIntervalRatio;
             recoverySeconds_ =
-                protectedIntervalRatio <= kStableIntervalRatio
+                intervalRatio <= kStableIntervalRatio
                     && cooldownSeconds_ <= 0.0
                 ? recoverySeconds_ + evidenceSeconds
                 : 0.0;
@@ -995,6 +1008,7 @@ std::size_t FixedSourceCadenceGovernor::plan(
                         : 0;
                 if (saferLimit < generationLimit_) {
                     generationLimit_ = saferLimit;
+                    backedOffActive_ = true;
                     telemetry_.backedOff = true;
                 }
                 cooldownSeconds_ = kBackoffCooldownSeconds;
@@ -1002,31 +1016,23 @@ std::size_t FixedSourceCadenceGovernor::plan(
             }
         } else {
             pressureSeconds_ = 0.0;
-
-            // Faster real-source cadence is safe evidence that the protected
-            // baseline may tighten. Never move the baseline slower while
-            // generated work is active; that would let LSFG justify its own
-            // source slowdown.
-            if (intervalSeconds < baselineIntervalSeconds_) {
-                baselineIntervalSeconds_ += kFasterBaselineAlpha
-                    * (intervalSeconds - baselineIntervalSeconds_);
-            }
-
-            if (intervalRatio <= kStableIntervalRatio
-                    && cooldownSeconds_ <= 0.0) {
-                recoverySeconds_ += evidenceSeconds;
-            } else {
-                recoverySeconds_ = 0.0;
-            }
+            recoverySeconds_ =
+                intervalRatio <= kStableIntervalRatio
+                    && cooldownSeconds_ <= 0.0
+                ? recoverySeconds_ + evidenceSeconds
+                : 0.0;
         }
 
         if (generationAllowed
+                && backedOffActive_
                 && generationLimit_ < requestedGeneratedFrames
                 && cooldownSeconds_ <= 0.0
                 && recoverySeconds_ >= kRecoveryConfirmSeconds) {
             ++generationLimit_;
             recoverySeconds_ = 0.0;
             telemetry_.raised = true;
+            if (generationLimit_ >= requestedGeneratedFrames)
+                backedOffActive_ = false;
         }
     }
 
@@ -1045,7 +1051,9 @@ std::size_t FixedSourceCadenceGovernor::plan(
 void FixedSourceCadenceGovernor::reset() {
     hasBaseline_ = false;
     baselineIntervalSeconds_ = 0.0;
-    generationLimit_ = 1;
+    generationLimit_ = 0;
+    requestedGeneratedFrames_ = 0;
+    backedOffActive_ = false;
     pressureSeconds_ = 0.0;
     recoverySeconds_ = 0.0;
     cooldownSeconds_ = 0.0;
