@@ -105,6 +105,7 @@ namespace {
                 || fixedFlowScaleChanged
                 || previous.performance != next.performance
                 || previous.hdr != next.hdr
+                || previous.preserveSwapchainImageCount != next.preserveSwapchainImageCount
                 || previous.e_present != next.e_present;
         }
 #endif
@@ -114,6 +115,7 @@ namespace {
             || previous.flowScale != next.flowScale
             || previous.performance != next.performance
             || previous.hdr != next.hdr
+            || previous.preserveSwapchainImageCount != next.preserveSwapchainImageCount
             || previous.e_present != next.e_present;
     }
 
@@ -978,35 +980,52 @@ namespace {
         const uint32_t requiredHeadroom = static_cast<uint32_t>(
             std::max<size_t>(1, residentMultiplier - 1));
         const uint32_t maxImageCount = surfaceCapabilities.maxImageCount;
-        if (pCreateInfo->minImageCount > UINT32_MAX - requiredHeadroom) {
-            std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom minImageCount="
-                      << pCreateInfo->minImageCount
-                      << " maxImageCount=" << maxImageCount
-                      << " requiredHeadroom=" << requiredHeadroom
-                      << "; preserving original swapchain\n";
-            return createPassThrough("headroom-overflow");
+        const bool headroomOverflow =
+            pCreateInfo->minImageCount > UINT32_MAX - requiredHeadroom;
+        const uint32_t requiredImageCount = headroomOverflow
+            ? pCreateInfo->minImageCount
+            : pCreateInfo->minImageCount + requiredHeadroom;
+        const bool surfaceCannotFitHeadroom =
+            headroomOverflow
+            || (maxImageCount != 0 && requiredImageCount > maxImageCount);
+
+        bool preserveSwapchainImageCount =
+            activeConf.preserveSwapchainImageCount;
+        const char* capacityPolicy = preserveSwapchainImageCount
+            ? "preserve-native-explicit"
+            : "legacy-headroom";
+#ifdef __ANDROID__
+        // Android can retain LSFG when the surface cannot provide the extra
+        // images. Generated-image acquisition becomes opportunistic in this
+        // policy so missing WSI capacity drops synthetic work instead of
+        // delaying the application's source present.
+        if (!preserveSwapchainImageCount && surfaceCannotFitHeadroom) {
+            preserveSwapchainImageCount = true;
+            capacityPolicy = "preserve-native-fallback";
         }
-        const uint32_t requiredImageCount =
-            pCreateInfo->minImageCount + requiredHeadroom;
+#else
+        // Preserve the existing desktop fallback unless the upstream quirk was
+        // explicitly requested.
+        if (!preserveSwapchainImageCount && headroomOverflow)
+            return createPassThrough("headroom-overflow");
+        if (!preserveSwapchainImageCount
+                && maxImageCount != 0
+                && requiredImageCount > maxImageCount)
+            return createPassThrough("insufficient-headroom");
+#endif
+
+        createInfo.minImageCount = preserveSwapchainImageCount
+            ? pCreateInfo->minImageCount
+            : requiredImageCount;
         std::cerr << "lsfg-vk: init stage=swapchain-capacity minImageCount="
                   << pCreateInfo->minImageCount
                   << " maxImageCount=" << maxImageCount
                   << " requiredHeadroom=" << requiredHeadroom
                   << " requiredImageCount=" << requiredImageCount
-                  << " capacityPolicy=legacy-headroom"
+                  << " selectedImageCount=" << createInfo.minImageCount
+                  << " capacityPolicy=" << capacityPolicy
                   << " multiplier=" << activeConf.multiplier
                   << " residentMultiplier=" << residentMultiplier << "\n";
-        if (maxImageCount != 0 && requiredImageCount > maxImageCount) {
-            std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom minImageCount="
-                      << pCreateInfo->minImageCount
-                      << " maxImageCount=" << maxImageCount
-                      << " requiredHeadroom=" << requiredHeadroom
-                      << " requiredImageCount=" << requiredImageCount
-                      << " capacityPolicy=legacy-headroom"
-                      << "; preserving original swapchain\n";
-            return createPassThrough("insufficient-headroom");
-        }
-        createInfo.minImageCount = requiredImageCount;
         Utils::resetLimitN("swapCount");
 
         const VkFormat sharedFormat = activeConf.hdr
@@ -1060,6 +1079,7 @@ namespace {
                       << " chosen_present_mode=" << createInfo.presentMode
                       << " actual_create_info_present_mode=" << createInfo.presentMode
                       << " image_count=" << imageCount
+                      << " capacity_policy=" << capacityPolicy
                       << " source_queue=application-present"
                       << " generated_queue=compatibility-selected"
                       << '\n';
@@ -1076,7 +1096,8 @@ namespace {
             state->configuredPresent = configuredPresentMode;
             state->context = std::make_shared<LsContext>(
                 *deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
-                swapchainImages, createInfo.presentMode);
+                swapchainImages, createInfo.presentMode,
+                preserveSwapchainImageCount);
             if (pCreateInfo->oldSwapchain)
                 retireSwapchainState(pCreateInfo->oldSwapchain);
             publishSwapchainState(*pSwapchain, std::move(state));
@@ -1204,6 +1225,8 @@ namespace {
                               << conf.multiplier
                               << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                               << " targetFps=" << conf.fpsLimit
+                              << " preserveSwapchainImageCount="
+                              << (conf.preserveSwapchainImageCount ? 1 : 0)
                               << " adaptiveFlow="
                               << (conf.adaptiveFlowScale ? 1 : 0)
                               << " adaptiveFlowPreset="

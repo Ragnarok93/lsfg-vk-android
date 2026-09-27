@@ -14,6 +14,7 @@ const std::string DEFAULT_CONFIG = R"(version = 1
 # flow_scale = 0.7
 # performance_mode = true
 # hdr_mode = false
+# preserve_swapchain_image_count = false
 #
 # experimental_present_mode = "fifo"
 

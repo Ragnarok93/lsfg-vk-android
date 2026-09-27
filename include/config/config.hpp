@@ -37,6 +37,9 @@ namespace Config {
         bool adaptiveFramegen{false};
         /// Final output FPS ceiling used by adaptive frame generation.
         uint32_t fpsLimit{0};
+        /// Preserve the application's requested swapchain image count instead
+        /// of adding frame-generation headroom.
+        bool preserveSwapchainImageCount{false};
 
         /// Experimental flag for overriding the synchronization method.
         VkPresentModeKHR e_present;

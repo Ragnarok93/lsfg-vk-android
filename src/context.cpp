@@ -199,6 +199,7 @@ uint64_t runtimeDiagnosticConfigSignature(
     mix(conf.hdr ? 1ULL : 0ULL);
     mix(conf.adaptiveFramegen ? 1ULL : 0ULL);
     mix(static_cast<uint64_t>(conf.fpsLimit));
+    mix(conf.preserveSwapchainImageCount ? 1ULL : 0ULL);
     return hash;
 }
 
@@ -588,10 +589,11 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
 
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
-        VkPresentModeKHR presentMode)
+        VkPresentModeKHR presentMode, bool preserveSwapchainImageCount)
         : swapchain(swapchain), swapchainImages(swapchainImages),
           presentWaitRetirements_(swapchainImages.size()),
           extent(extent), presentMode_(presentMode),
+          preserveSwapchainImageCount_(preserveSwapchainImageCount),
           device_(info.device), queue_(info.queue.second) {
     // get updated configuration
     auto conf = Config::snapshot();
@@ -5102,20 +5104,24 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         pass.acquireSemaphores.at(i) = Mini::Semaphore(info.device);
         uint32_t imageIdx{};
-        // Preserve the September 18 Adreno WSI transaction: once the
-        // generation planners admit a generated batch, generated-image
-        // acquisition uses the same bounded wait as 364178af. The newer
-        // nonblocking/drop policy remains isolated to Xclipse/generic.
+        // Preserve the September 18 Adreno WSI transaction when the wrapper
+        // has expanded the swapchain. When native image count is intentionally
+        // preserved, all Android paths use a zero-timeout generated acquire:
+        // synthetic work may be dropped, but it cannot delay the source present.
         const uint64_t generatedAcquireTimeoutNs =
-            this->conservativeCrossDeviceSync_
-                ? runtimeWaitTimeoutNs()
-                : 0;
+            this->preserveSwapchainImageCount_
+                ? 0
+                : (this->conservativeCrossDeviceSync_
+                    ? runtimeWaitTimeoutNs()
+                    : 0);
         auto res = Layer::ovkAcquireNextImageKHR(
             info.device, this->swapchain, generatedAcquireTimeoutNs,
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
-        if (!this->conservativeCrossDeviceSync_
+        if ((this->preserveSwapchainImageCount_
+                    || !this->conservativeCrossDeviceSync_)
                 && (res == VK_NOT_READY || res == VK_TIMEOUT)) {
-            // Generic/Xclipse keeps opportunistic downstream-capacity drops.
+            // Native-capacity mode and Generic/Xclipse keep opportunistic
+            // downstream-capacity drops.
             const size_t droppedGeneratedFrames = generatedFrameCount - i;
             generatedWsiRejectedFrameCount = droppedGeneratedFrames;
             metrics.windowGeneratedLateDrops += droppedGeneratedFrames;

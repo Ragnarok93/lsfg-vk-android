@@ -98,12 +98,15 @@ public:
     /// @param swapchain The Vulkan swapchain to use.
     /// @param extent The extent of the swapchain images.
     /// @param swapchainImages The swapchain images to use.
+    /// @param presentMode The effective WSI present mode.
+    /// @param preserveSwapchainImageCount Whether generated presentation must
+    ///        operate within the application's native swapchain capacity.
     ///
     /// @throws LSFG::vulkan_error if any Vulkan call fails.
     ///
     LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
-        VkPresentModeKHR presentMode);
+        VkPresentModeKHR presentMode, bool preserveSwapchainImageCount);
 
     ///
     /// Custom present logic.
@@ -208,6 +211,7 @@ private:
     std::vector<std::vector<Mini::Semaphore>> presentWaitRetirements_;
     VkExtent2D extent;
     VkPresentModeKHR presentMode_{VK_PRESENT_MODE_FIFO_KHR};
+    bool preserveSwapchainImageCount_{false};
 
     // The pass ring owns resources submitted to the game's queue. Retain the
     // queue/device dispatch until every in-flight pass has retired.

@@ -79,6 +79,8 @@ pub struct TomlGame {
     #[serde(default)]
     pub hdr_mode: bool,
     #[serde(default)]
+    pub preserve_swapchain_image_count: bool,
+    #[serde(default)]
     pub experimental_present_mode: PresentMode
 }
 
