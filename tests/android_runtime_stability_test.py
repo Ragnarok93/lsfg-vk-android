@@ -815,12 +815,15 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         source_only_create = hooks[create_start:create_end]
         self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only_create)
         self.assertIn(
-            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
+            "sourceOnlyCreateInfo.presentMode = choosePresentMode(",
             source_only_create,
         )
-        self.assertNotIn("choosePresentMode(", source_only_create)
+        self.assertIn("deviceInfo->physicalDevice", source_only_create)
+        self.assertIn("pCreateInfo->surface", source_only_create)
+        self.assertIn("pCreateInfo->presentMode", source_only_create)
+        self.assertIn("activeConf.e_present", source_only_create)
         self.assertNotIn(
-            "sourceOnlyCreateInfo.presentMode = activeConf.e_present",
+            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
             source_only_create,
         )
         self.assertNotIn("residentCapacityMultiplier", source_only_create)
@@ -879,62 +882,28 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("fifoRequiredImageCount", capacity)
         self.assertNotIn('"fifo-single-batch"', capacity)
 
-    def test_fifo_without_display_timing_uses_bounded_framegen_completion(self) -> None:
-        """Strict FIFO must establish a completed generated batch before WSI when no native timing backend exists."""
+    def test_fifo_async_completion_does_not_force_host_wait(self) -> None:
+        """Strict FIFO keeps GPU-side completion when the runtime already has a valid async dependency chain."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("bool requireHostCompletionWait")
         end = source.index("bool framegenReady = true;", start)
         completion_policy = source[start:end]
 
-        self.assertIn("fifoBoundedCompletion", completion_policy)
-        self.assertIn(
-            "this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR",
-            completion_policy,
-        )
-        self.assertIn("!this->adaptiveDisplayTimingEnabled_", completion_policy)
-        self.assertIn("this->asyncFramegenCompletionEnabled_", completion_policy)
-        self.assertIn("!this->conservativeCrossDeviceSync_", completion_policy)
-        self.assertIn("generatedFrameCount > 0", completion_policy)
-        self.assertIn(
-            "requireHostCompletionWait = requireHostCompletionWait || fifoBoundedCompletion",
-            completion_policy,
-        )
+        self.assertIn("!this->asyncFramegenCompletionEnabled_", completion_policy)
+        self.assertIn("!this->deferredAdrenoCompletionEnabled_", completion_policy)
+        self.assertNotIn("fifoBoundedCompletion", completion_policy)
+        self.assertNotIn("VK_PRESENT_MODE_FIFO_KHR", completion_policy)
 
-    def test_fifo_bounded_completion_is_capability_scoped_not_vendor_scoped(self) -> None:
-        """The conservative FIFO completion boundary must not key off GPU/vendor names."""
+    def test_fifo_async_completion_does_not_train_deadline_predictor_from_host_wait(self) -> None:
+        """FIFO must not turn a presentation-mode choice into blocking-completion evidence for Adaptive admission."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        marker = source.find("const bool fifoBoundedCompletion")
-        self.assertNotEqual(marker, -1)
-        if marker >= 0:
-            end = source.index(";", marker) + 1
-            predicate = source[marker:end].lower()
-            for vendor_term in (
-                "xclipse",
-                "samsung",
-                "adreno",
-                "qualcomm",
-                "turnip",
-                "vendorid",
-                "driverversion",
-            ):
-                self.assertNotIn(vendor_term, predicate)
+        start = source.index("bool framegenReady = true;", source.index("bool requireHostCompletionWait"))
+        end = source.index("updateAdaptiveFlowGovernor();", start)
+        completion = source[start:end]
 
-    def test_mailbox_retains_async_framegen_completion(self) -> None:
-        """Mailbox must not be host-serialized by the FIFO compatibility A/B."""
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        marker = source.find("const bool fifoBoundedCompletion")
-        self.assertNotEqual(marker, -1)
-        if marker >= 0:
-            end = source.index(";", marker) + 1
-            predicate = source[marker:end]
-            self.assertIn("VK_PRESENT_MODE_FIFO_KHR", predicate)
-            self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", predicate)
-
-    def test_fifo_completion_ab_logs_selected_boundary(self) -> None:
-        """Device validation must expose whether FIFO actually took the bounded-completion path."""
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn('runtime stage=fifo-bounded-completion', source)
-        self.assertIn('host_wait=1', source)
+        self.assertNotIn("fifoBoundedCompletion", completion)
+        self.assertNotIn("observeBlockingCompletion", completion)
+        self.assertNotIn('runtime stage=fifo-bounded-completion', completion)
 
     def test_fifo_admitted_batch_is_not_amputated_by_post_dispatch_deadline(self) -> None:
         """Once FIFO work is admitted and dispatched, wall-clock slot expiry must not delete it."""
