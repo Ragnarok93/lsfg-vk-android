@@ -3,6 +3,7 @@
 #include "config/config.hpp"
 #include "utils/utils.hpp"
 #include "context.hpp"
+#include "android_sync_policy.hpp"
 #include "layer.hpp"
 
 #include <vulkan/vulkan_core.h>
@@ -60,6 +61,19 @@ namespace {
 #endif
         return conf.multiplier;
     }
+
+#ifdef __ANDROID__
+    bool protectedAdrenoCapacityPath(VkPhysicalDevice physicalDevice) {
+        VkPhysicalDeviceProperties properties{};
+        Layer::ovkGetPhysicalDeviceProperties(physicalDevice, &properties);
+        constexpr uint32_t kQualcommVendorId = 0x5143U;
+        return properties.vendorID == kQualcommVendorId
+            || AndroidSyncPolicy::containsAsciiCaseInsensitive(
+                properties.deviceName, "adreno")
+            || AndroidSyncPolicy::containsAsciiCaseInsensitive(
+                properties.deviceName, "qualcomm");
+    }
+#endif
 
     bool adaptivePresentationPacing(const Config::Configuration& conf) {
         // Adaptive FG historically ran smoothly with the same WSI present-mode
@@ -995,11 +1009,29 @@ namespace {
             ? "preserve-native-explicit"
             : "legacy-headroom";
 #ifdef __ANDROID__
-        // Android can retain LSFG when the surface cannot provide the extra
-        // images. Generated-image acquisition becomes opportunistic in this
-        // policy so missing WSI capacity drops synthetic work instead of
-        // delaying the application's source present.
+        // The protected Qualcomm/Adreno path exits through the September 18
+        // compatibility island, where generated-image acquisition intentionally
+        // remains bounded/blocking. Do not combine that transaction with native
+        // swapchain capacity: keep legacy headroom or fail open exactly as before.
+        const bool protectedAdrenoCapacity =
+            protectedAdrenoCapacityPath(deviceInfo->physicalDevice);
+        if (protectedAdrenoCapacity && preserveSwapchainImageCount) {
+            preserveSwapchainImageCount = false;
+            capacityPolicy = "legacy-headroom-adreno-protected";
+            std::cerr << "lsfg-vk: init stage=swapchain-capacity-quirk-ignored"
+                      << " reason=adreno-protected-364178af\n";
+        }
         if (!preserveSwapchainImageCount && surfaceCannotFitHeadroom) {
+            if (protectedAdrenoCapacity) {
+                std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom"
+                          << " minImageCount=" << pCreateInfo->minImageCount
+                          << " maxImageCount=" << maxImageCount
+                          << " requiredHeadroom=" << requiredHeadroom
+                          << " requiredImageCount=" << requiredImageCount
+                          << " action=pass-through-adreno-protected\n";
+                return createPassThrough(
+                    headroomOverflow ? "headroom-overflow" : "insufficient-headroom");
+            }
             std::cerr << "lsfg-vk: init stage=swapchain-insufficient-headroom"
                       << " minImageCount=" << pCreateInfo->minImageCount
                       << " maxImageCount=" << maxImageCount

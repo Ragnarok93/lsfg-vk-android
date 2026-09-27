@@ -56,6 +56,27 @@ class AndroidPreserveSwapchainCapacityTest(unittest.TestCase):
             hooks,
         )
 
+    def test_protected_adreno_keeps_september18_capacity_contract(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("protectedAdrenoCapacityPath", hooks)
+        self.assertIn('"legacy-headroom-adreno-protected"', hooks)
+        self.assertIn('"action=pass-through-adreno-protected"', hooks)
+        self.assertIn('"reason=adreno-protected-364178af"', hooks)
+
+        android_capacity = hooks[
+            hooks.index("const bool protectedAdrenoCapacity ="):
+            hooks.index("#else", hooks.index("const bool protectedAdrenoCapacity ="))
+        ]
+        self.assertLess(
+            android_capacity.index("protectedAdrenoCapacity && preserveSwapchainImageCount"),
+            android_capacity.index("preserve-native-fallback"),
+        )
+        self.assertIn(
+            'headroomOverflow ? "headroom-overflow" : "insufficient-headroom"',
+            android_capacity,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

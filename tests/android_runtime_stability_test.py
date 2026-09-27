@@ -309,21 +309,14 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("runtimeWaitTimeoutNs()", acquire)
         self.assertIn(": 0", acquire)
 
-        # Expanded-swapchain Adreno retains the September 18 bounded WSI
-        # transaction. Native-capacity mode is the narrow exception: it must
-        # use zero-time generated acquisition so synthetic pressure cannot
-        # delay the source present.
+        # Newer deadline/capacity policy remains available for generic/Xclipse,
+        # but the protected Adreno WSI transaction is not converted into a
+        # zero-time opportunistic acquire.
         self.assertIn("syntheticAdmissionNowNs >= syntheticDesiredTimeNs", generated)
         self.assertIn("stage=generated-deadline-drop", generated)
-        self.assertIn("this->preserveSwapchainImageCount_", acquire)
-        self.assertIn("? 0", acquire)
         self.assertIn(
-            "(this->preserveSwapchainImageCount_\n"
-            "                    || !this->conservativeCrossDeviceSync_)",
-            generated,
-        )
-        self.assertIn(
-            "&& (res == VK_NOT_READY || res == VK_TIMEOUT)",
+            "!this->conservativeCrossDeviceSync_\n"
+            "                && (res == VK_NOT_READY || res == VK_TIMEOUT)",
             generated,
         )
         self.assertIn("droppedGeneratedFrames = generatedFrameCount - i", generated)
