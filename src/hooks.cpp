@@ -97,30 +97,42 @@ namespace {
             // Fixed and Adaptive use different temporal generation semantics.
             // Crossing this boundary must replace the private LSFG context rather
             // than carrying backend history through a resident soft reload.
+            const bool generationActiveBefore = previous.multiplier > 1;
+            const bool generationActiveAfter = next.multiplier > 1;
+            const bool generationStaysActive =
+                generationActiveBefore && generationActiveAfter;
             const bool framegenModeChanged =
-                previous.adaptiveFramegen != next.adaptiveFramegen;
+                generationStaysActive
+                && previous.adaptiveFramegen != next.adaptiveFramegen;
             const bool adaptiveFlowModeChanged =
-                previous.adaptiveFlowScale != next.adaptiveFlowScale;
+                generationStaysActive
+                && previous.adaptiveFlowScale != next.adaptiveFlowScale;
             const bool adaptiveFlowPresetChanged =
-                previous.adaptiveFlowScale && next.adaptiveFlowScale
+                generationStaysActive
+                && previous.adaptiveFlowScale && next.adaptiveFlowScale
                 && previous.adaptiveFlowPreset != next.adaptiveFlowPreset;
             const bool fixedFlowScaleChanged =
-                !previous.adaptiveFlowScale && !next.adaptiveFlowScale
+                generationStaysActive
+                && !previous.adaptiveFlowScale && !next.adaptiveFlowScale
                 && previous.flowScale != next.flowScale;
-            // A resident context is allocated for at least four
-            // generated outputs. A larger hot-reloaded multiplier needs a new
-            // swapchain/context before present can index those outputs.
+            const bool presentationPolicyChanged =
+                next.multiplier > 1 && previous.e_present != next.e_present;
+            // When both sides are Off there is no LSFG swapchain/context to
+            // rebuild. Saved FG-only settings become relevant on the one
+            // generation-boundary recreation that enables generation.
             return generationActivityChanged
                 || framegenModeChanged
-                || next.multiplier > residentCapacityMultiplier(previous)
-                || previous.dll != next.dll
+                || (generationStaysActive
+                    && next.multiplier > residentCapacityMultiplier(previous))
+                || (generationStaysActive && previous.dll != next.dll)
                 || adaptiveFlowModeChanged
                 || adaptiveFlowPresetChanged
                 || fixedFlowScaleChanged
-                || previous.performance != next.performance
-                || previous.hdr != next.hdr
-                || previous.preserveSwapchainImageCount != next.preserveSwapchainImageCount
-                || previous.e_present != next.e_present;
+                || (generationStaysActive && previous.performance != next.performance)
+                || (generationStaysActive && previous.hdr != next.hdr)
+                || (generationStaysActive
+                    && previous.preserveSwapchainImageCount != next.preserveSwapchainImageCount)
+                || presentationPolicyChanged;
         }
 #endif
         return previous.enable != next.enable
@@ -879,17 +891,11 @@ namespace {
 
         const auto createSourceOnly = [&](const char* reason) -> VkResult {
             VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo;
-            const auto configuredPresentMode = activeConf.e_present;
-            // Generation-off removes the LSFG swapchain/context contract but
-            // keeps the configured presentation policy that was already proven
-            // stable for this target. In particular, do not fall back to a
-            // guest-requested IMMEDIATE swapchain when GameNative is configured
-            // for Mailbox/FIFO pacing.
-            sourceOnlyCreateInfo.presentMode = choosePresentMode(
-                deviceInfo->physicalDevice,
-                pCreateInfo->surface,
-                pCreateInfo->presentMode,
-                activeConf.e_present);
+            // Generation-off is native WSI, not an LSFG presentation mode.
+            // Preserve every application swapchain field exactly, including
+            // presentMode. The saved Mailbox/FIFO selection applies only while
+            // frame generation is active.
+            const auto configuredPresentMode = pCreateInfo->presentMode;
 
             // Source-only remains a true no-framegen state: do not inflate image
             // count, add transfer usage, or instantiate the private LSFG/AHB
@@ -906,8 +912,8 @@ namespace {
                 auto state = std::make_shared<SwapchainState>();
                 state->device = device;
                 state->deviceInfo = deviceInfo;
-                state->present = sourceOnlyCreateInfo.presentMode;
-                state->configuredPresent = configuredPresentMode;
+                state->present = pCreateInfo->presentMode;
+                state->configuredPresent = pCreateInfo->presentMode;
                 publishSwapchainState(*pSwapchain, std::move(state));
             } catch (const std::exception& e) {
                 Utils::logLimitN("swapMap", 5,
