@@ -51,15 +51,12 @@ class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
         source_only_end = hooks.index("#ifdef __ANDROID__", source_only_start)
         source_only = hooks[source_only_start:source_only_end]
         self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only)
-        self.assertIn(
+        self.assertNotIn(
             "sourceOnlyCreateInfo.presentMode = choosePresentMode(",
             source_only,
         )
-        self.assertIn("activeConf.e_present", source_only)
-        self.assertNotIn(
-            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
-            source_only,
-        )
+        self.assertNotIn("sourceOnlyCreateInfo.presentMode =", source_only)
+        self.assertIn("state->present = pCreateInfo->presentMode", source_only)
         self.assertNotIn("LsContext", source_only)
         self.assertNotIn("requiredTransferUsage", source_only)
         self.assertNotIn("residentCapacityMultiplier", source_only)
