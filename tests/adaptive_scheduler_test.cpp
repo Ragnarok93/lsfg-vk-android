@@ -442,6 +442,8 @@ int main() {
         for (int frame = 0; frame < 72; ++frame)
             scheduler.plan(33'333'333ns);
         assert(scheduler.telemetry().costLimit == 3);
+        assert(scheduler.telemetry().integerDensityLocked);
+        assert(scheduler.telemetry().lockedGeneratedFrames == 3);
 
         for (int frame = 0; frame < 48; ++frame) {
             const auto generated =
@@ -451,6 +453,26 @@ int main() {
         }
     }
 
+
+    {
+        // Target changes and timing discontinuities reset the density latch and
+        // fractional phase rather than carrying the old regime into a new
+        // temporal epoch.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 72; ++frame)
+            scheduler.plan(33'333'333ns);
+        assert(scheduler.telemetry().integerDensityLocked);
+
+        scheduler.configure(100, 3);
+        scheduler.plan(33'333'333ns);
+        assert(!scheduler.telemetry().integerDensityLocked);
+        assert(scheduler.telemetry().lockedGeneratedFrames == 0);
+
+        scheduler.plan(1s);
+        assert(scheduler.telemetry().discontinuityReset);
+        assert(!scheduler.telemetry().integerDensityLocked);
+        assert(scheduler.telemetry().fractionalPhase == 0.0);
+    }
 
     {
         // Genuine fractional demand remains phase-distributed, but it is driven
