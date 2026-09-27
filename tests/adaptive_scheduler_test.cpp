@@ -434,37 +434,21 @@ int main() {
 
 
     {
-        // Fluidity regression: a mixed 20/50 ms source cadence should allocate
-        // synthetic work to the long intervals instead of deriving every count
-        // from the lagging smoothed-rate estimate. Once cost level 2 is proven
-        // sustainable, 50 ms intervals should receive two opportunities while
-        // 20 ms intervals remain at zero/one. This minimizes local output-gap
-        // variance without delaying real source frames.
-        AdaptiveFrameScheduler scheduler(60, 3);
-        for (int frame = 0; frame < 48; ++frame)
-            scheduler.plan(35ms);
-        assert(scheduler.telemetry().costLimit >= 2);
+        // r56 regression: once a ~30 FPS source has converged on a 120 FPS
+        // Adaptive target, ordinary source jitter must not modulate the batch
+        // density 3 -> 2 -> 3. Desired cadence is derived from the smoothed
+        // source timeline; raw intervals remain pressure evidence only.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 72; ++frame)
+            scheduler.plan(33'333'333ns);
+        assert(scheduler.telemetry().costLimit == 3);
 
-        std::size_t longTwo = 0;
-        std::size_t shortOverOne = 0;
-        std::size_t totalGenerated = 0;
-        for (int frame = 0; frame < 40; ++frame) {
-            const bool longInterval = (frame % 2) != 0;
+        for (int frame = 0; frame < 48; ++frame) {
             const auto generated =
-                scheduler.plan(longInterval ? 50ms : 20ms);
-            totalGenerated += generated;
-            if (longInterval && generated == 2)
-                ++longTwo;
-            if (!longInterval && generated > 1)
-                ++shortOverOne;
+                scheduler.plan((frame % 2 == 0) ? 25ms : 40ms);
+            assert(generated == 3);
+            assert(scheduler.telemetry().wantedGeneratedFrames > 2.7);
         }
-
-        assert(longTwo >= 12);
-        assert(shortOverOne == 0);
-        assert(totalGenerated >= 34);
-        assert(totalGenerated <= 46);
-        assert(scheduler.telemetry().fractionalPhase >= 0.0);
-        assert(scheduler.telemetry().fractionalPhase < 1.0);
     }
 
 
