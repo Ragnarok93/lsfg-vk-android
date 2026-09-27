@@ -814,16 +814,17 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         create_end = hooks.index("#ifdef __ANDROID__", create_start)
         source_only_create = hooks[create_start:create_end]
         self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only_create)
-        self.assertIn(
+        self.assertNotIn(
             "sourceOnlyCreateInfo.presentMode = choosePresentMode(",
             source_only_create,
         )
-        self.assertIn("deviceInfo->physicalDevice", source_only_create)
-        self.assertIn("pCreateInfo->surface", source_only_create)
-        self.assertIn("pCreateInfo->presentMode", source_only_create)
-        self.assertIn("activeConf.e_present", source_only_create)
         self.assertNotIn(
-            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
+            "sourceOnlyCreateInfo.presentMode =",
+            source_only_create,
+            "LSFG Off must preserve the application's native WSI present mode exactly",
+        )
+        self.assertIn(
+            "state->present = pCreateInfo->presentMode",
             source_only_create,
         )
         self.assertNotIn("residentCapacityMultiplier", source_only_create)
@@ -842,6 +843,20 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         # swapchain itself is truly native/source-only.
         self.assertIn(".targeted = true", config)
         self.assertIn('publishRuntimeState(activeConf.config_file, "source_only"', hooks)
+
+    def test_inactive_lsfg_present_policy_change_does_not_recreate_native_swapchain(self) -> None:
+        """Changing the saved LSFG WSI mode while generation is Off must not disturb native WSI."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        helper_start = source.index("bool requiresSwapchainRecreation")
+        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper = source[helper_start:helper_end]
+
+        self.assertIn("presentationPolicyChanged", helper)
+        self.assertIn(
+            "next.multiplier > 1 && previous.e_present != next.e_present",
+            helper,
+        )
+        self.assertNotIn("|| previous.e_present != next.e_present;", helper)
 
     def test_syncfd_source_export_failure_recreates_temporal_context(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
