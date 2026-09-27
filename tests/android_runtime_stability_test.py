@@ -888,7 +888,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
     def test_fifo_bounded_completion_is_capability_scoped_not_vendor_scoped(self) -> None:
         """The conservative FIFO completion boundary must not key off Xclipse/Samsung names."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("const bool fifoBoundedCompletion")
+        start = source.index("bool requireHostCompletionWait")
         end = source.index("// 3. Compatibility/error fallback only.", start)
         completion_policy = source[start:end].lower()
 
@@ -906,7 +906,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
     def test_mailbox_retains_async_framegen_completion(self) -> None:
         """Mailbox must not be host-serialized by the FIFO compatibility A/B."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("const bool fifoBoundedCompletion")
+        start = source.index("bool requireHostCompletionWait")
         end = source.index("// 3. Compatibility/error fallback only.", start)
         completion_policy = source[start:end]
 
