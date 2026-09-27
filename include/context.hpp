@@ -102,7 +102,8 @@ public:
     /// @throws LSFG::vulkan_error if any Vulkan call fails.
     ///
     LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
-        VkExtent2D extent, const std::vector<VkImage>& swapchainImages);
+        VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
+        VkPresentModeKHR presentMode);
 
     ///
     /// Custom present logic.
@@ -206,6 +207,7 @@ private:
     // fence does not prove that the presentation engine has released them.
     std::vector<std::vector<Mini::Semaphore>> presentWaitRetirements_;
     VkExtent2D extent;
+    VkPresentModeKHR presentMode_{VK_PRESENT_MODE_FIFO_KHR};
 
     // The pass ring owns resources submitted to the game's queue. Retain the
     // queue/device dispatch until every in-flight pass has retired.
