@@ -4957,17 +4957,45 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->asyncFramegenCompletionEnabled_ = false;
     }
 
-    // 3. Compatibility/error fallback only. The normal SYNC_FD path queues the
-    //    game-device copies against framegen completion and does not block here.
+    // Untimed strict FIFO needs one concrete batch-completion boundary before
+    // its ordered generated-prefix enters WSI. Keep the existing SYNC_FD source
+    // handoff/import path intact, but bound private-device completion here.
+    // Mailbox remains fully asynchronous, and the protected Adreno path keeps
+    // its independent September 18 completion contract.
+    const bool fifoBoundedCompletion =
+        this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR
+        && !this->adaptiveDisplayTimingEnabled_
+        && this->asyncFramegenCompletionEnabled_
+        && !this->conservativeCrossDeviceSync_
+        && framegenSync.gpuDependenciesExported
+        && generatedFrameCount > 0;
+    requireHostCompletionWait = requireHostCompletionWait || fifoBoundedCompletion;
+    if (firstPresentDiagnostic && fifoBoundedCompletion) {
+        std::cerr << "lsfg-vk: runtime stage=fifo-bounded-completion"
+                  << " host_wait=1"
+                  << " generated=" << generatedFrameCount
+                  << " display_timing=0"
+                  << "\n";
+    }
+
+    // 3. Compatibility/error fallback, plus the strict-FIFO completion A/B.
+    //    Normal Mailbox SYNC_FD completion remains GPU-side and nonblocking.
     bool framegenReady = true;
+    double framegenBlockingCompletionMs = 0.0;
     if (requireHostCompletionWait) {
         const auto waitIdleStart = RuntimeMetrics::Clock::now();
         const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
         framegenReady = conf.performance
             ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
             : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
-            RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        framegenBlockingCompletionMs =
+            std::chrono::duration<double, std::milli>(
+                RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
+    }
+    if (fifoBoundedCompletion && framegenReady && generatedFrameCount > 0) {
+        this->deadlineAdmissionPredictor_.observeBlockingCompletion(
+            generatedFrameCount, framegenBlockingCompletionMs);
     }
     if (requireHostCompletionWait && framegenReady) {
         metrics.windowGeneratedCompleted += generatedFrameCount;
