@@ -849,5 +849,72 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
 
 
+    def test_fifo_capacity_is_one_resident_batch_not_native_plus_batch(self) -> None:
+        """Strict FIFO must not allocate a second synthetic batch worth of queue depth."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        start = source.index("const bool fifoSingleBatchCapacity")
+        end = source.index("createInfo.minImageCount = requiredImageCount", start)
+        capacity = source[start:end]
+
+        self.assertIn(
+            "createInfo.presentMode == VK_PRESENT_MODE_FIFO_KHR",
+            capacity,
+        )
+        self.assertIn("fifoRequiredImageCount", capacity)
+        self.assertIn(
+            "std::max<uint32_t>(pCreateInfo->minImageCount, residentBatchImageCount)",
+            capacity,
+        )
+        self.assertIn(
+            "pCreateInfo->minImageCount + requiredHeadroom",
+            capacity,
+            "Non-FIFO modes must retain the existing headroom formula",
+        )
+
+    def test_mailbox_keeps_existing_swapchain_headroom_policy(self) -> None:
+        """Mailbox replacement semantics keep the current native+synthetic headroom."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        start = source.index("const bool fifoSingleBatchCapacity")
+        end = source.index("createInfo.minImageCount = requiredImageCount", start)
+        capacity = source[start:end]
+
+        self.assertIn(
+            "fifoSingleBatchCapacity ? fifoRequiredImageCount : legacyRequiredImageCount",
+            capacity,
+        )
+        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR ?", capacity)
+        self.assertNotIn("? VK_PRESENT_MODE_MAILBOX_KHR", capacity)
+
+    def test_fifo_capacity_policy_is_device_agnostic(self) -> None:
+        """FIFO queue bounding is selected only by present mode, never GPU identity."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        start = source.index("const bool fifoSingleBatchCapacity")
+        end = source.index("createInfo.minImageCount = requiredImageCount", start)
+        capacity = source[start:end].lower()
+
+        for vendor_term in (
+            "adreno",
+            "qualcomm",
+            "xclipse",
+            "samsung",
+            "turnip",
+            "vendorid",
+            "driverversion",
+        ):
+            self.assertNotIn(vendor_term, capacity)
+
+    def test_fifo_capacity_logging_exposes_selected_policy_and_count(self) -> None:
+        """On-device validation must show whether FIFO used the bounded capacity."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        start = source.index('init stage=swapchain-capacity')
+        end = source.index("createInfo.minImageCount = requiredImageCount", start)
+        logging = source[start:end]
+
+        self.assertIn('" capacityPolicy="', logging)
+        self.assertIn('" requiredImageCount="', logging)
+        self.assertIn('"fifo-single-batch"', logging)
+        self.assertIn('"legacy-headroom"', logging)
+
+
 if __name__ == "__main__":
     unittest.main()
