@@ -654,8 +654,45 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn('toml::find_or(gameTable, "multiplier", 2U)', source)
         self.assertNotIn('.enable = toml::find_or(gameTable, "enabled", true)', source)
 
+    def test_fixed_to_adaptive_requires_swapchain_recreation(self) -> None:
+        """Fixed -> Adaptive is a temporal backend-context boundary."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        helper_start = source.index("bool requiresSwapchainRecreation")
+        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper = source[helper_start:helper_end]
+
+        self.assertIn("framegenModeChanged", helper)
+        self.assertIn(
+            "previous.adaptiveFramegen != next.adaptiveFramegen",
+            helper,
+        )
+        self.assertIn("|| framegenModeChanged", helper)
+
+        reload_start = source.index("if (shouldPollConfig && configurationFileChanged(conf))")
+        reload_end = source.index("if (!state->context)", reload_start)
+        reload = source[reload_start:reload_end]
+        self.assertIn('"fixed-to-adaptive"', reload)
+        self.assertIn('" recreate="', reload)
+
+    def test_adaptive_to_fixed_requires_swapchain_recreation(self) -> None:
+        """Adaptive -> Fixed uses the same symmetric context-boundary rule."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        helper_start = source.index("bool requiresSwapchainRecreation")
+        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper = source[helper_start:helper_end]
+
+        self.assertIn(
+            "previous.adaptiveFramegen != next.adaptiveFramegen",
+            helper,
+        )
+        reload_start = source.index("if (shouldPollConfig && configurationFileChanged(conf))")
+        reload_end = source.index("if (!state->context)", reload_start)
+        reload = source[reload_start:reload_end]
+        self.assertIn('"adaptive-to-fixed"', reload)
+        self.assertIn('" recreate="', reload)
+
     def test_adaptive_target_reload_does_not_recreate_the_swapchain(self) -> None:
-        """Limiter adjustments must not create multi-second black transition windows."""
+        """Target-FPS changes inside Adaptive remain a resident lightweight reload."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         self.assertIn("requiresSwapchainRecreation", source)
         self.assertIn("const auto previousConf = conf", source)
@@ -663,10 +700,97 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("if (recreateSwapchain)", source)
 
         helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("VkResult myvkCreateInstance", helper_start)
+        helper_end = source.index("bool supportsDeviceExtension", helper_start)
         helper = source[helper_start:helper_end]
-        self.assertNotIn("adaptiveFramegen", helper)
+        self.assertIn("adaptiveFramegen", helper)
         self.assertNotIn("fpsLimit", helper)
+        self.assertNotIn("previous.fpsLimit", helper)
+        self.assertNotIn("next.fpsLimit", helper)
+
+    def test_mode_boundary_does_not_add_unrelated_recreation_inputs(self) -> None:
+        """The repair is limited to the mode bit, not scheduler/timeline diagnostics."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        helper_start = source.index("bool requiresSwapchainRecreation")
+        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper = source[helper_start:helper_end]
+
+        self.assertNotIn("adaptiveScheduler", helper)
+        self.assertNotIn("sourceTimeline", helper)
+        self.assertNotIn("configRevision", helper)
+        self.assertNotIn("runtimeConfigSignature", helper)
+        self.assertNotIn("fpsLimit", helper)
+        self.assertEqual(
+            helper.count("adaptiveFramegen"),
+            2,
+            "Only previous/next adaptiveFramegen may be added by this repair",
+        )
+
+    def test_fifo_present_mode_is_preserved_across_hot_recreation(self) -> None:
+        """A Fixed/Adaptive recreation must preserve FIFO when FIFO was active."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        start = source.index("const bool recreatingExistingSwapchain")
+        end = source.index("auto res = Layer::ovkCreateSwapchainKHR", start)
+        hot_recreate = source[start:end]
+
+        self.assertIn(
+            "recreatingExistingSwapchain\n            ? pCreateInfo->presentMode",
+            hot_recreate,
+        )
+        self.assertNotIn("? VK_PRESENT_MODE_FIFO_KHR", hot_recreate)
+        self.assertNotIn(": VK_PRESENT_MODE_FIFO_KHR", hot_recreate)
+
+    def test_mailbox_present_mode_is_preserved_across_hot_recreation(self) -> None:
+        """A Fixed/Adaptive recreation must preserve Mailbox when Mailbox was active."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        start = source.index("const bool recreatingExistingSwapchain")
+        end = source.index("auto res = Layer::ovkCreateSwapchainKHR", start)
+        hot_recreate = source[start:end]
+
+        self.assertIn(
+            "recreatingExistingSwapchain\n            ? pCreateInfo->presentMode",
+            hot_recreate,
+        )
+        self.assertNotIn("? VK_PRESENT_MODE_MAILBOX_KHR", hot_recreate)
+        self.assertNotIn(": VK_PRESENT_MODE_MAILBOX_KHR", hot_recreate)
+
+    def test_mode_boundary_rebuilds_wrapper_and_private_backend_context(self) -> None:
+        """The replacement swapchain owns a newly-created LsContext/backend context."""
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+
+        create_start = hooks.index("init stage=ls-context-begin")
+        create_end = hooks.index("init stage=ls-context-ready", create_start)
+        create = hooks[create_start:create_end]
+        self.assertIn("std::make_shared<LsContext>", create)
+        self.assertIn("retireSwapchainState(pCreateInfo->oldSwapchain)", create)
+        self.assertLess(
+            create.index("std::make_shared<LsContext>"),
+            create.index("retireSwapchainState(pCreateInfo->oldSwapchain)"),
+        )
+
+        self.assertIn(
+            "new int32_t(lsfgCreateContext(",
+            context,
+            "A fresh wrapper must allocate a fresh private LSFG backend context",
+        )
+        self.assertIn('stage=framegen-context-epoch', context)
+        self.assertIn('" context_id="', context)
+        self.assertIn('" config_revision="', context)
+        self.assertIn("bool runtimeConfigSignatureValid_{false}", header)
+
+    def test_mode_transition_requests_exactly_one_hot_recreation(self) -> None:
+        """One mode transition produces one OUT_OF_DATE recreation request, not a loop."""
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        reload_start = source.index("if (shouldPollConfig && configurationFileChanged(conf))")
+        reload_end = source.index("if (!state->context)", reload_start)
+        reload = source[reload_start:reload_end]
+
+        self.assertEqual(reload.count("requiresSwapchainRecreation("), 1)
+        self.assertEqual(reload.count("return VK_ERROR_OUT_OF_DATE_KHR;"), 1)
+        self.assertIn("const bool framegenModeChanged =", reload)
+        self.assertIn("if (framegenModeChanged)", reload)
+        self.assertIn('" recreate=" << (recreateSwapchain ? 1 : 0)', reload)
 
     def test_gamenative_off_recreates_true_source_only_swapchain(self) -> None:
         """Off keeps the layer hot-loadable but removes the LSFG swapchain/context contract."""
