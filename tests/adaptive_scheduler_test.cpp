@@ -898,21 +898,52 @@ int main() {
 
 
     {
-        // Fixed mode learns a source baseline without generated work, starts
-        // conservatively, and reaches the requested ceiling only after stable
-        // source cadence. No absolute FPS threshold participates.
+        // Fixed mode is an explicit multiplier request. Once a clean source
+        // baseline exists and generation is allowed, the requested generation
+        // count is authoritative immediately; the governor is a backoff guard,
+        // not a slow ramp-up controller.
         FixedSourceCadenceGovernor governor;
         assert(governor.plan(40ms, 3, 0, false) == 0);
         assert(governor.telemetry().baselineValid);
 
         std::size_t count = governor.plan(40ms, 3, 0, true);
-        assert(count == 1);
-        for (int i = 0; i < 12; ++i)
-            count = governor.plan(40ms, 3, count, true);
-        assert(count >= 2);
-        for (int i = 0; i < 12; ++i)
-            count = governor.plan(40ms, 3, count, true);
         assert(count == 3);
+        assert(governor.telemetry().generationLimit == 3);
+        for (int i = 0; i < 12; ++i) {
+            count = governor.plan(
+                40ms, 3, count, true, SourceCadenceObservation::Generated);
+            assert(count == 3);
+        }
+    }
+
+    {
+        // Hot Fixed multiplier changes must take effect on the next eligible
+        // generated cycle. A 2x -> 3x -> 4x request maps to 1 -> 2 -> 3
+        // generated frames without waiting for a recovery ramp.
+        FixedSourceCadenceGovernor governor;
+        assert(governor.plan(
+            40ms, 1, 0, false, SourceCadenceObservation::SourceOnly) == 0);
+        assert(governor.plan(
+            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance) == 1);
+        assert(governor.plan(
+            40ms, 2, 1, true, SourceCadenceObservation::Generated) == 2);
+        assert(governor.plan(
+            40ms, 3, 2, true, SourceCadenceObservation::Generated) == 3);
+    }
+
+    {
+        // Generated work must not tighten the clean-source baseline. Otherwise
+        // Fixed mode can manufacture an unrealistically fast baseline and then
+        // permanently suppress higher requested multipliers.
+        FixedSourceCadenceGovernor governor;
+        governor.plan(
+            40ms, 3, 0, false, SourceCadenceObservation::SourceOnly);
+        assert(governor.plan(
+            40ms, 3, 0, true, SourceCadenceObservation::HistoryMaintenance) == 3);
+        for (int i = 0; i < 12; ++i)
+            governor.plan(
+                30ms, 3, 3, true, SourceCadenceObservation::Generated);
+        assert(std::abs(governor.telemetry().baselineSourceFps - 25.0) < 0.01);
     }
 
     {
@@ -995,13 +1026,16 @@ int main() {
     }
 
     {
-        // Stable slow sources are treated identically to stable fast sources.
+        // Stable slow sources are treated identically to stable fast sources:
+        // the explicit Fixed multiplier is honored immediately after baseline
+        // measurement, with backoff reserved for proven cadence regression.
         FixedSourceCadenceGovernor governor;
         governor.plan(125ms, 2, 0, false);
         std::size_t count = governor.plan(125ms, 2, 0, true);
-        assert(count == 1);
+        assert(count == 2);
         for (int i = 0; i < 8; ++i)
-            count = governor.plan(125ms, 2, count, true);
+            count = governor.plan(
+                125ms, 2, count, true, SourceCadenceObservation::Generated);
         assert(count == 2);
         assert(!governor.telemetry().backedOff);
     }
