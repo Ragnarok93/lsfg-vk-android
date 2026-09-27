@@ -849,71 +849,63 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
 
 
-    def test_fifo_capacity_is_one_resident_batch_not_native_plus_batch(self) -> None:
-        """Strict FIFO must not allocate a second synthetic batch worth of queue depth."""
+    def test_swapchain_capacity_restores_native_plus_generated_headroom(self) -> None:
+        """FIFO and Mailbox both retain the proven native+synthetic headroom formula."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        start = source.index("const bool fifoSingleBatchCapacity")
+        start = source.index("const uint32_t requiredHeadroom")
         end = source.index("createInfo.minImageCount = requiredImageCount", start)
         capacity = source[start:end]
 
-        self.assertIn(
-            "createInfo.presentMode == VK_PRESENT_MODE_FIFO_KHR",
-            capacity,
-        )
-        self.assertIn("fifoRequiredImageCount", capacity)
-        self.assertIn(
-            "std::max<uint32_t>(pCreateInfo->minImageCount, residentBatchImageCount)",
-            capacity,
-        )
         self.assertIn(
             "pCreateInfo->minImageCount + requiredHeadroom",
             capacity,
-            "Non-FIFO modes must retain the existing headroom formula",
         )
+        self.assertNotIn("fifoSingleBatchCapacity", capacity)
+        self.assertNotIn("fifoRequiredImageCount", capacity)
+        self.assertNotIn('"fifo-single-batch"', capacity)
 
-    def test_mailbox_keeps_existing_swapchain_headroom_policy(self) -> None:
-        """Mailbox replacement semantics keep the current native+synthetic headroom."""
-        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        start = source.index("const bool fifoSingleBatchCapacity")
-        end = source.index("createInfo.minImageCount = requiredImageCount", start)
-        capacity = source[start:end]
+    def test_fifo_fallback_paces_absolute_slots_when_display_timing_is_unavailable(self) -> None:
+        """Strict FIFO must honor source-timeline slots instead of burst-submitting them."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("strictFifoHostPacing", source)
+        self.assertIn("waitForMonotonicDeadline", source)
+        self.assertIn("syntheticDesiredTimeNs", source)
+        self.assertIn("sourceDesiredTimeNs", source)
+        self.assertIn("fifo-slot", source)
+        self.assertIn("synthetic_skipped", source)
 
+    def test_fifo_fallback_is_present_mode_scoped_and_does_not_touch_mailbox(self) -> None:
+        """Host slot pacing is strict-FIFO-only; Mailbox keeps its existing path."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn(
-            "fifoSingleBatchCapacity ? fifoRequiredImageCount : legacyRequiredImageCount",
-            capacity,
+            "this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR",
+            source,
         )
-        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR ?", capacity)
-        self.assertNotIn("? VK_PRESENT_MODE_MAILBOX_KHR", capacity)
+        self.assertIn("!this->adaptiveDisplayTimingEnabled_", source)
 
-    def test_fifo_capacity_policy_is_device_agnostic(self) -> None:
-        """FIFO queue bounding is selected only by present mode, never GPU identity."""
-        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        start = source.index("const bool fifoSingleBatchCapacity")
-        end = source.index("createInfo.minImageCount = requiredImageCount", start)
-        capacity = source[start:end].lower()
+    def test_fifo_late_synthetic_is_dropped_before_wsi_submission(self) -> None:
+        """A missed FIFO synthetic slot is discarded rather than queued stale."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("const uint64_t syntheticDesiredTimeNs")
+        end = source.index("pass.acquireSemaphores.at(i)", start)
+        pre_acquire = source[start:end]
 
-        for vendor_term in (
-            "adreno",
-            "qualcomm",
-            "xclipse",
-            "samsung",
-            "turnip",
-            "vendorid",
-            "driverversion",
-        ):
-            self.assertNotIn(vendor_term, capacity)
+        self.assertIn("strictFifoHostPacing", pre_acquire)
+        self.assertIn("syntheticAdmissionNowNs >= syntheticDesiredTimeNs", pre_acquire)
+        self.assertIn("generatedDeadlineObservationEligible = false", pre_acquire)
+        self.assertIn("break;", pre_acquire)
 
-    def test_fifo_capacity_logging_exposes_selected_policy_and_count(self) -> None:
-        """On-device validation must show whether FIFO used the bounded capacity."""
-        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        start = source.index('init stage=swapchain-capacity')
-        end = source.index("createInfo.minImageCount = requiredImageCount", start)
-        logging = source[start:end]
+    def test_fifo_source_wait_uses_absolute_source_deadline_without_source_drop(self) -> None:
+        """The real source may wait until its protected FIFO slot but is never dropped."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("// 5. Present the real game frame")
+        end = source.index("return finishSourcePresent", start)
+        final_source = source[start:end]
 
-        self.assertIn('" capacityPolicy="', logging)
-        self.assertIn('" requiredImageCount="', logging)
-        self.assertIn('"fifo-single-batch"', logging)
-        self.assertIn('"legacy-headroom"', logging)
+        self.assertIn("strictFifoHostPacing", final_source)
+        self.assertIn("waitForMonotonicDeadline", final_source)
+        self.assertIn("currentSourceTimeline_.sourceDesiredTimeNs", final_source)
+        self.assertNotIn("windowSourcePresentFailures++", final_source.split("waitForMonotonicDeadline", 1)[0])
 
 
 if __name__ == "__main__":
