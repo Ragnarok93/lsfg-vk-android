@@ -47,6 +47,7 @@ jobs:
           python3 tests/android_instance_dispatch_regression_test.py
           python3 tests/android_wsi_provenance_test.py
           python3 tests/android_runtime_stability_test.py
+          python3 tests/android_preserve_swapchain_capacity_test.py
           python3 tests/android_adreno_compatibility_restore_test.py
           python3 tests/android_adreno_s20_reference_test.py
           python3 tests/android_adreno_regression_repair_test.py
