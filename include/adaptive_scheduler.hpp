@@ -10,6 +10,7 @@ struct AdaptiveSchedulerTelemetry {
     double sourceFps{};
     double smoothedSourceFps{};
     double wantedGeneratedFrames{};
+    double scheduledGenerationDensity{};
     std::size_t costLimit{};
     std::size_t generatedFrames{};
     bool sourceRateSnapped{false};
@@ -26,6 +27,9 @@ struct AdaptiveSchedulerTelemetry {
     double fractionalPhase{};
     double opportunityIntervalSeconds{};
     std::size_t syntheticOpportunitiesCreated{};
+    bool integerDensityLocked{false};
+    std::size_t lockedGeneratedFrames{};
+    unsigned densityTransitionEvidence{};
 };
 
 struct SourceTimelineSample {
@@ -384,6 +388,7 @@ private:
     void updateSourceRate(double intervalSeconds);
     [[nodiscard]] double robustSourceIntervalSeconds() const;
     void updateCostLimit(double wantedGeneratedFrames);
+    [[nodiscard]] double stabilizeGenerationDensity(double desiredDensity);
 
     uint32_t targetFps_{};
     std::size_t maxGeneratedFrames_{};
@@ -407,6 +412,11 @@ private:
     std::size_t safeGenerationHint_{};
     bool safeGenerationHintValid_{false};
     bool generationFirst_{false};
+    bool integerDensityLocked_{false};
+    std::size_t lockedIntegerDensity_{};
+    std::size_t integerDensityCandidate_{};
+    unsigned integerDensityCandidateSamples_{};
+    unsigned integerDensityReleaseSamples_{};
     unsigned capacityRaiseSamples_{};
     unsigned stableCadenceSamples_{};
 
