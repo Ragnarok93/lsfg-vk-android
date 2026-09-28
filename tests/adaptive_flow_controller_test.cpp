@@ -251,7 +251,7 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 6; ++i) {
             controller.observe(sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false));
         }
         assert(near(controller.currentScale(), 0.95F));
