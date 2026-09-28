@@ -193,36 +193,27 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertNotIn("VkSemaphore lastPostCopySem =", android)
         self.assertIn("runtime stage=present-sync-ready", android)
 
-    def test_runtime_disable_keeps_layer_resident_but_releases_lsfg_context(self) -> None:
+    def test_runtime_disable_keeps_resident_context_and_direct_presents_source(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("generationActivityChanged", hooks)
-        self.assertIn(
+        self.assertIn("generationActivationRequired", hooks)
+        self.assertNotIn(
             "(previous.multiplier > 1) != (next.multiplier > 1)",
             hooks,
         )
-        self.assertIn("const auto createSourceOnly", hooks)
-        self.assertIn(
-            "if (activeConf.targeted && activeConf.multiplier <= 1)",
-            hooks,
-        )
-        self.assertIn('return createSourceOnly("generation-off")', hooks)
-        self.assertIn("publishSwapchainState(*pSwapchain", hooks)
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", hooks)
-        self.assertNotIn("state->context->enterSourceOnlyBypass()", hooks)
+        self.assertIn("void enterSourceOnlyBypass();", header)
+        self.assertIn("void LsContext::enterSourceOnlyBypass()", context)
+        self.assertIn("bool sourceOnlyBypassActive_{false};", header)
 
-        create_start = hooks.index("const auto createSourceOnly")
-        create_end = hooks.index("#ifdef __ANDROID__", create_start)
-        source_only = hooks[create_start:create_end]
-        self.assertNotIn(
-            "sourceOnlyCreateInfo.presentMode = choosePresentMode(",
-            source_only,
-        )
-        self.assertNotIn("sourceOnlyCreateInfo.presentMode =", source_only)
-        self.assertIn("state->present = pCreateInfo->presentMode", source_only)
-        self.assertNotIn("residentCapacityMultiplier", source_only)
-        self.assertNotIn("requiredTransferUsage", source_only)
-        self.assertNotIn("LsContext", source_only)
+        lookup = hooks.index("if (!state->context)")
+        mutation = hooks.index("#pragma clang diagnostic push", lookup)
+        direct = hooks[lookup:mutation]
+        self.assertIn("if (conf.targeted && conf.multiplier <= 1)", direct)
+        self.assertIn("state->context->enterSourceOnlyBypass()", direct)
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", direct)
+        self.assertNotIn("return VK_ERROR_OUT_OF_DATE_KHR", direct)
 
         reload_pos = hooks.index("init stage=config-reloaded multiplier=")
         context_lookup_pos = hooks.index("if (!state->context)")

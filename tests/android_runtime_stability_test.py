@@ -796,53 +796,59 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("if (framegenModeChanged)", reload)
         self.assertIn('" recreate=" << (recreateSwapchain ? 1 : 0)', reload)
 
-    def test_gamenative_off_recreates_true_source_only_swapchain(self) -> None:
-        """Off keeps the layer hot-loadable but removes the LSFG swapchain/context contract."""
+    def test_gamenative_off_uses_resident_direct_present_without_swapchain_recreation(self) -> None:
+        """Quick-menu Off must become a direct source present without rebuilding WSI."""
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         helper_start = hooks.index("bool requiresSwapchainRecreation")
         helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
         helper = hooks[helper_start:helper_end]
-        self.assertIn("generationActivityChanged", helper)
+        self.assertIn("generationActivationRequired", helper)
         self.assertIn(
-            "(previous.multiplier > 1) != (next.multiplier > 1)",
+            "previous.multiplier <= 1 && next.multiplier > 1",
             helper,
         )
-
-        create_start = hooks.index("const auto createSourceOnly")
-        create_end = hooks.index("#ifdef __ANDROID__", create_start)
-        source_only_create = hooks[create_start:create_end]
-        self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only_create)
         self.assertNotIn(
-            "sourceOnlyCreateInfo.presentMode = choosePresentMode(",
-            source_only_create,
+            "(previous.multiplier > 1) != (next.multiplier > 1)",
+            helper,
+            "Disabling generation must not request a swapchain recreation",
         )
-        self.assertNotIn(
-            "sourceOnlyCreateInfo.presentMode =",
-            source_only_create,
-            "LSFG Off must preserve the application's native WSI present mode exactly",
+
+        context_lookup = hooks.index("if (!state->context)")
+        present_mutation = hooks.index("#pragma clang diagnostic push", context_lookup)
+        source_only_present = hooks[context_lookup:present_mutation]
+        self.assertIn(
+            "if (conf.targeted && conf.multiplier <= 1)",
+            source_only_present,
         )
         self.assertIn(
-            "state->present = pCreateInfo->presentMode",
-            source_only_create,
+            "state->context->enterSourceOnlyBypass()",
+            source_only_present,
         )
-        self.assertNotIn("residentCapacityMultiplier", source_only_create)
-        self.assertNotIn("requiredTransferUsage", source_only_create)
-        self.assertNotIn("LsContext", source_only_create)
-        self.assertNotIn("minImageCount =", source_only_create)
-
         self.assertIn(
-            "if (activeConf.targeted && activeConf.multiplier <= 1)",
-            hooks,
+            "Layer::ovkQueuePresentKHR(queue, pPresentInfo)",
+            source_only_present,
         )
-        self.assertIn('return createSourceOnly("generation-off")', hooks)
-        self.assertNotIn("state->context->enterSourceOnlyBypass()", hooks)
+        self.assertIn(
+            'publishRuntimeState(conf.config_file, "source_only"',
+            source_only_present,
+        )
 
-        # The target remains loader-resident for hot enable even though the Off
-        # swapchain itself is truly native/source-only.
-        self.assertIn(".targeted = true", config)
-        self.assertIn('publishRuntimeState(activeConf.config_file, "source_only"', hooks)
+        self.assertIn("void enterSourceOnlyBypass();", header)
+        self.assertIn("bool sourceOnlyBypassActive_{false};", header)
+        bypass_start = context.index("void LsContext::enterSourceOnlyBypass()")
+        bypass_end = context.index("#endif", bypass_start)
+        bypass = context[bypass_start:bypass_end]
+        self.assertIn("if (this->sourceOnlyBypassActive_)", bypass)
+        self.assertIn("return;", bypass)
+        self.assertIn("this->sourceOnlyBypassActive_ = true;", bypass)
+
+        present_start = context.index("VkResult LsContext::present")
+        android_start = context.index("#ifdef __ANDROID__", present_start)
+        present_prefix = context[android_start:android_start + 4000]
+        self.assertIn("this->sourceOnlyBypassActive_ = false;", present_prefix)
 
     def test_inactive_lsfg_present_policy_change_does_not_recreate_native_swapchain(self) -> None:
         """Changing the saved LSFG WSI mode while generation is Off must not disturb native WSI."""
