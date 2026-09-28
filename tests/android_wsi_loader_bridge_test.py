@@ -198,9 +198,14 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("generationActivationRequired", hooks)
+        self.assertNotIn("generationActivationRequired", hooks)
+        self.assertNotIn("fifoGenerationDeactivation", hooks)
         self.assertNotIn(
-            "(previous.multiplier > 1) != (next.multiplier > 1)",
+            'return createSourceOnly("generation-off")',
+            hooks,
+        )
+        self.assertIn(
+            "activeConf.multiplier <= 1 && !activeConf.targeted",
             hooks,
         )
         self.assertIn("void enterSourceOnlyBypass();", header)
