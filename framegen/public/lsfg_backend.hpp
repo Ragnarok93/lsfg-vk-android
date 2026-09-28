@@ -63,6 +63,19 @@ struct BackendDiagnostics {
     uint32_t apiVersion{VK_API_VERSION_1_0};
     uint32_t driverVersion{0};
     VkDriverId driverId{static_cast<VkDriverId>(0)};
+    uint32_t vendorId{0};
+    uint32_t deviceId{0};
+    uint32_t deviceType{0};
+    uint32_t subgroupSize{0};
+    VkShaderStageFlags subgroupStages{};
+    VkSubgroupFeatureFlags subgroupOperations{};
+    bool timelineSemaphore{false};
+    bool shaderFloat16{false};
+    bool synchronization2Core{false};
+    bool synchronization2Extension{false};
+    bool synchronization2Feature{false};
+    std::string synchronizationPath;
+    std::string deviceName;
     std::string driverName;
     std::string driverInfo;
     DeviceIdentity identity{};
@@ -81,6 +94,16 @@ struct BackendDiagnostics {
     // established host-fence path remains the fallback when it is unavailable.
     bool externalSemaphoreOpaqueFd{false};
     bool externalSemaphoreSyncFd{false};
+    bool externalSemaphoreOpaqueFdExtension{false};
+    bool externalSemaphoreOpaqueFdQuery{false};
+    bool externalSemaphoreSyncFdExtension{false};
+    bool externalSemaphoreSyncFdQuery{false};
+    uint32_t externalSemaphoreOpaqueFdFeatures{0};
+    uint32_t externalSemaphoreOpaqueFdCompatible{0};
+    uint32_t externalSemaphoreOpaqueFdExportFromImported{0};
+    uint32_t externalSemaphoreSyncFdFeatures{0};
+    uint32_t externalSemaphoreSyncFdCompatible{0};
+    uint32_t externalSemaphoreSyncFdExportFromImported{0};
 };
 
 inline constexpr uint64_t DEFAULT_DRIVER_WAIT_TIMEOUT_NS = 500'000'000ULL;
