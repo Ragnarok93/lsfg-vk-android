@@ -5294,8 +5294,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - waitIdleStart).count();
         metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
-        metrics.completionTiming.add(framegenBlockingCompletionMs);
     }
+    metrics.completionTiming.add(framegenBlockingCompletionMs);
     if (requireHostCompletionWait && framegenReady) {
         metrics.windowGeneratedCompleted += generatedFrameCount;
         metrics.totalGeneratedCompleted += generatedFrameCount;
