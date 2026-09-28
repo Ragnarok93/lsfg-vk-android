@@ -666,7 +666,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "previous.adaptiveFramegen != next.adaptiveFramegen",
             helper,
         )
-        self.assertIn("|| framegenModeChanged", helper)
+        self.assertIn("return framegenModeChanged", helper)
 
         reload_start = source.index("if (shouldPollConfig && configurationFileChanged(conf))")
         reload_end = source.index("if (!state->context)", reload_start)
@@ -796,66 +796,67 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("if (framegenModeChanged)", reload)
         self.assertIn('" recreate=" << (recreateSwapchain ? 1 : 0)', reload)
 
-    def test_source_only_retirement_waits_until_downstream_swapchain_destroy(self) -> None:
-        """FIFO off-transition must not run the old context teardown before WSI retirement."""
+    def test_resident_off_does_not_retire_or_recreate_swapchain(self) -> None:
+        """Off is a resident present bypass; it must not tear down the active WSI/context."""
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
-        create_start = hooks.index("const auto createSourceOnly")
-        create_end = hooks.index("#ifdef __ANDROID__", create_start)
-        source_only_create = hooks[create_start:create_end]
-        self.assertNotIn("retireSwapchainState(pCreateInfo->oldSwapchain)", source_only_create)
-        self.assertIn("source-only old swapchain", source_only_create)
+        helper_start = hooks.index("bool requiresSwapchainRecreation")
+        helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
+        helper = hooks[helper_start:helper_end]
+        self.assertNotIn("generationActivityChanged", helper)
+        self.assertIn("return framegenModeChanged", helper)
 
-        destroy_start = hooks.index("void destroySwapchainStateAfterDownstreamDestroy")
-        destroy_end = hooks.index("void myvkDestroyDevice", destroy_start)
-        destroy_helper = hooks[destroy_start:destroy_end]
-        self.assertIn("Layer::ovkDestroySwapchainKHR", destroy_helper)
-        self.assertLess(
-            destroy_helper.index("Layer::ovkDestroySwapchainKHR"),
-            destroy_helper.index("state->context.reset()"),
-        )
-        self.assertIn("destroySwapchainStateAfterDownstreamDestroy", hooks)
+        self.assertNotIn("const auto createSourceOnly", hooks)
+        self.assertNotIn('return createSourceOnly("generation-off")', hooks)
 
-    def test_gamenative_off_recreates_true_source_only_swapchain(self) -> None:
-        """Off keeps the layer hot-loadable but removes the LSFG swapchain/context contract."""
+        reload_start = hooks.index("if (shouldPollConfig && configurationFileChanged(conf))")
+        reload_end = hooks.index("if (!state->context)", reload_start)
+        reload = hooks[reload_start:reload_end]
+        self.assertIn("enteringResidentSourceOnly", reload)
+        self.assertIn("state->context->enterSourceOnlyBypass()", reload)
+        self.assertIn("recreateSwapchain=0", reload)
+
+        bypass_start = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
+        bypass_end = hooks.index("        try {", bypass_start)
+        bypass = hooks[bypass_start:bypass_end]
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", bypass)
+        self.assertNotIn("state->context->present(", bypass)
+
+    def test_gamenative_off_keeps_resident_context_and_direct_presents(self) -> None:
+        """Off keeps the targeted LSFG context resident while skipping all framegen work."""
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
 
         helper_start = hooks.index("bool requiresSwapchainRecreation")
         helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
         helper = hooks[helper_start:helper_end]
-        self.assertIn("generationActivityChanged", helper)
-        self.assertIn(
-            "(previous.multiplier > 1) != (next.multiplier > 1)",
-            helper,
-        )
+        self.assertNotIn("generationActivityChanged", helper)
+        self.assertIn("const bool residentTarget = previous.targeted && next.targeted", helper)
+        self.assertIn("next.multiplier > residentCapacityMultiplier(previous)", helper)
 
-        create_start = hooks.index("const auto createSourceOnly")
-        create_end = hooks.index("#ifdef __ANDROID__", create_start)
-        source_only_create = hooks[create_start:create_end]
-        self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only_create)
+        self.assertNotIn("const auto createSourceOnly", hooks)
+        self.assertNotIn('return createSourceOnly("generation-off")', hooks)
         self.assertIn(
-            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
-            source_only_create,
-        )
-        self.assertNotIn("choosePresentMode(", source_only_create)
-        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", source_only_create)
-        self.assertNotIn("residentCapacityMultiplier", source_only_create)
-        self.assertNotIn("requiredTransferUsage", source_only_create)
-        self.assertNotIn("LsContext", source_only_create)
-        self.assertNotIn("minImageCount =", source_only_create)
-
-        self.assertIn(
-            "if (activeConf.targeted && activeConf.multiplier <= 1)",
+            "if (activeConf.multiplier <= 1 && !activeConf.targeted)",
             hooks,
         )
-        self.assertIn('return createSourceOnly("generation-off")', hooks)
-        self.assertNotIn("state->context->enterSourceOnlyBypass()", hooks)
 
-        # The target remains loader-resident for hot enable even though the Off
-        # swapchain itself is truly native/source-only.
+        self.assertIn("enteringResidentSourceOnly", hooks)
+        self.assertIn("state->context->enterSourceOnlyBypass()", hooks)
+        bypass_start = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
+        bypass_end = hooks.index("        try {", bypass_start)
+        bypass = hooks[bypass_start:bypass_end]
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", bypass)
+        self.assertIn("recordSuccessfulOutputCycle(*state, *state->context", bypass)
+        self.assertNotIn("state->context->present(", bypass)
+
+        # The target remains loader/context-resident for immediate hot re-enable.
         self.assertIn(".targeted = true", config)
-        self.assertIn('publishRuntimeState(activeConf.config_file, "source_only"', hooks)
+
+        # Do not weaken the newly working Xclipse FIFO implementation.
+        self.assertIn("xclipseFifoMailboxBacked", hooks)
+        self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
+        self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
 
     def test_syncfd_source_export_failure_recreates_temporal_context(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")

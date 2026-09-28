@@ -57,20 +57,25 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         self.assertNotIn("resize(conf.multiplier - 1)", allocation)
 
 
-    def test_generation_off_preserves_native_present_mode(self) -> None:
-        """LSFG-off must not inherit the frame-generation presentation policy."""
+    def test_generation_off_uses_resident_native_present_bypass(self) -> None:
+        """LSFG-off must bypass framegen without rebuilding or retuning the active WSI."""
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
-        source_only_start = hooks.index("const auto createSourceOnly")
-        source_only_end = hooks.index("if (!activeConf.enable)", source_only_start)
-        source_only = hooks[source_only_start:source_only_end]
+        self.assertNotIn("const auto createSourceOnly", hooks)
+        self.assertNotIn('return createSourceOnly("generation-off")', hooks)
 
-        self.assertIn(
-            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
-            source_only,
-        )
-        self.assertNotIn("choosePresentMode(", source_only)
-        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", source_only)
+        bypass_start = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
+        bypass_end = hooks.index("        try {", bypass_start)
+        bypass = hooks[bypass_start:bypass_end]
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", bypass)
+        self.assertIn("recordSuccessfulOutputCycle(*state, *state->context", bypass)
+        self.assertNotIn("state->context->present(", bypass)
+
+        # Xclipse FIFO remains the active-swapchain policy: logical FIFO may be
+        # backed by MAILBOX while generation is enabled, and Off does not mutate it.
+        self.assertIn("xclipseFifoMailboxBacked", hooks)
+        self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
+        self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
 
 
 if __name__ == "__main__":
