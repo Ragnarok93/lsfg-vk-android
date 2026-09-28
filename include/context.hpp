@@ -29,12 +29,15 @@ struct AdaptiveFlowRuntimeSnapshot {
     float minimumScale{0.0F};
     float requestedScale{0.0F};
     float activeScale{0.0F};
+    std::size_t stateIndex{0};
+    std::size_t stateCount{0};
     bool transitionPending{false};
     uint32_t warmupRemaining{0};
     bool timingValid{false};
     double mipmapsMs{0.0};
     double flowMs{0.0};
     double totalLsfgMs{0.0};
+    double predictedNextTotalMs{0.0};
     double budgetMs{0.0};
     size_t generationCount{0};
     bool globalPressureValid{false};
@@ -59,6 +62,7 @@ struct AdaptiveFlowRuntimeSnapshot {
     bool presentationLastChangeOutputDeficit{false};
     bool presentationProvisionalLowerActive{false};
     bool presentationUpwardProbePending{false};
+    bool outputTargetSatisfied{false};
     bool outputDeficit{false};
     bool syntheticDropPressure{false};
     const char* reason{"none"};
@@ -117,12 +121,15 @@ public:
             .minimumScale = telemetry.minimumScale,
             .requestedScale = adaptiveFlowRequestedScale_,
             .activeScale = adaptiveFlowActiveScale_,
+            .stateIndex = telemetry.stateIndex,
+            .stateCount = telemetry.stateCount,
             .transitionPending = adaptiveFlowTransitionPending_,
             .warmupRemaining = adaptiveFlowWarmupRemaining_,
             .timingValid = adaptiveFlowTimingValid_,
             .mipmapsMs = adaptiveFlowMipmapsMs_,
             .flowMs = adaptiveFlowWorkMs_,
             .totalLsfgMs = adaptiveFlowTotalLsfgMs_,
+            .predictedNextTotalMs = telemetry.estimatedNextTotalMs,
             .budgetMs = adaptiveFlowBudgetMs_,
             .generationCount = adaptiveFlowGenerationCount_,
             .globalPressureValid = adaptiveFlowGlobalPressureValid_,
@@ -154,6 +161,7 @@ public:
                 presentationCapacity.provisionalLowerActive,
             .presentationUpwardProbePending =
                 presentationCapacity.upwardProbePending,
+            .outputTargetSatisfied = outputCadence.targetSatisfiedConfirmed,
             .outputDeficit = telemetry.outputDeficit,
             .syntheticDropPressure =
                 adaptiveFlowComputePressure_ || adaptiveFlowWsiPressure_,
