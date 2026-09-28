@@ -59,6 +59,112 @@ namespace {
     std::atomic<uint64_t> nextSwapchainGeneration{1};
     std::atomic<uint64_t> nextDiagnosticsSessionId{1};
 
+
+    const char* presentModeName(VkPresentModeKHR mode) noexcept {
+        switch (mode) {
+            case VK_PRESENT_MODE_FIFO_KHR: return "FIFO";
+            case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "FIFO_RELAXED";
+            case VK_PRESENT_MODE_MAILBOX_KHR: return "MAILBOX";
+            case VK_PRESENT_MODE_IMMEDIATE_KHR: return "IMMEDIATE";
+            default: return "UNKNOWN";
+        }
+    }
+
+    void emitNativeStructuredDiagnostic(
+            const char* tag, const std::string& fields) {
+        std::cerr << "lsfg-vk: " << tag << " " << fields << '\n';
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_INFO, tag, "%s", fields.c_str());
+#endif
+    }
+
+    std::vector<VkPresentModeKHR> querySurfacePresentModes(
+            VkPhysicalDevice physicalDevice, VkSurfaceKHR surface) noexcept {
+        std::vector<VkPresentModeKHR> modes;
+        if (layerInstance == VK_NULL_HANDLE)
+            return modes;
+        const auto getPresentModes =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(
+                Layer::ovkGetInstanceProcAddr(
+                    layerInstance, "vkGetPhysicalDeviceSurfacePresentModesKHR"));
+        if (getPresentModes == nullptr)
+            return modes;
+        uint32_t count = 0;
+        if (getPresentModes(physicalDevice, surface, &count, nullptr) != VK_SUCCESS
+                || count == 0) {
+            return modes;
+        }
+        try {
+            modes.resize(count);
+        } catch (...) {
+            return {};
+        }
+        if (getPresentModes(physicalDevice, surface, &count, modes.data()) != VK_SUCCESS)
+            return {};
+        modes.resize(count);
+        return modes;
+    }
+
+    void emitWsiContractDiagnostic(
+            const Hooks::DeviceInfo& deviceInfo,
+            const Config::Configuration& conf,
+            const VkSwapchainCreateInfoKHR& requested,
+            const VkSwapchainCreateInfoKHR& chosen,
+            const VkSurfaceCapabilitiesKHR& surfaceCapabilities,
+            uint64_t swapchainGeneration,
+            uint32_t actualImageCount,
+            bool xclipseFifoMailboxBacked,
+            const std::vector<VkPresentModeKHR>& supportedPresentModes) {
+        std::ostringstream modes;
+        for (size_t i = 0; i < supportedPresentModes.size(); ++i) {
+            if (i != 0)
+                modes << ',';
+            modes << presentModeName(supportedPresentModes[i])
+                  << ':' << static_cast<uint32_t>(supportedPresentModes[i]);
+        }
+        std::ostringstream fields;
+        fields << "schema=1"
+               << " session_id=" << deviceInfo.diagnosticsSessionId
+               << " swapchain_generation=" << swapchainGeneration
+               << " requested_mode=" << presentModeName(requested.presentMode)
+               << " requested_mode_value=" << static_cast<uint32_t>(requested.presentMode)
+               << " logical_mode=" << presentModeName(conf.e_present)
+               << " logical_mode_value=" << static_cast<uint32_t>(conf.e_present)
+               << " actual_mode=" << presentModeName(chosen.presentMode)
+               << " actual_mode_value=" << static_cast<uint32_t>(chosen.presentMode)
+               << " backend="
+               << (xclipseFifoMailboxBacked
+                    ? "xclipse-mailbox-backed"
+                    : (deviceInfo.xclipseDevice
+                        && conf.e_present == VK_PRESENT_MODE_FIFO_KHR
+                            ? "xclipse-fifo-fallback" : "native"))
+               << " supported_modes=" << (modes.str().empty() ? "none" : modes.str())
+               << " app_min_images=" << requested.minImageCount
+               << " chosen_min_images=" << chosen.minImageCount
+               << " actual_images=" << actualImageCount
+               << " max_images=" << surfaceCapabilities.maxImageCount
+               << " extent=" << chosen.imageExtent.width << 'x' << chosen.imageExtent.height
+               << " format=" << static_cast<uint32_t>(chosen.imageFormat)
+               << " color_space=" << static_cast<uint32_t>(chosen.imageColorSpace)
+               << " image_usage=0x" << std::hex << chosen.imageUsage
+               << " supported_usage=0x" << surfaceCapabilities.supportedUsageFlags
+               << std::dec
+               << " current_extent=" << surfaceCapabilities.currentExtent.width
+               << 'x' << surfaceCapabilities.currentExtent.height
+               << " supported_transforms=0x" << std::hex
+               << surfaceCapabilities.supportedTransforms
+               << std::dec
+               << " current_transform=" << surfaceCapabilities.currentTransform
+               << " composite_alpha=0x" << std::hex << chosen.compositeAlpha
+               << std::dec
+               << " old_swapchain=" << (requested.oldSwapchain != VK_NULL_HANDLE ? 1 : 0)
+               << " enabled=" << (conf.enable ? 1 : 0)
+               << " targeted=" << (conf.targeted ? 1 : 0)
+               << " multiplier=" << conf.multiplier
+               << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0);
+        emitNativeStructuredDiagnostic("LSFG_WSI", fields.str());
+    }
+
     size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 #ifdef __ANDROID__
         if (conf.targeted)
@@ -395,12 +501,14 @@ namespace {
                 static_cast<VkDriverId>(0), {}, gameDeviceProperties.deviceName)
             == AndroidSyncPolicy::FramegenCompatibilityPath::XclipseCurrent;
         const auto identity = Utils::getDeviceIdentity(physicalDevice, getProperties2);
+        const uint64_t diagnosticsSessionId =
+            nextDiagnosticsSessionId.fetch_add(1, std::memory_order_relaxed);
         if (!identity.has_value()) {
             Utils::logLimitN("deviceIdentity", 1,
                 "Physical-device ID properties unavailable; LSFG will fail open for this device.");
         }
         std::cerr << "lsfg-vk: LSFG_PROVENANCE game-device"
-                  << " session_id=" << nextDiagnosticsSessionId.load(std::memory_order_relaxed)
+                  << " session_id=" << diagnosticsSessionId
                   << " api_version=" << VK_VERSION_MAJOR(gameDeviceProperties.apiVersion) << "."
                   << VK_VERSION_MINOR(gameDeviceProperties.apiVersion) << "."
                   << VK_VERSION_PATCH(gameDeviceProperties.apiVersion)
@@ -425,8 +533,7 @@ namespace {
                 .gameDriverId = gameDriverId,
                 .gameDriverName = gameDriverName,
                 .gameDriverInfo = gameDriverInfo,
-                .diagnosticsSessionId = nextDiagnosticsSessionId.fetch_add(
-                    1, std::memory_order_relaxed),
+                .diagnosticsSessionId = diagnosticsSessionId,
                 .identity = identity.value_or(LSFG::DeviceIdentity{}),
                 .identityValid = identity.has_value(),
                 .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
@@ -480,6 +587,7 @@ namespace {
         std::shared_ptr<DeviceInfo> deviceInfo;
         VkPresentModeKHR present{VK_PRESENT_MODE_FIFO_KHR};
         VkPresentModeKHR configuredPresent{VK_PRESENT_MODE_FIFO_KHR};
+        uint64_t swapchainGeneration{0};
         std::shared_ptr<LsContext> context;
         // Serializes a present against swapchain retirement and protects the
         // per-swapchain runtime counters. The global map lock is never held
@@ -1115,6 +1223,13 @@ namespace {
                       << " generated_queue=compatibility-selected"
                       << '\n';
 
+            emitWsiContractDiagnostic(
+                *deviceInfo, activeConf, *pCreateInfo, createInfo,
+                surfaceCapabilities, swapchainGeneration, imageCount,
+                xclipseFifoMailboxBacked,
+                querySurfacePresentModes(
+                    deviceInfo->physicalDevice, pCreateInfo->surface));
+
             // Retire the old LSFG bookkeeping only after the replacement Vulkan
             // swapchain is known-good. If downstream creation fails, the old
             // swapchain remains usable and its context remains intact.
@@ -1125,6 +1240,7 @@ namespace {
             state->deviceInfo = deviceInfo;
             state->present = createInfo.presentMode;
             state->configuredPresent = configuredPresentMode;
+            state->swapchainGeneration = swapchainGeneration;
             state->context = std::make_shared<LsContext>(
                 *deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
                 swapchainImages, createInfo.presentMode);
@@ -1241,6 +1357,20 @@ namespace {
                     conf = Config::snapshot();
                     recreateSwapchain = requiresSwapchainRecreation(
                         previousConf, conf);
+                    {
+                        std::ostringstream event;
+                        event << "schema=1 session_id=" << deviceInfo->diagnosticsSessionId
+                              << " type=config-reload"
+                              << " old_enabled=" << (previousConf.enable ? 1 : 0)
+                              << " new_enabled=" << (conf.enable ? 1 : 0)
+                              << " old_multiplier=" << previousConf.multiplier
+                              << " new_multiplier=" << conf.multiplier
+                              << " old_adaptive=" << (previousConf.adaptiveFramegen ? 1 : 0)
+                              << " new_adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
+                              << " recreate=" << (recreateSwapchain ? 1 : 0)
+                              << " swapchain_generation=" << state->swapchainGeneration;
+                        emitNativeStructuredDiagnostic("LSFG_EVENT", event.str());
+                    }
                     const bool framegenModeChanged =
                         previousConf.adaptiveFramegen != conf.adaptiveFramegen;
                     if (framegenModeChanged) {
@@ -1277,6 +1407,18 @@ namespace {
                                       << " newMultiplier=" << conf.multiplier
                                       << " recreateSwapchain=0"
                                       << "\n";
+                            {
+                                std::ostringstream event;
+                                event << "schema=1 session_id="
+                                      << deviceInfo->diagnosticsSessionId
+                                      << " type=source-only-enter"
+                                      << " old_multiplier=" << previousConf.multiplier
+                                      << " new_multiplier=" << conf.multiplier
+                                      << " resident=1"
+                                      << " swapchain_generation="
+                                      << state->swapchainGeneration;
+                                emitNativeStructuredDiagnostic("LSFG_EVENT", event.str());
+                            }
                         }
 #endif
                         const bool generationActive = conf.multiplier > 1;
@@ -1290,6 +1432,19 @@ namespace {
                                   << " generation_ready=" << (generationActive ? 1 : 0)
                                   << " recreateSwapchain=0"
                                   << "\n";
+                        {
+                            std::ostringstream event;
+                            event << "schema=1 session_id="
+                                  << deviceInfo->diagnosticsSessionId
+                                  << " type=soft-toggle"
+                                  << " old_enabled=" << (previousConf.enable ? 1 : 0)
+                                  << " new_enabled=" << (conf.enable ? 1 : 0)
+                                  << " old_multiplier=" << previousConf.multiplier
+                                  << " new_multiplier=" << conf.multiplier
+                                  << " source_only=" << (generationActive ? 0 : 1)
+                                  << " swapchain_generation=" << state->swapchainGeneration;
+                            emitNativeStructuredDiagnostic("LSFG_EVENT", event.str());
+                        }
                     }
                 } catch (const std::exception& e) {
                     Utils::logLimitN("configReload", 5,
@@ -1300,6 +1455,14 @@ namespace {
                 recreateSwapchain = true;
             }
             if (recreateSwapchain) {
+                {
+                    std::ostringstream event;
+                    event << "schema=1 session_id=" << deviceInfo->diagnosticsSessionId
+                          << " type=swapchain-recreate"
+                          << " reason=config-reload"
+                          << " swapchain_generation=" << state->swapchainGeneration;
+                    emitNativeStructuredDiagnostic("LSFG_EVENT", event.str());
+                }
 #ifdef __ANDROID__
                 publishRuntimeState(configFile, "degraded",
                     false, false, false, false, false, false, true,
