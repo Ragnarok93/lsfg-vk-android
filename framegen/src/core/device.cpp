@@ -416,15 +416,15 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
               << (this->diagnostics.externalSemaphoreOpaqueFd ? 1 : 0)
               << " externalSemaphoreSyncFd="
               << (this->diagnostics.externalSemaphoreSyncFd ? 1 : 0)
-              << " sync=" << synchronizationPathName(decision.synchronizationPath) << '\n';
-               << " api_version=" << VK_VERSION_MAJOR(properties.apiVersion) << "."
-               << VK_VERSION_MINOR(properties.apiVersion) << "."
-               << VK_VERSION_PATCH(properties.apiVersion)
-               << " vendor_id=" << properties.vendorID
-               << " device_id=" << properties.deviceID
-               << " subgroup_size=" << caps.subgroupSize
-               << " timeline=" << (caps.timelineSemaphore ? 1 : 0)
-               << " fp16=" << (caps.shaderFloat16 ? 1 : 0)
+              << " sync=" << synchronizationPathName(decision.synchronizationPath)
+              << " api_version=" << VK_VERSION_MAJOR(properties.apiVersion) << "."
+              << VK_VERSION_MINOR(properties.apiVersion) << "."
+              << VK_VERSION_PATCH(properties.apiVersion)
+              << " vendor_id=" << properties.vendorID
+              << " device_id=" << properties.deviceID
+              << " subgroup_size=" << caps.subgroupSize
+              << " timeline=" << (caps.timelineSemaphore ? 1 : 0)
+              << " fp16=" << (caps.shaderFloat16 ? 1 : 0) << '\\n';
 
     uint32_t familyCount{};
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
