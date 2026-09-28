@@ -7,6 +7,10 @@
 
 #include <vulkan/vulkan_core.h>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 #include <unordered_map>
 #include <filesystem>
 #include <stdexcept>
@@ -16,6 +20,7 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -52,6 +57,7 @@ namespace {
 
     constexpr size_t kAndroidResidentMaxMultiplier = 4;
     std::atomic<uint64_t> nextSwapchainGeneration{1};
+    std::atomic<uint64_t> nextDiagnosticsSessionId{1};
 
     size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 #ifdef __ANDROID__
@@ -290,6 +296,8 @@ namespace {
             requestedExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
         const bool displayTimingSupported = supportsDeviceExtension(
             physicalDevice, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+        const bool presentTimingSupported = supportsDeviceExtension(
+            physicalDevice, "VK_EXT_present_timing");
         if (displayTimingSupported)
             requestedExtensions.push_back(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
 
@@ -304,6 +312,8 @@ namespace {
                   << " fallback=host-fence\n";
         std::cerr << "lsfg-vk: init stage=android-display-timing capability="
                   << (displayTimingSupported ? 1 : 0) << "\n";
+        std::cerr << "lsfg-vk: init stage=android-present-timing capability="
+                  << (presentTimingSupported ? 1 : 0) << " behavior=probe-only\n";
 #else
         auto extensions = Utils::addExtensions(
             pCreateInfo->ppEnabledExtensionNames,
@@ -341,6 +351,8 @@ namespace {
             physicalDevice, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT).supported;
         const bool androidDisplayTimingSupported = supportsDeviceExtension(
             physicalDevice, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+        const bool androidPresentTimingSupported = supportsDeviceExtension(
+            physicalDevice, "VK_EXT_present_timing");
 #else
         const bool androidAhbSupported = true;
         const bool androidOpaqueFdSemaphoreSupported = false;
@@ -356,6 +368,28 @@ namespace {
         VkPhysicalDeviceProperties gameDeviceProperties{};
         Layer::ovkGetPhysicalDeviceProperties(
             physicalDevice, &gameDeviceProperties);
+        VkDriverId gameDriverId{static_cast<VkDriverId>(0)};
+        std::string gameDriverName;
+        std::string gameDriverInfo;
+        const bool gameDriverPropertiesSupported =
+            getProperties2 != nullptr
+            && (gameDeviceProperties.apiVersion >= VK_API_VERSION_1_2
+                || supportsDeviceExtension(physicalDevice, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME));
+        if (gameDriverPropertiesSupported) {
+            VkPhysicalDeviceDriverProperties driverProperties{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+            };
+            VkPhysicalDeviceProperties2 properties2{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                .pNext = &driverProperties,
+            };
+            getProperties2(physicalDevice, &properties2);
+            gameDriverId = driverProperties.driverID;
+            gameDriverName = driverProperties.driverName;
+            gameDriverInfo = driverProperties.driverInfo;
+        }
+        if (gameDriverName.empty())
+            gameDriverName = gameDeviceProperties.deviceName;
         const bool xclipseDevice =
             AndroidSyncPolicy::selectFramegenCompatibilityPath(
                 static_cast<VkDriverId>(0), {}, gameDeviceProperties.deviceName)
