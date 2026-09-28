@@ -45,6 +45,26 @@ bool near(float a, float b) {
 
 int main() {
     {
+        const auto autoStates = AdaptiveFlowController::statesForPreset(AdaptiveFlowPreset::Auto);
+        constexpr float expected[] = {
+            1.00F, 0.95F, 0.90F, 0.85F, 0.80F, 0.75F, 0.70F, 0.65F,
+            0.60F, 0.55F, 0.50F, 0.45F, 0.40F, 0.35F, 0.30F, 0.25F,
+        };
+        assert(autoStates.size() == 16);
+        for (std::size_t i = 0; i < autoStates.size(); ++i) {
+            assert(near(autoStates[i], expected[i]));
+            if (i > 0)
+                assert(near(autoStates[i - 1] - autoStates[i], 0.05F));
+        }
+
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
+        assert(controller.telemetry().stateCount == autoStates.size());
+        assert(near(controller.telemetry().targetScale, 1.00F));
+        assert(near(controller.telemetry().minimumScale, 0.25F));
+        assert(controller.telemetry().stateIndex == 0);
+    }
+
+    {
         const auto quality = AdaptiveFlowController::statesForPreset(AdaptiveFlowPreset::Quality);
         const auto balanced = AdaptiveFlowController::statesForPreset(AdaptiveFlowPreset::Balanced);
         const auto low = AdaptiveFlowController::statesForPreset(AdaptiveFlowPreset::Low);
