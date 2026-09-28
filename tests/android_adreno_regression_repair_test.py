@@ -33,7 +33,7 @@ class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
             selection,
         )
 
-    def test_disabled_targeted_android_swapchain_releases_framegen_context(self) -> None:
+    def test_disabled_targeted_adreno_keeps_context_resident_and_bypasses_framegen(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -41,37 +41,37 @@ class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
         recreation_start = hooks.index("bool requiresSwapchainRecreation")
         recreation_end = hooks.index("bool supportsDeviceExtension", recreation_start)
         recreation = hooks[recreation_start:recreation_end]
-        self.assertIn("generationActivityChanged", recreation)
+        self.assertIn("generationActivationRequired", recreation)
         self.assertIn(
-            "(previous.multiplier > 1) != (next.multiplier > 1)",
+            "previous.multiplier <= 1 && next.multiplier > 1",
             recreation,
         )
-
-        source_only_start = hooks.index("const auto createSourceOnly")
-        source_only_end = hooks.index("#ifdef __ANDROID__", source_only_start)
-        source_only = hooks[source_only_start:source_only_end]
-        self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only)
         self.assertNotIn(
-            "sourceOnlyCreateInfo.presentMode = choosePresentMode(",
-            source_only,
+            "(previous.multiplier > 1) != (next.multiplier > 1)",
+            recreation,
+            "Generated -> Off must not rebuild the protected Adreno swapchain",
         )
-        self.assertNotIn("sourceOnlyCreateInfo.presentMode =", source_only)
-        self.assertIn("state->present = pCreateInfo->presentMode", source_only)
-        self.assertNotIn("LsContext", source_only)
-        self.assertNotIn("requiredTransferUsage", source_only)
-        self.assertNotIn("residentCapacityMultiplier", source_only)
 
-        self.assertIn(
-            "if (activeConf.targeted && activeConf.multiplier <= 1)",
-            hooks,
-        )
-        self.assertIn('return createSourceOnly("generation-off")', hooks)
-        self.assertNotIn("state->context->enterSourceOnlyBypass()", hooks)
+        lookup = hooks.index("if (!state->context)")
+        mutation = hooks.index("#pragma clang diagnostic push", lookup)
+        source_only = hooks[lookup:mutation]
+        self.assertIn("if (conf.targeted && conf.multiplier <= 1)", source_only)
+        self.assertIn("state->context->enterSourceOnlyBypass()", source_only)
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", source_only)
+        self.assertNotIn("VK_ERROR_OUT_OF_DATE_KHR", source_only)
 
-        # The lifecycle helper remains valid for true context reset paths; Off
-        # simply no longer invokes it every frame on a resident LSFG swapchain.
         self.assertIn("void enterSourceOnlyBypass();", header)
+        self.assertIn("bool sourceOnlyBypassActive_{false};", header)
         self.assertIn("void LsContext::enterSourceOnlyBypass()", context)
+
+        begin = context.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        end = context.index("// END ADRENO_364178AF_EXECUTION", begin)
+        adreno = context[begin:end]
+        self.assertNotIn(
+            "sourceOnlyBypassActive_",
+            adreno,
+            "Off-state lifecycle repair must not alter the protected 364178af execution island",
+        )
 
 
 if __name__ == "__main__":
