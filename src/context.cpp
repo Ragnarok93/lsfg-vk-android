@@ -1262,6 +1262,16 @@ bool LsContext::tryRecyclePass(RenderPassInfo& pass) {
     }
 #endif
 
+    // A generic Android/Xclipse image reacquisition can happen before the
+    // presentation engine's old wait owners are safe to destroy. The pass
+    // completion fence is armed after the acquire wait is submitted, so keep
+    // those owners until that retirement point is known to be safe.
+    if (!pass.acquiredPresentWaitRetentions.empty()
+            && !pass.presentAcquireRetirementsArmed)
+        return false;
+    pass.acquiredPresentWaitRetentions.clear();
+    pass.presentAcquireRetirementsArmed = false;
+
     pass.crossFrameWaitRetentions.clear();
 #ifdef __ANDROID__
     pass.framegenBatchCompleteValid = false;
@@ -3972,7 +3982,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const VkQueue targetQueue = retirementQueue != VK_NULL_HANDLE
             ? retirementQueue
             : info.queue.second;
-        if (!this->submitPassCompletionFence(pass, targetQueue)) {
+        if (this->submitPassCompletionFence(pass, targetQueue)) {
+            // This fence (or its queue-idle fallback) proves that the acquire
+            // semaphore wait has executed before displaced present waits retire.
+            pass.presentAcquireRetirementsArmed = true;
+        } else {
             Utils::logLimitN(
                 "passRetirement",
                 5,
@@ -5139,7 +5153,22 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.totalGeneratedPresentFailures++;
             throw LSFG::vulkan_error(res, "Failed to acquire next swapchain image");
         }
-        this->releasePresentWaitRetirements(imageIdx);
+#ifdef __ANDROID__
+        // Xclipse/generic can reacquire an image before the previous present
+        // wait semaphores are safe to destroy. Move those owners onto this
+        // pass; its completion fence is armed after the acquire wait is
+        // submitted and is the first safe release point for this ownership.
+        if (!this->conservativeCrossDeviceSync_
+                && imageIdx < this->presentWaitRetirements_.size()) {
+            auto& previousPresentWaits =
+                this->presentWaitRetirements_.at(imageIdx);
+            for (auto& semaphore : previousPresentWaits) {
+                pass.acquiredPresentWaitRetentions.emplace_back(
+                    std::move(semaphore));
+            }
+            previousPresentWaits.clear();
+        }
+#endif
 
         pass.postCopySemaphores.at(i) = Mini::Semaphore(info.device);
         pass.prevPostCopySemaphores.at(i) = Mini::Semaphore(info.device);
