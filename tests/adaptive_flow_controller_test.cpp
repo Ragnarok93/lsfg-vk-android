@@ -353,7 +353,7 @@ int main() {
         bool lowered = false;
         for (int i = 0; i < 12 && !lowered; ++i) {
             auto observation = sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false);
             observation.wsiPresentationPressure = true;
             observation.wsiLossRate = 0.35;
@@ -369,7 +369,7 @@ int main() {
         bool reverted = false;
         for (int i = 0; i < 12; ++i) {
             auto observation = sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false);
             observation.wsiPresentationPressure = true;
             observation.wsiLossRate = 0.35;
