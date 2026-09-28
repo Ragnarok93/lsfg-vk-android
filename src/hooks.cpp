@@ -89,60 +89,29 @@ namespace {
 #ifdef __ANDROID__
         const bool residentTarget = previous.targeted && next.targeted;
         if (residentTarget) {
-            // A process launched source-only has no LSFG context, so its first
-            // enable still needs one recreation. A live generated -> Off
-            // transition must remain resident: rebuilding WSI here is the
-            // disabled-mode hitch regression fixed by the September 8 path.
-            const bool generationActivationRequired =
-                previous.multiplier <= 1 && next.multiplier > 1;
-            // Mailbox can remain on the resident wrapper when generation turns
-            // off. FIFO cannot: direct source presents would otherwise inherit
-            // the LSFG-created FIFO swapchain and keep its blocking WSI cadence.
-            // Recreate exactly once on FIFO -> Off so the application can
-            // restore its native present mode.
-            const bool fifoGenerationDeactivation =
-                previous.multiplier > 1 && next.multiplier <= 1
-                && previous.e_present == VK_PRESENT_MODE_FIFO_KHR;
-            // Fixed and Adaptive use different temporal generation semantics.
-            // Crossing this boundary must replace the private LSFG context rather
-            // than carrying backend history through a resident soft reload.
-            const bool generationActiveBefore = previous.multiplier > 1;
-            const bool generationActiveAfter = next.multiplier > 1;
-            const bool generationStaysActive =
-                generationActiveBefore && generationActiveAfter;
+            // September-8 resident contract: Off/On multiplier transitions do
+            // not rebuild WSI. The targeted wrapper stays resident and direct-
+            // presents source frames at multiplier=1.
             const bool framegenModeChanged =
-                generationStaysActive
-                && previous.adaptiveFramegen != next.adaptiveFramegen;
+                previous.adaptiveFramegen != next.adaptiveFramegen;
             const bool adaptiveFlowModeChanged =
-                generationStaysActive
-                && previous.adaptiveFlowScale != next.adaptiveFlowScale;
+                previous.adaptiveFlowScale != next.adaptiveFlowScale;
             const bool adaptiveFlowPresetChanged =
-                generationStaysActive
-                && previous.adaptiveFlowScale && next.adaptiveFlowScale
+                previous.adaptiveFlowScale && next.adaptiveFlowScale
                 && previous.adaptiveFlowPreset != next.adaptiveFlowPreset;
             const bool fixedFlowScaleChanged =
-                generationStaysActive
-                && !previous.adaptiveFlowScale && !next.adaptiveFlowScale
+                !previous.adaptiveFlowScale && !next.adaptiveFlowScale
                 && previous.flowScale != next.flowScale;
-            const bool presentationPolicyChanged =
-                next.multiplier > 1 && previous.e_present != next.e_present;
-            // When both sides are Off there is no LSFG swapchain/context to
-            // rebuild. Saved FG-only settings become relevant on the one
-            // generation-boundary recreation that enables generation.
-            return generationActivationRequired
-                || fifoGenerationDeactivation
-                || framegenModeChanged
-                || (generationStaysActive
-                    && next.multiplier > residentCapacityMultiplier(previous))
-                || (generationStaysActive && previous.dll != next.dll)
+            return framegenModeChanged
+                || next.multiplier > residentCapacityMultiplier(previous)
+                || previous.dll != next.dll
                 || adaptiveFlowModeChanged
                 || adaptiveFlowPresetChanged
                 || fixedFlowScaleChanged
-                || (generationStaysActive && previous.performance != next.performance)
-                || (generationStaysActive && previous.hdr != next.hdr)
-                || (generationStaysActive
-                    && previous.preserveSwapchainImageCount != next.preserveSwapchainImageCount)
-                || presentationPolicyChanged;
+                || previous.performance != next.performance
+                || previous.hdr != next.hdr
+                || previous.preserveSwapchainImageCount != next.preserveSwapchainImageCount
+                || previous.e_present != next.e_present;
         }
 #endif
         return previous.enable != next.enable
@@ -950,8 +919,8 @@ namespace {
             return createPassThrough("disabled");
 
 #ifdef __ANDROID__
-        if (activeConf.targeted && activeConf.multiplier <= 1)
-            return createSourceOnly("generation-off");
+        // Targeted GameNative processes keep the LSFG wrapper resident even at
+        // multiplier=1. This is the validated September-8 hitch-free Off path.
         if (activeConf.multiplier <= 1 && !activeConf.targeted)
             return createPassThrough("disabled");
 #else
