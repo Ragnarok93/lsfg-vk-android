@@ -193,39 +193,39 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertNotIn("VkSemaphore lastPostCopySem =", android)
         self.assertIn("runtime stage=present-sync-ready", android)
 
-    def test_runtime_disable_keeps_layer_resident_but_releases_lsfg_context(self) -> None:
+    def test_runtime_disable_keeps_targeted_context_resident_and_native_presents(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("generationActivityChanged", hooks)
+        self.assertNotIn("generationActivityChanged", hooks)
+        self.assertNotIn("const auto createSourceOnly", hooks)
+        self.assertNotIn('return createSourceOnly("generation-off")', hooks)
         self.assertIn(
-            "(previous.multiplier > 1) != (next.multiplier > 1)",
+            "if (activeConf.multiplier <= 1 && !activeConf.targeted)",
             hooks,
         )
-        self.assertIn("const auto createSourceOnly", hooks)
-        self.assertIn(
-            "if (activeConf.targeted && activeConf.multiplier <= 1)",
-            hooks,
-        )
-        self.assertIn('return createSourceOnly("generation-off")', hooks)
-        self.assertIn("publishSwapchainState(*pSwapchain", hooks)
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", hooks)
-        self.assertNotIn("state->context->enterSourceOnlyBypass()", hooks)
 
-        create_start = hooks.index("const auto createSourceOnly")
-        create_end = hooks.index("#ifdef __ANDROID__", create_start)
-        source_only = hooks[create_start:create_end]
-        self.assertIn(
-            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
-            source_only,
-        )
-        self.assertNotIn("choosePresentMode(", source_only)
-        self.assertNotIn("residentCapacityMultiplier", source_only)
-        self.assertNotIn("requiredTransferUsage", source_only)
-        self.assertNotIn("LsContext", source_only)
+        self.assertIn("enteringResidentSourceOnly", hooks)
+        self.assertIn("state->context->enterSourceOnlyBypass()", hooks)
+        self.assertIn("runtime stage=resident-source-only-enter", hooks)
+
+        bypass_start = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
+        bypass_end = hooks.index("        try {", bypass_start)
+        bypass = hooks[bypass_start:bypass_end]
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", bypass)
+        self.assertNotIn("state->context->present(", bypass)
+
+        # The logical FIFO policy and Xclipse mailbox-backed active WSI path are
+        # protected from this Off-path repair.
+        self.assertIn("xclipseFifoMailboxBacked", hooks)
+        self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
+        self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
 
         reload_pos = hooks.index("init stage=config-reloaded multiplier=")
         context_lookup_pos = hooks.index("if (!state->context)")
+        bypass_pos = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
         self.assertLess(reload_pos, context_lookup_pos)
+        self.assertLess(context_lookup_pos, bypass_pos)
+
 
     def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:
         source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")

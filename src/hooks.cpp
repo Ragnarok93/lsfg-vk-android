@@ -75,11 +75,9 @@ namespace {
 #ifdef __ANDROID__
         const bool residentTarget = previous.targeted && next.targeted;
         if (residentTarget) {
-            // Off is layer-resident, not framegen-context-resident. Crossing
-            // the generation boundary must rebuild the real swapchain so an
-            // inactive FIFO path cannot inherit LSFG image-count/usage state.
-            const bool generationActivityChanged =
-                (previous.multiplier > 1) != (next.multiplier > 1);
+            // Targeted Android swapchains keep their pre-sized LSFG context
+            // resident across generation Off/On. multiplier <= 1 is a native
+            // present-path bypass, not a WSI/context lifetime boundary.
             // Fixed and Adaptive use different temporal generation semantics.
             // Crossing this boundary must replace the private LSFG context rather
             // than carrying backend history through a resident soft reload.
@@ -96,8 +94,7 @@ namespace {
             // A resident context is allocated for at least four
             // generated outputs. A larger hot-reloaded multiplier needs a new
             // swapchain/context before present can index those outputs.
-            return generationActivityChanged
-                || framegenModeChanged
+            return framegenModeChanged
                 || next.multiplier > residentCapacityMultiplier(previous)
                 || previous.dll != next.dll
                 || adaptiveFlowModeChanged
@@ -884,62 +881,10 @@ namespace {
             return res;
         };
 
-        const auto createSourceOnly = [&](const char* reason) -> VkResult {
-            VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo;
-            const auto configuredPresentMode = activeConf.e_present;
-            // Generation-off is a true native boundary. The LSFG-selected
-            // presentation policy only applies while frame generation owns the
-            // synthetic/source batch; carrying FIFO into source-only mode
-            // reintroduces driver pacing and hitching after LSFG is disabled.
-            sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode;
-
-            // Source-only remains a true no-framegen state: do not inflate image
-            // count, add transfer usage, or instantiate the private LSFG/AHB
-            // context.
-            const auto res = Layer::ovkCreateSwapchainKHR(
-                device, &sourceOnlyCreateInfo, pAllocator, pSwapchain);
-            if (res != VK_SUCCESS)
-                return res;
-
-            // Keep the source-only old swapchain wrapper alive until the
-            // application's vkDestroySwapchainKHR reaches the downstream WSI.
-            // Resetting it here would synchronously queue-wait a FIFO still
-            // owned by the driver and recreate the old hitch.
-
-            try {
-                auto state = std::make_shared<SwapchainState>();
-                state->device = device;
-                state->deviceInfo = deviceInfo;
-                state->present = sourceOnlyCreateInfo.presentMode;
-                state->configuredPresent = configuredPresentMode;
-                publishSwapchainState(*pSwapchain, std::move(state));
-            } catch (const std::exception& e) {
-                Utils::logLimitN("swapMap", 5,
-                    "Could not retain source-only swapchain state; continuing natively:\n- "
-                    + std::string(e.what()));
-            }
-#ifdef __ANDROID__
-            publishRuntimeState(activeConf.config_file, "source_only",
-                false, false, true, true, false, false, false,
-                static_cast<int>(activeConf.multiplier), activeConf.performance,
-                activeConf.adaptiveFramegen, activeConf.fpsLimit);
-#endif
-            std::cerr << "lsfg-vk: init stage=swapchain-source-only-pass-through"
-                      << " reason=" << reason
-                      << " requestedImages=" << pCreateInfo->minImageCount
-                      << " requestedPresentMode=" << pCreateInfo->presentMode
-                      << " configuredPresentMode=" << configuredPresentMode
-                      << " chosenPresentMode=" << sourceOnlyCreateInfo.presentMode
-                      << "\n";
-            return VK_SUCCESS;
-        };
-
-        if (!activeConf.enable)
+        if (!activeConf.enable)        if (!activeConf.enable)
             return createPassThrough("disabled");
 
 #ifdef __ANDROID__
-        if (activeConf.targeted && activeConf.multiplier <= 1)
-            return createSourceOnly("generation-off");
         if (activeConf.multiplier <= 1 && !activeConf.targeted)
             return createPassThrough("disabled");
 #else
@@ -1261,6 +1206,20 @@ namespace {
                               << " recreateSwapchain=" << (recreateSwapchain ? 1 : 0)
                               << "\n";
                     if (!recreateSwapchain) {
+#ifdef __ANDROID__
+                        const bool enteringResidentSourceOnly =
+                            previousConf.targeted && conf.targeted
+                            && previousConf.multiplier > 1
+                            && conf.multiplier <= 1;
+                        if (enteringResidentSourceOnly && state->context) {
+                            state->context->enterSourceOnlyBypass();
+                            std::cerr << "lsfg-vk: runtime stage=resident-source-only-enter"
+                                      << " oldMultiplier=" << previousConf.multiplier
+                                      << " newMultiplier=" << conf.multiplier
+                                      << " recreateSwapchain=0"
+                                      << "\n";
+                        }
+#endif
                         const bool generationActive = conf.multiplier > 1;
                         std::cerr << "lsfg-vk: runtime stage=config-reload-soft-toggle"
                                   << " oldEnabled=" << (previousConf.enable ? 1 : 0)
@@ -1319,6 +1278,21 @@ namespace {
             Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
+
+#ifdef __ANDROID__
+        if (conf.targeted && conf.multiplier <= 1) {
+            const auto res = Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+            if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
+                recordSuccessfulOutputCycle(*state, *state->context,
+                    conf.config_file, 0, 1, conf.performance,
+                    conf.adaptiveFramegen, conf.fpsLimit);
+                Utils::resetLimitN("swapPresent");
+            } else {
+                recordOutputFailure(*state);
+            }
+            return res;
+        }
+#endif
 
         try {
 #ifdef __ANDROID__
