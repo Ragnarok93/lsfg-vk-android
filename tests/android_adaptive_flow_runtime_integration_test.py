@@ -441,6 +441,43 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             self.assertIn(field, context_header)
 
 
+    def test_auto_config_and_transition_telemetry_contract(self) -> None:
+        config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        context_header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+
+        self.assertIn('preset == "auto"', config)
+        self.assertIn("Adaptive Flow preset must be quality, balanced, low, or auto", config)
+        self.assertIn("AdaptiveFlowPreset::Auto", source)
+        self.assertIn("stateIndex", context_header)
+        self.assertIn("stateCount", context_header)
+
+        for field in (
+            "adaptive_flow_state_index=",
+            "adaptive_flow_state_count=",
+            "adaptive_flow_predicted_next_total_ms=",
+            "adaptive_flow_target_fps=",
+            "preset=",
+            "target=",
+            "minimum=",
+            "state_index=",
+            "state_count=",
+            "previous=",
+            "requested=",
+            "active=",
+            "transition=",
+            "warmup_remaining=",
+            "timing_valid=",
+            "target_fps=",
+            "multiplier=",
+            "adaptive=",
+            "predicted_next_total_ms=",
+        ):
+            self.assertIn(field, source)
+
+        self.assertIn('"LSFG_FLOW"', source)
+        self.assertIn('"LSFG_METRICS"', source)
+
     def test_runtime_pressure_requires_a_complete_fresh_record(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         reader_start = source.index("RuntimePressureSample readRuntimePressure")
