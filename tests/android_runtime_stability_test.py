@@ -666,7 +666,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "previous.adaptiveFramegen != next.adaptiveFramegen",
             helper,
         )
-        self.assertIn("|| framegenModeChanged", helper)
+        self.assertIn("framegenModeChanged", helper)
 
         reload_start = source.index("if (shouldPollConfig && configurationFileChanged(conf))")
         reload_end = source.index("if (!state->context)", reload_start)
@@ -857,20 +857,17 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("return;", bypass)
         self.assertIn("this->sourceOnlyBypassActive_ = true;", bypass)
 
-    def test_inactive_lsfg_present_policy_change_does_not_recreate_native_swapchain(self) -> None:
-        """Changing the saved LSFG WSI mode while generation is Off must not disturb native WSI."""
+    def test_resident_lsfg_present_policy_change_recreates_swapchain(self) -> None:
+        """Changing the configured LSFG WSI mode remains a real resident swapchain boundary."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         helper_start = source.index("bool requiresSwapchainRecreation")
         helper_end = source.index("bool supportsDeviceExtension", helper_start)
         helper = source[helper_start:helper_end]
 
         resident_helper = helper.split("#endif", 1)[0]
-        self.assertIn("presentationPolicyChanged", resident_helper)
-        self.assertIn(
-            "next.multiplier > 1 && previous.e_present != next.e_present",
-            resident_helper,
-        )
-        self.assertNotIn("|| previous.e_present != next.e_present;", resident_helper)
+        self.assertIn("previous.e_present != next.e_present", resident_helper)
+        self.assertNotIn("presentationPolicyChanged", resident_helper)
+        self.assertNotIn("next.multiplier > 1 && previous.e_present", resident_helper)
 
     def test_syncfd_source_export_failure_recreates_temporal_context(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
