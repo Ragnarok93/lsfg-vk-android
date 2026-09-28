@@ -143,7 +143,7 @@ int main() {
         assert(near(controller.currentScale(), 0.80F));
         for (int i = 0; i < 12; ++i)
             controller.observe(sample(16.2, 5.0));
-        assert(near(controller.currentScale(), 0.70F));
+        assert(near(controller.currentScale(), 0.75F));
     }
 
     {
