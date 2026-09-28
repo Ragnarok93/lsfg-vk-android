@@ -383,6 +383,57 @@ private:
     struct RuntimeMetrics {
         using Clock = std::chrono::steady_clock;
 
+        struct TimingReservoir {
+            std::array<double, 64> values{};
+            uint32_t count{0};
+            uint64_t seen{0};
+
+            void add(double value) noexcept {
+                if (value != value || value < 0.0)
+                    return;
+                ++seen;
+                if (count < values.size()) {
+                    values[count++] = value;
+                    return;
+                }
+                values[static_cast<size_t>(seen % values.size())] = value;
+            }
+
+            void reset() noexcept {
+                count = 0;
+                seen = 0;
+            }
+
+            [[nodiscard]] double percentile(double fraction) const noexcept {
+                if (count == 0)
+                    return 0.0;
+                std::array<double, 64> sorted = values;
+                for (uint32_t i = 1; i < count; ++i) {
+                    const double value = sorted[i];
+                    uint32_t j = i;
+                    while (j > 0 && sorted[j - 1] > value) {
+                        sorted[j] = sorted[j - 1];
+                        --j;
+                    }
+                    sorted[j] = value;
+                }
+                if (fraction <= 0.0)
+                    return sorted[0];
+                if (fraction >= 1.0)
+                    return sorted[count - 1];
+                const double position = fraction * static_cast<double>(count - 1);
+                const uint32_t lower = static_cast<uint32_t>(position);
+                const uint32_t upper = lower + (lower + 1 < count ? 1 : 0);
+                const double remainder = position - static_cast<double>(lower);
+                return sorted[lower]
+                    + (sorted[upper] - sorted[lower]) * remainder;
+            }
+
+            [[nodiscard]] double maximum() const noexcept {
+                return count == 0 ? 0.0 : percentile(1.0);
+            }
+        };
+
         Clock::time_point windowStart{Clock::now()};
         Clock::time_point lastSourcePresent{};
         bool hasLastSourcePresent{false};
@@ -415,6 +466,14 @@ private:
         uint64_t totalDisplayTimingQueryFailures{0};
         uint64_t totalSourcePresentFailures{0};
         uint64_t totalGeneratedPresentFailures{0};
+        uint64_t windowAcquireNotReady{0};
+        uint64_t totalAcquireNotReady{0};
+        uint64_t windowAcquireTimeout{0};
+        uint64_t totalAcquireTimeout{0};
+        uint64_t windowPresentSuboptimal{0};
+        uint64_t totalPresentSuboptimal{0};
+        uint64_t windowPresentOutOfDate{0};
+        uint64_t totalPresentOutOfDate{0};
 
         uint64_t windowAdaptiveZeroGenerationCycles{0};
         uint64_t totalAdaptiveZeroGenerationCycles{0};
@@ -477,6 +536,33 @@ private:
         uint64_t windowSourceIntervals{0};
         uint64_t windowSourceDeadlineSamples{0};
         uint64_t windowSourceTimelineRebases{0};
+
+        TimingReservoir cycleTiming;
+        TimingReservoir handoffTiming;
+        TimingReservoir dispatchTiming;
+        TimingReservoir completionTiming;
+        TimingReservoir generatedPresentTiming;
+        TimingReservoir sourceIntervalTiming;
+
+        void observeAcquireResult(VkResult result) noexcept {
+            if (result == VK_NOT_READY) {
+                ++windowAcquireNotReady;
+                ++totalAcquireNotReady;
+            } else if (result == VK_TIMEOUT) {
+                ++windowAcquireTimeout;
+                ++totalAcquireTimeout;
+            }
+        }
+
+        void observePresentResult(VkResult result) noexcept {
+            if (result == VK_SUBOPTIMAL_KHR) {
+                ++windowPresentSuboptimal;
+                ++totalPresentSuboptimal;
+            } else if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+                ++windowPresentOutOfDate;
+                ++totalPresentOutOfDate;
+            }
+        }
 
         // Previous completed one-second LSFG metrics window. It is retained
         // for diagnostics only; Adaptive Flow control uses the shorter rolling
