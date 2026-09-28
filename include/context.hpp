@@ -216,6 +216,12 @@ private:
     PFN_vkWaitForFences completionWaitFences_{nullptr};
     PFN_vkResetFences completionResetFences_{nullptr};
     PFN_vkQueueWaitIdle waitQueueIdle_{nullptr};
+#ifdef __ANDROID__
+    // Xclipse FIFO must not reuse a framegen output AHB until the game-device
+    // post-copy has completed and released that AHB back to EXTERNAL.
+    std::vector<std::shared_ptr<VkFence>> xclipseOutputCompletionFences_;
+    std::vector<bool> xclipseOutputCompletionFenceSubmitted_;
+#endif
 
     Mini::Image frame_0, frame_1; // frames shared with lsfg. write to frame_0 when fc % 2 == 0
     std::vector<Mini::Image> out_n; // output images shared with lsfg, indexed by framegen id
@@ -540,6 +546,9 @@ private:
 
     bool tryRecyclePass(RenderPassInfo& pass);
     bool submitPassCompletionFence(RenderPassInfo& pass, VkQueue queue);
+#ifdef __ANDROID__
+    bool retireXclipseOutputCopies(size_t generatedFrameCount);
+#endif
 
     std::array<RenderPassInfo, 8> passInfos; // allocate 8 because why not
 };
