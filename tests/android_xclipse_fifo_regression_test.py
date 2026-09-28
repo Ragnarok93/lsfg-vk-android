@@ -65,6 +65,33 @@ class AndroidXclipseFifoRegressionTest(unittest.TestCase):
         self.assertIn("runtimeWaitTimeoutNs()", adreno)
         self.assertIn("generated-before-source", source)
 
+    def test_fifo_waits_for_xclipse_output_copy_retirement_without_host_stalling(self) -> None:
+        """FIFO must not let framegen overwrite an output AHB still being copied."""
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("xclipseOutputCompletionFences_", header)
+        self.assertIn("xclipseOutputCompletionFenceSubmitted_", header)
+        self.assertIn("retireXclipseOutputCopies", source)
+
+        generic_start = source.index("const bool xclipseFifoPresentation")
+        generic_end = source.index("// 4. Generated presentation is opportunistic.", generic_start)
+        admission = source[generic_start:generic_end]
+        self.assertIn("retireXclipseOutputCopies(generatedFrameCount)", admission)
+        self.assertIn("generatedFrameCount = 0", admission)
+
+        generated_start = source.index("// 4. Generated presentation is opportunistic.")
+        generated_end = source.index("// 5. Present the real game frame", generated_start)
+        generated = source[generated_start:generated_end]
+        self.assertIn("xclipseOutputCompletionFence", generated)
+        self.assertIn("postCopyBuf.submit(", generated)
+        self.assertNotIn("waitContext(", generated)
+        self.assertNotIn("vkQueueWaitIdle", generated)
+
+        adreno_start = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        adreno_end = source.index("// END ADRENO_364178AF_EXECUTION", adreno_start)
+        self.assertNotIn("xclipseOutputCompletion", source[adreno_start:adreno_end])
+
     def test_fix_does_not_add_host_waits_to_fifo_delivery(self) -> None:
         """The Xclipse repair must not reintroduce a per-frame host stall."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
