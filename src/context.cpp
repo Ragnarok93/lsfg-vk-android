@@ -163,6 +163,8 @@ AdaptiveFlowPreset adaptiveFlowPresetFromConfig(const std::string& preset) {
         return AdaptiveFlowPreset::Balanced;
     if (preset == "low")
         return AdaptiveFlowPreset::Low;
+    if (preset == "auto")
+        return AdaptiveFlowPreset::Auto;
     return AdaptiveFlowPreset::Quality;
 }
 
@@ -1684,10 +1686,27 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::cerr << "lsfg-vk: adaptive-flow-decision"
                       << " runtime_session_id=" << this->runtimeSessionId_
                       << " config_revision=" << this->configRevision_
+                      << " preset="
+                      << AdaptiveFlowController::presetName(this->adaptiveFlowPreset_)
+                      << " target=" << flowTelemetry.targetScale
+                      << " minimum=" << flowTelemetry.minimumScale
+                      << " state_index=" << flowTelemetry.stateIndex
+                      << " state_count=" << flowTelemetry.stateCount
                       << " previous=" << previousScale
                       << " requested=" << selectedScale
+                      << " active=" << this->adaptiveFlowActiveScale_
+                      << " transition="
+                      << (this->adaptiveFlowTransitionPending_ ? 1 : 0)
+                      << " warmup_remaining=" << this->adaptiveFlowWarmupRemaining_
+                      << " timing_valid=" << (retainedTimingUsable ? 1 : 0)
                       << " reason="
                       << AdaptiveFlowController::reasonName(flowTelemetry.reason)
+                      << " source_fps=" << observation.sourceFps
+                      << " target_fps=" << conf.fpsLimit
+                      << " multiplier=" << conf.multiplier
+                      << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
+                      << " predicted_next_total_ms="
+                      << flowTelemetry.estimatedNextTotalMs
                       << " mipmaps_ms=" << observation.mipmapsMs
                       << " flow_ms=" << observation.flowMs
                       << " lsfg_ms=" << observation.totalLsfgMs
@@ -1715,15 +1734,34 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ANDROID_LOG_INFO,
                 "LSFG_FLOW",
                 "runtime_session_id=%llu config_revision=%llu "
-                "previous=%.3f requested=%.3f reason=%s flow_ms=%.3f lsfg_ms=%.3f "
+                "preset=%s target=%.3f minimum=%.3f "
+                "state_index=%zu state_count=%zu "
+                "previous=%.3f requested=%.3f active=%.3f "
+                "transition=%d warmup_remaining=%u timing_valid=%d "
+                "reason=%s source_fps=%.3f target_fps=%u multiplier=%zu adaptive=%d "
+                "predicted_next_total_ms=%.3f flow_ms=%.3f lsfg_ms=%.3f "
                 "budget_ms=%.3f generation_count=%zu gpu=%.1f pressure_valid=%d "
                 "output_fps=%.3f output_deficit=%d output_satisfied=%d "
                 "compute_pressure=%d wsi_pressure=%d wsi_loss_rate=%.3f",
                 static_cast<unsigned long long>(this->runtimeSessionId_),
                 static_cast<unsigned long long>(this->configRevision_),
+                AdaptiveFlowController::presetName(this->adaptiveFlowPreset_),
+                static_cast<double>(flowTelemetry.targetScale),
+                static_cast<double>(flowTelemetry.minimumScale),
+                flowTelemetry.stateIndex,
+                flowTelemetry.stateCount,
                 static_cast<double>(previousScale),
                 static_cast<double>(selectedScale),
+                static_cast<double>(this->adaptiveFlowActiveScale_),
+                this->adaptiveFlowTransitionPending_ ? 1 : 0,
+                this->adaptiveFlowWarmupRemaining_,
+                retainedTimingUsable ? 1 : 0,
                 AdaptiveFlowController::reasonName(flowTelemetry.reason),
+                observation.sourceFps,
+                conf.fpsLimit,
+                conf.multiplier,
+                conf.adaptiveFramegen ? 1 : 0,
+                flowTelemetry.estimatedNextTotalMs,
                 observation.flowMs,
                 observation.totalLsfgMs,
                 observation.frameBudgetMs,
@@ -2136,6 +2174,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->adaptiveFlowController_.telemetry().targetScale
                       << " adaptive_flow_minimum="
                       << this->adaptiveFlowController_.telemetry().minimumScale
+                       << " adaptive_flow_state_index="
+                       << this->adaptiveFlowController_.telemetry().stateIndex
+                       << " adaptive_flow_state_count="
+                       << this->adaptiveFlowController_.telemetry().stateCount
+                       << " adaptive_flow_predicted_next_total_ms="
+                       << this->adaptiveFlowController_.telemetry().estimatedNextTotalMs
+                       << " adaptive_flow_target_fps=" << conf.fpsLimit
+                       << " adaptive_flow_multiplier=" << conf.multiplier
+                       << " adaptive_flow_adaptive_framegen="
+                       << (conf.adaptiveFramegen ? 1 : 0)
+                       << " adaptive_flow_output_target_satisfied="
+                       << (this->lsfgOutputCadenceTracker_.snapshot().targetSatisfiedConfirmed ? 1 : 0)
                       << " adaptive_flow_requested=" << this->adaptiveFlowRequestedScale_
                       << " adaptive_flow_active=" << this->adaptiveFlowActiveScale_
                       << " adaptive_flow_transition="
@@ -2226,7 +2276,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "pred_total_ms=%.3f reserve_ms=%.3f effective_budget_ms=%.3f "
                 "wanted=%.3f cost_limit=%zu final_generated=%zu history_only=%llu "
                 "flow_active=%.3f flow_gpu=%.1f flow_output_fps=%.3f "
-                "flow_deficit=%d flow_reason=%s multiplier=%zu adaptive=%d target=%u",
+                "flow_deficit=%d flow_reason=%s multiplier=%zu adaptive=%d target=%u "
+                "flow_preset=%s flow_target=%.3f flow_minimum=%.3f "
+                "flow_state_index=%zu flow_state_count=%zu "
+                "flow_requested=%.3f flow_active=%.3f flow_transition=%d "
+                "flow_warmup_remaining=%u flow_timing_valid=%d "
+                "flow_target_satisfied=%d flow_predicted_next_total_ms=%.3f "
+                "flow_source_fps=%.3f flow_budget_ms=%.3f",
                 static_cast<unsigned long long>(this->runtimeSessionId_),
                 static_cast<unsigned long long>(this->configRevision_),
                 sourceFps,
@@ -2266,7 +2322,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 AdaptiveFlowController::reasonName(this->adaptiveFlowReason_),
                 conf.multiplier,
                 conf.adaptiveFramegen ? 1 : 0,
-                conf.fpsLimit);
+                conf.fpsLimit,
+                AdaptiveFlowController::presetName(this->adaptiveFlowPreset_),
+                static_cast<double>(this->adaptiveFlowController_.telemetry().targetScale),
+                static_cast<double>(this->adaptiveFlowController_.telemetry().minimumScale),
+                this->adaptiveFlowController_.telemetry().stateIndex,
+                this->adaptiveFlowController_.telemetry().stateCount,
+                static_cast<double>(this->adaptiveFlowRequestedScale_),
+                static_cast<double>(this->adaptiveFlowActiveScale_),
+                this->adaptiveFlowTransitionPending_ ? 1 : 0,
+                this->adaptiveFlowWarmupRemaining_,
+                this->adaptiveFlowTimingValid_ ? 1 : 0,
+                this->lsfgOutputCadenceTracker_.snapshot().targetSatisfiedConfirmed ? 1 : 0,
+                this->adaptiveFlowController_.telemetry().estimatedNextTotalMs,
+                adaptiveTelemetry.smoothedSourceFps,
+                this->adaptiveFlowBudgetMs_);
             __android_log_print(
                 ANDROID_LOG_INFO,
                 "LSFG_METRICS",
