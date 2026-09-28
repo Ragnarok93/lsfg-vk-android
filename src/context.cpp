@@ -1110,12 +1110,23 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             });
     };
 
+    // prepare render passes
     bool reuseGameCopyCommandBuffers = false;
 #ifdef __ANDROID__
     reuseGameCopyCommandBuffers = this->conservativeCrossDeviceSync_;
 #endif
     this->cmdPool = Mini::CommandPool(
         info.device, info.queue.first, reuseGameCopyCommandBuffers);
+#ifdef __ANDROID__
+    if (!this->conservativeCrossDeviceSync_
+            && this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR) {
+        this->xclipseOutputCompletionFences_.resize(runtimeMultiplier - 1);
+        this->xclipseOutputCompletionFenceSubmitted_.assign(
+            runtimeMultiplier - 1, false);
+        for (auto& outputFence : this->xclipseOutputCompletionFences_)
+            outputFence = createOwnedCompletionFence();
+    }
+#endif
     for (size_t i = 0; i < 8; i++) {
         auto& pass = this->passInfos.at(i);
         pass.renderSemaphores.resize(runtimeMultiplier - 1);
@@ -1140,16 +1151,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         }
 #endif
     }
-#ifdef __ANDROID__
-    if (!this->conservativeCrossDeviceSync_
-            && this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR) {
-        this->xclipseOutputCompletionFences_.resize(runtimeMultiplier - 1);
-        this->xclipseOutputCompletionFenceSubmitted_.assign(
-            runtimeMultiplier - 1, false);
-        for (auto& outputFence : this->xclipseOutputCompletionFences_)
-            outputFence = createOwnedCompletionFence();
-    }
-#endif
 }
 
 LsContext::~LsContext() {
