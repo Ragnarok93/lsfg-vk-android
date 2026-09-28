@@ -45,7 +45,6 @@ class AndroidXclipseFifoRegressionTest(unittest.TestCase):
 
         arm_start = source.index(
             "const auto armPassGpuRetirement =",
-            generated_end,
         )
         arm_end = source.index(
             "if (this->conservativeCrossDeviceSync_",
