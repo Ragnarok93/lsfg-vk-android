@@ -60,7 +60,7 @@
 - Accept `adaptive_flow_preset = "auto"` in game TOML and legacy/environment configuration paths, with the existing quality default and existing compatibility behavior preserved.
 - Map Auto through context initialization, prebuild all 16 Auto states using the existing adaptive-context path, and report the actual state count in initialization telemetry.
 - Extend `AdaptiveFlowRuntimeSnapshot` as needed with state index/count and the active transition evidence required by logs.
-- Extend every adaptive decision event with stable machine-readable fields for `preset`, `target`, `minimum`, `state_index`, `state_count`, `previous/requested/active`, `transition`, `warmup_remaining`, `timing_valid`, target FPS/multiplier evidence, and the existing flow/mipmap/total budget, generation, global GPU, compute pressure, WSI pressure/loss, output deficit, and output-satisfied evidence.
+- Extend every adaptive decision event with stable machine-readable fields for `runtime_session_id`, `config_revision`, `preset`, `target`, `minimum`, `state_index`, `state_count`, `previous/requested/active`, `transition`, `warmup_remaining`, `timing_valid`, target FPS/multiplier evidence, `predicted_next_total`, and the existing flow/mipmap/total budget, generation, global GPU, compute pressure, WSI pressure/loss, output deficit, and output-satisfied evidence.
 - Extend periodic text metrics and Android `LSFG_METRICS` output with the same target/floor/state/requested-vs-active contract, so validation can distinguish a requested transition from an applied transition.
 - Preserve the existing decision cadence and downstep/upstep semantics; telemetry must observe the decision, not alter it.
 
