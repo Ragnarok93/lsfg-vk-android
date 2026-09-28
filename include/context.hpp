@@ -516,6 +516,13 @@ private:
         // proves those waits have executed.
         std::vector<Mini::Semaphore> crossFrameWaitRetentions;
 
+        // Generic Android/Xclipse FIFO may reacquire a swapchain image before
+        // the previous present wait semaphores are safe to destroy. Keep those
+        // displaced owners with the consuming pass until its completion fence
+        // proves the acquire wait has executed.
+        std::vector<Mini::Semaphore> acquiredPresentWaitRetentions;
+        bool presentAcquireRetirementsArmed{false};
+
         // GPU-submit retirement only. Present-wait semaphore lifetime is
         // tracked separately by swapchain-image reacquisition.
         std::shared_ptr<VkFence> completionFence;
