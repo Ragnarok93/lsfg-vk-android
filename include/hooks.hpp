@@ -30,6 +30,10 @@ namespace Hooks {
         // source presents carry explicit target times instead of relying on
         // MAILBOX queue submission cadence to approximate display cadence.
         bool androidDisplayTimingSupported{false};
+        // True only for Samsung/Xclipse-class game devices. This is resolved
+        // before swapchain creation so Xclipse FIFO can select its WSI backend
+        // without changing the protected Adreno compatibility path.
+        bool xclipseDevice{false};
     };
 
     /// Map of hooked Vulkan functions.
