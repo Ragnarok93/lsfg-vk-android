@@ -10,6 +10,7 @@ enum class AdaptiveFlowPreset : uint8_t {
     Quality,
     Balanced,
     Low,
+    Auto,
 };
 
 enum class AdaptiveFlowDecisionReason : uint8_t {
@@ -73,6 +74,7 @@ struct AdaptiveFlowTelemetry {
     float minimumScale{1.0F};
     float currentScale{1.0F};
     std::size_t stateIndex{};
+    std::size_t stateCount{};
     bool changed{false};
     AdaptiveFlowDecisionReason reason{AdaptiveFlowDecisionReason::None};
     double pressureRatio{};
