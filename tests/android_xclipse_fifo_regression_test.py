@@ -108,5 +108,35 @@ class AndroidXclipseFifoRegressionTest(unittest.TestCase):
         self.assertNotIn("waitQueueIdle_", generated)
 
 
+    def test_xclipse_fifo_prefers_mailbox_backing_without_touching_adreno(self) -> None:
+        """Xclipse logical FIFO uses the proven nonblocking WSI backend when available."""
+        header = (ROOT / "include/hooks.hpp").read_text(encoding="utf-8")
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("bool xclipseDevice{false}", header)
+        self.assertIn("selectFramegenCompatibilityPath", hooks)
+
+        active_start = hooks.index("VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;")
+        active_end = hooks.index("const size_t residentMultiplier", active_start)
+        active = hooks[active_start:active_end]
+        self.assertIn("deviceInfo->xclipseDevice", active)
+        self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", active)
+        self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", active)
+        self.assertIn("xclipseFifoMailboxBacked", active)
+
+        source_only_start = hooks.index("const auto createSourceOnly")
+        source_only_end = hooks.index("if (!activeConf.enable)", source_only_start)
+        source_only = hooks[source_only_start:source_only_end]
+        self.assertNotIn("xclipseFifoMailboxBacked", source_only)
+        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", source_only)
+
+        adreno_start = (ROOT / "src/context.cpp").read_text(
+            encoding="utf-8"
+        ).index("// BEGIN ADRENO_364178AF_EXECUTION")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        adreno_end = context.index("// END ADRENO_364178AF_EXECUTION", adreno_start)
+        self.assertNotIn("xclipseFifoMailboxBacked", context[adreno_start:adreno_end])
+
+
 if __name__ == "__main__":
     unittest.main()
