@@ -462,16 +462,16 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Balanced);
         for (int i = 0; i < 4; ++i) {
             controller.observe(sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true));
         }
         controller.observe(sample(
-            8.0, 3.0, 16.666, true, false,
+            8.0, 5.0, 16.666, true, false,
             99.0, true, true));
         bool lowered = false;
         for (int i = 0; i < 14 && !lowered; ++i) {
             controller.observe(sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true));
             lowered = near(controller.currentScale(), 0.75F);
         }
