@@ -796,8 +796,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("if (framegenModeChanged)", reload)
         self.assertIn('" recreate=" << (recreateSwapchain ? 1 : 0)', reload)
 
-    def test_gamenative_off_recreates_only_when_leaving_fifo(self) -> None:
-        """Mailbox Off stays resident; FIFO Off recreates once to restore native WSI."""
+    def test_gamenative_off_keeps_targeted_swapchain_resident_for_all_present_modes(self) -> None:
+        """September-8 contract: targeted Off is a soft resident bypass, including FIFO."""
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -806,30 +806,30 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
         helper = hooks[helper_start:helper_end]
 
-        self.assertIn("generationActivationRequired", helper)
-        self.assertIn(
-            "previous.multiplier <= 1 && next.multiplier > 1",
-            helper,
-        )
-        self.assertIn("fifoGenerationDeactivation", helper)
-        self.assertIn(
-            "previous.multiplier > 1 && next.multiplier <= 1",
-            helper,
-        )
-        self.assertIn(
-            "previous.e_present == VK_PRESENT_MODE_FIFO_KHR",
-            helper,
-        )
+        self.assertNotIn("generationActivationRequired", helper)
+        self.assertNotIn("fifoGenerationDeactivation", helper)
         self.assertNotIn(
             "(previous.multiplier > 1) != (next.multiplier > 1)",
             helper,
-            "Mailbox deactivation must not recreate the swapchain",
         )
-        self.assertIn(
-            "return generationActivationRequired",
+        self.assertNotIn(
+            "previous.multiplier <= 1 && next.multiplier > 1",
             helper,
         )
-        self.assertIn("|| fifoGenerationDeactivation", helper)
+        self.assertNotIn(
+            "previous.multiplier > 1 && next.multiplier <= 1",
+            helper,
+        )
+
+        self.assertNotIn(
+            'return createSourceOnly("generation-off")',
+            hooks,
+            "Targeted multiplier=1 must retain the resident LSFG wrapper instead of replacing WSI",
+        )
+        self.assertIn(
+            "activeConf.multiplier <= 1 && !activeConf.targeted",
+            hooks,
+        )
 
         context_lookup = hooks.index("if (!state->context)")
         present_mutation = hooks.index("#pragma clang diagnostic push", context_lookup)
@@ -846,6 +846,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "Layer::ovkQueuePresentKHR(queue, pPresentInfo)",
             source_only_present,
         )
+        self.assertNotIn("VK_ERROR_OUT_OF_DATE_KHR", source_only_present)
 
         self.assertIn("void enterSourceOnlyBypass();", header)
         self.assertIn("bool sourceOnlyBypassActive_{false};", header)
@@ -855,11 +856,6 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("if (this->sourceOnlyBypassActive_)", bypass)
         self.assertIn("return;", bypass)
         self.assertIn("this->sourceOnlyBypassActive_ = true;", bypass)
-
-        present_start = context.index("VkResult LsContext::present")
-        android_start = context.index("#ifdef __ANDROID__", present_start)
-        present_prefix = context[android_start:android_start + 4000]
-        self.assertIn("this->sourceOnlyBypassActive_ = false;", present_prefix)
 
     def test_inactive_lsfg_present_policy_change_does_not_recreate_native_swapchain(self) -> None:
         """Changing the saved LSFG WSI mode while generation is Off must not disturb native WSI."""
