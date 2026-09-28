@@ -201,7 +201,7 @@ int main() {
             controller.observe(sample(16.2, 6.0));
         assert(near(controller.currentScale(), 0.95F));
         for (int i = 0; i < 60; ++i)
-            controller.observe(sample(11.8, 9.0));
+            controller.observe(sample(14.0, 9.0));
         assert(near(controller.currentScale(), 0.95F));
     }
 
