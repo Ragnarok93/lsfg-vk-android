@@ -41,10 +41,11 @@ class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
         recreation_start = hooks.index("bool requiresSwapchainRecreation")
         recreation_end = hooks.index("bool supportsDeviceExtension", recreation_start)
         recreation = hooks[recreation_start:recreation_end]
-        self.assertIn("generationActivationRequired", recreation)
-        self.assertIn(
+        self.assertNotIn("generationActivationRequired", recreation)
+        self.assertNotIn(
             "previous.multiplier <= 1 && next.multiplier > 1",
             recreation,
+            "The validated resident contract must not rebuild WSI on Off -> On",
         )
         self.assertNotIn(
             "(previous.multiplier > 1) != (next.multiplier > 1)",
