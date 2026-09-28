@@ -30,3 +30,20 @@ def test_runtime_off_remains_multiplier_one_resident_semantics():
     assert ".enable = true" in SOURCE
     assert ".targeted = true" in SOURCE
     assert "if (game.multiplier < 1)" in SOURCE
+
+
+def test_auto_preset_is_accepted_by_native_config():
+    assert 'preset == "auto"' in SOURCE
+    assert "Adaptive Flow preset must be quality, balanced, low, or auto" in SOURCE
+
+
+if __name__ == "__main__":
+    for test in (
+        test_gamenative_adaptive_uses_authoritative_conf_toml,
+        test_adaptive_target_is_not_source_pacing,
+        test_fixed_and_source_only_do_not_require_target,
+        test_runtime_off_remains_multiplier_one_resident_semantics,
+        test_auto_preset_is_accepted_by_native_config,
+    ):
+        test()
+    print("gamenative adaptive config contract: 5 tests passed")
