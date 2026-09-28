@@ -95,6 +95,14 @@ namespace {
             // disabled-mode hitch regression fixed by the September 8 path.
             const bool generationActivationRequired =
                 previous.multiplier <= 1 && next.multiplier > 1;
+            // Mailbox can remain on the resident wrapper when generation turns
+            // off. FIFO cannot: direct source presents would otherwise inherit
+            // the LSFG-created FIFO swapchain and keep its blocking WSI cadence.
+            // Recreate exactly once on FIFO -> Off so the application can
+            // restore its native present mode.
+            const bool fifoGenerationDeactivation =
+                previous.multiplier > 1 && next.multiplier <= 1
+                && previous.e_present == VK_PRESENT_MODE_FIFO_KHR;
             // Fixed and Adaptive use different temporal generation semantics.
             // Crossing this boundary must replace the private LSFG context rather
             // than carrying backend history through a resident soft reload.
@@ -122,6 +130,7 @@ namespace {
             // rebuild. Saved FG-only settings become relevant on the one
             // generation-boundary recreation that enables generation.
             return generationActivationRequired
+                || fifoGenerationDeactivation
                 || framegenModeChanged
                 || (generationStaysActive
                     && next.multiplier > residentCapacityMultiplier(previous))
