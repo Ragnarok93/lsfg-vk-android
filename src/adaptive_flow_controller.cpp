@@ -5,9 +5,15 @@
 #include <cmath>
 
 namespace {
-constexpr std::array<float, 7> kQualityStates{\n    1.00F, 0.95F, 0.90F, 0.85F, 0.80F, 0.75F, 0.70F,\n};
-constexpr std::array<float, 6> kBalancedStates{\n    0.80F, 0.75F, 0.70F, 0.65F, 0.60F, 0.55F,\n};
-constexpr std::array<float, 7> kLowStates{\n    0.55F, 0.50F, 0.45F, 0.40F, 0.35F, 0.30F, 0.25F,\n};
+constexpr std::array<float, 7> kQualityStates{
+    1.00F, 0.95F, 0.90F, 0.85F, 0.80F, 0.75F, 0.70F,
+};
+constexpr std::array<float, 6> kBalancedStates{
+    0.80F, 0.75F, 0.70F, 0.65F, 0.60F, 0.55F,
+};
+constexpr std::array<float, 7> kLowStates{
+    0.55F, 0.50F, 0.45F, 0.40F, 0.35F, 0.30F, 0.25F,
+};
 constexpr std::array<float, 16> kAutoStates{
     1.00F, 0.95F, 0.90F, 0.85F, 0.80F, 0.75F, 0.70F, 0.65F,
     0.60F, 0.55F, 0.50F, 0.45F, 0.40F, 0.35F, 0.30F, 0.25F,
