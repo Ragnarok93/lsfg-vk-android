@@ -22,6 +22,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <algorithm>
 #include <exception>
 #include <iostream>
@@ -43,6 +44,39 @@
 namespace {
 
 std::mutex lsfgDisableEnvMutex;
+
+void emitNativeStructuredDiagnostic(
+        const char* tag, const std::string& fields) {
+    std::cerr << "lsfg-vk: " << tag << " " << fields << '\n';
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, tag, "%s", fields.c_str());
+#endif
+}
+
+std::string diagnosticQuotedValue(std::string_view value) {
+    std::string sanitized;
+    sanitized.reserve(value.size());
+    for (const char ch : value) {
+        if (ch == '"' || ch == '\\' || ch == '\n' || ch == '\r')
+            sanitized.push_back('_');
+        else
+            sanitized.push_back(ch);
+    }
+    return sanitized;
+}
+
+uint64_t identityFingerprint(const LSFG::DeviceIdentity& identity) noexcept {
+    uint64_t hash = 1469598103934665603ULL;
+    for (const uint8_t byte : identity.deviceUUID) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    for (const uint8_t byte : identity.driverUUID) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
 
 class ScopedLsfgDisable {
 public:
@@ -830,6 +864,96 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         this->compatibilityPath_
             == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood;
 
+    this->runtimeSessionId_ = processRuntimeSessionId();
+    {
+        std::ostringstream fields;
+        fields << "schema=1"
+               << " runtime_session_id=" << this->runtimeSessionId_
+               << " config_revision=0"
+               << " context_id=" << ctxId
+               << " exact_device_match=1"
+               << " game_api_version="
+               << VK_VERSION_MAJOR(info.physicalDeviceProperties.apiVersion) << '.'
+               << VK_VERSION_MINOR(info.physicalDeviceProperties.apiVersion) << '.'
+               << VK_VERSION_PATCH(info.physicalDeviceProperties.apiVersion)
+               << " game_vendor_id=" << info.physicalDeviceProperties.vendorID
+               << " game_device_id=" << info.physicalDeviceProperties.deviceID
+               << " game_device_type=" << info.physicalDeviceProperties.deviceType
+               << " game_device_name=\""
+               << diagnosticQuotedValue(info.physicalDeviceProperties.deviceName) << '"'
+               << " game_driver_id=" << static_cast<uint32_t>(info.gameDriverId)
+               << " game_driver_name=\""
+               << diagnosticQuotedValue(info.gameDriverName) << '"'
+               << " game_driver_info=\""
+               << diagnosticQuotedValue(info.gameDriverInfo) << '"'
+               << " game_driver_version=" << info.physicalDeviceProperties.driverVersion
+               << " game_device_uuid_hash=" << identityFingerprint(info.identity)
+               << " framegen_api_version="
+               << VK_VERSION_MAJOR(backendDiagnostics.apiVersion) << '.'
+               << VK_VERSION_MINOR(backendDiagnostics.apiVersion) << '.'
+               << VK_VERSION_PATCH(backendDiagnostics.apiVersion)
+               << " framegen_vendor_id=" << backendDiagnostics.vendorId
+               << " framegen_device_id=" << backendDiagnostics.deviceId
+               << " framegen_device_type=" << backendDiagnostics.deviceType
+               << " framegen_device_name=\""
+               << diagnosticQuotedValue(backendDiagnostics.deviceName) << '"'
+               << " framegen_driver_id=" << static_cast<uint32_t>(backendDiagnostics.driverId)
+               << " framegen_driver_name=\""
+               << diagnosticQuotedValue(backendDiagnostics.driverName) << '"'
+               << " framegen_driver_info=\""
+               << diagnosticQuotedValue(backendDiagnostics.driverInfo) << '"'
+               << " framegen_driver_version=" << backendDiagnostics.driverVersion
+               << " framegen_device_uuid_hash=" << identityFingerprint(backendDiagnostics.identity)
+               << " ahb_mode=" << LSFG::ahbTransportModeName(ahbTransportMode)
+               << " ahb_sampled_input=" << (backendDiagnostics.ahbSampledInput ? 1 : 0)
+               << " ahb_storage_output=" << (backendDiagnostics.ahbStorageOutput ? 1 : 0)
+               << " ahb_transfer_input=" << (backendDiagnostics.ahbTransferInput ? 1 : 0)
+               << " ahb_transfer_output=" << (backendDiagnostics.ahbTransferOutput ? 1 : 0)
+               << " sync2_core=" << (backendDiagnostics.synchronization2Core ? 1 : 0)
+               << " sync2_extension=" << (backendDiagnostics.synchronization2Extension ? 1 : 0)
+               << " sync2_feature=" << (backendDiagnostics.synchronization2Feature ? 1 : 0)
+               << " sync_path=" << backendDiagnostics.synchronizationPath
+               << " timeline=" << (backendDiagnostics.timelineSemaphore ? 1 : 0)
+               << " fp16=" << (backendDiagnostics.shaderFloat16 ? 1 : 0)
+               << " subgroup_size=" << backendDiagnostics.subgroupSize
+               << " subgroup_stages=0x" << std::hex
+               << static_cast<uint32_t>(backendDiagnostics.subgroupStages)
+               << " subgroup_operations=0x"
+               << static_cast<uint32_t>(backendDiagnostics.subgroupOperations)
+               << std::dec
+               << " game_opaque_fd=" << (info.androidOpaqueFdSemaphoreSupported ? 1 : 0)
+               << " game_sync_fd=" << (info.androidSyncFdSemaphoreSupported ? 1 : 0)
+               << " framegen_opaque_fd=" << (backendDiagnostics.externalSemaphoreOpaqueFd ? 1 : 0)
+               << " framegen_sync_fd=" << (backendDiagnostics.externalSemaphoreSyncFd ? 1 : 0)
+               << " framegen_opaque_fd_extension="
+               << (backendDiagnostics.externalSemaphoreOpaqueFdExtension ? 1 : 0)
+               << " framegen_opaque_fd_query="
+               << (backendDiagnostics.externalSemaphoreOpaqueFdQuery ? 1 : 0)
+               << " framegen_opaque_fd_features="
+               << backendDiagnostics.externalSemaphoreOpaqueFdFeatures
+               << " framegen_opaque_fd_compatible="
+               << backendDiagnostics.externalSemaphoreOpaqueFdCompatible
+               << " framegen_opaque_fd_export_from_imported="
+               << backendDiagnostics.externalSemaphoreOpaqueFdExportFromImported
+               << " framegen_sync_fd_extension="
+               << (backendDiagnostics.externalSemaphoreSyncFdExtension ? 1 : 0)
+               << " framegen_sync_fd_query="
+               << (backendDiagnostics.externalSemaphoreSyncFdQuery ? 1 : 0)
+               << " framegen_sync_fd_features="
+               << backendDiagnostics.externalSemaphoreSyncFdFeatures
+               << " framegen_sync_fd_compatible="
+               << backendDiagnostics.externalSemaphoreSyncFdCompatible
+               << " framegen_sync_fd_export_from_imported="
+               << backendDiagnostics.externalSemaphoreSyncFdExportFromImported
+               << " display_timing=" << (info.androidDisplayTimingSupported ? 1 : 0)
+               << " present_timing_ext=" << (info.androidPresentTimingSupported ? 1 : 0)
+               << " compatibility_path="
+               << AndroidSyncPolicy::compatibilityPathName(this->compatibilityPath_)
+               << " conservative_sync="
+               << (this->conservativeCrossDeviceSync_ ? 1 : 0);
+        emitNativeStructuredDiagnostic("LSFG_PROVENANCE", fields.str());
+    }
+
     // Presentation-engine confirmation is telemetry-only. VK_GOOGLE_display_timing
     // was already enabled opportunistically at device creation; on Xclipse/generic
     // paths resolve its asynchronous history query and leave desiredPresentTime=0
@@ -1572,6 +1696,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     info.device, this->swapchain, 0,
                     deferredPass.acquireSemaphores.at(i).handle(),
                     VK_NULL_HANDLE, &imageIdx);
+                this->runtimeMetrics.observeAcquireResult(acquireResult);
                 if (acquireResult == VK_NOT_READY || acquireResult == VK_TIMEOUT) {
                     deferredWsiDrops = deferredReadyOutputPrefix - i;
                     this->runtimeMetrics.windowGeneratedLateDrops += deferredWsiDrops;
@@ -1663,6 +1788,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->runtimeMetrics.totalGeneratedWsiSubmitted++;
                 const auto deferredPresentResult =
                     Layer::ovkQueuePresentKHR(queue, &deferredPresentInfo);
+                this->runtimeMetrics.observePresentResult(deferredPresentResult);
                 if (isAdrenoWsiRetirementResult(deferredPresentResult))
                     return deferredPresentResult;
                 if (deferredPresentResult != VK_SUCCESS
@@ -2920,6 +3046,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     }
 
     const auto finishSourcePresent = [&](VkResult result, const char* sourceWait) -> VkResult {
+        metrics.observePresentResult(result);
         // Nonblocking presentation-engine feedback for previously submitted
         // generated frames. No queue/fence waits are introduced here.
         pollGeneratedDisplayConfirmations();
@@ -3940,6 +4067,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 pass.acquireSemaphores.at(i).handle(),
                 VK_NULL_HANDLE,
                 &imageIdx);
+            metrics.observeAcquireResult(res);
             if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
                 metrics.windowGeneratedPresentFailures++;
                 metrics.totalGeneratedPresentFailures++;
@@ -4006,6 +4134,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedWsiSubmitted++;
             metrics.totalGeneratedWsiSubmitted++;
             res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
+            metrics.observePresentResult(res);
             if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
                 metrics.windowGeneratedPresentFailures++;
                 metrics.totalGeneratedPresentFailures++;
@@ -5216,6 +5345,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         auto res = Layer::ovkAcquireNextImageKHR(
             info.device, this->swapchain, generatedAcquireTimeoutNs,
             pass.acquireSemaphores.at(i).handle(), VK_NULL_HANDLE, &imageIdx);
+        metrics.observeAcquireResult(res);
         if (!this->conservativeCrossDeviceSync_
                 && (res == VK_NOT_READY || res == VK_TIMEOUT)) {
             // Generic/Xclipse keeps opportunistic downstream-capacity drops.
@@ -5331,6 +5461,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.windowGeneratedWsiSubmitted++;
         metrics.totalGeneratedWsiSubmitted++;
         res = Layer::ovkQueuePresentKHR(generatedPresentQueue, &presentInfo);
+        metrics.observePresentResult(res);
         if (this->conservativeCrossDeviceSync_
                 && isAdrenoWsiRetirementResult(res))
             return res;
