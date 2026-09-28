@@ -356,6 +356,13 @@ namespace {
             getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
                 Layer::ovkGetInstanceProcAddr(layerInstance, "vkGetPhysicalDeviceProperties2KHR"));
         }
+        VkPhysicalDeviceProperties gameDeviceProperties{};
+        Layer::ovkGetPhysicalDeviceProperties(
+            physicalDevice, &gameDeviceProperties);
+        const bool xclipseDevice =
+            AndroidSyncPolicy::selectFramegenCompatibilityPath(
+                static_cast<VkDriverId>(0), {}, gameDeviceProperties.deviceName)
+            == AndroidSyncPolicy::FramegenCompatibilityPath::XclipseCurrent;
         const auto identity = Utils::getDeviceIdentity(physicalDevice, getProperties2);
         if (!identity.has_value()) {
             Utils::logLimitN("deviceIdentity", 1,
@@ -372,6 +379,7 @@ namespace {
                 .androidOpaqueFdSemaphoreSupported = androidOpaqueFdSemaphoreSupported,
                 .androidSyncFdSemaphoreSupported = androidSyncFdSemaphoreSupported,
                 .androidDisplayTimingSupported = androidDisplayTimingSupported,
+                .xclipseDevice = xclipseDevice,
             });
             std::lock_guard lock(hookStateMutex);
             deviceToInfo.insert_or_assign(*pDevice, std::move(deviceInfo));
@@ -879,16 +887,11 @@ namespace {
         const auto createSourceOnly = [&](const char* reason) -> VkResult {
             VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo;
             const auto configuredPresentMode = activeConf.e_present;
-            // Generation-off removes the LSFG swapchain/context contract but
-            // keeps the configured presentation policy that was already proven
-            // stable for this target. In particular, do not fall back to a
-            // guest-requested IMMEDIATE swapchain when GameNative is configured
-            // for Mailbox/FIFO pacing.
-            sourceOnlyCreateInfo.presentMode = choosePresentMode(
-                deviceInfo->physicalDevice,
-                pCreateInfo->surface,
-                pCreateInfo->presentMode,
-                activeConf.e_present);
+            // Generation-off is a true native boundary. The LSFG-selected
+            // presentation policy only applies while frame generation owns the
+            // synthetic/source batch; carrying FIFO into source-only mode
+            // reintroduces driver pacing and hitching after LSFG is disabled.
+            sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode;
 
             // Source-only remains a true no-framegen state: do not inflate image
             // count, add transfer usage, or instantiate the private LSFG/AHB
@@ -983,6 +986,31 @@ namespace {
             : choosePresentMode(
                 deviceInfo->physicalDevice, pCreateInfo->surface,
                 pCreateInfo->presentMode, configuredPresentMode);
+        bool xclipseFifoMailboxBacked = false;
+#ifdef __ANDROID__
+        // Samsung's FIFO WSI accepts every synthetic/source present but does not
+        // expose their visible scanout cadence. The device trace shows that this
+        // produces ghosting/hitching while the same batches are stable through
+        // MAILBOX. Keep FIFO as the logical policy (and GameNative refresh vote),
+        // but use the proven nonblocking WSI backend for active Xclipse LSFG.
+        // Adreno and generic devices never enter this branch.
+        if (deviceInfo->xclipseDevice
+                && configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR) {
+            const auto mailboxPresentMode = choosePresentMode(
+                deviceInfo->physicalDevice, pCreateInfo->surface,
+                pCreateInfo->presentMode, VK_PRESENT_MODE_MAILBOX_KHR);
+            if (mailboxPresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
+                createInfo.presentMode = mailboxPresentMode;
+                xclipseFifoMailboxBacked = true;
+            }
+            std::cerr << "lsfg-vk: init stage=xclipse-fifo-backend"
+                      << " logicalPresentMode=" << configuredPresentMode
+                      << " actualPresentMode=" << createInfo.presentMode
+                      << " backend="
+                      << (xclipseFifoMailboxBacked ? "mailbox" : "fifo-fallback")
+                      << "\n";
+        }
+#endif
         if (recreatingExistingSwapchain) {
             std::cerr << "lsfg-vk: init stage=swapchain-hot-recreate-present-mode"
                       << " adaptivePacing=0"
@@ -1076,6 +1104,8 @@ namespace {
                       << " wrapper_override_present_mode=" << configuredPresentMode
                       << " chosen_present_mode=" << createInfo.presentMode
                       << " actual_create_info_present_mode=" << createInfo.presentMode
+                      << " fifo_backend="
+                      << (xclipseFifoMailboxBacked ? "mailbox" : "native")
                       << " image_count=" << imageCount
                       << " source_queue=application-present"
                       << " generated_queue=compatibility-selected"
