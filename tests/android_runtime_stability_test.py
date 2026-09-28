@@ -835,17 +835,11 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         source_only_create = hooks[create_start:create_end]
         self.assertIn("VkSwapchainCreateInfoKHR sourceOnlyCreateInfo = *pCreateInfo", source_only_create)
         self.assertIn(
-            "sourceOnlyCreateInfo.presentMode = choosePresentMode(",
-            source_only_create,
-        )
-        self.assertIn("deviceInfo->physicalDevice", source_only_create)
-        self.assertIn("pCreateInfo->surface", source_only_create)
-        self.assertIn("pCreateInfo->presentMode", source_only_create)
-        self.assertIn("activeConf.e_present", source_only_create)
-        self.assertNotIn(
             "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
             source_only_create,
         )
+        self.assertNotIn("choosePresentMode(", source_only_create)
+        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", source_only_create)
         self.assertNotIn("residentCapacityMultiplier", source_only_create)
         self.assertNotIn("requiredTransferUsage", source_only_create)
         self.assertNotIn("LsContext", source_only_create)
