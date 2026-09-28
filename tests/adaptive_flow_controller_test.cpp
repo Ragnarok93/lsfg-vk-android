@@ -68,9 +68,27 @@ int main() {
         const auto quality = AdaptiveFlowController::statesForPreset(AdaptiveFlowPreset::Quality);
         const auto balanced = AdaptiveFlowController::statesForPreset(AdaptiveFlowPreset::Balanced);
         const auto low = AdaptiveFlowController::statesForPreset(AdaptiveFlowPreset::Low);
-        assert(quality.size() == 4 && near(quality.front(), 1.00F) && near(quality.back(), 0.70F));
-        assert(balanced.size() == 4 && near(balanced.front(), 0.80F) && near(balanced.back(), 0.55F));
-        assert(low.size() == 4 && near(low.front(), 0.55F) && near(low.back(), 0.25F));
+        constexpr float qualityExpected[] = {
+            1.00F, 0.95F, 0.90F, 0.85F, 0.80F, 0.75F, 0.70F,
+        };
+        constexpr float balancedExpected[] = {
+            0.80F, 0.75F, 0.70F, 0.65F, 0.60F, 0.55F,
+        };
+        constexpr float lowExpected[] = {
+            0.55F, 0.50F, 0.45F, 0.40F, 0.35F, 0.30F, 0.25F,
+        };
+        const auto verifyStates = [](std::span<const float> actual,
+                const float* expected, std::size_t expectedCount) {
+            assert(actual.size() == expectedCount);
+            for (std::size_t i = 0; i < expectedCount; ++i) {
+                assert(near(actual[i], expected[i]));
+                if (i > 0)
+                    assert(near(actual[i - 1] - actual[i], 0.05F));
+            }
+        };
+        verifyStates(quality, qualityExpected, std::size(qualityExpected));
+        verifyStates(balanced, balancedExpected, std::size(balancedExpected));
+        verifyStates(low, lowExpected, std::size(lowExpected));
     }
 
     {
@@ -202,6 +220,28 @@ int main() {
         resumed.elapsed = 10s;
         controller.observe(resumed);
         assert(near(controller.currentScale(), 0.90F));
+    }
+
+    {
+        // Auto must probe the next .05 state when the target is missed under
+        // sustained whole-device pressure, even when the first probe is below
+        // the ordinary material-contribution threshold.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
+        bool lowered = false;
+        for (int i = 0; i < 16 && !lowered; ++i) {
+            auto observation = sample(
+                36.3, 11.7, 66.666, false, false,
+                97.0, true, true, false, true);
+            observation.outputTargeted = true;
+            observation.outputCadenceValid = true;
+            observation.outputFps = 49.8;
+            observation.outputTargetSatisfied = false;
+            observation.sourceFps = 12.4;
+            controller.observe(observation);
+            lowered = near(controller.currentScale(), 0.95F);
+        }
+        assert(lowered);
+        assert(controller.telemetry().stateIndex == 1);
     }
 
     {
