@@ -3184,18 +3184,44 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const double outputFps = (sourceCount + generatedCount) / elapsedSeconds;
             const uint64_t generatedDisplayPending =
                 static_cast<uint64_t>(this->generatedDisplayPendingSet_.size());
+            const bool generatedDisplayConfirmationComplete =
+                this->generatedDisplayConfirmationEnabled_
+                && metrics.totalGeneratedWsiAccepted > 0
+                && generatedDisplayPending == 0
+                && metrics.totalGeneratedDisplayConfirmed
+                    == metrics.totalGeneratedWsiAccepted
+                && metrics.totalGeneratedDisplayNotShown == 0
+                && metrics.totalGeneratedDisplayUnknown == 0
+                && metrics.totalDisplayTimingQueryFailures == 0;
+            const char* generatedDisplayConfirmation =
+                !this->generatedDisplayConfirmationEnabled_
+                    ? "unavailable"
+                    : generatedDisplayConfirmationComplete
+                        ? "confirmed"
+                        : metrics.totalGeneratedDisplayNotShown > 0
+                            ? "not-shown"
+                            : metrics.totalGeneratedDisplayUnknown > 0
+                                ? "unknown"
+                                : generatedDisplayPending > 0
+                                    ? "pending"
+                                    : metrics.totalGeneratedWsiAccepted == 0
+                                        ? "no-generated-frames"
+                                        : "incomplete";
             const char* generatedDeliveryConfidence =
-                metrics.windowGeneratedDisplayConfirmed > 0
+                generatedDisplayConfirmationComplete
                     ? "display-timing-confirmed"
                     : (this->generatedDisplayConfirmationEnabled_
-                        && generatedDisplayPending > 0
-                            ? "display-timing-pending"
+                        && metrics.totalGeneratedDisplayNotShown > 0
+                            ? "display-timing-no-visible-confirmation"
                             : (this->generatedDisplayConfirmationEnabled_
-                                && metrics.windowGeneratedDisplayNotShown > 0
-                                    ? "display-timing-no-visible-confirmation"
-                                    : (metrics.windowGeneratedWsiAccepted > 0
-                                        ? "wsi-accepted-only"
-                                        : "none")));
+                                && metrics.totalGeneratedDisplayUnknown > 0
+                                    ? "display-timing-unknown"
+                                    : (this->generatedDisplayConfirmationEnabled_
+                                        && generatedDisplayPending > 0
+                                            ? "display-timing-pending"
+                                            : (metrics.windowGeneratedWsiAccepted > 0
+                                                ? "wsi-accepted-only"
+                                                : "none"))));
             std::cerr << "lsfg-vk: delivery-metrics"
                       << " generated_dispatched=" << metrics.windowGeneratedDispatched
                       << " generated_completed=" << metrics.windowGeneratedCompleted
@@ -3218,6 +3244,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (this->generatedDisplayConfirmationEnabled_
                             ? "google-display-timing"
                             : "none")
+                      << " generated_display_confirmation="
+                      << generatedDisplayConfirmation
+                      << " generated_display_confirmation_complete="
+                      << (generatedDisplayConfirmationComplete ? 1 : 0)
                       << " generated_delivery_confidence=" << generatedDeliveryConfidence
                       << " history_invalidation_reason="
                       << sourceHistoryInvalidationReasonName(
@@ -3236,7 +3266,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "generated_display_unknown=%llu generated_display_confirmed_total=%llu "
                 "generated_display_not_shown_total=%llu generated_display_unknown_total=%llu "
                 "display_timing_query_failures=%llu "
-                "generated_delivery_backend=%s generated_delivery_confidence=%s "
+                "generated_delivery_backend=%s generated_display_confirmation=%s "
+                "generated_display_confirmation_complete=%d "
+                "generated_delivery_confidence=%s "
                 "history_invalidation_reason=%s history_reprime_reason=%s",
                 static_cast<unsigned long long>(metrics.windowGeneratedDispatched),
                 static_cast<unsigned long long>(metrics.windowGeneratedCompleted),
@@ -3253,6 +3285,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 static_cast<unsigned long long>(metrics.windowDisplayTimingQueryFailures),
                 this->generatedDisplayConfirmationEnabled_
                     ? "google-display-timing" : "none",
+                generatedDisplayConfirmation,
+                generatedDisplayConfirmationComplete ? 1 : 0,
                 generatedDeliveryConfidence,
                 sourceHistoryInvalidationReasonName(
                     this->lastHistoryInvalidationReason_),
