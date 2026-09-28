@@ -59,7 +59,7 @@ def patch_context_source(path: Path) -> None:
         init_anchor
         + "        // android-submit-hot-path: retain small submit-vector capacity per slot.\n"
         "        data.submitWaitSemaphores.reserve(1);\n"
-        "        data.submitSignalSemaphores.reserve(1);\n"
+        "        data.submitSignalSemaphores.reserve(2);\n"
         "        data.activeInternalSemaphores.reserve(vk.generationCount);\n"
     )
     text = replace_exact(
@@ -72,12 +72,12 @@ def patch_context_source(path: Path) -> None:
 
     waits_old = (
         "    std::vector<Core::Semaphore> waits = { data.inSemaphore };\n"
-        "    if (inSem < 0) waits.clear();\n"
+        "    if (!hasInputSemaphore) waits.clear();\n"
     )
     waits_new = (
         "    auto& waits = data.submitWaitSemaphores;\n"
         "    waits.clear();\n"
-        "    if (inSem >= 0)\n"
+        "    if (hasInputSemaphore)\n"
         "        waits.emplace_back(data.inSemaphore);\n"
     )
     text = replace_exact(
@@ -111,6 +111,10 @@ def patch_context_source(path: Path) -> None:
         "        std::vector<Core::Semaphore> signals;\n"
         "        if (hasOutSemaphore)\n"
         "            signals.emplace_back(outSemaphore);\n"
+        "#ifdef __ANDROID__\n"
+        "        if (exportSyncFdOutputs && pass + 1 == generationCount)\n"
+        "            signals.emplace_back(data.batchCompleteSemaphore);\n"
+        "#endif\n"
         "        buf2.submit(vk.device.getComputeQueue(), completionFence,\n"
         "            { internalSemaphore }, std::nullopt,\n"
         "            signals, std::nullopt);\n"
@@ -120,6 +124,10 @@ def patch_context_source(path: Path) -> None:
         "        signals.clear();\n"
         "        if (hasOutSemaphore)\n"
         "            signals.emplace_back(outSemaphore);\n"
+        "#ifdef __ANDROID__\n"
+        "        if (exportSyncFdOutputs && pass + 1 == generationCount)\n"
+        "            signals.emplace_back(data.batchCompleteSemaphore);\n"
+        "#endif\n"
         "        waits.clear();\n"
         "        waits.emplace_back(internalSemaphore);\n"
         "        buf2.submit(vk.device.getComputeQueue(), completionFence,\n"

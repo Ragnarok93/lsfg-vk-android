@@ -36,6 +36,7 @@ DescriptorPool::DescriptorPool(const Core::Device& device) {
         new VkDescriptorPool(poolHandle),
         [dev = device.handle()](VkDescriptorPool* poolHandle) {
             vkDestroyDescriptorPool(dev, *poolHandle, nullptr);
+            delete poolHandle;
         }
     );
 }

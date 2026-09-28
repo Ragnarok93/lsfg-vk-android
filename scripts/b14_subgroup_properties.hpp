@@ -21,12 +21,15 @@ struct SubgroupQueryResult {
 
 [[nodiscard]] inline bool supportsCooperativeMipmaps(
         const VkPhysicalDeviceSubgroupProperties& properties) noexcept {
-    constexpr VkSubgroupFeatureFlags requiredOperations =
-        VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT;
-    return properties.subgroupSize >= 4U
-        && (properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0
-        && (properties.supportedOperations & requiredOperations)
-            == requiredOperations;
+    // B14 is enabled only for the previously validated subgroup-128 Android
+    // capability profile instead of reopening the old broad subgroup>=4 gate.
+    // Every other capability tuple remains on exact B13 bytecode.
+    constexpr VkSubgroupFeatureFlags kValidatedOperations =
+        static_cast<VkSubgroupFeatureFlags>(0x67fU);
+    return properties.subgroupSize == 128U
+        && properties.supportedStages == VK_SHADER_STAGE_COMPUTE_BIT
+        && properties.supportedOperations == kValidatedOperations
+        && properties.quadOperationsInAllStages == VK_FALSE;
 }
 
 [[nodiscard]] inline bool hasCompleteSubgroupMetadata(

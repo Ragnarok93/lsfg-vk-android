@@ -55,9 +55,36 @@ removed = [
     "tests/android_candidate_b3_beta4_analysis_test.py",
     "tests/android_candidate_b9_beta4_spill_collapse_test.py",
     "tests/android_b12_timestamp_fallback_test.py",
+    "include/adreno_source_protection.hpp",
+    "tests/android_adreno_source_protection_state_test.cpp",
+    "tests/android_adreno_source_protection_delivery_test.py",
 ]
 for rel in removed:
     if (root / rel).exists():
         raise SystemExit(f"superseded experiment artifact remains: {rel}")
+
+source_protection_tokens = (
+    "AdrenoSourceProtectionController",
+    "AdrenoSourceProtectionBackoffReason",
+    "adrenoSourceProtection_",
+    "SourceProtectionBudgetTracker",
+    "SourceProtectionBudgetTelemetry",
+    "sourceProtectionBudgetTracker_",
+    "setSourceProtectionBaseline(",
+    "source_protection_baseline_valid=",
+    "source_protection_copy_cost_valid=",
+    "adreno_source_protection_state=",
+    "adreno_source_protection_backoff=",
+)
+for rel in (
+    "include/adaptive_scheduler.hpp",
+    "src/adaptive_scheduler.cpp",
+    "include/context.hpp",
+    "src/context.cpp",
+):
+    text = (root / rel).read_text(encoding="utf-8")
+    for token in source_protection_tokens:
+        if token in text:
+            raise SystemExit(f"retired source-protection mechanism remains in {rel}: {token}")
 
 print("production Android pipeline cleanup contract: ok")

@@ -78,8 +78,14 @@ void write(VkPhysicalDeviceProperties2* out, uint32_t size,
 
 void validCore(VkPhysicalDevice, VkPhysicalDeviceProperties2* out) {
     ++coreCalls;
-    write(out, 32, VK_SHADER_STAGE_COMPUTE_BIT,
-        VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT, VK_FALSE);
+    write(out, 128, VK_SHADER_STAGE_COMPUTE_BIT,
+        static_cast<VkSubgroupFeatureFlags>(0x67fU), VK_FALSE);
+}
+
+void xclipseLike(VkPhysicalDevice, VkPhysicalDeviceProperties2* out) {
+    ++coreCalls;
+    write(out, 64, static_cast<VkShaderStageFlags>(0x3d3fU),
+        static_cast<VkSubgroupFeatureFlags>(0x6ffU), VK_TRUE);
 }
 
 void missingBallot(VkPhysicalDevice, VkPhysicalDeviceProperties2* out) {
@@ -133,7 +139,7 @@ int main() {
         assert(coreCalls == 1 && khrCalls == 1);
         assert(result.properties.subgroupSize == 64);
         assert(result.properties.quadOperationsInAllStages == VK_TRUE);
-        assert(b14::supportsCooperativeMipmaps(result.properties));
+        assert(!b14::supportsCooperativeMipmaps(result.properties));
     }
     {
         coreCalls = khrCalls = 0;
@@ -143,6 +149,12 @@ int main() {
         assert(coreCalls == 1 && khrCalls == 1);
         assert(result.properties.supportedStages == VK_SHADER_STAGE_COMPUTE_BIT);
         assert(result.properties.supportedOperations == VK_SUBGROUP_FEATURE_BASIC_BIT);
+        assert(!b14::supportsCooperativeMipmaps(result.properties));
+    }
+    {
+        coreCalls = khrCalls = 0;
+        const auto result = b14::querySubgroupProperties(1, xclipseLike, nullptr);
+        assert(result.route == b14::SubgroupQueryRoute::Core);
         assert(!b14::supportsCooperativeMipmaps(result.properties));
     }
     {
@@ -157,7 +169,7 @@ int main() {
 
 
 class AndroidB14SubgroupPropertyQueryTest(unittest.TestCase):
-    def test_core_and_khr_routes_preserve_strict_shader_contract(self) -> None:
+    def test_s20_profile_is_eligible_while_xclipse_profile_remains_b13(self) -> None:
         compiler = shutil.which("g++") or shutil.which("clang++")
         self.assertIsNotNone(compiler)
         with tempfile.TemporaryDirectory() as tmp:

@@ -17,10 +17,23 @@ namespace Hooks {
         LSFG::DeviceIdentity identity{};
         bool identityValid{false};
         std::pair<uint32_t, VkQueue> queue; // graphics family
+        // Qualcomm/Adreno only: a second queue from the same graphics family
+        // keeps synthetic waits off the application's render/present queue.
+        VkQueue syntheticQueue{VK_NULL_HANDLE};
+        bool adrenoSyntheticQueueAvailable{false};
         bool androidAhbSupported{true};
-        // Optional Android optimization. False preserves the established
-        // synchronous AHB fence handoff with no change in presentation behavior.
+        // Optional Android cross-device semaphore transports. False for both
+        // preserves the established synchronous AHB fence handoff.
         bool androidOpaqueFdSemaphoreSupported{false};
+        bool androidSyncFdSemaphoreSupported{false};
+        // Optional adaptive presentation pacing. When available, generated and
+        // source presents carry explicit target times instead of relying on
+        // MAILBOX queue submission cadence to approximate display cadence.
+        bool androidDisplayTimingSupported{false};
+        // True only for Samsung/Xclipse-class game devices. This is resolved
+        // before swapchain creation so Xclipse FIFO can select its WSI backend
+        // without changing the protected Adreno compatibility path.
+        bool xclipseDevice{false};
     };
 
     /// Map of hooked Vulkan functions.

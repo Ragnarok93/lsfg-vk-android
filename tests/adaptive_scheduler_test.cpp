@@ -8,6 +8,141 @@ using namespace std::chrono_literals;
 
 int main() {
     {
+        // Source deadlines advance once per real source observation. Querying
+        // synthetic positions cannot advance or re-phase the protected source
+        // timeline.
+        SourceProtectedTimeline timeline;
+        const auto first = timeline.observe(1'000'000'000ULL, 16ms);
+        assert(first.valid);
+        assert(first.rebased);
+        assert(first.sourceIndex == 0);
+        assert(first.sourceDesiredTimeNs == 1'016'000'000ULL);
+
+        const auto quarter =
+            timeline.syntheticDesiredTimeNs(first, 0.25);
+        const auto threeQuarter =
+            timeline.syntheticDesiredTimeNs(first, 0.75);
+        assert(quarter == 1'004'000'000ULL);
+        assert(threeQuarter == 1'012'000'000ULL);
+
+        const auto second = timeline.observe(1'016'000'000ULL, 16ms);
+        assert(second.sourceIndex == 1);
+        assert(second.previousSourceDesiredTimeNs == first.sourceDesiredTimeNs);
+        assert(second.sourceDesiredTimeNs == 1'032'000'000ULL);
+        assert(second.sourceDeadlineErrorNs == 0);
+
+        // A synthetic opportunity can be ignored/rejected without changing the
+        // next source deadline because no generated-work feedback enters observe().
+        (void) timeline.syntheticDesiredTimeNs(second, 0.5);
+        const auto third = timeline.observe(1'032'000'000ULL, 16ms);
+        assert(third.sourceDesiredTimeNs == 1'048'000'000ULL);
+    }
+
+    {
+        // Phase follows the real source arrival, while the future generation
+        // window follows predicted cadence rather than the lateness itself.
+        SourceProtectedTimeline timeline;
+        const auto first = timeline.observe(2'000'000'000ULL, 20ms);
+        assert(first.valid);
+        const auto late = timeline.observe(2'050'000'000ULL, 20ms);
+        assert(late.rebased);
+        assert(late.sourceDeadlineErrorNs == 30'000'000LL);
+        assert(late.previousSourceDesiredTimeNs == 2'050'000'000ULL);
+        assert(late.intervalNs == 20'000'000ULL);
+        assert(late.sourceDesiredTimeNs == 2'070'000'000ULL);
+    }
+
+    {
+        // A single slow frame cannot become a giant synthetic budget. The
+        // source arrival is authoritative for phase, while cadence expands only
+        // gradually from the previous real-source prediction.
+        SourceProtectedTimeline timeline;
+        const auto initial = timeline.observe(5'000'000'000ULL, 16ms);
+        assert(initial.valid);
+        assert(initial.intervalNs == 16'000'000ULL);
+        assert(initial.sourceDesiredTimeNs == 5'016'000'000ULL);
+
+        const auto slowSpike = timeline.observe(5'050'000'000ULL, 50ms);
+        assert(slowSpike.valid);
+        assert(slowSpike.rebased);
+        assert(slowSpike.sourceDeadlineErrorNs == 34'000'000LL);
+        assert(slowSpike.previousSourceDesiredTimeNs == 5'050'000'000ULL);
+        // Upward prediction is capped to +10% per source observation:
+        // bounded observation=24ms, alpha=.2 => 17.6ms.
+        assert(slowSpike.intervalNs == 17'600'000ULL);
+        assert(slowSpike.sourceDesiredTimeNs == 5'067'600'000ULL);
+
+        const auto sustainedSlow =
+            timeline.observe(5'100'000'000ULL, 50ms);
+        assert(sustainedSlow.valid);
+        assert(sustainedSlow.intervalNs == 19'360'000ULL);
+        assert(sustainedSlow.sourceDesiredTimeNs == 5'119'360'000ULL);
+    }
+
+    {
+        // When the source speeds up, the prediction contracts much faster so
+        // frame generation cannot keep spending against an obsolete long
+        // interval.
+        SourceProtectedTimeline timeline;
+        assert(timeline.observe(6'000'000'000ULL, 32ms).valid);
+
+        const auto fast =
+            timeline.observe(6'016'000'000ULL, 16ms);
+        assert(fast.valid);
+        // 32ms -> bounded 16ms, alpha=.5 => 24ms.
+        assert(fast.intervalNs == 24'000'000ULL);
+        assert(fast.previousSourceDesiredTimeNs == 6'016'000'000ULL);
+        assert(fast.sourceDesiredTimeNs == 6'040'000'000ULL);
+
+        const auto faster =
+            timeline.observe(6'032'000'000ULL, 16ms);
+        assert(faster.valid);
+        assert(faster.intervalNs == 20'000'000ULL);
+        assert(faster.sourceDesiredTimeNs == 6'052'000'000ULL);
+    }
+
+    {
+        // Small source jitter changes the measured error but never shifts the
+        // synthetic interval start away from the real source arrival.
+        SourceProtectedTimeline timeline;
+        assert(timeline.observe(7'000'000'000ULL, 16ms).valid);
+
+        const auto jitter =
+            timeline.observe(7'016'500'000ULL, 16'500'000ns);
+        assert(jitter.valid);
+        assert(!jitter.rebased);
+        assert(jitter.previousSourceDesiredTimeNs == 7'016'500'000ULL);
+        assert(jitter.sourceDesiredTimeNs > jitter.previousSourceDesiredTimeNs);
+        const auto midpoint = timeline.syntheticDesiredTimeNs(jitter, 0.5);
+        assert(midpoint > jitter.previousSourceDesiredTimeNs);
+        assert(midpoint < jitter.sourceDesiredTimeNs);
+    }
+
+    {
+        // Source timeline discontinuities are cadence-relative in every mode.
+        // A suspend-like outlier must not create a historical synthetic span or
+        // a delayed source deadline, while a slow-but-stable cadence remains valid.
+        SourceProtectedTimeline timeline;
+        assert(timeline.observe(3'000'000'000ULL, 16ms).valid);
+        assert(timeline.observe(3'016'000'000ULL, 16ms).valid);
+
+        const auto suspended =
+            timeline.observe(3'516'000'000ULL, 500ms);
+        assert(!suspended.valid);
+
+        const auto resumed =
+            timeline.observe(3'532'000'000ULL, 16ms);
+        assert(resumed.valid);
+        assert(resumed.rebased);
+        assert(resumed.sourceIndex == 0);
+        assert(resumed.sourceDesiredTimeNs == 3'548'000'000ULL);
+
+        SourceProtectedTimeline slowTimeline;
+        assert(slowTimeline.observe(4'000'000'000ULL, 125ms).valid);
+        assert(slowTimeline.observe(4'125'000'000ULL, 125ms).valid);
+    }
+
+    {
         AdaptiveFrameScheduler scheduler(60, 3);
         assert(scheduler.plan(33333333ns) == 1);
         assert(scheduler.plan(33333333ns) == 1);
@@ -56,39 +191,57 @@ int main() {
     }
 
     {
-        // A real sustained increase in source rate must still be recognized;
-        // it just requires stronger confirmation than a slowdown so transient
-        // present bursts cannot zero Adaptive generation.
+        // Sustained faster cadence is recognized through the robust window and
+        // bounded EMA, not a hard snap. Short WSI bursts therefore cannot erase
+        // interpolation demand, while a real transition still converges.
         AdaptiveFrameScheduler scheduler(60, 3);
         for (int frame = 0; frame < 12; ++frame)
             scheduler.plan(33333333ns);
 
-        bool snapped = false;
-        for (int frame = 0; frame < 8; ++frame) {
+        for (int frame = 0; frame < 8; ++frame)
             scheduler.plan(10ms);
-            snapped = snapped || scheduler.telemetry().sourceRateSnapped;
-        }
+        assert(!scheduler.telemetry().sourceRateSnapped);
+        assert(scheduler.telemetry().smoothedSourceFps > 40.0);
+        assert(scheduler.telemetry().smoothedSourceFps < 70.0);
 
-        assert(snapped);
+        for (int frame = 0; frame < 16; ++frame)
+            scheduler.plan(10ms);
         assert(scheduler.telemetry().smoothedSourceFps > 80.0);
     }
 
     {
-        // A genuine slowdown must remain responsive: three consistent slow
-        // intervals should snap the estimate quickly so Adaptive can react to
-        // a heavier scene without several seconds of EMA lag.
+        // Sustained slowdown must remain responsive without allowing one bursty
+        // interval to replace the source baseline.
         AdaptiveFrameScheduler scheduler(60, 3);
         for (int frame = 0; frame < 12; ++frame)
             scheduler.plan(16ms);
 
-        bool snapped = false;
-        for (int frame = 0; frame < 3; ++frame) {
+        scheduler.plan(90ms);
+        assert(scheduler.telemetry().smoothedSourceFps > 50.0);
+        assert(scheduler.telemetry().syntheticOpportunitiesCreated <= 1);
+
+        for (int frame = 0; frame < 8; ++frame)
             scheduler.plan(34ms);
-            snapped = snapped || scheduler.telemetry().sourceRateSnapped;
+        assert(!scheduler.telemetry().sourceRateSnapped);
+        assert(scheduler.telemetry().smoothedSourceFps < 35.0);
+    }
+
+    {
+        // Robust cadence changes must not erase sustained unmet-demand evidence.
+        // At 60 FPS target, a stable ~29 FPS source still reaches cost level 2.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(16ms);
+
+        bool sawRaise = false;
+        for (int frame = 0; frame < 32; ++frame) {
+            scheduler.plan(34ms);
+            sawRaise = sawRaise || scheduler.telemetry().costRaised;
         }
 
-        assert(snapped);
-        assert(scheduler.telemetry().smoothedSourceFps < 35.0);
+        assert(sawRaise);
+        assert(scheduler.telemetry().costLimit >= 2);
+        assert(scheduler.telemetry().wantedGeneratedFrames > 1.0);
     }
 
     {
@@ -136,28 +289,6 @@ int main() {
         assert(scheduler.telemetry().costLimit == 2);
     }
 
-    {
-        // If source FPS collapses shortly after a confirmed cost raise,
-        // attribute the correlated drop to framegen and return to the lower
-        // cost ceiling.
-        AdaptiveFrameScheduler scheduler(120, 3);
-        bool sawRaise = false;
-        for (int frame = 0; frame < 24; ++frame) {
-            scheduler.plan(40ms);
-            sawRaise = sawRaise || scheduler.telemetry().costRaised;
-            if (sawRaise)
-                break;
-        }
-        assert(sawRaise);
-
-        bool sawBackoff = false;
-        for (int frame = 0; frame < 3; ++frame) {
-            scheduler.plan(60ms);
-            sawBackoff = sawBackoff || scheduler.telemetry().costBackedOff;
-        }
-        assert(sawBackoff);
-        assert(scheduler.telemetry().costLimit == 1);
-    }
 
     {
         // A natural source-rate transition with no preceding cost raise must
@@ -165,16 +296,14 @@ int main() {
         AdaptiveFrameScheduler scheduler(60, 3);
         for (int frame = 0; frame < 8; ++frame)
             scheduler.plan(16ms);
-        bool sawRateSnap = false;
         bool sawBackoff = false;
         bool sawRaise = false;
         for (int frame = 0; frame < 3; ++frame) {
             scheduler.plan(34ms);
-            sawRateSnap = sawRateSnap || scheduler.telemetry().sourceRateSnapped;
             sawBackoff = sawBackoff || scheduler.telemetry().costBackedOff;
             sawRaise = sawRaise || scheduler.telemetry().costRaised;
         }
-        assert(sawRateSnap);
+        assert(!scheduler.telemetry().sourceRateSnapped);
         assert(!sawBackoff);
         assert(!sawRaise);
     }
@@ -236,22 +365,6 @@ int main() {
         assert(generated >= 2);
     }
 
-    {
-        // The warm start must remain fail-safe: if the newly seeded load causes
-        // a prompt source-rate regression, the existing blame window must back
-        // it off rather than pinning the user-selected target at an unsafe cost.
-        AdaptiveFrameScheduler scheduler(45, 3);
-        for (int frame = 0; frame < 12; ++frame)
-            scheduler.plan(40ms);
-        scheduler.configure(120, 3);
-        assert(scheduler.plan(1s) == 0);
-        scheduler.plan(40ms);
-        assert(scheduler.telemetry().configWarmStart);
-        assert(scheduler.telemetry().costLimit == 3);
-        scheduler.plan(80ms);
-        assert(scheduler.telemetry().costBackedOff);
-        assert(scheduler.telemetry().costLimit == 2);
-    }
 
     {
         // First-time configuration is still a cold start; merely constructing
@@ -279,6 +392,721 @@ int main() {
         assert(scheduler.plan(60ms) == 1);
         assert(!scheduler.telemetry().configWarmStart);
     }
+
+
+    {
+        // Source rate by itself is never a reason to disable interpolation.
+        // A slow but stable source remains eligible under the same generation
+        // semantics as every other cadence.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame) {
+            assert(scheduler.plan(125ms) > 0); // stable 8 FPS source
+            assert(!scheduler.telemetry().discontinuityReset);
+        }
+    }
+
+    {
+        // Fractional density creates deterministic opportunities rather than
+        // changing a coarse multiplier mode. Ignoring an opportunity is not
+        // fed back into the distributor, so it cannot become catch-up debt.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        std::size_t opportunities = 0;
+        std::size_t priorOpportunityFrame = 0;
+        std::size_t maxGap = 0;
+        for (std::size_t frame = 1; frame <= 20; ++frame) {
+            const auto created = scheduler.plan(20ms); // ~0.2 generated/source
+            assert(created <= 1);
+            assert(scheduler.telemetry().syntheticOpportunitiesCreated == created);
+            assert(scheduler.telemetry().fractionalPhase >= 0.0);
+            assert(scheduler.telemetry().fractionalPhase < 1.0);
+            if (created != 0) {
+                if (priorOpportunityFrame != 0)
+                    maxGap = std::max(maxGap, frame - priorOpportunityFrame);
+                priorOpportunityFrame = frame;
+                opportunities += created;
+                // Deliberately pretend downstream rejected this opportunity.
+                // The next plan() call receives no rejection/debt feedback.
+            }
+        }
+        assert(opportunities >= 3 && opportunities <= 5);
+        assert(maxGap <= 6);
+    }
+
+
+    {
+        // r56 regression: once a ~30 FPS source has converged on a 120 FPS
+        // Adaptive target, ordinary source jitter must not modulate the batch
+        // density 3 -> 2 -> 3. Desired cadence is derived from the smoothed
+        // source timeline; raw intervals remain pressure evidence only.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 72; ++frame)
+            scheduler.plan(33'333'333ns);
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(scheduler.telemetry().integerDensityLocked);
+        assert(scheduler.telemetry().lockedGeneratedFrames == 3);
+
+        for (int frame = 0; frame < 48; ++frame) {
+            const auto generated =
+                scheduler.plan((frame % 2 == 0) ? 25ms : 40ms);
+            assert(generated == 3);
+            assert(scheduler.telemetry().wantedGeneratedFrames > 2.7);
+        }
+    }
+
+
+    {
+        // Target changes and timing discontinuities reset the density latch and
+        // fractional phase rather than carrying the old regime into a new
+        // temporal epoch.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        for (int frame = 0; frame < 72; ++frame)
+            scheduler.plan(33'333'333ns);
+        assert(scheduler.telemetry().integerDensityLocked);
+
+        scheduler.configure(100, 3);
+        scheduler.plan(33'333'333ns);
+        assert(!scheduler.telemetry().integerDensityLocked);
+        assert(scheduler.telemetry().lockedGeneratedFrames == 0);
+
+        scheduler.plan(1s);
+        assert(scheduler.telemetry().discontinuityReset);
+        assert(!scheduler.telemetry().integerDensityLocked);
+        assert(scheduler.telemetry().fractionalPhase == 0.0);
+    }
+
+    {
+        // Genuine fractional demand remains phase-distributed, but it is driven
+        // by the smoothed source cadence rather than raw 25/40 ms jitter. A
+        // ~30 FPS source targeting 100 FPS needs about 2.33 synthetics/source,
+        // so every stable cycle should contain two or three, never one or four.
+        AdaptiveFrameScheduler scheduler(100, 3);
+        for (int frame = 0; frame < 72; ++frame)
+            scheduler.plan(33'333'333ns);
+        assert(scheduler.telemetry().costLimit == 3);
+
+        std::size_t total = 0;
+        bool sawTwo = false;
+        bool sawThree = false;
+        for (int frame = 0; frame < 30; ++frame) {
+            const auto generated =
+                scheduler.plan((frame % 2 == 0) ? 25ms : 40ms);
+            assert(generated >= 2);
+            assert(generated <= 3);
+            total += generated;
+            sawTwo = sawTwo || generated == 2;
+            sawThree = sawThree || generated == 3;
+        }
+
+        assert(sawTwo);
+        assert(sawThree);
+        assert(total >= 67 && total <= 73);
+    }
+
+    {
+        // Build #383 regression: predictor capacity alone must not early-promote
+        // while the recent real-source cadence is still alternating wildly.
+        // The generic sustained-demand timer remains available, but the fast
+        // capacity path requires a stable cadence window.
+        AdaptiveFrameScheduler scheduler(120, 3);
+        const std::array<std::chrono::milliseconds, 4> unstable{
+            20ms, 60ms, 20ms, 60ms,
+        };
+        bool promoted = false;
+        for (const auto interval : unstable) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(interval);
+            promoted = promoted || scheduler.telemetry().capacityPromoted;
+        }
+        assert(!promoted);
+        assert(scheduler.telemetry().costLimit == 1);
+
+        // Once cadence settles, the same safe hint may still promote one level
+        // early rather than waiting the full generic demand interval.
+        for (int frame = 0; frame < 8 && !promoted; ++frame) {
+            scheduler.setSafeGenerationHint(2, true);
+            scheduler.plan(40ms);
+            promoted = promoted || scheduler.telemetry().capacityPromoted;
+        }
+        assert(promoted);
+        assert(scheduler.telemetry().costLimit == 2);
+    }
+
+
+    {
+        // A single long-but-not-discontinuous source hitch is consumed without
+        // minting several target slots or catch-up debt.
+        AdaptiveFrameScheduler scheduler(60, 3);
+        for (int frame = 0; frame < 12; ++frame)
+            scheduler.plan(16ms);
+        const auto hitch = scheduler.plan(100ms);
+        assert(hitch <= 1);
+        assert(scheduler.telemetry().opportunityIntervalSeconds < 0.030);
+        const auto next = scheduler.plan(16ms);
+        assert(next <= 1);
+    }
+
+    {
+        // WSI capacity is independent of scheduler cost. Sustained rejection
+        // lowers one presentation level; recovery requires a much longer clean
+        // run and never blocks or pre-acquires a swapchain image.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        assert(capacity.limit(3) == 3);
+        for (int i = 0; i < 3; ++i)
+            capacity.observe(2, 1);
+        assert(capacity.telemetry().generationCap == 2);
+        assert(capacity.telemetry().pressure);
+
+        bool sawRecoveryRaise = false;
+        for (int i = 0; i < 24; ++i) {
+            capacity.observe(2, 0);
+            sawRecoveryRaise = sawRecoveryRaise
+                || capacity.telemetry().raised;
+        }
+        assert(capacity.telemetry().generationCap == 3);
+        assert(sawRecoveryRaise);
+    }
+
+    {
+        // Build #383 regression: intermittent-but-sustained WSI rejection must
+        // accumulate presentation-pressure evidence instead of being erased by
+        // each clean attempt.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(2);
+        for (int i = 0;
+                i < 12 && capacity.telemetry().generationCap > 1;
+                ++i) {
+            assert(capacity.limit(2) >= 1);
+            capacity.observe(2, (i % 2 == 0) ? 1 : 0);
+        }
+        assert(capacity.telemetry().generationCap == 1);
+    }
+
+    {
+        // A cap of one is not enough when WSI cannot accept even one synthetic
+        // frame per source cycle. Sustained rejection at generationCap==1 must
+        // deterministically suppress some single-frame opportunities so the
+        // expensive work is skipped before dispatch, while retaining probe
+        // attempts that can later demonstrate recovery.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(1);
+
+        bool suppressed = false;
+        bool probeObserved = false;
+        for (int i = 0; i < 24; ++i) {
+            const auto allowed = capacity.limit(1);
+            if (allowed == 0) {
+                suppressed = true;
+                continue;
+            }
+            probeObserved = true;
+            capacity.observe(1, 1);
+        }
+
+        assert(suppressed);
+        assert(probeObserved);
+        assert(capacity.telemetry().pressure);
+    }
+
+    {
+        // A WSI reduction is provisional. If the lower cap does not improve
+        // useful delivery while the target remains recoverable, restore the
+        // higher cap instead of turning presentation pressure into a target
+        // governor.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        GeneratedPresentationCapacityContext context{
+            .outputDeficit = false,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .sourceInsideBudget = true,
+            .higherCapacityProven = true,
+        };
+
+        for (int i = 0; i < 12; ++i) {
+            const auto attempted = capacity.limit(3, context);
+            const auto accepted = attempted > 0 ? attempted - 1 : 0;
+            capacity.observe(attempted, accepted, attempted - accepted, context);
+        }
+        assert(capacity.telemetry().generationCap <= 2);
+
+        context.outputDeficit = true;
+        bool restored = false;
+        for (int i = 0; i < 24; ++i) {
+            const auto attempted = capacity.limit(3, context);
+            capacity.observe(attempted, attempted, 0, context);
+            restored = restored
+                || capacity.telemetry().lastChangeReason
+                    == GeneratedPresentationCapChangeReason::ProfitabilityRestoreHigher
+                || capacity.telemetry().lastChangeReason
+                    == GeneratedPresentationCapChangeReason::TargetDeficitProbeSuccess;
+        }
+        assert(restored);
+        assert(capacity.telemetry().generationCap == 3);
+    }
+
+    {
+        // Once the output target is deficient, a proven higher presentation
+        // capacity must prevent persistent fractional-duty collapse. Hard WSI
+        // pressure may still lower the integer cap, but it must not suppress
+        // every remaining single-frame opportunity.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(3);
+        GeneratedPresentationCapacityContext collapse{};
+        for (int i = 0; i < 80 && capacity.telemetry().generationCap > 1; ++i) {
+            const auto attempted = capacity.limit(3, collapse);
+            if (attempted > 0)
+                capacity.observe(attempted, 0, attempted, collapse);
+        }
+        assert(capacity.telemetry().generationCap == 1);
+
+        GeneratedPresentationCapacityContext recoverable{
+            .outputDeficit = true,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .sourceInsideBudget = true,
+            .higherCapacityProven = true,
+        };
+        for (int i = 0; i < 30; ++i) {
+            const auto attempted = capacity.limit(3, recoverable);
+            if (attempted > 0)
+                capacity.observe(attempted, 0, attempted, recoverable);
+        }
+        assert(capacity.telemetry().singleFrameDuty >= 0.999);
+    }
+
+    {
+        // A lower cap that preserves accepted throughput but does not materially
+        // improve delivery efficiency is still unprofitable while the target is
+        // unmet. It must be restored instead of becoming a hidden target cap.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(8);
+        GeneratedPresentationCapacityContext context{
+            .outputDeficit = false,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 8,
+            .schedulerCostLimit = 8,
+            .sourceInsideBudget = true,
+            .higherCapacityProven = true,
+        };
+
+        for (int i = 0; i < 4; ++i) {
+            const auto attempted = capacity.limit(8, context);
+            capacity.observe(attempted, 4, attempted - 4, context);
+        }
+        assert(capacity.telemetry().generationCap == 7);
+
+        context.outputDeficit = true;
+        bool restored = false;
+        for (int i = 0; i < 6; ++i) {
+            const auto attempted = capacity.limit(8, context);
+            capacity.observe(attempted, 4, attempted - 4, context);
+            restored = restored
+                || capacity.telemetry().lastChangeReason
+                    == GeneratedPresentationCapChangeReason::ProfitabilityRestoreHigher;
+        }
+        assert(restored);
+        assert(capacity.telemetry().generationCap == 8);
+    }
+
+    {
+        // A target deficit must not preserve a higher presentation capacity
+        // when the source timeline is already materially late. The source
+        // evidence gate is what keeps an overdue real frame from being used to
+        // justify more synthetic work.
+        GeneratedPresentationCapacityTracker capacity;
+        capacity.configure(1);
+        GeneratedPresentationCapacityContext lateSource{
+            .outputDeficit = true,
+            .deadlineCapacityValid = true,
+            .safeGenerationHint = 3,
+            .schedulerCostLimit = 3,
+            .sourceInsideBudget = true,
+            .sourceDeadlineErrorNs = 9'000'000,
+            .higherCapacityProven = true,
+        };
+        for (int i = 0; i < 40; ++i) {
+            const auto attempted = capacity.limit(1, lateSource);
+            if (attempted > 0)
+                capacity.observe(attempted, 0, attempted, lateSource);
+        }
+        assert(capacity.telemetry().singleFrameDuty < 0.999);
+    }
+
+    {
+        // Rolling LSFG output reacts inside a sub-second window and requires
+        // sustained evidence both to declare deficit and to prove recovery.
+        LsfgOutputCadenceTracker cadence;
+        cadence.configure(true, 60);
+        for (int i = 0; i < 20; ++i)
+            cadence.observe(33333333ns, 1, 0);
+        assert(cadence.snapshot().valid);
+        assert(cadence.snapshot().outputFps < 35.0);
+        assert(cadence.snapshot().deficitConfirmed);
+        assert(!cadence.snapshot().targetSatisfiedConfirmed);
+
+        for (int i = 0; i < 36; ++i)
+            cadence.observe(33333333ns, 1, 1);
+        assert(cadence.snapshot().outputFps > 58.0);
+        assert(!cadence.snapshot().deficitConfirmed);
+        assert(cadence.snapshot().targetSatisfiedConfirmed);
+    }
+
+    {
+        // Deadline admission predicts from observed GPU cost without source-rate
+        // assumptions. The runtime may use this to reject synthetic work, while
+        // the predictor itself remains independent of fractional scheduling.
+        // The safety margin must turn an otherwise-fitting job into a rejection
+        // when the remaining source-owned presentation budget is too small.
+        DeadlineAdmissionPredictor predictor;
+        const auto cold = predictor.predict(2, 12.0);
+        assert(!cold.valid);
+
+        predictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 4.0,
+            .opticalFlowMs = 6.0,
+            .totalLsfgMs = 9.0,
+            .generationCount = 2,
+            .valid = true,
+        });
+
+        const auto roomy = predictor.predict(2, 12.0);
+        assert(roomy.valid);
+        assert(roomy.predictedMipmapsMs > 3.99 && roomy.predictedMipmapsMs < 4.01);
+        assert(roomy.predictedOpticalFlowMs > 5.99 && roomy.predictedOpticalFlowMs < 6.01);
+        assert(roomy.predictedTotalLsfgMs > 8.99 && roomy.predictedTotalLsfgMs < 9.01);
+        assert(roomy.safetyMarginMs >= 0.35);
+        assert(roomy.wouldAdmit);
+
+        const auto tight = predictor.predict(2, 9.2);
+        assert(tight.valid);
+        assert(!tight.wouldAdmit);
+
+        // Admission must also learn unmodeled end-to-end delivery pressure.
+        // A frame that was predicted to fit but still arrived 2 ms late adds a
+        // delivery reserve; repeated successful batches decay it instead of
+        // turning one transient into a permanent throughput cap.
+        const auto beforeMiss = predictor.predict(1, 8.5);
+        assert(beforeMiss.valid);
+        assert(beforeMiss.wouldAdmit);
+        assert(beforeMiss.deliveryReserveMs == 0.0);
+
+        predictor.observeDeliveryMiss(2.0);
+        const auto afterMiss = predictor.predict(1, 8.5);
+        assert(afterMiss.valid);
+        assert(afterMiss.deliveryReserveMs >= 1.99);
+        assert(afterMiss.effectiveUsableBudgetMs < beforeMiss.effectiveUsableBudgetMs);
+        assert(!afterMiss.wouldAdmit);
+
+        for (int i = 0; i < 100; ++i)
+            predictor.observeDeliverySuccess();
+        const auto recovered = predictor.predict(1, 8.5);
+        assert(recovered.deliveryReserveMs < 0.05);
+        assert(recovered.wouldAdmit);
+
+        // Batch cost is learned independently by generation count. Unknown
+        // counts use a conservative whole-batch bound; a measured 2-frame
+        // batch must replace that fallback instead of being decomposed into a
+        // misleading shared + linear per-frame model.
+        const auto oneOutput = predictor.predict(1, 20.0);
+        assert(oneOutput.valid);
+        assert(oneOutput.predictedTotalLsfgMs >= roomy.predictedTotalLsfgMs * 0.5);
+
+        predictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 7.0,
+            .opticalFlowMs = 11.0,
+            .totalLsfgMs = 40.0,
+            .generationCount = 2,
+            .valid = true,
+        });
+        const auto measuredTwo = predictor.predict(2, 60.0);
+        assert(measuredTwo.valid);
+        assert(measuredTwo.predictedTotalLsfgMs >= 39.9);
+
+        const auto conservativeThree = predictor.predict(3, 100.0);
+        assert(conservativeThree.valid);
+        assert(conservativeThree.predictedTotalLsfgMs >= 55.0);
+
+        predictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 8.0,
+            .opticalFlowMs = 13.0,
+            .totalLsfgMs = 58.0,
+            .generationCount = 3,
+            .valid = true,
+        });
+        const auto measuredThree = predictor.predict(3, 100.0);
+        assert(measuredThree.valid);
+        assert(measuredThree.predictedTotalLsfgMs >= 57.9);
+
+        const auto safeHint = predictor.safeGenerationHint(3, 33.0);
+        // With a measured 40 ms two-frame batch and a conservative lower-count
+        // fallback, even the first evenly-spaced synthetic slot is not proven
+        // safe inside a 33 ms source interval. Prefix-slot promotion must stay
+        // closed rather than inventing capacity from the batch-only budget.
+        assert(safeHint == 0);
+
+        // Deferred Adreno protects the real-source boundary rather than
+        // requiring compute to finish by the first ideal synthetic scanout.
+        // The same measured batch can therefore be source-safe even when it
+        // cannot satisfy the historical prefix-slot hint.
+        DeadlineAdmissionPredictor deferredPredictor;
+        deferredPredictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 16.0,
+            .opticalFlowMs = 18.0,
+            .totalLsfgMs = 28.0,
+            .generationCount = 1,
+            .valid = true,
+        });
+        const auto slotHint =
+            deferredPredictor.safeGenerationHint(1, 33.333);
+        const auto batchHint =
+            deferredPredictor.safeBatchGenerationHint(1, 33.333);
+        assert(slotHint == 0);
+        assert(batchHint == 1);
+
+        const auto tooExpensiveBatchHint =
+            deferredPredictor.safeBatchGenerationHint(1, 28.0);
+        assert(tooExpensiveBatchHint == 0);
+
+        // Protected Adreno blocks the source-present thread at private-device
+        // completion. GPU shader timestamps alone can therefore understate the
+        // real source-owned cost when queue residency expands under saturation.
+        // Train admission from that measured blocking completion boundary.
+        DeadlineAdmissionPredictor blockingPredictor;
+        blockingPredictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 12.0,
+            .opticalFlowMs = 19.0,
+            .totalLsfgMs = 24.0,
+            .generationCount = 1,
+            .valid = true,
+        });
+        const auto gpuOnlyDecision = blockingPredictor.predict(1, 37.0);
+        assert(gpuOnlyDecision.valid);
+        assert(gpuOnlyDecision.wouldAdmit);
+
+        blockingPredictor.observeBlockingCompletion(1, 69.0);
+        const auto blockingDecision = blockingPredictor.predict(1, 37.0);
+        assert(blockingDecision.valid);
+        assert(blockingDecision.predictedTotalLsfgMs > 68.9);
+        assert(!blockingDecision.wouldAdmit);
+
+        // Recovery from one saturated sample must be conservative so a single
+        // fast frame cannot immediately reopen the same hitch-producing batch.
+        blockingPredictor.observeBlockingCompletion(1, 24.0);
+        const auto recoveryDecision = blockingPredictor.predict(1, 80.0);
+        assert(recoveryDecision.predictedTotalLsfgMs > 60.0);
+
+        // Once generated work is suppressed, no new completion samples exist.
+        // Clean protected source-only cycles must therefore relax only the
+        // queue-residency penalty toward the last measured GPU cost, never
+        // below that cost, until a cautious probe can become admissible again.
+        const auto stillBlocked = blockingPredictor.predict(1, 37.0);
+        assert(!stillBlocked.wouldAdmit);
+
+        // The GPU timestamp for the same completed batch is descriptive, not
+        // recovery evidence. When it arrives after a 69 ms blocking completion,
+        // it must not immediately dilute that source-owned cost back toward
+        // the 24 ms shader time.
+        DeadlineAdmissionPredictor sameBatchPredictor;
+        sameBatchPredictor.observeBlockingCompletion(1, 69.0);
+        sameBatchPredictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 12.0,
+            .opticalFlowMs = 19.0,
+            .totalLsfgMs = 24.0,
+            .generationCount = 1,
+            .valid = true,
+        });
+        const auto sameBatchDecision = sameBatchPredictor.predict(1, 37.0);
+        assert(sameBatchDecision.predictedTotalLsfgMs > 68.9);
+        assert(!sameBatchDecision.wouldAdmit);
+        for (int i = 0; i < 16; ++i)
+            blockingPredictor.observeSourceOnlyRecovery();
+        const auto recoveredProbe = blockingPredictor.predict(1, 37.0);
+        assert(recoveredProbe.valid);
+        assert(recoveredProbe.predictedTotalLsfgMs >= 23.9);
+        assert(recoveredProbe.predictedTotalLsfgMs < 33.0);
+        assert(recoveredProbe.wouldAdmit);
+    }
+
+
+    {
+        // Fixed mode is an explicit multiplier request. Once a clean source
+        // baseline exists and generation is allowed, the requested generation
+        // count is authoritative immediately; the governor is a backoff guard,
+        // not a slow ramp-up controller.
+        FixedSourceCadenceGovernor governor;
+        assert(governor.plan(40ms, 3, 0, false) == 0);
+        assert(governor.telemetry().baselineValid);
+
+        std::size_t count = governor.plan(40ms, 3, 0, true);
+        assert(count == 3);
+        assert(governor.telemetry().generationLimit == 3);
+        for (int i = 0; i < 12; ++i) {
+            count = governor.plan(
+                40ms, 3, count, true, SourceCadenceObservation::Generated);
+            assert(count == 3);
+        }
+    }
+
+    {
+        // Hot Fixed multiplier changes must take effect on the next eligible
+        // generated cycle. A 2x -> 3x -> 4x request maps to 1 -> 2 -> 3
+        // generated frames without waiting for a recovery ramp.
+        FixedSourceCadenceGovernor governor;
+        assert(governor.plan(
+            40ms, 1, 0, false, SourceCadenceObservation::SourceOnly) == 0);
+        assert(governor.plan(
+            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance) == 1);
+        assert(governor.plan(
+            40ms, 2, 1, true, SourceCadenceObservation::Generated) == 2);
+        assert(governor.plan(
+            40ms, 3, 2, true, SourceCadenceObservation::Generated) == 3);
+    }
+
+    {
+        // Generated work must not tighten the clean-source baseline. Otherwise
+        // Fixed mode can manufacture an unrealistically fast baseline and then
+        // permanently suppress higher requested multipliers.
+        FixedSourceCadenceGovernor governor;
+        governor.plan(
+            40ms, 3, 0, false, SourceCadenceObservation::SourceOnly);
+        assert(governor.plan(
+            40ms, 3, 0, true, SourceCadenceObservation::HistoryMaintenance) == 3);
+        for (int i = 0; i < 12; ++i)
+            governor.plan(
+                30ms, 3, 3, true, SourceCadenceObservation::Generated);
+        assert(std::abs(governor.telemetry().baselineSourceFps - 25.0) < 0.01);
+    }
+
+    {
+        // A severe cadence regression correlated with Fixed generated load must
+        // back off before the slower cadence can inflate its own deadline budget.
+        FixedSourceCadenceGovernor governor;
+        governor.plan(40ms, 3, 0, false);
+        std::size_t count = governor.plan(40ms, 3, 0, true);
+        for (int i = 0; i < 20 && count < 3; ++i)
+            count = governor.plan(40ms, 3, count, true);
+        assert(count == 3);
+
+        bool backedOff = false;
+        for (int i = 0; i < 3; ++i) {
+            count = governor.plan(70ms, 3, count, true);
+            backedOff = backedOff || governor.telemetry().backedOff;
+        }
+        assert(backedOff);
+        assert(count <= 2);
+    }
+
+    {
+        // If even one synthetic frame causes a large source-cadence collapse,
+        // Fixed mode may temporarily choose HistoryOnly rather than preserve the
+        // multiplier at the expense of the real source timeline.
+        FixedSourceCadenceGovernor governor;
+        governor.plan(40ms, 1, 0, false);
+        std::size_t count = governor.plan(40ms, 1, 0, true);
+        assert(count == 1);
+        bool backedOff = false;
+        for (int i = 0; i < 3; ++i) {
+            count = governor.plan(70ms, 1, count, true);
+            backedOff = backedOff || governor.telemetry().backedOff;
+        }
+        assert(backedOff);
+        assert(count == 0);
+
+        // Only genuine source-only evidence may re-anchor a naturally slower
+        // game cadence and eventually permit a cautious one-frame probe again.
+        for (int i = 0; i < 20 && count == 0; ++i)
+            count = governor.plan(
+                60ms, 1, 0, true, SourceCadenceObservation::SourceOnly);
+        assert(count == 1);
+    }
+
+    {
+        // A HistoryOnly interval is still LSFG-active on protected Adreno.
+        // Once Fixed backs off, those maintenance intervals must not redefine a
+        // faster clean baseline as a naturally slower game and immediately
+        // restart the same hitch-producing probe loop.
+        FixedSourceCadenceGovernor governor;
+        governor.plan(
+            40ms, 1, 0, false, SourceCadenceObservation::SourceOnly);
+        std::size_t count = governor.plan(
+            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance);
+        assert(count == 1);
+
+        bool backedOff = false;
+        for (int i = 0; i < 3; ++i) {
+            count = governor.plan(
+                70ms, 1, count, true, SourceCadenceObservation::Generated);
+            backedOff = backedOff || governor.telemetry().backedOff;
+        }
+        assert(backedOff);
+        assert(count == 0);
+
+        for (int i = 0; i < 20; ++i)
+            count = governor.plan(
+                60ms, 1, 0, true,
+                SourceCadenceObservation::HistoryMaintenance);
+        assert(governor.telemetry().baselineSourceFps > 24.0);
+        assert(count == 0);
+
+        // Clean source-only evidence can still establish a genuinely slower
+        // scene and eventually permit a cautious probe.
+        for (int i = 0; i < 20 && count == 0; ++i)
+            count = governor.plan(
+                60ms, 1, 0, true, SourceCadenceObservation::SourceOnly);
+        assert(count == 1);
+    }
+
+    {
+        // Stable slow sources are treated identically to stable fast sources:
+        // the explicit Fixed multiplier is honored immediately after baseline
+        // measurement, with backoff reserved for proven cadence regression.
+        FixedSourceCadenceGovernor governor;
+        governor.plan(125ms, 2, 0, false);
+        std::size_t count = governor.plan(125ms, 2, 0, true);
+        assert(count == 2);
+        for (int i = 0; i < 8; ++i)
+            count = governor.plan(
+                125ms, 2, count, true, SourceCadenceObservation::Generated);
+        assert(count == 2);
+        assert(!governor.telemetry().backedOff);
+    }
+
+
+
+
+    {
+        // Generation-first Adreno mode treats resource pressure as telemetry,
+        // not permission to suppress requested synthetic work. A constrained
+        // source must still be able to request more than one generated frame
+        // when the adaptive target requires it.
+        AdaptiveFrameScheduler scheduler(45, 3);
+        scheduler.setGenerationFirst(true);
+
+        std::size_t peak = 0;
+        for (int i = 0; i < 12; ++i)
+            peak = std::max(peak, scheduler.plan(70ms));
+
+        assert(scheduler.telemetry().costLimit == 3);
+        assert(peak >= 2);
+
+        // A later severe source slowdown must not back the generation ceiling
+        // down simply because the device is constrained.
+        for (int i = 0; i < 8; ++i)
+            scheduler.plan(120ms);
+        assert(scheduler.telemetry().costLimit == 3);
+    }
+
+
+    // Generation-first Adreno executes one synthetic batch inside the real
+    // source interval. A fixed 2x request must therefore not compare the
+    // complete private-device batch against half of the source interval.
+    assert(std::abs(framegenBatchBudgetMs(
+        33.333, 16.666, true) - 33.333) < 0.001);
+    assert(std::abs(framegenBatchBudgetMs(
+        33.333, 16.666, false) - 16.666) < 0.001);
 
     return 0;
 }

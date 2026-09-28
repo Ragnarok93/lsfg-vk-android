@@ -1,0 +1,272 @@
+from pathlib import Path
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
+    def test_single_queue_adreno_rejects_deferred_delivery_and_uses_device_proven_fallback(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "deferredAdrenoCompletionEnabled_",
+            "deferredAdrenoBatchValid_",
+            "deferredAdrenoOutputReadyFds_",
+            "deferredAdrenoBatchCompleteFd_",
+            "deferredAdrenoPassIndex_",
+            "deferredAdrenoGeneratedCount_",
+            "deferredAdrenoSourceAge_",
+        ):
+            self.assertIn(token, header)
+
+        selection_start = source.index("this->asyncAhbHandoffEnabled_ =")
+        selection_end = source.index("const bool xclipseCompatibilityPath =", selection_start)
+        selection = source[selection_start:selection_end]
+        self.assertIn(
+            "!this->conservativeCrossDeviceSync_",
+            selection,
+        )
+        self.assertIn(
+            "this->deferredAdrenoCompletionEnabled_ = false;",
+            selection,
+        )
+        self.assertNotIn(
+            "this->syntheticQueue_ == VK_NULL_HANDLE",
+            selection,
+        )
+        self.assertNotIn(
+            "gameImportSemaphoreFd != nullptr;\n    this->deferredAdrenoCompletionEnabled_ =\n",
+            selection,
+        )
+        self.assertIn("presentContextWithCountExportSyncFd", source)
+        self.assertIn("runtime stage=adreno-deferred-batch-queued", source)
+        queued_log = source.index("runtime stage=adreno-deferred-batch-queued")
+        self.assertIn(
+            "if (firstPresentDiagnostic)",
+            source[max(0, queued_log - 300):queued_log],
+            "dormant deferred diagnostics must remain rate-limited if this path is revisited",
+        )
+
+    def test_deferred_batch_never_places_unsignaled_wait_on_primary_queue(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        start = source.index("if (this->deferredAdrenoBatchValid_)")
+        end = source.index("const bool conservativePreCopySourceBypass", start)
+        deferred = source[start:end]
+
+        self.assertIn("poll(&batchPoll, 1, 0)", deferred)
+        self.assertIn("poll(&outputPoll, 1, 0)", deferred)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", deferred)
+        self.assertIn("conservativeBatchStillInFlight = !batchReady", deferred)
+        self.assertNotIn("waitContext(*this->lsfgCtxId, runtimeWaitTimeoutNs()", deferred)
+
+    def test_late_batch_drops_synthetics_but_keeps_source_immediate(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        start = source.index("if (this->deferredAdrenoBatchValid_)")
+        end = source.index("const bool conservativePreCopySourceBypass", start)
+        deferred = source[start:end]
+
+        self.assertIn("windowGeneratedLateDrops", deferred)
+        self.assertIn("windowGeneratedDeadlineDrops", deferred)
+        self.assertIn("totalGeneratedDeadlineDrops", deferred)
+        self.assertIn("deadlineAdmissionPredictor_.observeDeliveryMiss", deferred)
+        self.assertIn("deferredAdrenoSourceAge_", deferred)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", deferred)
+
+        bypass_start = source.index("if (conservativePreCopySourceBypass)")
+        bypass_end = source.index("// Android path: AHardwareBuffer exchange", bypass_start)
+        bypass = source[bypass_start:bypass_end]
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo)", bypass)
+        self.assertNotIn("waitContext(", bypass)
+
+    def test_deferred_wsi_rejection_trains_adreno_presentation_capacity(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        start = source.index("if (this->deferredAdrenoBatchValid_)")
+        end = source.index("const bool conservativePreCopySourceBypass", start)
+        deferred = source[start:end]
+
+        self.assertIn("deferredPresentationAttempted", deferred)
+        self.assertIn("deferredWsiDrops", deferred)
+        self.assertIn("generatedPresentationCapacityTracker_.observe(", deferred)
+        self.assertIn("if (conf.adaptiveFramegen && deferredPresentationAttempted)", deferred)
+
+    def test_deferred_adreno_delivers_ready_temporal_prefix_without_waiting_for_batch_complete(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        start = source.index("if (this->deferredAdrenoBatchValid_)")
+        end = source.index("const bool conservativePreCopySourceBypass", start)
+        deferred = source[start:end]
+
+        self.assertIn("size_t deferredReadyOutputPrefix = 0", deferred)
+        self.assertIn("deferredReadyOutputPrefix < this->deferredAdrenoGeneratedCount_", deferred)
+        self.assertIn("const size_t deferredUnreadyOutputCount", deferred)
+        self.assertIn(
+            "if (deferredReadyOutputPrefix > 0 && deferredPresentationAttempted)",
+            deferred,
+        )
+        self.assertIn("i < deferredReadyOutputPrefix", deferred)
+        self.assertIn("conservativeBatchStillInFlight = !batchReady", deferred)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", deferred)
+        self.assertNotIn(
+            "this->deferredAdrenoOutputEligible_ && outputsReady",
+            deferred,
+            "Adreno deferred delivery must not remain all-or-nothing",
+        )
+
+    def test_ready_deferred_batch_delivers_before_current_source_and_retires_pass(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("bool deferredAdrenoOwned{false};", header)
+
+        start = source.index("if (this->deferredAdrenoBatchValid_)")
+        end = source.index("const bool conservativePreCopySourceBypass", start)
+        deferred = source[start:end]
+
+        self.assertIn("deferredAdrenoPassIndex_", deferred)
+        self.assertIn("releasePresentWaitRetirements(imageIdx)", deferred)
+        self.assertIn("copyExternalAhbToSwapchain", deferred)
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, &deferredPresentInfo)", deferred)
+        self.assertIn("postCopyCompletionFences", header)
+        self.assertIn("postCopyCompletionFenceSubmitted", header)
+        self.assertIn("*deferredPass.postCopyCompletionFences.at(i)", deferred)
+        self.assertIn("deferredPass.postCopyCompletionFenceSubmitted.at(i) = true", deferred)
+        self.assertNotIn(
+            "submitPassCompletionFence(deferredPass, info.queue.second)",
+            deferred,
+            "deferred Adreno retirement must be anchored to real consuming submits",
+        )
+        self.assertIn("deferredPass.deferredAdrenoOwned = false", deferred)
+
+    def test_protected_adreno_source_reuse_matches_september18_previous_source_dependency(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        island_start = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        island_end = source.index("// END ADRENO_364178AF_EXECUTION", island_start)
+        island = source[island_start:island_end]
+        dependency_start = island.index("std::vector<VkSemaphore> gameRenderSemaphores2")
+        dependency_end = island.index("const auto handoffStart", dependency_start)
+        dependency = island[dependency_start:dependency_end]
+
+        self.assertIn("previousSourceCopySignalValid_", dependency)
+        self.assertIn("passInfos.at((this->frameIdx - 1) % 8)", dependency)
+        self.assertIn("preCopySemaphores.at(1).handle()", dependency)
+        self.assertNotIn("deferredAdreno", dependency)
+        self.assertNotIn("conservativePending", dependency)
+
+    def test_deferred_adreno_buffers_closing_source_until_next_boundary(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "pendingSourceValid_",
+            "pendingSourceImage_",
+            "pendingSourceReady_",
+            "pendingPassIndex_",
+            "pendingGeneratedCount_",
+        ):
+            self.assertIn(token, header)
+
+        deferred_start = source.index("if (this->deferredAdrenoBatchValid_)")
+        pass_start = source.index("auto& pass =", deferred_start)
+        boundary = source[deferred_start:pass_start]
+        self.assertIn("if (this->pendingSourceValid_)", boundary)
+        self.assertIn("pendingSourceImage_", boundary)
+        self.assertIn("pendingSourceReady_.handle()", boundary)
+        self.assertIn("Layer::ovkQueuePresentKHR", boundary)
+
+        queue_start = source.index("runtime stage=adreno-deferred-batch-queued")
+        queue_end = source.index(
+            "if (this->asyncFramegenCompletionEnabled_", queue_start
+        )
+        queued = source[queue_start:queue_end]
+        self.assertIn("pendingSourceValid_ = true", queued)
+        self.assertIn("pendingSourceImage_ = presentIdx", queued)
+        self.assertIn("pendingSourceReady_ = pass.preCopySemaphores.at(0)", queued)
+        self.assertIn('"pre-copy-adreno-deferred-buffered"', queued)
+        self.assertNotIn(
+            "Layer::ovkQueuePresentKHR(queue, &deferredSourcePresentInfo)",
+            queued,
+        )
+
+    def test_deferred_source_buffer_fails_open_when_app_present_chain_cannot_be_retained(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        queue_start = source.index("runtime stage=adreno-deferred-batch-queued")
+        queue_end = source.index(
+            "if (this->asyncFramegenCompletionEnabled_", queue_start
+        )
+        queued = source[queue_start:queue_end]
+        self.assertIn("if (pNext != nullptr)", queued)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", queued)
+        self.assertIn('"pre-copy-adreno-deferred-pnext-fail-open"', queued)
+
+    def test_deferred_batch_blocks_pass_recycle_until_real_copy_submissions_retire(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        recycle_start = source.index("bool LsContext::tryRecyclePass")
+        recycle_end = source.index("bool LsContext::submitPassCompletionFence", recycle_start)
+        recycle = source[recycle_start:recycle_end]
+
+        self.assertIn("postCopyCompletionFences", header)
+        self.assertIn("postCopyCompletionFenceSubmitted", header)
+        self.assertIn("pass.deferredAdrenoOwned", recycle)
+        self.assertIn("pass.postCopyCompletionFenceSubmitted", recycle)
+        self.assertIn("pass.postCopyCompletionFences", recycle)
+        self.assertIn("VK_TRUE, 0", recycle)
+        self.assertIn("completionResetFences_", recycle)
+
+    def test_deferred_outputs_are_invalidated_across_resume_or_config_boundary(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("const bool deferredAdrenoBoundaryDiscontinuity")
+        end = source.index("if (this->deferredAdrenoBatchValid_)", start)
+        guard = source[start:end]
+        self.assertIn("runtimeConfigSignature_", guard)
+        self.assertIn("runtimeDiagnosticConfigSignature(conf)", guard)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", guard)
+        self.assertIn("deferredAdrenoOutputReadyFds_", guard)
+
+    def test_adaptive_epoch_reset_drops_stale_outputs_but_preserves_batch_release(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("void LsContext::resetAdaptiveSourceEpoch(")
+        end = source.index("void LsContext::enterSourceOnlyBypass()", start)
+        reset = source[start:end]
+
+        self.assertIn("deferredAdrenoBatchValid_", reset)
+        self.assertIn("deferredAdrenoOutputEligible_ = false", reset)
+        self.assertIn("deferredAdrenoOutputReadyFds_", reset)
+        self.assertNotIn(
+            "deferredAdrenoBatchValid_ = false",
+            reset,
+            "epoch reset must preserve the private-device batch release dependency",
+        )
+
+    def test_source_only_reset_drops_stale_outputs_but_preserves_batch_release(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("void LsContext::enterSourceOnlyBypass()")
+        bypass = source[start:]
+        self.assertIn("deferredAdrenoOutputEligible_ = false", bypass)
+        self.assertIn("deferredAdrenoOutputReadyFds_", bypass)
+        self.assertNotIn(
+            "deferredAdrenoBatchValid_ = false",
+            bypass[:bypass.index("#endif")],
+            "source-only transition must preserve the in-flight batch release",
+        )
+
+    def test_xclipse_immediate_async_path_is_left_intact(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        selection_start = source.index("this->asyncFramegenCompletionEnabled_ =")
+        selection_end = source.index("const bool xclipseCompatibilityPath =", selection_start)
+        selection = source[selection_start:selection_end]
+        self.assertIn("!this->conservativeCrossDeviceSync_", selection)
+
+        generated = source[source.index("// 2. Tell framegen"):]
+        self.assertIn("if (this->asyncFramegenCompletionEnabled_)", generated)
+        self.assertIn("framegenSync.gpuDependenciesExported", generated)
+
+
+if __name__ == "__main__":
+    unittest.main()

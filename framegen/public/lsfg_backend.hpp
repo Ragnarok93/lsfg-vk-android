@@ -6,7 +6,9 @@
 
 #include <array>
 #include <cstdint>
+#include <cstddef>
 #include <string>
+#include <vector>
 
 namespace LSFG {
 
@@ -19,9 +21,48 @@ struct DeviceIdentity {
     }
 };
 
+struct AdaptiveFlowContextState {
+    float requestedScale{0.0f};
+    float activeScale{0.0f};
+    uint32_t warmupRemaining{0};
+    bool transitionPending{false};
+};
+
+// Metadata attached by the layer to one submitted frame-generation batch.
+// Keeping this next to the GPU result makes asynchronous timing samples
+// attributable without adding a CPU/GPU synchronization point.
+struct AdaptiveFlowBatchMetadata {
+    uint64_t sessionEpoch{0};
+    uint64_t batchId{0};
+    double frameBudgetMs{0.0};
+    double predictedTotalLsfgMs{0.0};
+};
+
+struct AdaptiveFlowGpuTiming {
+    double mipmapsMs{0.0};
+    double opticalFlowMs{0.0};
+    double totalLsfgMs{0.0};
+    size_t generationCount{0};
+    uint64_t sessionEpoch{0};
+    uint64_t batchId{0};
+    double frameBudgetMs{0.0};
+    double predictedTotalLsfgMs{0.0};
+    bool transitionActive{false};
+    bool valid{false};
+};
+
+struct AndroidFrameSyncFds {
+    std::vector<int> outputReadyFds;
+    int batchCompleteFd{-1};
+    uint64_t batchId{0};
+    bool gpuDependenciesExported{false};
+    bool hostWaitFallback{false};
+};
+
 struct BackendDiagnostics {
     uint32_t apiVersion{VK_API_VERSION_1_0};
     uint32_t driverVersion{0};
+    VkDriverId driverId{static_cast<VkDriverId>(0)};
     std::string driverName;
     std::string driverInfo;
     DeviceIdentity identity{};
@@ -39,6 +80,7 @@ struct BackendDiagnostics {
     // uses this solely as an optional GPU-to-GPU AHB handoff optimization; the
     // established host-fence path remains the fallback when it is unavailable.
     bool externalSemaphoreOpaqueFd{false};
+    bool externalSemaphoreSyncFd{false};
 };
 
 inline constexpr uint64_t DEFAULT_DRIVER_WAIT_TIMEOUT_NS = 500'000'000ULL;

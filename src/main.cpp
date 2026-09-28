@@ -32,7 +32,7 @@ namespace {
 
         const auto name = Utils::getProcessName();
         try {
-            Config::activeConf = Config::getConfig(name);
+            Config::setActive(Config::getConfig(name));
         } catch (const std::exception& e) {
             std::cerr << "lsfg-vk: The configuration for " << name.second << " is invalid, IGNORING:\n";
             std::cerr << e.what() << '\n';
@@ -42,7 +42,7 @@ namespace {
         // Unmatched processes may unload silently. Explicitly targeted GameNative
         // executables keep the loader dispatch resident; multiplier=1 is their
         // runtime Off/pass-through state and remains hot-enableable.
-        auto& conf = Config::activeConf;
+        auto conf = Config::snapshot();
         if (!conf.targeted && !conf.enable && name.second != "benchmark")
             return;
 
@@ -132,6 +132,11 @@ namespace {
             }
         });
         benchmark.detach();
+        // The benchmark runs asynchronously, but the layer must stop treating
+        // the process as enabled immediately. Config::snapshot() is a copy;
+        // publish the state change through the synchronized configuration API
+        // instead of mutating the removed global configuration object.
         conf.enable = false;
+        Config::setActive(conf);
     }
 }

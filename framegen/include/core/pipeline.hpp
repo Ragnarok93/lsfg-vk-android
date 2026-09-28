@@ -48,8 +48,10 @@ namespace LSFG::Core {
         Pipeline& operator=(Pipeline&&) noexcept = default;
         ~Pipeline() = default;
     private:
-        std::shared_ptr<VkPipeline> pipeline;
+        // The pipeline must be destroyed before its layout. Members are
+        // destroyed in reverse declaration order.
         std::shared_ptr<VkPipelineLayout> layout;
+        std::shared_ptr<VkPipeline> pipeline;
     };
 
 }

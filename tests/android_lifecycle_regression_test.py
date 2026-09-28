@@ -57,5 +57,26 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         self.assertNotIn("resize(conf.multiplier - 1)", allocation)
 
 
+    def test_generation_off_uses_resident_native_present_bypass(self) -> None:
+        """LSFG-off must bypass framegen without rebuilding or retuning the active WSI."""
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertNotIn("const auto createSourceOnly", hooks)
+        self.assertNotIn('return createSourceOnly("generation-off")', hooks)
+
+        bypass_start = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
+        bypass_end = hooks.index("        try {", bypass_start)
+        bypass = hooks[bypass_start:bypass_end]
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", bypass)
+        self.assertIn("recordSuccessfulOutputCycle(*state, *state->context", bypass)
+        self.assertNotIn("state->context->present(", bypass)
+
+        # Xclipse FIFO remains the active-swapchain policy: logical FIFO may be
+        # backed by MAILBOX while generation is enabled, and Off does not mutate it.
+        self.assertIn("xclipseFifoMailboxBacked", hooks)
+        self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
+        self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
+
+
 if __name__ == "__main__":
     unittest.main()

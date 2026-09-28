@@ -16,6 +16,7 @@
 #include <array>
 #include <optional>
 #include <memory>
+#include <utility>
 
 namespace LSFG::Core {
 
@@ -76,6 +77,27 @@ namespace LSFG::Core {
     class DescriptorSetUpdateBuilder {
         friend class DescriptorSet;
     public:
+        DescriptorSetUpdateBuilder(const DescriptorSetUpdateBuilder&) = delete;
+        DescriptorSetUpdateBuilder& operator=(const DescriptorSetUpdateBuilder&) = delete;
+        DescriptorSetUpdateBuilder(DescriptorSetUpdateBuilder&& other) noexcept
+                : descriptorSet(other.descriptorSet), device(other.device),
+                  entries(std::move(other.entries)) {
+            other.descriptorSet = nullptr;
+            other.device = nullptr;
+        }
+        DescriptorSetUpdateBuilder& operator=(DescriptorSetUpdateBuilder&& other) noexcept {
+            if (this != &other) {
+                this->clearEntries();
+                this->descriptorSet = other.descriptorSet;
+                this->device = other.device;
+                this->entries = std::move(other.entries);
+                other.descriptorSet = nullptr;
+                other.device = nullptr;
+            }
+            return *this;
+        }
+        ~DescriptorSetUpdateBuilder() noexcept;
+
         /// Add a resource to the descriptor set update.
         DescriptorSetUpdateBuilder& add(VkDescriptorType type, const Image& image);
         DescriptorSetUpdateBuilder& add(VkDescriptorType type, const Sampler& sampler);
@@ -117,6 +139,8 @@ namespace LSFG::Core {
 
         DescriptorSetUpdateBuilder(const DescriptorSet& descriptorSet, const Core::Device& device)
                 : descriptorSet(&descriptorSet), device(&device) {}
+
+        void clearEntries() noexcept;
 
         std::vector<VkWriteDescriptorSet> entries;
     };

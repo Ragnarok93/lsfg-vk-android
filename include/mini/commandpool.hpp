@@ -24,7 +24,8 @@ namespace Mini {
         ///
         /// @throws LSFG::vulkan_error if object creation fails.
         ///
-        CommandPool(VkDevice device, uint32_t graphicsFamilyIdx);
+        CommandPool(VkDevice device, uint32_t graphicsFamilyIdx,
+            bool enableIndividualReset = false);
 
         /// Get the Vulkan handle.
         [[nodiscard]] auto handle() const { return *this->commandPool; }

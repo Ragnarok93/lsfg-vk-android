@@ -1,26 +1,354 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 struct AdaptiveSchedulerTelemetry {
     double sourceFps{};
     double smoothedSourceFps{};
     double wantedGeneratedFrames{};
+    double scheduledGenerationDensity{};
     std::size_t costLimit{};
     std::size_t generatedFrames{};
     bool sourceRateSnapped{false};
     bool costRaised{false};
+    // Compatibility telemetry retained for older log consumers. The unified
+    // target-authoritative scheduler deliberately never sets either flag.
     bool costBackedOff{false};
     bool costProbe{false};
     bool discontinuityReset{false};
     bool configWarmStart{false};
+    bool capacityPromoted{false};
+    bool safeGenerationHintValid{false};
+    std::size_t safeGenerationHint{};
+    double fractionalPhase{};
+    double opportunityIntervalSeconds{};
+    std::size_t syntheticOpportunitiesCreated{};
+    bool integerDensityLocked{false};
+    std::size_t lockedGeneratedFrames{};
+    unsigned densityTransitionEvidence{};
 };
+
+struct SourceTimelineSample {
+    uint64_t sourceIndex{};
+    uint64_t intervalNs{};
+    uint64_t previousSourceDesiredTimeNs{};
+    uint64_t sourceDesiredTimeNs{};
+    int64_t sourceDeadlineErrorNs{};
+    bool rebased{false};
+    bool valid{false};
+};
+
+/// Maintains a presentation epoch driven only by real/source arrivals.
+///
+/// The timeline deliberately has no generated-present API: generated work may
+/// query interpolation positions inside the current source interval, but only a
+/// subsequent source observation can advance the source deadline.
+class SourceProtectedTimeline {
+public:
+    SourceTimelineSample observe(
+        uint64_t sourceArrivalTimeNs,
+        std::chrono::nanoseconds sourceInterval,
+        bool discontinuity = false);
+
+    [[nodiscard]] uint64_t syntheticDesiredTimeNs(
+        const SourceTimelineSample& sample, double interpolationFraction) const;
+
+    void reset();
+
+private:
+    bool initialized_{false};
+    uint64_t sourceIndex_{0};
+    uint64_t sourceDesiredTimeNs_{0};
+    uint64_t lastIntervalNs_{0};
+    uint64_t predictedIntervalNs_{0};
+};
+
+enum class SourceCadenceObservation {
+    SourceOnly,
+    HistoryMaintenance,
+    Generated,
+};
+
+const char* sourceCadenceObservationName(SourceCadenceObservation observation);
 
 /// Chooses the minimum number of interpolation frames needed to approach an
 /// output FPS target. It owns no Vulkan objects, never paces source frames, and
 /// is independently testable.
+/// Select the fallback compute budget for one admitted frame-generation batch.
+/// On source-protected execution the whole real-source interval owns the batch;
+/// generic execution keeps its nominal per-slot budget.
+double framegenBatchBudgetMs(
+    double sourceIntervalMs,
+    double nominalBatchBudgetMs,
+    bool fullSourceIntervalBudget);
+
+struct DeadlineAdmissionObservation {
+    double mipmapsMs{};
+    double opticalFlowMs{};
+    double totalLsfgMs{};
+    std::size_t generationCount{};
+    bool valid{false};
+};
+
+struct DeadlineAdmissionDecision {
+    double predictedMipmapsMs{};
+    double predictedOpticalFlowMs{};
+    double predictedTotalLsfgMs{};
+    double safetyMarginMs{};
+    double usableBudgetMs{};
+    double deliveryReserveMs{};
+    double effectiveUsableBudgetMs{};
+    bool wouldAdmit{false};
+    bool valid{false};
+};
+
+/// Predicts whether one synthetic batch should fit inside the source-owned
+/// presentation budget. This class is deliberately policy-local: it estimates
+/// cost and makes a fast admission comparison, but it never changes source
+/// timing, fractional demand, Flow Scale, or the long-term generation ceiling.
+class DeadlineAdmissionPredictor {
+public:
+    void observe(const DeadlineAdmissionObservation& observation);
+    /// Learn the source-thread blocking cost at the protected private-device
+    /// completion boundary. On host-bounded Adreno this includes queue residency
+    /// that GPU shader timestamps do not see, so it is part of the source-owned
+    /// admission cost rather than a presentation-only reserve.
+    void observeBlockingCompletion(
+        std::size_t generationCount, double completionMs);
+    /// During a protected source-only recovery cycle, relax only queue-residency
+    /// overhead toward the last measured GPU batch cost. Never decays below
+    /// measured GPU work and therefore cannot invent synthetic capacity.
+    void observeSourceOnlyRecovery();
+    /// Learn unmodeled submit-to-delivery pressure only from a frame that was
+    /// admitted but still missed its synthetic deadline/WSI opportunity.
+    void observeDeliveryMiss(double latenessMs);
+    /// Slowly relax the learned delivery reserve after a fully queued batch.
+    void observeDeliverySuccess();
+    [[nodiscard]] DeadlineAdmissionDecision predict(
+        std::size_t generationCount, double usableBudgetMs) const;
+    /// Return the largest generated-frame count whose evenly-spaced prefix
+    /// deadlines fit inside one predicted source interval. This is a capacity
+    /// hint only; per-cycle admission remains authoritative.
+    [[nodiscard]] std::size_t safeGenerationHint(
+        std::size_t maxGenerationCount, double sourceIntervalMs) const;
+    /// Batch-boundary execution may complete generated work any time before the
+    /// next real-source boundary. Unlike safeGenerationHint(), this does not
+    /// reinterpret ideal interpolation slots as compute deadlines.
+    [[nodiscard]] std::size_t safeBatchGenerationHint(
+        std::size_t maxGenerationCount, double batchBudgetMs) const;
+    [[nodiscard]] bool hasEstimate() const { return hasEstimate_; }
+    void reset();
+
+private:
+    struct BatchCostEstimate {
+        bool valid{false};
+        bool blockingCompletionObserved{false};
+        double mipmapsMs{};
+        double opticalFlowMs{};
+        double gpuTotalLsfgMs{};
+        double totalLsfgMs{};
+    };
+
+    static constexpr std::size_t kTrackedBatchCounts = 4;
+    static constexpr double kRecoveryEwmaAlpha = 0.12;
+    static constexpr double kUnknownBatchSafetyRatio = 1.10;
+    static constexpr double kSafetyMarginRatio = 0.12;
+    static constexpr double kSafetyMarginFloorMs = 0.35;
+    static constexpr double kDeliveryReserveFloorMs = 0.50;
+    static constexpr double kDeliveryReserveMaxMs = 8.0;
+    static constexpr double kDeliveryReserveAlpha = 0.25;
+    static constexpr double kDeliveryReserveSuccessDecay = 0.95;
+
+    bool hasEstimate_{false};
+    std::array<BatchCostEstimate, kTrackedBatchCounts> batchEstimates_{};
+    double deliveryReserveMs_{0.0};
+};
+
+struct FixedSourceCadenceTelemetry {
+    double baselineSourceFps{};
+    double intervalRatio{1.0};
+    std::size_t requestedGeneratedFrames{};
+    std::size_t generationLimit{};
+    bool backedOff{false};
+    bool raised{false};
+    bool baselineValid{false};
+};
+
+/// Protects real/source cadence in Fixed frame-generation mode.
+///
+/// This governor never paces source frames and never changes interpolation
+/// positions. The user-selected multiplier is a ceiling: synthetic cost begins
+/// conservatively, rises one level at a time after stable cadence, and backs
+/// off when the preceding generated load materially stretches source intervals
+/// relative to a baseline learned without generated-frame work.
+class FixedSourceCadenceGovernor {
+public:
+    std::size_t plan(
+        std::chrono::nanoseconds sourceInterval,
+        std::size_t requestedGeneratedFrames,
+        std::size_t previousDispatchedGeneratedFrames,
+        bool generationAllowed,
+        SourceCadenceObservation previousObservation =
+            SourceCadenceObservation::HistoryMaintenance);
+
+    void reset();
+
+    [[nodiscard]] const FixedSourceCadenceTelemetry& telemetry() const {
+        return telemetry_;
+    }
+
+private:
+    bool hasBaseline_{false};
+    double baselineIntervalSeconds_{};
+    std::size_t generationLimit_{0};
+    std::size_t requestedGeneratedFrames_{0};
+    bool backedOffActive_{false};
+    double pressureSeconds_{};
+    double recoverySeconds_{};
+    double cooldownSeconds_{};
+    FixedSourceCadenceTelemetry telemetry_{};
+};
+
+
+enum class GeneratedPresentationCapChangeReason {
+    None,
+    RejectionProbe,
+    ProfitabilityKeepLower,
+    ProfitabilityRestoreHigher,
+    RecoveryEvidenceRaise,
+    TargetDeficitProbeSuccess,
+    SubOneDutyLower,
+    SubOneDutyRecover,
+};
+
+const char* generatedPresentationCapChangeReasonName(
+    GeneratedPresentationCapChangeReason reason);
+
+struct GeneratedPresentationCapacityContext {
+    bool outputDeficit{false};
+    bool deadlineCapacityValid{false};
+    std::size_t safeGenerationHint{};
+    std::size_t schedulerCostLimit{};
+    bool sourceInsideBudget{false};
+    int64_t sourceDeadlineErrorNs{};
+    bool higherCapacityProven{false};
+};
+
+struct GeneratedPresentationCapacityTelemetry {
+    std::size_t generationCap{};
+    double singleFrameDuty{1.0};
+    double wsiRejectionRatio{};
+    unsigned rejectionEvidence{};
+    double recoveryEvidence{};
+    uint64_t attemptedGeneratedFrames{};
+    uint64_t acceptedGeneratedFrames{};
+    double deliveredEfficiency{};
+    double acceptedFramesEwma{};
+    std::size_t highestUsefulCapacity{};
+    GeneratedPresentationCapChangeReason lastChangeReason{
+        GeneratedPresentationCapChangeReason::None};
+    bool lastChangeOutputDeficit{false};
+    bool upwardProbePending{false};
+    bool provisionalLowerActive{false};
+    bool pressure{false};
+    bool lowered{false};
+    bool raised{false};
+};
+
+/// Learns downstream swapchain capacity independently from GPU generation
+/// capacity. It never blocks on WSI and never changes source pacing.
+class GeneratedPresentationCapacityTracker {
+public:
+    void configure(std::size_t maxGeneratedFrames);
+    [[nodiscard]] std::size_t limit(std::size_t requested);
+    [[nodiscard]] std::size_t limit(
+        std::size_t requested,
+        const GeneratedPresentationCapacityContext& context);
+    void observe(std::size_t attempted, std::size_t wsiRejected);
+    void observe(
+        std::size_t attempted,
+        std::size_t accepted,
+        std::size_t wsiRejected,
+        const GeneratedPresentationCapacityContext& context);
+    void reset();
+
+    [[nodiscard]] const GeneratedPresentationCapacityTelemetry& telemetry() const {
+        return telemetry_;
+    }
+
+private:
+    std::size_t maxGeneratedFrames_{};
+    unsigned rejectionEvidence_{};
+    double recoveryEvidence_{};
+    double singleFramePhase_{};
+    bool hasObservation_{false};
+    double acceptedFramesEwma_{};
+    double efficiencyEwma_{};
+
+    bool provisionalLowerActive_{false};
+    std::size_t provisionalPreviousCap_{};
+    unsigned provisionalSamples_{};
+    double provisionalAcceptedSum_{};
+    double provisionalEfficiencySum_{};
+    double provisionalBaselineAccepted_{};
+    double provisionalBaselineEfficiency_{};
+
+    bool upwardProbePending_{false};
+    bool upwardProbeInFlight_{false};
+    std::size_t upwardProbeAttempted_{};
+
+    GeneratedPresentationCapacityTelemetry telemetry_{};
+};
+
+struct LsfgOutputCadenceSnapshot {
+    bool valid{false};
+    bool targeted{false};
+    double outputFps{};
+    double coverageSeconds{};
+    bool deficitConfirmed{false};
+    bool targetSatisfiedConfirmed{false};
+};
+
+/// Allocation-free rolling output estimator for the LSFG source+generated
+/// presentation domain. The one-second RuntimeMetrics window remains logging
+/// only; control decisions use this shorter, fresher window.
+class LsfgOutputCadenceTracker {
+public:
+    void configure(bool targeted, uint32_t targetFps);
+    void observe(
+        std::chrono::nanoseconds elapsed,
+        std::size_t sourceFrames,
+        std::size_t generatedFrames);
+    void reset();
+
+    [[nodiscard]] const LsfgOutputCadenceSnapshot& snapshot() const {
+        return snapshot_;
+    }
+
+private:
+    struct Sample {
+        double seconds{};
+        std::size_t frames{};
+    };
+
+    void clearWindow();
+    void rebuildSnapshot(double evidenceSeconds);
+
+    static constexpr std::size_t kSampleCapacity = 128;
+    std::array<Sample, kSampleCapacity> samples_{};
+    std::size_t sampleCount_{};
+    std::size_t nextSample_{};
+    bool targeted_{false};
+    uint32_t targetFps_{};
+    double deficitSeconds_{};
+    double satisfiedSeconds_{};
+    LsfgOutputCadenceSnapshot snapshot_{};
+};
+
 class AdaptiveFrameScheduler {
 public:
     AdaptiveFrameScheduler() = default;
@@ -38,6 +366,15 @@ public:
     /// sleeps and never modifies source pacing.
     std::size_t plan(std::chrono::nanoseconds sourceInterval);
 
+    /// Supply a predictor-derived capacity hint for the next generation level.
+    /// Invalid hints disable the early-promotion path without affecting the
+    /// ordinary sustained-demand governor.
+    void setSafeGenerationHint(std::size_t hint, bool valid);
+
+    /// Make target demand authoritative. Resource/cadence estimates remain
+    /// telemetry only and may not lower the synthetic generation ceiling.
+    void setGenerationFirst(bool enabled);
+
     void reset();
 
     [[nodiscard]] uint32_t targetFps() const { return targetFps_; }
@@ -46,15 +383,18 @@ public:
 
 private:
     void resetRuntimeState();
-    void resetRateChangeCandidates();
+    void resetSourceCadenceWindow();
     void resetUnmetDemand();
     void updateSourceRate(double intervalSeconds);
+    [[nodiscard]] double robustSourceIntervalSeconds() const;
     void updateCostLimit(double wantedGeneratedFrames);
+    [[nodiscard]] double stabilizeGenerationDensity(double desiredDensity);
 
     uint32_t targetFps_{};
     std::size_t maxGeneratedFrames_{};
-    double fractionalGeneratedBudget_{};
+    double fractionalOpportunityPhase_{};
     double smoothedSourceIntervalSeconds_{};
+    double lastTrustedSourceIntervalSeconds_{};
     bool hasSmoothedInterval_{false};
     // Unlike the current smoothing window, this survives timing discontinuities.
     // It distinguishes an established runtime that resumed before observing a
@@ -62,35 +402,28 @@ private:
     bool runtimeCadenceEstablished_{false};
     bool reconfigureWarmStartPending_{false};
 
-    // Source-rate decreases need to be recognized quickly so a heavier scene
-    // can receive more generation. Apparent source-rate increases are held to
-    // a stricter confirmation threshold because Android/WSI present bursts can
-    // contain several very short intervals without representing sustainable
-    // game throughput.
-    unsigned slowRateChangeSamples_{};
-    unsigned fastRateChangeSamples_{};
-    double slowIntervalAccumulatorSeconds_{};
-    double fastIntervalAccumulatorSeconds_{};
+    // Robust cadence estimation uses only recent trusted real-source intervals.
+    // Individual present bursts/hitches cannot hard-snap the scheduler state.
+    static constexpr std::size_t kSourceCadenceWindow = 9;
+    std::array<double, kSourceCadenceWindow> recentSourceIntervals_{};
+    std::size_t recentSourceIntervalCount_{};
+    std::size_t recentSourceIntervalCursor_{};
+
+    std::size_t safeGenerationHint_{};
+    bool safeGenerationHintValid_{false};
+    bool generationFirst_{false};
+    bool integerDensityLocked_{false};
+    std::size_t lockedIntegerDensity_{};
+    std::size_t integerDensityCandidate_{};
+    unsigned integerDensityCandidateSamples_{};
+    unsigned integerDensityReleaseSamples_{};
+    unsigned capacityRaiseSamples_{};
+    unsigned stableCadenceSamples_{};
 
     double observedTimeSeconds_{};
     std::size_t costLimit_{};
-    bool pendingCostRaise_{false};
-    bool probeAfterBackoff_{false};
-    bool pendingRaiseWasProbe_{false};
-    double pendingRaiseBaselineFps_{};
-    double pendingRaiseTimeSeconds_{};
-    double lastCostChangeTimeSeconds_{-1.0};
-    double lastBackoffTimeSeconds_{-1.0};
-    double successfulProbeHoldUntilSeconds_{};
-    double raiseHoldUntilSeconds_{};
 
-    // Raising the generation ceiling requires a sustained output deficit. The
-    // source-rate average collected during that observation period becomes the
-    // pre-raise baseline used to decide whether the additional LSFG work caused
-    // a subsequent source-FPS regression.
     double unmetDemandSinceSeconds_{-1.0};
-    double unmetSourceFpsSum_{};
-    std::size_t unmetSourceFpsSamples_{};
 
     AdaptiveSchedulerTelemetry telemetry_{};
 };

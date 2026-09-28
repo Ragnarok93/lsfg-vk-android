@@ -86,20 +86,32 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         )
 
         present = source.split("VkResult LsContext::present", 1)[1]
-        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        android_present = present.split(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization", 1
+        )[0]
         self.assertIn("this->asyncAhbHandoffEnabled_", android_present)
-        self.assertIn("&& generatedFrameCount > 0", android_present)
-        self.assertIn("&& !warmupSourceHistory", android_present)
-        self.assertIn(
-            "submitAndWaitForAhbHandoff",
-            android_present,
-            "Unsupported, warm-up, and non-generated cycles must retain the proven host-fence fallback",
+        handoff_start = android_present.index("bool useAsyncHandoff =")
+        handoff_end = android_present.index(
+            "if (!useAsyncHandoff && !asyncSubmissionIssued)", handoff_start
         )
+        handoff_decision = android_present[handoff_start:handoff_end]
+        self.assertIn("this->asyncAhbHandoffEnabled_", handoff_decision)
+        self.assertIn("!conservativeSourceOnlyWarmup", handoff_decision)
+        self.assertIn("!conservativeTrueSourceOnlyCycle", handoff_decision)
+        self.assertNotIn("warmupSourceHistory", handoff_decision)
+        self.assertIn(
+            "if (!useAsyncHandoff && !asyncSubmissionIssued)",
+            android_present,
+            "The bounded host-fence handoff remains only as compatibility/error fallback",
+        )
+        self.assertIn("submitAndWaitForAhbHandoff", android_present)
 
     def test_generated_ahb_uses_external_ownership_copy_path(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present = source.split("VkResult LsContext::present", 1)[1]
-        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        android_present = present.split(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization", 1
+        )[0]
         self.assertIn("copyExternalAhbToSwapchain", android_present)
         self.assertNotIn(
             "Utils::copyImage(",
@@ -117,16 +129,66 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, hooks)
 
+    def test_ahb_imports_and_failure_paths_preserve_native_and_vulkan_lifetimes(self) -> None:
+        core_header = (ROOT / "framegen/include/core/image.hpp").read_text(encoding="utf-8")
+        core_source = (ROOT / "framegen/src/core/image.cpp").read_text(encoding="utf-8")
+        mini_header = (ROOT / "include/mini/image.hpp").read_text(encoding="utf-8")
+        mini_source = (ROOT / "src/mini/image.cpp").read_text(encoding="utf-8")
+        context_header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("AHardwareBuffer_acquire(ahb)", core_source)
+        self.assertIn("std::shared_ptr<AHardwareBuffer> ahbRef", core_header)
+        self.assertIn("VulkanImageHandlesGuard", core_source)
+        self.assertIn("AhbHandleGuard", mini_source)
+        self.assertIn("VulkanImageHandlesGuard", mini_source)
+        self.assertIn("std::shared_ptr<AHardwareBuffer> ahbRef", mini_header)
+        self.assertIn("this->lsfgCtxId.reset()", context)
+        self.assertLess(
+            context_header.index("out_n;"),
+            context_header.index("std::shared_ptr<int32_t> lsfgCtxId"),
+            "The framegen context owner must be declared after imported images so exceptional destruction retires it first",
+        )
+        self.assertGreaterEqual(
+            core_source.count("delete img"),
+            3,
+            "Core Vulkan image holder cells must be freed after their driver objects",
+        )
+        self.assertGreaterEqual(
+            mini_source.count("delete img"),
+            2,
+            "Game-side Vulkan image holder cells must be freed after their driver objects",
+        )
+        self.assertIn("delete id", context)
+
+    def test_hook_state_retirement_is_serialized_and_noexcept_file_checks_fail_open(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        for token in (
+            "std::mutex hookStateMutex",
+            "std::shared_ptr<SwapchainState>",
+            "std::mutex presentMutex",
+            "retireSwapchainState",
+            "configurationFileChanged",
+            "std::filesystem::exists(configFile, configError)",
+        ):
+            self.assertIn(token, hooks)
+        self.assertIn("while (true)", hooks)
+        self.assertNotIn("const auto& activeConf = Config::activeConf", hooks)
+
     def test_runtime_config_change_is_reparsed_before_swapchain_recreation(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
         present = hooks.split("VkResult myvkQueuePresentKHR", 1)[1]
+        self.assertIn("configurationUpdateMutex", config)
+        self.assertIn("std::lock_guard updateLock(configurationUpdateMutex)", config)
         self.assertIn(
             "Config::updateConfig(",
             present,
             "A GameNative hot-reload must reparse conf.toml instead of remaining permanently OUT_OF_DATE",
         )
         self.assertIn(
-            "Config::activeConf = Config::getConfig(Utils::getProcessName())",
+            "Config::setActive(Config::getConfig(Utils::getProcessName()))",
             present,
         )
         self.assertIn("stage=config-reloaded", present)
@@ -134,7 +196,9 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
     def test_android_first_present_has_one_shot_framegen_stage_diagnostics(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present = source.split("VkResult LsContext::present", 1)[1]
-        android_present = present.split("#ifdef __ANDROID__", 1)[1].split("#else", 1)[0]
+        android_present = present.split(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization", 1
+        )[0]
         self.assertIn("const bool firstPresentDiagnostic = this->frameIdx == 0;", android_present)
         for marker in (
             "runtime stage=first-present-enter",
@@ -192,7 +256,16 @@ class AndroidAhbPortabilityContractTest(unittest.TestCase):
         )
         self.assertIn("requiredHeadroom", swapchain)
         self.assertIn("residentMultiplier - 1", swapchain)
-        self.assertIn("activeConf.targeted", swapchain)
+        self.assertIn(
+            "activeConf.multiplier <= 1 && !activeConf.targeted",
+            swapchain,
+            "A targeted GameNative Off toggle must keep the resident context; "
+            "non-targeted disabled sessions still preserve the native swapchain.",
+        )
+        self.assertLess(
+            swapchain.index("activeConf.multiplier <= 1 && !activeConf.targeted"),
+            swapchain.index("residentCapacityMultiplier(activeConf)"),
+        )
         self.assertIn("pCreateInfo->minImageCount + requiredHeadroom", swapchain)
         self.assertIn("requiredImageCount > maxImageCount", swapchain)
         self.assertIn("stage=swapchain-insufficient-headroom", swapchain)

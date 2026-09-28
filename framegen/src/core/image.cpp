@@ -8,10 +8,79 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 
 #ifdef __ANDROID__
 #include <android/hardware_buffer.h>
 #endif
+
+namespace {
+#ifdef __ANDROID__
+    struct AhbHandleGuard {
+        AHardwareBuffer* handle{};
+
+        ~AhbHandleGuard() {
+            if (handle != nullptr)
+                AHardwareBuffer_release(handle);
+        }
+
+        void release() noexcept { handle = nullptr; }
+    };
+#endif
+
+    struct VulkanImageHandlesGuard {
+        VkDevice device{VK_NULL_HANDLE};
+        VkImage image{VK_NULL_HANDLE};
+        VkDeviceMemory memory{VK_NULL_HANDLE};
+        VkImageView view{VK_NULL_HANDLE};
+
+        void destroyView() noexcept {
+            if (view != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, view, nullptr);
+                view = VK_NULL_HANDLE;
+            }
+        }
+
+        void destroyImage() noexcept {
+            if (image != VK_NULL_HANDLE) {
+                vkDestroyImage(device, image, nullptr);
+                image = VK_NULL_HANDLE;
+            }
+        }
+
+        void destroyMemory() noexcept {
+            if (memory != VK_NULL_HANDLE) {
+                vkFreeMemory(device, memory, nullptr);
+                memory = VK_NULL_HANDLE;
+            }
+        }
+
+        ~VulkanImageHandlesGuard() {
+            destroyView();
+            destroyImage();
+            destroyMemory();
+        }
+    };
+
+    struct VulkanImageOwners {
+        VulkanImageHandlesGuard handles;
+        std::shared_ptr<VkImage> image;
+        std::shared_ptr<VkDeviceMemory> memory;
+        std::shared_ptr<VkImageView> view;
+        std::shared_ptr<VkImageLayout> layout;
+
+        ~VulkanImageOwners() {
+            // Release dependencies before the raw-handle fallback cleanup.
+            handles.destroyView();
+            view.reset();
+            handles.destroyImage();
+            image.reset();
+            handles.destroyMemory();
+            memory.reset();
+            layout.reset();
+        }
+    };
+}
 
 using namespace LSFG::Core;
 
@@ -31,6 +100,9 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     };
     VkImage imageHandle{};
     auto res = vkCreateImage(device.handle(), &desc, nullptr, &imageHandle);
+    VulkanImageOwners owners;
+    owners.handles.device = device.handle();
+    owners.handles.image = imageHandle;
     if (res != VK_SUCCESS || imageHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create Vulkan image");
 
@@ -60,6 +132,7 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     };
     VkDeviceMemory memoryHandle{};
     res = vkAllocateMemory(device.handle(), &allocInfo, nullptr, &memoryHandle);
+    owners.handles.memory = memoryHandle;
     if (res != VK_SUCCESS || memoryHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to allocate memory for Vulkan image");
     res = vkBindImageMemory(device.handle(), imageHandle, memoryHandle, 0);
@@ -85,16 +158,40 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     };
     VkImageView viewHandle{};
     res = vkCreateImageView(device.handle(), &viewDesc, nullptr, &viewHandle);
+    owners.handles.view = viewHandle;
     if (res != VK_SUCCESS || viewHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create image view");
 
-    this->layout = std::make_shared<VkImageLayout>(VK_IMAGE_LAYOUT_UNDEFINED);
-    this->image = std::shared_ptr<VkImage>(new VkImage(imageHandle),
-        [dev = device.handle()](VkImage* img) { vkDestroyImage(dev, *img, nullptr); });
-    this->memory = std::shared_ptr<VkDeviceMemory>(new VkDeviceMemory(memoryHandle),
-        [dev = device.handle()](VkDeviceMemory* mem) { vkFreeMemory(dev, *mem, nullptr); });
-    this->view = std::shared_ptr<VkImageView>(new VkImageView(viewHandle),
-        [dev = device.handle()](VkImageView* imgView) { vkDestroyImageView(dev, *imgView, nullptr); });
+    owners.layout = std::make_shared<VkImageLayout>(VK_IMAGE_LAYOUT_UNDEFINED);
+    owners.image = std::shared_ptr<VkImage>(new VkImage(imageHandle),
+        [dev = device.handle()](VkImage* img) {
+            if (img != nullptr) {
+                vkDestroyImage(dev, *img, nullptr);
+                delete img;
+            }
+        });
+    owners.handles.image = VK_NULL_HANDLE;
+    owners.memory = std::shared_ptr<VkDeviceMemory>(new VkDeviceMemory(memoryHandle),
+        [dev = device.handle()](VkDeviceMemory* mem) {
+            if (mem != nullptr) {
+                vkFreeMemory(dev, *mem, nullptr);
+                delete mem;
+            }
+        });
+    owners.handles.memory = VK_NULL_HANDLE;
+    owners.view = std::shared_ptr<VkImageView>(new VkImageView(viewHandle),
+        [dev = device.handle()](VkImageView* imgView) {
+            if (imgView != nullptr) {
+                vkDestroyImageView(dev, *imgView, nullptr);
+                delete imgView;
+            }
+        });
+    owners.handles.view = VK_NULL_HANDLE;
+
+    this->layout = std::move(owners.layout);
+    this->image = std::move(owners.image);
+    this->memory = std::move(owners.memory);
+    this->view = std::move(owners.view);
 }
 
 Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
@@ -118,6 +215,9 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     };
     VkImage imageHandle{};
     auto res = vkCreateImage(device.handle(), &desc, nullptr, &imageHandle);
+    VulkanImageOwners owners;
+    owners.handles.device = device.handle();
+    owners.handles.image = imageHandle;
     if (res != VK_SUCCESS || imageHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create Vulkan image");
 
@@ -158,6 +258,7 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     };
     VkDeviceMemory memoryHandle{};
     res = vkAllocateMemory(device.handle(), &allocInfo, nullptr, &memoryHandle);
+    owners.handles.memory = memoryHandle;
     if (res != VK_SUCCESS || memoryHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to allocate memory for Vulkan image");
     res = vkBindImageMemory(device.handle(), imageHandle, memoryHandle, 0);
@@ -179,16 +280,40 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     };
     VkImageView viewHandle{};
     res = vkCreateImageView(device.handle(), &viewDesc, nullptr, &viewHandle);
+    owners.handles.view = viewHandle;
     if (res != VK_SUCCESS || viewHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create image view");
 
-    this->layout = std::make_shared<VkImageLayout>(VK_IMAGE_LAYOUT_UNDEFINED);
-    this->image = std::shared_ptr<VkImage>(new VkImage(imageHandle),
-        [dev = device.handle()](VkImage* img) { vkDestroyImage(dev, *img, nullptr); });
-    this->memory = std::shared_ptr<VkDeviceMemory>(new VkDeviceMemory(memoryHandle),
-        [dev = device.handle()](VkDeviceMemory* mem) { vkFreeMemory(dev, *mem, nullptr); });
-    this->view = std::shared_ptr<VkImageView>(new VkImageView(viewHandle),
-        [dev = device.handle()](VkImageView* imgView) { vkDestroyImageView(dev, *imgView, nullptr); });
+    owners.layout = std::make_shared<VkImageLayout>(VK_IMAGE_LAYOUT_UNDEFINED);
+    owners.image = std::shared_ptr<VkImage>(new VkImage(imageHandle),
+        [dev = device.handle()](VkImage* img) {
+            if (img != nullptr) {
+                vkDestroyImage(dev, *img, nullptr);
+                delete img;
+            }
+        });
+    owners.handles.image = VK_NULL_HANDLE;
+    owners.memory = std::shared_ptr<VkDeviceMemory>(new VkDeviceMemory(memoryHandle),
+        [dev = device.handle()](VkDeviceMemory* mem) {
+            if (mem != nullptr) {
+                vkFreeMemory(dev, *mem, nullptr);
+                delete mem;
+            }
+        });
+    owners.handles.memory = VK_NULL_HANDLE;
+    owners.view = std::shared_ptr<VkImageView>(new VkImageView(viewHandle),
+        [dev = device.handle()](VkImageView* imgView) {
+            if (imgView != nullptr) {
+                vkDestroyImageView(dev, *imgView, nullptr);
+                delete imgView;
+            }
+        });
+    owners.handles.view = VK_NULL_HANDLE;
+
+    this->layout = std::move(owners.layout);
+    this->image = std::move(owners.image);
+    this->memory = std::move(owners.memory);
+    this->view = std::move(owners.view);
 }
 
 #ifdef __ANDROID__
@@ -199,6 +324,19 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
         : extent(extent), format(format), aspectFlags(aspectFlags), externalShared(true) {
     if (ahb == nullptr)
         throw LSFG::vulkan_error(VK_ERROR_INITIALIZATION_FAILED, "AHB is null");
+
+    // The caller owns the original reference. Keep an independent reference
+    // so this imported image remains valid even if the caller's Mini::Image
+    // is destroyed first.
+    AHardwareBuffer_acquire(ahb);
+    AhbHandleGuard ahbGuard{ahb};
+    this->ahbRef = std::shared_ptr<AHardwareBuffer>(
+        ahb,
+        [](AHardwareBuffer* buffer) {
+            if (buffer != nullptr)
+                AHardwareBuffer_release(buffer);
+        });
+    ahbGuard.release();
 
     VkAndroidHardwareBufferFormatPropertiesANDROID fmtProps{
         .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID,
@@ -241,6 +379,9 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     };
     VkImage imageHandle{};
     res = vkCreateImage(device.handle(), &desc, nullptr, &imageHandle);
+    VulkanImageOwners owners;
+    owners.handles.device = device.handle();
+    owners.handles.image = imageHandle;
     if (res != VK_SUCCESS || imageHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create Vulkan image (AHB)");
 
@@ -251,7 +392,6 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
         if (ahbProps.memoryTypeBits & (1u << i)) { memType.emplace(i); break; }
     }
     if (!memType.has_value()) {
-        vkDestroyImage(device.handle(), imageHandle, nullptr);
         throw LSFG::vulkan_error(VK_ERROR_UNKNOWN, "No memory type for AHB import");
     }
 
@@ -272,16 +412,12 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     };
     VkDeviceMemory memoryHandle{};
     res = vkAllocateMemory(device.handle(), &allocInfo, nullptr, &memoryHandle);
-    if (res != VK_SUCCESS || memoryHandle == VK_NULL_HANDLE) {
-        vkDestroyImage(device.handle(), imageHandle, nullptr);
+    owners.handles.memory = memoryHandle;
+    if (res != VK_SUCCESS || memoryHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to import AHB into VkDeviceMemory");
-    }
     res = vkBindImageMemory(device.handle(), imageHandle, memoryHandle, 0);
-    if (res != VK_SUCCESS) {
-        vkFreeMemory(device.handle(), memoryHandle, nullptr);
-        vkDestroyImage(device.handle(), imageHandle, nullptr);
+    if (res != VK_SUCCESS)
         throw LSFG::vulkan_error(res, "Failed to bind AHB memory");
-    }
 
     const VkImageViewCreateInfo viewDescAhb{
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -298,19 +434,42 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     };
     VkImageView viewHandleAhb{};
     res = vkCreateImageView(device.handle(), &viewDescAhb, nullptr, &viewHandleAhb);
-    if (res != VK_SUCCESS || viewHandleAhb == VK_NULL_HANDLE) {
-        vkFreeMemory(device.handle(), memoryHandle, nullptr);
-        vkDestroyImage(device.handle(), imageHandle, nullptr);
+    owners.handles.view = viewHandleAhb;
+    if (res != VK_SUCCESS || viewHandleAhb == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create AHB image view");
-    }
 
-    this->layout = std::make_shared<VkImageLayout>(VK_IMAGE_LAYOUT_GENERAL);
-    this->image = std::shared_ptr<VkImage>(new VkImage(imageHandle),
-        [dev = device.handle()](VkImage* img) { vkDestroyImage(dev, *img, nullptr); });
-    this->memory = std::shared_ptr<VkDeviceMemory>(new VkDeviceMemory(memoryHandle),
-        [dev = device.handle()](VkDeviceMemory* mem) { vkFreeMemory(dev, *mem, nullptr); });
-    this->view = std::shared_ptr<VkImageView>(new VkImageView(viewHandleAhb),
-        [dev = device.handle()](VkImageView* imgView) { vkDestroyImageView(dev, *imgView, nullptr); });
+    // Construct all owners off-object first. If any allocation throws, the
+    // bundle releases view, image, and memory in Vulkan dependency order.
+    owners.layout = std::make_shared<VkImageLayout>(VK_IMAGE_LAYOUT_GENERAL);
+    owners.image = std::shared_ptr<VkImage>(new VkImage(imageHandle),
+        [dev = device.handle()](VkImage* img) {
+            if (img != nullptr) {
+                vkDestroyImage(dev, *img, nullptr);
+                delete img;
+            }
+        });
+    owners.handles.image = VK_NULL_HANDLE;
+    owners.memory = std::shared_ptr<VkDeviceMemory>(new VkDeviceMemory(memoryHandle),
+        [dev = device.handle()](VkDeviceMemory* mem) {
+            if (mem != nullptr) {
+                vkFreeMemory(dev, *mem, nullptr);
+                delete mem;
+            }
+        });
+    owners.handles.memory = VK_NULL_HANDLE;
+    owners.view = std::shared_ptr<VkImageView>(new VkImageView(viewHandleAhb),
+        [dev = device.handle()](VkImageView* imgView) {
+            if (imgView != nullptr) {
+                vkDestroyImageView(dev, *imgView, nullptr);
+                delete imgView;
+            }
+        });
+    owners.handles.view = VK_NULL_HANDLE;
+
+    this->layout = std::move(owners.layout);
+    this->image = std::move(owners.image);
+    this->memory = std::move(owners.memory);
+    this->view = std::move(owners.view);
 }
 
 #endif // __ANDROID__

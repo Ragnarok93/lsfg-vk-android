@@ -24,6 +24,16 @@ if "else()\n    # Android loader/provenance entrypoints" not in cmake:
     raise SystemExit("Android-only source exclusions are not scoped to the desktop branch")
 
 workflow = (root / ".github/workflows/android-bionic.yml").read_text()
+if 'bash ./scripts/build/android.sh Release' in workflow:
+    raise SystemExit("feature/fix branches must not invoke an unconditional Android Release build")
+if "ANDROID_BUILD_TYPE:" not in workflow:
+    raise SystemExit("Android CI must select build type from the ref")
+if 'bash ./scripts/build/android.sh "${ANDROID_BUILD_TYPE}"' not in workflow:
+    raise SystemExit("Android CI must invoke the selected Debug/Release build type")
+
+desktop_workflow = (root / ".github/workflows/build.yml").read_text()
+if 'branches: ["release", "fix/**"]' in desktop_workflow:
+    raise SystemExit("fix branches must not trigger the desktop Release workflow")
 for stale in ("b12-evidence-build:", "b12-mipmaps-refinement-build:"):
     if stale in workflow:
         raise SystemExit(f"stale profiling-only Android job remains: {stale}")

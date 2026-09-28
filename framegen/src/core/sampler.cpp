@@ -38,6 +38,7 @@ Sampler::Sampler(const Core::Device& device,
         new VkSampler(samplerHandle),
         [dev = device.handle()](VkSampler* samplerHandle) {
             vkDestroySampler(dev, *samplerHandle, nullptr);
+            delete samplerHandle;
         }
     );
 }

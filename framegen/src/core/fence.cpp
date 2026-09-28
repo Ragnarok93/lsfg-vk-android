@@ -25,6 +25,7 @@ Fence::Fence(const Core::Device& device) {
         new VkFence(fenceHandle),
         [dev = device.handle()](VkFence* fenceHandle) {
             vkDestroyFence(dev, *fenceHandle, nullptr);
+            delete fenceHandle;
         }
     );
 }
@@ -42,5 +43,12 @@ bool Fence::wait(const Core::Device& device, uint64_t timeout) const {
     if (res != VK_SUCCESS && res != VK_TIMEOUT)
         throw LSFG::vulkan_error(res, "Unable to wait for fence");
 
+    return res == VK_SUCCESS;
+}
+
+bool Fence::isSignaled(const Core::Device& device) const {
+    const auto res = vkGetFenceStatus(device.handle(), this->handle());
+    if (res != VK_SUCCESS && res != VK_NOT_READY)
+        throw LSFG::vulkan_error(res, "Unable to query fence status");
     return res == VK_SUCCESS;
 }

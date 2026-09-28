@@ -54,7 +54,7 @@ std::array<uint8_t, VK_UUID_SIZE> parseUuid(const char* envName) {
 } // namespace
 
 void Benchmark::run(uint32_t width, uint32_t height) {
-    const auto& conf = Config::activeConf;
+    const auto conf = Config::snapshot();
 
     auto* lsfgInitialize = LSFG_3_1::initialize;
     auto* lsfgCreateContext = LSFG_3_1::createContext;

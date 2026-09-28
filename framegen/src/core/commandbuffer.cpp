@@ -33,6 +33,7 @@ CommandBuffer::CommandBuffer(const Core::Device& device, const CommandPool& pool
         new VkCommandBuffer(commandBufferHandle),
         [dev = device.handle(), pool = pool.handle()](VkCommandBuffer* cmdBuffer) {
             vkFreeCommandBuffers(dev, pool, 1, cmdBuffer);
+            delete cmdBuffer;
         }
     );
 }

@@ -36,6 +36,7 @@ struct CommandBufferOwner {
 } // namespace
 
 CommandBuffer::CommandBuffer(VkDevice device, const CommandPool& pool) {
+    this->device = device;
     const VkCommandBufferAllocateInfo desc{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = pool.handle(),
@@ -56,6 +57,26 @@ CommandBuffer::CommandBuffer(VkDevice device, const CommandPool& pool) {
     auto owner = std::make_shared<CommandBufferOwner>(
         device, pool.handle(), commandBufferHandle);
     this->commandBuffer = std::shared_ptr<VkCommandBuffer>(owner, &owner->handle);
+}
+
+void CommandBuffer::reset() {
+    if (!this->state || !this->commandBuffer
+            || *this->state != CommandBufferState::Submitted) {
+        throw std::logic_error("Command buffer is not in Submitted state");
+    }
+    if (this->resetCommandBuffer == nullptr) {
+        this->resetCommandBuffer = reinterpret_cast<PFN_vkResetCommandBuffer>(
+            Layer::ovkGetDeviceProcAddr(this->device, "vkResetCommandBuffer"));
+    }
+    if (this->resetCommandBuffer == nullptr) {
+        throw LSFG::vulkan_error(
+            VK_ERROR_INITIALIZATION_FAILED,
+            "Unable to reset command buffer: vkResetCommandBuffer unavailable");
+    }
+    const auto res = this->resetCommandBuffer(*this->commandBuffer, 0);
+    if (res != VK_SUCCESS)
+        throw LSFG::vulkan_error(res, "Unable to reset command buffer");
+    *this->state = CommandBufferState::Empty;
 }
 
 void CommandBuffer::begin() {

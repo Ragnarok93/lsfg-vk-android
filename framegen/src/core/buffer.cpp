@@ -9,8 +9,27 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 
 using namespace LSFG::Core;
+
+namespace {
+
+struct BufferHandleGuard {
+    VkDevice device{VK_NULL_HANDLE};
+    VkBuffer buffer{VK_NULL_HANDLE};
+    VkDeviceMemory memory{VK_NULL_HANDLE};
+
+    ~BufferHandleGuard() {
+        // A bound buffer must be destroyed before its memory is freed.
+        if (buffer != VK_NULL_HANDLE)
+            vkDestroyBuffer(device, buffer, nullptr);
+        if (memory != VK_NULL_HANDLE)
+            vkFreeMemory(device, memory, nullptr);
+    }
+};
+
+} // namespace
 
 void Buffer::construct(const Core::Device& device, const void* data, VkBufferUsageFlags usage) {
     // create buffer
@@ -24,6 +43,7 @@ void Buffer::construct(const Core::Device& device, const void* data, VkBufferUsa
     auto res = vkCreateBuffer(device.handle(), &desc, nullptr, &bufferHandle);
     if (res != VK_SUCCESS || bufferHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create Vulkan buffer");
+    BufferHandleGuard handles{.device = device.handle(), .buffer = bufferHandle};
 
     // find memory type
     VkPhysicalDeviceMemoryProperties memProps;
@@ -55,6 +75,7 @@ void Buffer::construct(const Core::Device& device, const void* data, VkBufferUsa
     };
     VkDeviceMemory memoryHandle{};
     res = vkAllocateMemory(device.handle(), &allocInfo, nullptr, &memoryHandle);
+    handles.memory = memoryHandle;
     if (res != VK_SUCCESS || memoryHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to allocate memory for Vulkan buffer");
 
@@ -70,17 +91,24 @@ void Buffer::construct(const Core::Device& device, const void* data, VkBufferUsa
     std::copy_n(reinterpret_cast<const uint8_t*>(data), this->size, buf);
     vkUnmapMemory(device.handle(), memoryHandle);
 
-    // store buffer and memory in shared ptr
-    this->buffer = std::shared_ptr<VkBuffer>(
+    // Store buffer and memory only after every operation has succeeded. The
+    // stack guard owns partial Vulkan construction on all exceptional paths.
+    auto bufferOwner = std::shared_ptr<VkBuffer>(
         new VkBuffer(bufferHandle),
         [dev = device.handle()](VkBuffer* img) {
             vkDestroyBuffer(dev, *img, nullptr);
+            delete img;
         }
     );
-    this->memory = std::shared_ptr<VkDeviceMemory>(
+    handles.buffer = VK_NULL_HANDLE;
+    auto memoryOwner = std::shared_ptr<VkDeviceMemory>(
         new VkDeviceMemory(memoryHandle),
         [dev = device.handle()](VkDeviceMemory* mem) {
             vkFreeMemory(dev, *mem, nullptr);
+            delete mem;
         }
     );
+    handles.memory = VK_NULL_HANDLE;
+    this->buffer = std::move(bufferOwner);
+    this->memory = std::move(memoryOwner);
 }

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -75,6 +76,11 @@ namespace {
         return shaderData;
     }
 
+    auto& shadersMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
     int on_resource(void*, const peparse::resource& res) {
         if (res.type != peparse::RT_RCDATA || res.buf == nullptr || res.buf->bufLen <= 0)
             return 0;
@@ -94,7 +100,7 @@ namespace {
 
     std::string getDllPath() {
         // overriden path
-        std::string dllPath = Config::activeConf.dll;
+        std::string dllPath = Config::snapshot().dll;
         if (!dllPath.empty())
             return dllPath;
         // direct Unix path from the host (GameNative / Wine-on-Android resolves the
@@ -134,23 +140,35 @@ namespace {
 }
 
 void Extract::extractShaders() {
+    std::lock_guard lock(shadersMutex());
     if (!shaders().empty())
         return;
 
+    shaders().clear();
     // parse the dll
     peparse::parsed_pe* dll = peparse::ParsePEFromFile(getDllPath().c_str());
     if (!dll)
         throw std::runtime_error("Unable to read Lossless.dll, is it installed?");
-    peparse::IterRsrc(dll, on_resource, nullptr);
-    peparse::DestructParsedPE(dll);
 
-    // ensure all shaders are present
-    for (const auto& [name, idx] : nameIdxTable)
-        if (shaders().find(idx) == shaders().end())
-            throw std::runtime_error("Shader not found: " + name + ".\n- Is Lossless Scaling up to date?");
+    try {
+        peparse::IterRsrc(dll, on_resource, nullptr);
+
+        // ensure all shaders are present before publishing the cache as ready
+        for (const auto& [name, idx] : nameIdxTable)
+            if (shaders().find(idx) == shaders().end())
+                throw std::runtime_error(
+                    "Shader not found: " + name
+                    + ".\n- Is Lossless Scaling up to date?");
+    } catch (...) {
+        peparse::DestructParsedPE(dll);
+        shaders().clear();
+        throw;
+    }
+    peparse::DestructParsedPE(dll);
 }
 
 std::vector<uint8_t> Extract::getShader(const std::string& name) {
+    std::lock_guard lock(shadersMutex());
     if (shaders().empty())
         throw std::runtime_error("Shaders are not loaded.");
 

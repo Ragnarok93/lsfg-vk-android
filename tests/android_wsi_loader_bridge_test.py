@@ -170,9 +170,11 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
     def test_android_present_chain_uses_distinct_binary_semaphore_signals(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         present_start = source.index("VkResult LsContext::present")
-        android_start = source.index("#ifdef __ANDROID__", present_start)
-        desktop_start = source.index("#else", android_start)
-        android = source[android_start:desktop_start]
+        desktop_start = source.index(
+            "// Desktop Linux path: OPAQUE_FD semaphore-based synchronization",
+            present_start,
+        )
+        android = source[present_start:desktop_start]
 
         # A Vulkan binary semaphore signal can satisfy only one wait. The
         # generated present and following generated/source present therefore
@@ -191,25 +193,39 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertNotIn("VkSemaphore lastPostCopySem =", android)
         self.assertIn("runtime stage=present-sync-ready", android)
 
-    def test_runtime_disable_uses_resident_source_only_context(self) -> None:
+    def test_runtime_disable_keeps_targeted_context_resident_and_native_presents(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
-        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("activeConf.multiplier <= 1 && !activeConf.targeted", hooks)
-        self.assertIn("init stage=swapchain-pass-through reason=", hooks)
-        self.assertIn("enabled=", hooks)
-        self.assertIn("swapchainToDeviceTable.emplace(*pSwapchain, device)", hooks)
-        self.assertNotIn("if (!conf.enable || conf.multiplier <= 1)", hooks)
-        self.assertIn("if (conf.targeted && conf.multiplier <= 1)", hooks)
-        self.assertIn("swapchain.enterSourceOnlyBypass()", hooks)
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", hooks)
-        self.assertIn("void enterSourceOnlyBypass();", header)
-        self.assertIn("void LsContext::enterSourceOnlyBypass()", context)
+        self.assertNotIn("generationActivityChanged", hooks)
+        self.assertNotIn("const auto createSourceOnly", hooks)
+        self.assertNotIn('return createSourceOnly("generation-off")', hooks)
+        self.assertIn(
+            "if (activeConf.multiplier <= 1 && !activeConf.targeted)",
+            hooks,
+        )
+
+        self.assertIn("enteringResidentSourceOnly", hooks)
+        self.assertIn("state->context->enterSourceOnlyBypass()", hooks)
+        self.assertIn("runtime stage=resident-source-only-enter", hooks)
+
+        bypass_start = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
+        bypass_end = hooks.index("        try {", bypass_start)
+        bypass = hooks[bypass_start:bypass_end]
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", bypass)
+        self.assertNotIn("state->context->present(", bypass)
+
+        # The logical FIFO policy and Xclipse mailbox-backed active WSI path are
+        # protected from this Off-path repair.
+        self.assertIn("xclipseFifoMailboxBacked", hooks)
+        self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
+        self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
 
         reload_pos = hooks.index("init stage=config-reloaded multiplier=")
-        context_lookup_pos = hooks.index("auto it3 = swapchains.find")
+        context_lookup_pos = hooks.index("if (!state->context)")
+        bypass_pos = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
         self.assertLess(reload_pos, context_lookup_pos)
+        self.assertLess(context_lookup_pos, bypass_pos)
+
 
     def test_diagnostic_bridge_is_not_required_by_manifest(self) -> None:
         source = (ROOT / "src/android_wsi_loader_bridge.cpp").read_text(encoding="utf-8")

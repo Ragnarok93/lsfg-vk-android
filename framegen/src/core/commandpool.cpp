@@ -24,6 +24,7 @@ CommandPool::CommandPool(const Core::Device& device) {
         new VkCommandPool(commandPoolHandle),
         [dev = device.handle()](VkCommandPool* commandPoolHandle) {
             vkDestroyCommandPool(dev, *commandPoolHandle, nullptr);
+            delete commandPoolHandle;
         }
     );
 }

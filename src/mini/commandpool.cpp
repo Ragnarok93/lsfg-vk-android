@@ -29,13 +29,17 @@ struct CommandPoolOwner {
 
 } // namespace
 
-CommandPool::CommandPool(VkDevice device, uint32_t graphicsFamilyIdx) {
-    // LSFG records short-lived copy command buffers every frame. Marking the
-    // pool transient lets Android ICDs choose backing storage optimized for
-    // frequent allocation/free rather than long-lived command buffers.
+CommandPool::CommandPool(VkDevice device, uint32_t graphicsFamilyIdx,
+        bool enableIndividualReset) {
+    // Keep the existing transient-only behavior unless a caller explicitly
+    // opts into individual command-buffer reset. The Adreno wrapper path is
+    // the only production caller that enables it.
+    VkCommandPoolCreateFlags flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    if (enableIndividualReset)
+        flags |= VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     const VkCommandPoolCreateInfo desc{
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .flags = flags,
         .queueFamilyIndex = graphicsFamilyIdx
     };
     VkCommandPool commandPoolHandle{};
