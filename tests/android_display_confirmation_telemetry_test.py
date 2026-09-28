@@ -57,11 +57,11 @@ class AndroidDisplayConfirmationTelemetryTest(unittest.TestCase):
         self.assertIn("generatedDisplayConfirmationComplete", source)
         self.assertRegex(
             source,
-            r"totalGeneratedDisplayConfirmed\\s*==\\s*metrics\\.totalGeneratedWsiAccepted",
+            r"totalGeneratedDisplayConfirmed\s*==\s*metrics\.totalGeneratedWsiAccepted",
         )
         self.assertIn("metrics.totalGeneratedDisplayNotShown == 0", source)
         self.assertIn("metrics.totalGeneratedDisplayUnknown == 0", source)
-        self.assertRegex(source, r"generatedDisplayConfirmation\\s*=")
+        self.assertRegex(source, r"generatedDisplayConfirmation\s*=")
         self.assertIn("!this->generatedDisplayConfirmationEnabled_", source)
         self.assertIn(': "unavailable"', source)
 
