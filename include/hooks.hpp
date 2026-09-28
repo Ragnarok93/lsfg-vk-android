@@ -14,6 +14,11 @@ namespace Hooks {
     struct DeviceInfo {
         VkDevice device;
         VkPhysicalDevice physicalDevice;
+        VkPhysicalDeviceProperties physicalDeviceProperties{};
+        VkDriverId gameDriverId{static_cast<VkDriverId>(0)};
+        std::string gameDriverName;
+        std::string gameDriverInfo;
+        uint64_t diagnosticsSessionId{0};
         LSFG::DeviceIdentity identity{};
         bool identityValid{false};
         std::pair<uint32_t, VkQueue> queue; // graphics family
@@ -30,6 +35,9 @@ namespace Hooks {
         // source presents carry explicit target times instead of relying on
         // MAILBOX queue submission cadence to approximate display cadence.
         bool androidDisplayTimingSupported{false};
+        // Capability probe only. The extension is not enabled or used for pacing
+        // by diagnostics; it is recorded for future display-visible qualification.
+        bool androidPresentTimingSupported{false};
         // True only for Samsung/Xclipse-class game devices. This is resolved
         // before swapchain creation so Xclipse FIFO can select its WSI backend
         // without changing the protected Adreno compatibility path.
