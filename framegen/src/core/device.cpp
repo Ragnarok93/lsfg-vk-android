@@ -336,11 +336,24 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.driverId = hasDriverProperties
         ? driverProperties.driverID
         : static_cast<VkDriverId>(0);
+    this->diagnostics.vendorId = properties.vendorID;
+    this->diagnostics.deviceId = properties.deviceID;
+    this->diagnostics.deviceType = static_cast<uint32_t>(properties.deviceType);
+    this->diagnostics.deviceName = properties.deviceName;
     this->diagnostics.identity = selectedIdentity;
     this->diagnostics.driverName = hasDriverProperties && driverProperties.driverName[0] != '\0'
         ? driverProperties.driverName
         : properties.deviceName;
     this->diagnostics.driverInfo = hasDriverProperties ? driverProperties.driverInfo : "";
+    this->diagnostics.subgroupSize = caps.subgroupSize;
+    this->diagnostics.subgroupStages = caps.subgroupStages;
+    this->diagnostics.subgroupOperations = caps.subgroupOperations;
+    this->diagnostics.timelineSemaphore = caps.timelineSemaphore;
+    this->diagnostics.shaderFloat16 = caps.shaderFloat16;
+    this->diagnostics.synchronization2Core = caps.synchronization2Core;
+    this->diagnostics.synchronization2Extension = caps.synchronization2Extension;
+    this->diagnostics.synchronization2Feature = caps.synchronization2Feature;
+    this->diagnostics.synchronizationPath = synchronizationPathName(decision.synchronizationPath);
 #ifdef __ANDROID__
     this->diagnostics.ahbR16fStorage = probeAhbImageUsage(physicalDevice,
         VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -378,6 +391,18 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT, syncFdSemaphoreProbe);
     this->diagnostics.externalSemaphoreOpaqueFd = opaqueFdSemaphoreProbe.supported;
     this->diagnostics.externalSemaphoreSyncFd = syncFdSemaphoreProbe.supported;
+    this->diagnostics.externalSemaphoreOpaqueFdExtension = opaqueFdSemaphoreProbe.extensionPresent;
+    this->diagnostics.externalSemaphoreOpaqueFdQuery = opaqueFdSemaphoreProbe.queryAvailable;
+    this->diagnostics.externalSemaphoreOpaqueFdFeatures = opaqueFdSemaphoreProbe.features;
+    this->diagnostics.externalSemaphoreOpaqueFdCompatible = opaqueFdSemaphoreProbe.compatibleHandleTypes;
+    this->diagnostics.externalSemaphoreOpaqueFdExportFromImported =
+        opaqueFdSemaphoreProbe.exportFromImportedHandleTypes;
+    this->diagnostics.externalSemaphoreSyncFdExtension = syncFdSemaphoreProbe.extensionPresent;
+    this->diagnostics.externalSemaphoreSyncFdQuery = syncFdSemaphoreProbe.queryAvailable;
+    this->diagnostics.externalSemaphoreSyncFdFeatures = syncFdSemaphoreProbe.features;
+    this->diagnostics.externalSemaphoreSyncFdCompatible = syncFdSemaphoreProbe.compatibleHandleTypes;
+    this->diagnostics.externalSemaphoreSyncFdExportFromImported =
+        syncFdSemaphoreProbe.exportFromImportedHandleTypes;
 #else
     this->diagnostics.ahbTransportMode = LSFG::AhbTransportMode::DirectStorage;
     this->diagnostics.externalSemaphoreOpaqueFd = true;
@@ -392,6 +417,14 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
               << " externalSemaphoreSyncFd="
               << (this->diagnostics.externalSemaphoreSyncFd ? 1 : 0)
               << " sync=" << synchronizationPathName(decision.synchronizationPath) << '\n';
+               << " api_version=" << VK_VERSION_MAJOR(properties.apiVersion) << "."
+               << VK_VERSION_MINOR(properties.apiVersion) << "."
+               << VK_VERSION_PATCH(properties.apiVersion)
+               << " vendor_id=" << properties.vendorID
+               << " device_id=" << properties.deviceID
+               << " subgroup_size=" << caps.subgroupSize
+               << " timeline=" << (caps.timelineSemaphore ? 1 : 0)
+               << " fp16=" << (caps.shaderFloat16 ? 1 : 0)
 
     uint32_t familyCount{};
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
