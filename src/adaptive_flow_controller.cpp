@@ -8,6 +8,10 @@ namespace {
 constexpr std::array<float, 4> kQualityStates{1.00F, 0.90F, 0.80F, 0.70F};
 constexpr std::array<float, 4> kBalancedStates{0.80F, 0.70F, 0.625F, 0.55F};
 constexpr std::array<float, 4> kLowStates{0.55F, 0.45F, 0.35F, 0.25F};
+constexpr std::array<float, 16> kAutoStates{
+    1.00F, 0.95F, 0.90F, 0.85F, 0.80F, 0.75F, 0.70F, 0.65F,
+    0.60F, 0.55F, 0.50F, 0.45F, 0.40F, 0.35F, 0.30F, 0.25F,
+};
 
 constexpr double kPressureRatio = 0.90;
 constexpr double kRecoveryPredictedRatio = 0.82;
@@ -36,6 +40,7 @@ std::span<const float> states(AdaptiveFlowPreset preset) {
     case AdaptiveFlowPreset::Quality: return kQualityStates;
     case AdaptiveFlowPreset::Balanced: return kBalancedStates;
     case AdaptiveFlowPreset::Low: return kLowStates;
+    case AdaptiveFlowPreset::Auto: return kAutoStates;
     }
     return kQualityStates;
 }
@@ -68,6 +73,7 @@ void AdaptiveFlowController::selectTargetState() {
     telemetry_ = {};
     telemetry_.targetScale = presetStates.front();
     telemetry_.minimumScale = presetStates.back();
+    telemetry_.stateCount = presetStates.size();
     telemetry_.currentScale = presetStates.front();
     telemetry_.stateIndex = 0;
 }
@@ -404,6 +410,7 @@ const char* AdaptiveFlowController::presetName(AdaptiveFlowPreset preset) {
     case AdaptiveFlowPreset::Quality: return "quality";
     case AdaptiveFlowPreset::Balanced: return "balanced";
     case AdaptiveFlowPreset::Low: return "low";
+    case AdaptiveFlowPreset::Auto: return "auto";
     }
     return "quality";
 }
