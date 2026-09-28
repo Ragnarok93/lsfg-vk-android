@@ -61,7 +61,9 @@ class AndroidDisplayConfirmationTelemetryTest(unittest.TestCase):
         )
         self.assertIn("metrics.totalGeneratedDisplayNotShown == 0", source)
         self.assertIn("metrics.totalGeneratedDisplayUnknown == 0", source)
-        self.assertIn("generated_display_confirmation=unavailable", source)
+        self.assertRegex(source, r"generatedDisplayConfirmation\\s*=")
+        self.assertIn("!this->generatedDisplayConfirmationEnabled_", source)
+        self.assertIn(': "unavailable"', source)
 
 
 if __name__ == "__main__":
