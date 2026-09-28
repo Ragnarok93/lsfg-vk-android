@@ -124,11 +124,18 @@ class AndroidXclipseFifoRegressionTest(unittest.TestCase):
         self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", active)
         self.assertIn("xclipseFifoMailboxBacked", active)
 
-        source_only_start = hooks.index("const auto createSourceOnly")
-        source_only_end = hooks.index("if (!activeConf.enable)", source_only_start)
-        source_only = hooks[source_only_start:source_only_end]
-        self.assertNotIn("xclipseFifoMailboxBacked", source_only)
-        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", source_only)
+        # Off no longer creates a second source-only swapchain. It bypasses
+        # framegen on the resident swapchain, so the already-working Xclipse
+        # logical-FIFO/mailbox-backed WSI selection remains untouched.
+        self.assertNotIn("const auto createSourceOnly", hooks)
+        self.assertNotIn('return createSourceOnly("generation-off")', hooks)
+
+        bypass_start = hooks.index("if (conf.targeted && conf.multiplier <= 1)")
+        bypass_end = hooks.index("        try {", bypass_start)
+        bypass = hooks[bypass_start:bypass_end]
+        self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", bypass)
+        self.assertNotIn("xclipseFifoMailboxBacked", bypass)
+        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", bypass)
 
         adreno_start = (ROOT / "src/context.cpp").read_text(
             encoding="utf-8"
