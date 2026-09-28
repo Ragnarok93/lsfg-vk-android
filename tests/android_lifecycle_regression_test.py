@@ -57,5 +57,21 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         self.assertNotIn("resize(conf.multiplier - 1)", allocation)
 
 
+    def test_generation_off_preserves_native_present_mode(self) -> None:
+        """LSFG-off must not inherit the frame-generation presentation policy."""
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        source_only_start = hooks.index("const auto createSourceOnly")
+        source_only_end = hooks.index("if (!activeConf.enable)", source_only_start)
+        source_only = hooks[source_only_start:source_only_end]
+
+        self.assertIn(
+            "sourceOnlyCreateInfo.presentMode = pCreateInfo->presentMode",
+            source_only,
+        )
+        self.assertNotIn("choosePresentMode(", source_only)
+        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", source_only)
+
+
 if __name__ == "__main__":
     unittest.main()
