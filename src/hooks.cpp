@@ -469,6 +469,21 @@ namespace {
         state->context.reset();
     }
 
+    void destroySwapchainStateAfterDownstreamDestroy(
+            VkDevice device,
+            VkSwapchainKHR swapchain,
+            const VkAllocationCallbacks* pAllocator) noexcept {
+        auto state = detachSwapchainState(swapchain);
+        if (!state) {
+            Layer::ovkDestroySwapchainKHR(device, swapchain, pAllocator);
+            return;
+        }
+
+        std::lock_guard presentLock(state->presentMutex);
+        Layer::ovkDestroySwapchainKHR(device, swapchain, pAllocator);
+        state->context.reset();
+    }
+
     void myvkDestroyDevice(VkDevice device,
             const VkAllocationCallbacks* pAllocator) noexcept {
         // Retire one state at a time so device destruction cannot fail with a
@@ -883,8 +898,10 @@ namespace {
             if (res != VK_SUCCESS)
                 return res;
 
-            if (pCreateInfo->oldSwapchain)
-                retireSwapchainState(pCreateInfo->oldSwapchain);
+            // Keep the source-only old swapchain wrapper alive until the
+            // application's vkDestroySwapchainKHR reaches the downstream WSI.
+            // Resetting it here would synchronously queue-wait a FIFO still
+            // owned by the driver and recreate the old hitch.
 
             try {
                 auto state = std::make_shared<SwapchainState>();
@@ -1315,8 +1332,8 @@ namespace {
             VkDevice device,
             VkSwapchainKHR swapchain,
             const VkAllocationCallbacks* pAllocator) noexcept {
-        retireSwapchainState(swapchain);
-        Layer::ovkDestroySwapchainKHR(device, swapchain, pAllocator);
+        destroySwapchainStateAfterDownstreamDestroy(
+            device, swapchain, pAllocator);
     }
 }
 
