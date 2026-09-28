@@ -1080,7 +1080,36 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             "Required pass-retirement fence functions unavailable");
     }
 
-    // prepare render passes
+    // Prepare the render-pass retirement fences once so the same safe owner
+    // can also guard Xclipse output-AHB reuse across FIFO batches.
+    const VkFenceCreateInfo fenceInfo{
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = 0,
+    };
+    const auto createOwnedCompletionFence = [&]() {
+        VkFence fence = VK_NULL_HANDLE;
+        const auto fenceResult = createCompletionFence(
+            info.device, &fenceInfo, nullptr, &fence);
+        if (fenceResult != VK_SUCCESS || fence == VK_NULL_HANDLE) {
+            throw LSFG::vulkan_error(
+                fenceResult == VK_SUCCESS
+                    ? VK_ERROR_INITIALIZATION_FAILED
+                    : fenceResult,
+                "Failed to create pass-retirement fence");
+        }
+        return std::shared_ptr<VkFence>(
+            new VkFence(fence),
+            [device = info.device, destroyCompletionFence](
+                    VkFence* ownedFence) {
+                if (ownedFence != nullptr) {
+                    if (*ownedFence != VK_NULL_HANDLE)
+                        destroyCompletionFence(
+                            device, *ownedFence, nullptr);
+                    delete ownedFence;
+                }
+            });
+    };
+
     bool reuseGameCopyCommandBuffers = false;
 #ifdef __ANDROID__
     reuseGameCopyCommandBuffers = this->conservativeCrossDeviceSync_;
@@ -1100,34 +1129,6 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         pass.postCopySemaphores.resize(runtimeMultiplier - 1);
         pass.prevPostCopySemaphores.resize(runtimeMultiplier - 1);
 
-        const VkFenceCreateInfo fenceInfo{
-            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-            .flags = 0,
-        };
-        const auto createOwnedCompletionFence = [&]() {
-            VkFence fence = VK_NULL_HANDLE;
-            const auto fenceResult = createCompletionFence(
-                info.device, &fenceInfo, nullptr, &fence);
-            if (fenceResult != VK_SUCCESS || fence == VK_NULL_HANDLE) {
-                throw LSFG::vulkan_error(
-                    fenceResult == VK_SUCCESS
-                        ? VK_ERROR_INITIALIZATION_FAILED
-                        : fenceResult,
-                    "Failed to create pass-retirement fence");
-            }
-            return std::shared_ptr<VkFence>(
-                new VkFence(fence),
-                [device = info.device, destroyCompletionFence](
-                        VkFence* ownedFence) {
-                    if (ownedFence != nullptr) {
-                        if (*ownedFence != VK_NULL_HANDLE)
-                            destroyCompletionFence(
-                                device, *ownedFence, nullptr);
-                        delete ownedFence;
-                    }
-                });
-        };
-
         pass.completionFence = createOwnedCompletionFence();
 #ifdef __ANDROID__
         if (this->deferredAdrenoCompletionEnabled_) {
@@ -1139,6 +1140,16 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         }
 #endif
     }
+#ifdef __ANDROID__
+    if (!this->conservativeCrossDeviceSync_
+            && this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR) {
+        this->xclipseOutputCompletionFences_.resize(runtimeMultiplier - 1);
+        this->xclipseOutputCompletionFenceSubmitted_.assign(
+            runtimeMultiplier - 1, false);
+        for (auto& outputFence : this->xclipseOutputCompletionFences_)
+            outputFence = createOwnedCompletionFence();
+    }
+#endif
 }
 
 LsContext::~LsContext() {
@@ -1314,6 +1325,60 @@ bool LsContext::submitPassCompletionFence(RenderPassInfo& pass, VkQueue queue) {
     pass.completionFenceFailed = true;
     return false;
 }
+
+#ifdef __ANDROID__
+bool LsContext::retireXclipseOutputCopies(size_t generatedFrameCount) {
+    if (generatedFrameCount == 0
+            || this->xclipseOutputCompletionFences_.empty())
+        return true;
+    if (generatedFrameCount > this->xclipseOutputCompletionFences_.size()
+            || generatedFrameCount
+                > this->xclipseOutputCompletionFenceSubmitted_.size())
+        return false;
+
+    bool allReady = true;
+    for (size_t i = 0; i < generatedFrameCount; ++i) {
+        if (!this->xclipseOutputCompletionFenceSubmitted_.at(i))
+            continue;
+
+        const auto& fenceOwner = this->xclipseOutputCompletionFences_.at(i);
+        if (fenceOwner == nullptr) {
+            allReady = false;
+            continue;
+        }
+        const VkFence fence = *fenceOwner;
+        const auto waitResult = this->completionWaitFences_(
+            this->device_, 1, &fence, VK_TRUE, 0);
+        if (waitResult == VK_SUCCESS) {
+            const auto resetResult = this->completionResetFences_(
+                this->device_, 1, &fence);
+            if (resetResult == VK_SUCCESS) {
+                this->xclipseOutputCompletionFenceSubmitted_.at(i) = false;
+            } else {
+                allReady = false;
+                Utils::logLimitN(
+                    "xclipseOutputRetirement",
+                    5,
+                    "Xclipse FIFO output retirement fence reset failed: "
+                        + std::to_string(resetResult));
+            }
+        } else if (waitResult == VK_TIMEOUT || waitResult == VK_NOT_READY) {
+            // A zero-time query is intentional: FIFO must skip a generated
+            // batch rather than blocking the application's source present.
+            allReady = false;
+        } else {
+            allReady = false;
+            Utils::logLimitN(
+                "xclipseOutputRetirement",
+                5,
+                "Xclipse FIFO output retirement fence query failed: "
+                    + std::to_string(waitResult));
+        }
+    }
+    return allReady;
+}
+
+#endif
 
 VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, VkQueue queue,
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
@@ -1849,6 +1914,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             ? static_cast<size_t>(conf.multiplier - 1)
             : 0;
     const bool generationFirstAdreno = this->conservativeCrossDeviceSync_;
+    const bool xclipseFifoPresentation =
+        !this->conservativeCrossDeviceSync_
+        && this->presentMode_ == VK_PRESENT_MODE_FIFO_KHR;
     const char* deadlineSemantics =
         generationFirstAdreno ? "generation-first" : "synthetic-slot";
     double computeReadyBudgetMs = 0.0;
@@ -2140,6 +2208,26 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.totalGeneratedPresentationCapDrops +=
                 cappedGeneratedFrames;
             generatedFrameCount = presentationCappedGeneratedFrameCount;
+        }
+    }
+
+    if (xclipseFifoPresentation
+            && generatedFrameCount > 0
+            && !sourceHistoryWarmupActive
+            && !this->retireXclipseOutputCopies(generatedFrameCount)) {
+        const size_t retiredOutputDropCount = generatedFrameCount;
+        metrics.windowGeneratedLateDrops += retiredOutputDropCount;
+        metrics.totalGeneratedLateDrops += retiredOutputDropCount;
+        metrics.windowAdmissionRejects += retiredOutputDropCount;
+        metrics.totalAdmissionRejects += retiredOutputDropCount;
+        this->deadlineBatchDecision_ = {};
+        generatedFrameCount = 0;
+        if (this->frameIdx < 4) {
+            std::cerr << "lsfg-vk: runtime stage=xclipse-fifo-output-retirement"
+                      << " generated=0"
+                      << " dropped=" << retiredOutputDropCount
+                      << " host_wait=0"
+                      << "\n";
         }
     }
 
@@ -5193,10 +5281,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         };
         if (outputReadyWaitValid.at(i))
             generatedCopyWaits.emplace_back(pass.renderSemaphores.at(i).handle());
+        VkFence xclipseOutputCompletionFence = VK_NULL_HANDLE;
+        if (xclipseFifoPresentation
+                && i < this->xclipseOutputCompletionFences_.size()) {
+            xclipseOutputCompletionFence =
+                *this->xclipseOutputCompletionFences_.at(i);
+        }
         postCopyBuf.submit(generatedWorkQueue,
             generatedCopyWaits,
             { pass.postCopySemaphores.at(i).handle(),
-              pass.prevPostCopySemaphores.at(i).handle() });
+              pass.prevPostCopySemaphores.at(i).handle() },
+            xclipseOutputCompletionFence);
+        if (xclipseOutputCompletionFence != VK_NULL_HANDLE)
+            this->xclipseOutputCompletionFenceSubmitted_.at(i) = true;
         metrics.windowGeneratedCopySubmitted++;
         metrics.totalGeneratedCopySubmitted++;
 
