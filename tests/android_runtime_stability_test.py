@@ -796,6 +796,26 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("if (framegenModeChanged)", reload)
         self.assertIn('" recreate=" << (recreateSwapchain ? 1 : 0)', reload)
 
+    def test_source_only_retirement_waits_until_downstream_swapchain_destroy(self) -> None:
+        """FIFO off-transition must not run the old context teardown before WSI retirement."""
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        create_start = hooks.index("const auto createSourceOnly")
+        create_end = hooks.index("#ifdef __ANDROID__", create_start)
+        source_only_create = hooks[create_start:create_end]
+        self.assertNotIn("retireSwapchainState(pCreateInfo->oldSwapchain)", source_only_create)
+        self.assertIn("source-only old swapchain", source_only_create)
+
+        destroy_start = hooks.index("void destroySwapchainStateAfterDownstreamDestroy")
+        destroy_end = hooks.index("void myvkDestroyDevice", destroy_start)
+        destroy_helper = hooks[destroy_start:destroy_end]
+        self.assertIn("Layer::ovkDestroySwapchainKHR", destroy_helper)
+        self.assertLess(
+            destroy_helper.index("Layer::ovkDestroySwapchainKHR"),
+            destroy_helper.index("state->context.reset()"),
+        )
+        self.assertIn("destroySwapchainStateAfterDownstreamDestroy", hooks)
+
     def test_gamenative_off_recreates_true_source_only_swapchain(self) -> None:
         """Off keeps the layer hot-loadable but removes the LSFG swapchain/context contract."""
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
