@@ -831,9 +831,13 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             "Layer::ovkQueuePresentKHR(queue, pPresentInfo)",
             source_only_present,
         )
+        reload_start = hooks.index("if (shouldPollConfig && configurationFileChanged(conf))")
+        reload_end = hooks.index("if (!state->context)", reload_start)
+        reload = hooks[reload_start:reload_end]
         self.assertIn(
             'publishRuntimeState(conf.config_file, "source_only"',
-            source_only_present,
+            reload,
+            "Source-only readiness must publish once on the soft transition, not every frame",
         )
 
         self.assertIn("void enterSourceOnlyBypass();", header)
