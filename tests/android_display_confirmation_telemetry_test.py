@@ -49,6 +49,20 @@ class AndroidDisplayConfirmationTelemetryTest(unittest.TestCase):
         block = source[enable:enable + 1800]
         self.assertIn("&& !this->conservativeCrossDeviceSync_", block)
 
+    def test_aggregate_display_confirmation_is_fail_closed(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("generated_display_confirmation=", source)
+        self.assertIn("generated_display_confirmation_complete=", source)
+        self.assertIn("generatedDisplayConfirmationComplete", source)
+        self.assertRegex(
+            source,
+            r"totalGeneratedDisplayConfirmed\\s*==\\s*metrics\\.totalGeneratedWsiAccepted",
+        )
+        self.assertIn("metrics.totalGeneratedDisplayNotShown == 0", source)
+        self.assertIn("metrics.totalGeneratedDisplayUnknown == 0", source)
+        self.assertIn("generated_display_confirmation=unavailable", source)
+
 
 if __name__ == "__main__":
     unittest.main()
