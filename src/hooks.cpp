@@ -399,10 +399,34 @@ namespace {
             Utils::logLimitN("deviceIdentity", 1,
                 "Physical-device ID properties unavailable; LSFG will fail open for this device.");
         }
+        std::cerr << "lsfg-vk: LSFG_PROVENANCE game-device"
+                  << " session_id=" << nextDiagnosticsSessionId.load(std::memory_order_relaxed)
+                  << " api_version=" << VK_VERSION_MAJOR(gameDeviceProperties.apiVersion) << "."
+                  << VK_VERSION_MINOR(gameDeviceProperties.apiVersion) << "."
+                  << VK_VERSION_PATCH(gameDeviceProperties.apiVersion)
+                  << " vendor_id=" << gameDeviceProperties.vendorID
+                  << " device_id=" << gameDeviceProperties.deviceID
+                  << " device_name=\"" << gameDeviceProperties.deviceName << "\""
+                  << " driver_id=" << static_cast<uint32_t>(gameDriverId)
+                  << " driver_name=\"" << gameDriverName << "\""
+                  << " driver_version=" << gameDeviceProperties.driverVersion
+                  << " ahb=" << (androidAhbSupported ? 1 : 0)
+                  << " opaque_fd=" << (androidOpaqueFdSemaphoreSupported ? 1 : 0)
+                  << " sync_fd=" << (androidSyncFdSemaphoreSupported ? 1 : 0)
+                  << " display_timing=" << (androidDisplayTimingSupported ? 1 : 0)
+                  << " present_timing_ext=" << (androidPresentTimingSupported ? 1 : 0)
+                  << " identity_valid=" << (identity.has_value() ? 1 : 0)
+                  << "\n";
         try {
             auto deviceInfo = std::make_shared<DeviceInfo>(DeviceInfo {
                 .device = *pDevice,
                 .physicalDevice = physicalDevice,
+                .physicalDeviceProperties = gameDeviceProperties,
+                .gameDriverId = gameDriverId,
+                .gameDriverName = gameDriverName,
+                .gameDriverInfo = gameDriverInfo,
+                .diagnosticsSessionId = nextDiagnosticsSessionId.fetch_add(
+                    1, std::memory_order_relaxed),
                 .identity = identity.value_or(LSFG::DeviceIdentity{}),
                 .identityValid = identity.has_value(),
                 .queue = Utils::findQueue(*pDevice, physicalDevice, pCreateInfo, VK_QUEUE_GRAPHICS_BIT),
@@ -410,6 +434,7 @@ namespace {
                 .androidOpaqueFdSemaphoreSupported = androidOpaqueFdSemaphoreSupported,
                 .androidSyncFdSemaphoreSupported = androidSyncFdSemaphoreSupported,
                 .androidDisplayTimingSupported = androidDisplayTimingSupported,
+                .androidPresentTimingSupported = androidPresentTimingSupported,
                 .xclipseDevice = xclipseDevice,
             });
             std::lock_guard lock(hookStateMutex);
