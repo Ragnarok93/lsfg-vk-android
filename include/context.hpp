@@ -236,6 +236,9 @@ private:
     uint64_t runtimeConfigSignature_{0};
     uint64_t configRevision_{0};
     bool runtimeConfigSignatureValid_{false};
+    // Quick-menu Off calls the direct-present bypass every source frame. Reset
+    // temporal/adaptive state only on the transition, not on every present.
+    bool sourceOnlyBypassActive_{false};
 
     AdaptiveFrameScheduler adaptiveScheduler_;
     FixedSourceCadenceGovernor fixedSourceCadenceGovernor_;

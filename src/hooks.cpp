@@ -89,11 +89,12 @@ namespace {
 #ifdef __ANDROID__
         const bool residentTarget = previous.targeted && next.targeted;
         if (residentTarget) {
-            // Off is layer-resident, not framegen-context-resident. Crossing
-            // the generation boundary must rebuild the real swapchain so an
-            // inactive FIFO path cannot inherit LSFG image-count/usage state.
-            const bool generationActivityChanged =
-                (previous.multiplier > 1) != (next.multiplier > 1);
+            // A process launched source-only has no LSFG context, so its first
+            // enable still needs one recreation. A live generated -> Off
+            // transition must remain resident: rebuilding WSI here is the
+            // disabled-mode hitch regression fixed by the September 8 path.
+            const bool generationActivationRequired =
+                previous.multiplier <= 1 && next.multiplier > 1;
             // Fixed and Adaptive use different temporal generation semantics.
             // Crossing this boundary must replace the private LSFG context rather
             // than carrying backend history through a resident soft reload.
@@ -120,7 +121,7 @@ namespace {
             // When both sides are Off there is no LSFG swapchain/context to
             // rebuild. Saved FG-only settings become relevant on the one
             // generation-boundary recreation that enables generation.
-            return generationActivityChanged
+            return generationActivationRequired
                 || framegenModeChanged
                 || (generationStaysActive
                     && next.multiplier > residentCapacityMultiplier(previous))
@@ -1297,6 +1298,14 @@ namespace {
                                   << " generation_ready=" << (generationActive ? 1 : 0)
                                   << " recreateSwapchain=0"
                                   << "\n";
+#ifdef __ANDROID__
+                        if (!generationActive) {
+                            publishRuntimeState(conf.config_file, "source_only",
+                                false, false, true, true, false, false, false,
+                                1, conf.performance, conf.adaptiveFramegen,
+                                conf.fpsLimit);
+                        }
+#endif
                     }
                 } catch (const std::exception& e) {
                     Utils::logLimitN("configReload", 5,
@@ -1324,6 +1333,24 @@ namespace {
             // not add repeated work or noise on every present.
             return Layer::ovkQueuePresentKHR(queue, pPresentInfo);
         }
+
+#ifdef __ANDROID__
+        if (conf.targeted && conf.multiplier <= 1) {
+            state->context->enterSourceOnlyBypass();
+            const auto sourceOnlyResult =
+                Layer::ovkQueuePresentKHR(queue, pPresentInfo);
+            if (sourceOnlyResult == VK_SUCCESS
+                    || sourceOnlyResult == VK_SUBOPTIMAL_KHR) {
+                recordSuccessfulOutputCycle(*state, *state->context,
+                    conf.config_file, 0, 1, conf.performance,
+                    conf.adaptiveFramegen, conf.fpsLimit);
+                Utils::resetLimitN("swapPresent");
+            } else {
+                recordOutputFailure(*state);
+            }
+            return sourceOnlyResult;
+        }
+#endif
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
         const VkSwapchainPresentModeInfoEXT* presentModeInfo =

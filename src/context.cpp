@@ -1310,6 +1310,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
     const auto conf = Config::snapshot();
 #ifdef __ANDROID__
+    // Re-entry into the generated path arms the next Off transition to perform
+    // its one-shot temporal reset.
+    this->sourceOnlyBypassActive_ = false;
     const bool adrenoHostCompletionFallback =
         this->conservativeCrossDeviceSync_
         && this->syntheticQueue_ == VK_NULL_HANDLE
@@ -5513,6 +5516,10 @@ void LsContext::resetAdaptiveSourceEpoch(
 }
 
 void LsContext::enterSourceOnlyBypass() {
+    if (this->sourceOnlyBypassActive_)
+        return;
+    this->sourceOnlyBypassActive_ = true;
+
     if (this->conservativeCrossDeviceSync_)
     // Explicit Off/source-only transitions invalidate deferred synthetic output,
     // but never discard the private-device batch release itself. The latter must
