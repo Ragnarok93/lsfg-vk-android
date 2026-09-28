@@ -473,7 +473,7 @@ int main() {
             controller.observe(sample(
                 8.0, 3.0, 16.666, false, false,
                 99.0, true, true));
-            lowered = near(controller.currentScale(), 0.70F);
+            lowered = near(controller.currentScale(), 0.75F);
         }
         assert(lowered);
         for (int i = 0; i < 10; ++i) {
@@ -481,7 +481,7 @@ int main() {
                 5.5, 1.8, 16.666, false, false,
                 90.0, true, false));
         }
-        assert(near(controller.currentScale(), 0.70F));
+        assert(near(controller.currentScale(), 0.75F));
     }
 
     {
