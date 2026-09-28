@@ -28,7 +28,8 @@ namespace {
     std::optional<std::unordered_map<std::string, Configuration>> gameConfs;
 
     bool validAdaptiveFlowPreset(const std::string& preset) {
-        return preset == "quality" || preset == "balanced" || preset == "low";
+        return preset == "quality" || preset == "balanced" || preset == "low"
+            || preset == "auto";
     }
 }
 
@@ -147,7 +148,7 @@ void Config::updateConfig(const std::string& file) {
         if (game.flowScale < 0.25F || game.flowScale > 1.0F)
             throw std::runtime_error("Flow scale must be between 0.25 and 1.0");
         if (!validAdaptiveFlowPreset(game.adaptiveFlowPreset))
-            throw std::runtime_error("Adaptive Flow preset must be quality, balanced, or low");
+            throw std::runtime_error("Adaptive Flow preset must be quality, balanced, low, or auto");
         if (game.adaptiveFramegen && game.fpsLimit == 0)
             throw std::runtime_error("Adaptive frame generation requires a positive fps_limit");
         games[exe] = std::move(game);
@@ -195,7 +196,7 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
         if (e_present) conf.e_present = into_present(std::string(e_present));
 
         if (!validAdaptiveFlowPreset(conf.adaptiveFlowPreset))
-            throw std::runtime_error("Adaptive Flow preset must be quality, balanced, or low");
+            throw std::runtime_error("Adaptive Flow preset must be quality, balanced, low, or auto");
         return conf;
     }
 
