@@ -12,7 +12,8 @@
 
 ## Global Constraints
 
-- `Auto` is the only new preset. Existing `quality`, `balanced`, and `low` state arrays and behavior remain unchanged.
+- `Auto` is the only new preset. Existing `quality`, `balanced`, and `low` target/floor envelopes and controller behavior remain unchanged; all preset state lattices use exact 0.05 increments.
+- Existing preset lattices are Quality `1.00–0.70`, Balanced `0.80–0.55`, and Low `0.55–0.25`; Auto spans `1.00–0.25`.
 - The Auto lattice is exactly `1.00, 0.95, 0.90, 0.85, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55, 0.50, 0.45, 0.40, 0.35, 0.30, 0.25`.
 - Preserve the existing target multiplier/adaptive frame-generation coupling and existing controller policy; do not add a second governor.
 - Keep runtime graph/context construction off the presentation path. Auto may increase prebuilt-context count, but must not introduce per-transition graph builds or destruction.
@@ -32,7 +33,7 @@
 
 - Add `AdaptiveFlowPreset::Auto`.
 - Return the exact 16-state Auto lattice above from `statesForPreset(AdaptiveFlowPreset::Auto)` and expose its count in `AdaptiveFlowTelemetry` as `stateCount` alongside the existing `stateIndex`.
-- Keep the current Quality, Balanced, and Low arrays byte-for-byte equivalent in values and order.
+- Keep the Quality, Balanced, and Low target/floor envelopes and order, with exact 0.05 spacing: Quality `1.00–0.70`, Balanced `0.80–0.55`, and Low `0.55–0.25`.
 - Make preset naming/reason reporting recognize Auto without changing the existing adaptive decision policy.
 
 **Implementation and verification steps:**
@@ -139,7 +140,7 @@
 
 ## Review Focus
 
-- **State lattice correctness:** exact 16 values, 0.05 spacing, descending order, endpoints, and no regressions in existing preset arrays. Owned by Task 1 controller tests.
+- **State lattice correctness:** exact 0.05 spacing, descending order, preserved preset target/floor envelopes, Auto’s 16 values/endpoints, and no lattice drift across all four presets. Owned by Task 1 controller tests.
 - **Policy behavior:** Auto reuses existing pressure/recovery logic, can reach 0.25 under sustained pressure, and still favors recovery to the highest sustainable state. Owned by Task 1 behavior tests and Task 2 runtime contracts.
 - **Configuration compatibility:** TOML, legacy/environment, saved preference, serialization, and hot reload all accept Auto while preserving defaults and existing presets. Owned by Task 2 and Task 3 tests.
 - **Observability correctness:** decision and periodic metrics include target/floor, state index/count, requested-vs-active values, transition/warmup/timing status, target FPS, and pressure evidence. Owned by Task 2 Python contracts and log inspection.

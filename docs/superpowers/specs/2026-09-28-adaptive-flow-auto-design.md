@@ -53,7 +53,11 @@ Auto uses these descending states:
 0.60, 0.55, 0.50, 0.45, 0.40, 0.35, 0.30, 0.25
 ```
 
-The controller target is 1.00 and the hard floor is 0.25. The existing Quality, Balanced, and Low state arrays remain unchanged.
+The controller target is 1.00 and the hard floor is 0.25. Quality, Balanced, and Low retain their existing target/floor envelopes while using exact 0.05 state spacing:
+
+- Quality: 1.00, 0.95, 0.90, 0.85, 0.80, 0.75, 0.70
+- Balanced: 0.80, 0.75, 0.70, 0.65, 0.60, 0.55
+- Low: 0.55, 0.50, 0.45, 0.40, 0.35, 0.30, 0.25
 
 The Android adaptive context will prebuild the complete Auto graph set using the existing prepared-state handoff mechanism. Runtime changes remain requests to already-built contexts; no graph is constructed or destroyed on the present thread.
 
@@ -152,7 +156,7 @@ Initialization telemetry must identify preset=auto, target=1.000, minimum=0.250,
 - Auto serializes as adaptive_flow_preset = "auto".
 - Auto initializes at 1.00 and can reach 0.25 through exact 0.05 states.
 - Auto remains biased toward the highest sustainable state.
-- Existing Quality, Balanced, and Low behavior is unchanged.
+- Existing Quality, Balanced, and Low target/floor envelopes and controller policy are unchanged; their state spacing is exact 0.05.
 - The UI order is exactly Auto/Quality over Low/Balanced.
 - Transition and periodic telemetry are sufficient to determine why every state changed.
 - Native and GameNative focused tests pass.
