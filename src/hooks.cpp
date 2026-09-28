@@ -881,7 +881,7 @@ namespace {
             return res;
         };
 
-        if (!activeConf.enable)        if (!activeConf.enable)
+        if (!activeConf.enable)
             return createPassThrough("disabled");
 
 #ifdef __ANDROID__
