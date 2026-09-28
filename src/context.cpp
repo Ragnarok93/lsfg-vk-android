@@ -1811,6 +1811,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     std::chrono::duration<double, std::milli>(
                         RuntimeMetrics::Clock::now()
                             - generatedPresentStart).count();
+                this->runtimeMetrics.generatedPresentTiming.add(
+                    std::chrono::duration<double, std::milli>(
+                        RuntimeMetrics::Clock::now()
+                            - generatedPresentStart).count());
             }
         }
 
@@ -2029,6 +2033,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             sourceInterval).count();
         if (sourceIntervalMs < kRuntimeTimingDiscontinuityMs) {
             metrics.windowSourceIntervalMs += sourceIntervalMs;
+            metrics.sourceIntervalTiming.add(sourceIntervalMs);
             if (sourceIntervalMs > metrics.windowSourceIntervalMaxMs)
                 metrics.windowSourceIntervalMaxMs = sourceIntervalMs;
             metrics.windowSourceIntervals++;
@@ -3100,6 +3105,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedPresentationCapDrops = 0;
             metrics.windowSourcePresentFailures = 0;
             metrics.windowGeneratedPresentFailures = 0;
+            metrics.windowAcquireNotReady = 0;
+            metrics.windowAcquireTimeout = 0;
+            metrics.windowPresentSuboptimal = 0;
+            metrics.windowPresentOutOfDate = 0;
             metrics.windowAdaptiveZeroGenerationCycles = 0;
             metrics.windowAdaptiveRateSnaps = 0;
             metrics.windowAdaptiveCostRaises = 0;
@@ -3134,9 +3143,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceIntervals = 0;
             metrics.windowSourceDeadlineSamples = 0;
             metrics.windowSourceTimelineRebases = 0;
+            metrics.cycleTiming.reset();
+            metrics.handoffTiming.reset();
+            metrics.dispatchTiming.reset();
+            metrics.completionTiming.reset();
+            metrics.generatedPresentTiming.reset();
+            metrics.sourceIntervalTiming.reset();
         }
         if (!excludeCurrentCycleFromTimingMetrics) {
             metrics.windowCycleMs += cycleMs;
+            metrics.cycleTiming.add(cycleMs);
             if (cycleMs > metrics.windowCycleMaxMs)
                 metrics.windowCycleMaxMs = cycleMs;
         }
@@ -3638,6 +3654,49 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 presentationTelemetry.upwardProbePending ? 1 : 0);
 #endif
 
+            std::ostringstream outcome;
+            outcome << std::fixed << std::setprecision(3)
+                    << "schema=1"
+                    << " runtime_session_id=" << this->runtimeSessionId_
+                    << " config_revision=" << this->configRevision_
+                    << " window_ms=" << elapsedSeconds * 1000.0
+                    << " source_fps=" << sourceFps
+                    << " output_fps=" << outputFps
+                    << " source_p50_ms=" << metrics.sourceIntervalTiming.percentile(0.50)
+                    << " source_p95_ms=" << metrics.sourceIntervalTiming.percentile(0.95)
+                    << " source_p99_ms=" << metrics.sourceIntervalTiming.percentile(0.99)
+                    << " source_max_ms=" << metrics.sourceIntervalTiming.maximum()
+                    << " cycle_p50_ms=" << metrics.cycleTiming.percentile(0.50)
+                    << " cycle_p95_ms=" << metrics.cycleTiming.percentile(0.95)
+                    << " cycle_p99_ms=" << metrics.cycleTiming.percentile(0.99)
+                    << " cycle_max_ms=" << metrics.cycleTiming.maximum()
+                    << " handoff_p95_ms=" << metrics.handoffTiming.percentile(0.95)
+                    << " dispatch_p95_ms=" << metrics.dispatchTiming.percentile(0.95)
+                    << " completion_wait_p95_ms="
+                    << metrics.completionTiming.percentile(0.95)
+                    << " generated_present_p95_ms="
+                    << metrics.generatedPresentTiming.percentile(0.95)
+                    << " acquire_not_ready=" << metrics.windowAcquireNotReady
+                    << " acquire_timeout=" << metrics.windowAcquireTimeout
+                    << " present_suboptimal=" << metrics.windowPresentSuboptimal
+                    << " present_out_of_date=" << metrics.windowPresentOutOfDate
+                    << " generated_attempted="
+                    << presentationTelemetry.attemptedGeneratedFrames
+                    << " dispatched=" << metrics.windowGeneratedDispatched
+                    << " completed=" << metrics.windowGeneratedCompleted
+                    << " wsi_submitted=" << metrics.windowGeneratedWsiSubmitted
+                    << " wsi_accepted=" << metrics.windowGeneratedWsiAccepted
+                    << " display_confirmed=" << metrics.windowGeneratedDisplayConfirmed
+                    << " display_not_shown=" << metrics.windowGeneratedDisplayNotShown
+                    << " display_unknown=" << metrics.windowGeneratedDisplayUnknown
+                    << " deadline_drop=" << metrics.windowGeneratedDeadlineDrops
+                    << " wsi_drop=" << metrics.windowGeneratedWsiDrops
+                    << " capacity_drop=" << metrics.windowGeneratedPresentationCapDrops
+                    << " outcome_confidence=" << generatedDeliveryConfidence
+                    << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
+                    << " multiplier=" << conf.multiplier;
+            emitNativeStructuredDiagnostic("LSFG_OUTCOME", outcome.str());
+
             metrics.windowStart = cycleEnd;
             metrics.windowSourceFrames = 0;
             metrics.windowGeneratedFrames = 0;
@@ -3657,6 +3716,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowGeneratedPresentationCapDrops = 0;
             metrics.windowSourcePresentFailures = 0;
             metrics.windowGeneratedPresentFailures = 0;
+            metrics.windowAcquireNotReady = 0;
+            metrics.windowAcquireTimeout = 0;
+            metrics.windowPresentSuboptimal = 0;
+            metrics.windowPresentOutOfDate = 0;
             metrics.windowAdaptiveZeroGenerationCycles = 0;
             metrics.windowAdaptiveRateSnaps = 0;
             metrics.windowAdaptiveCostRaises = 0;
@@ -3691,6 +3754,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowSourceIntervals = 0;
             metrics.windowSourceDeadlineSamples = 0;
             metrics.windowSourceTimelineRebases = 0;
+            metrics.cycleTiming.reset();
+            metrics.handoffTiming.reset();
+            metrics.dispatchTiming.reset();
+            metrics.completionTiming.reset();
+            metrics.generatedPresentTiming.reset();
+            metrics.sourceIntervalTiming.reset();
         }
 
         this->frameIdx++;
@@ -3826,6 +3895,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->previousSourceCopySignalValid_ = true;
         metrics.windowHandoffMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - handoffStart).count();
+        metrics.handoffTiming.add(std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - handoffStart).count());
 
         if (firstPresentDiagnostic) {
             std::cerr << "lsfg-vk: runtime stage=source-ahb-handoff-ready mode="
@@ -4003,6 +4074,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.totalGeneratedDispatched += generatedFrameCount;
         metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - dispatchStart).count();
+        metrics.dispatchTiming.add(std::chrono::duration<double, std::milli>(
+            RuntimeMetrics::Clock::now() - dispatchStart).count());
 
         // 364178af blocks only at this private-device completion boundary before
         // the game device reads generated AHBs.
@@ -4015,6 +4088,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - waitIdleStart).count();
         metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
+        metrics.completionTiming.add(framegenBlockingCompletionMs);
         if (framegenReady && generatedFrameCount > 0) {
             // This is the cost that actually blocks the matching source present
             // on protected Adreno. GPU timestamps omit queue residency and were
@@ -4151,6 +4225,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 std::chrono::duration<double, std::milli>(
                     RuntimeMetrics::Clock::now()
                     - generatedPresentStart).count();
+            metrics.generatedPresentTiming.add(
+                std::chrono::duration<double, std::milli>(
+                    RuntimeMetrics::Clock::now()
+                    - generatedPresentStart).count());
         }
 
         // The source is queued after the admitted generated prefix, using the
@@ -5215,6 +5293,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - waitIdleStart).count();
         metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
+        metrics.completionTiming.add(framegenBlockingCompletionMs);
     }
     if (requireHostCompletionWait && framegenReady) {
         metrics.windowGeneratedCompleted += generatedFrameCount;
@@ -5478,6 +5557,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         trackGeneratedDisplayPresent(generatedPresentTime.presentID);
         metrics.windowGeneratedPresentMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - generatedPresentStart).count();
+        metrics.generatedPresentTiming.add(
+            std::chrono::duration<double, std::milli>(
+                RuntimeMetrics::Clock::now() - generatedPresentStart).count());
         if (firstPresentDiagnostic && i == 0) {
             std::cerr << "lsfg-vk: runtime stage=generated-present-ready image=" << imageIdx
                       << " result=" << res << "\n";
