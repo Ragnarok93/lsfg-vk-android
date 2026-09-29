@@ -1006,6 +1006,23 @@ std::size_t FixedSourceCadenceGovernor::plan(
             // but generation remains blocked until the next clean interval.
             baselineIntervalSeconds_ = intervalSeconds;
             hasBaseline_ = true;
+            baselinePriming_ = true;
+            pressureSeconds_ = 0.0;
+            recoverySeconds_ = 0.0;
+            telemetry_.intervalRatio = 1.0;
+            telemetry_.baselineValid = false;
+            telemetry_.baselineSourceFps = 0.0;
+            telemetry_.generationLimit = generationLimit_;
+            return 0;
+        }
+
+        // Confirm the candidate with one more interval that carried no
+        // generated frames. This absorbs the short post-reset burst without
+        // allowing established HistoryMaintenance samples to re-anchor the
+        // governor after generated work has already been observed.
+        if (baselinePriming_ && previousDispatchedGeneratedFrames == 0) {
+            baselineIntervalSeconds_ = intervalSeconds;
+            baselinePriming_ = false;
             pressureSeconds_ = 0.0;
             recoverySeconds_ = 0.0;
             telemetry_.intervalRatio = 1.0;
@@ -1014,6 +1031,7 @@ std::size_t FixedSourceCadenceGovernor::plan(
             telemetry_.generationLimit = generationLimit_;
             return 0;
         }
+        baselinePriming_ = false;
 
         double intervalRatio =
             intervalSeconds / baselineIntervalSeconds_;
@@ -1075,20 +1093,21 @@ std::size_t FixedSourceCadenceGovernor::plan(
         }
     }
 
-    telemetry_.baselineValid = hasBaseline_;
+    telemetry_.baselineValid = hasBaseline_ && !baselinePriming_;
     telemetry_.baselineSourceFps =
-        hasBaseline_ && baselineIntervalSeconds_ > 0.0
+        hasBaseline_ && !baselinePriming_ && baselineIntervalSeconds_ > 0.0
             ? 1.0 / baselineIntervalSeconds_
             : 0.0;
     telemetry_.generationLimit = generationLimit_;
 
-    if (!generationAllowed || !hasBaseline_)
+    if (!generationAllowed || !hasBaseline_ || baselinePriming_)
         return 0;
     return std::min(generationLimit_, requestedGeneratedFrames);
 }
 
 void FixedSourceCadenceGovernor::reset() {
     hasBaseline_ = false;
+    baselinePriming_ = false;
     baselineIntervalSeconds_ = 0.0;
     generationLimit_ = 0;
     requestedGeneratedFrames_ = 0;
