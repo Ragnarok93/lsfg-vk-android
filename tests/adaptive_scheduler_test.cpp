@@ -752,6 +752,14 @@ int main() {
         assert(cadence.snapshot().outputFps > 58.0);
         assert(!cadence.snapshot().deficitConfirmed);
         assert(cadence.snapshot().targetSatisfiedConfirmed);
+
+        // A Flow transition's bounded history-only cycles must not retain the
+        // preceding deficit/satisfied evidence as if output were continuous.
+        cadence.beginTransition();
+        assert(!cadence.snapshot().valid);
+        assert(cadence.snapshot().coverageSeconds == 0.0);
+        assert(!cadence.snapshot().deficitConfirmed);
+        assert(!cadence.snapshot().targetSatisfiedConfirmed);
     }
 
     {
