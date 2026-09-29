@@ -629,8 +629,8 @@ namespace {
                 << (adaptiveFlow.globalPressureValid ? 1 : 0) << '\n'
                 << "adaptive_flow_global_gpu_percent="
                 << adaptiveFlow.globalGpuUsagePercent << '\n'
-                << "adaptive_flow_global_output_fps="
-                << adaptiveFlow.globalOutputFps << '\n'
+                << "adaptive_flow_global_source_fps="
+                << adaptiveFlow.globalSourceFps << '\n'
                 << "adaptive_flow_lsfg_output_valid="
                 << (adaptiveFlow.lsfgOutputValid ? 1 : 0) << '\n'
                 << "adaptive_flow_lsfg_output_fps="
