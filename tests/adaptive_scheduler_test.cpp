@@ -910,6 +910,43 @@ int main() {
         const auto safeHint = predictor.safeGenerationHint(3, 33.0);
         assert(safeHint >= 1);
         assert(safeHint <= 3);
+
+        // GPU timestamps alone miss queue residency on the protected Adreno
+        // path. A measured host completion time must bound the same batch's
+        // predicted cost before the next generated batch is admitted.
+        DeadlineAdmissionPredictor blockingPredictor;
+        blockingPredictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 4.0,
+            .opticalFlowMs = 6.0,
+            .totalLsfgMs = 9.0,
+            .generationCount = 2,
+            .valid = true,
+        });
+        const auto blockingBudget = blockingPredictor.predict(2, 75.0);
+        assert(blockingBudget.wouldAdmit);
+        blockingPredictor.observeBlockingCompletion(2, 70.0, 6.0);
+        const auto blocking = blockingPredictor.predict(2, 75.0);
+        assert(blocking.valid);
+        assert(blocking.predictedTotalLsfgMs > 69.99);
+        assert(blocking.predictedTotalLsfgMs < 70.01);
+        assert(!blocking.wouldAdmit);
+
+        // If blocking admission shuts generation off, zero-generation cycles let
+        // the queue residency estimate recover toward GPU cost so admission
+        // cannot remain stuck closed after one saturated batch.
+        DeadlineAdmissionPredictor recoveringPredictor;
+        recoveringPredictor.observe(DeadlineAdmissionObservation{
+            .mipmapsMs = 4.0,
+            .opticalFlowMs = 6.0,
+            .totalLsfgMs = 9.0,
+            .generationCount = 2,
+            .valid = true,
+        });
+        recoveringPredictor.observeBlockingCompletion(2, 70.0, 6.0);
+        assert(!recoveringPredictor.predict(2, 35.0).wouldAdmit);
+        for (int i = 0; i < 8; ++i)
+            recoveringPredictor.observeZeroGenerationRecovery();
+        assert(recoveringPredictor.predict(2, 35.0).wouldAdmit);
     }
 
 

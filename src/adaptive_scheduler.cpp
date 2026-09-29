@@ -181,8 +181,49 @@ void DeadlineAdmissionPredictor::observe(
 
     mipmapsMs_ = blend(mipmapsMs_, observation.mipmapsMs);
     opticalFlowMs_ = blend(opticalFlowMs_, observation.opticalFlowMs);
+    sharedWorkMs_ = blend(
+        sharedWorkMs_, std::max(observation.mipmapsMs, observation.opticalFlowMs));
     perGeneratedMs_ = blend(perGeneratedMs_, perGeneratedMs);
     hasEstimate_ = true;
+}
+
+void DeadlineAdmissionPredictor::observeBlockingCompletion(
+        std::size_t generationCount,
+        double completionMs,
+        double sharedWorkMs) {
+    if (!hasEstimate_
+            || generationCount == 0
+            || !std::isfinite(completionMs)
+            || completionMs <= 0.0
+            || !std::isfinite(sharedWorkMs)
+            || sharedWorkMs < 0.0) {
+        return;
+    }
+
+    const double perGeneratedBlockingMs = std::max(
+        0.0, completionMs - sharedWorkMs)
+        / static_cast<double>(generationCount);
+    if (!std::isfinite(perGeneratedBlockingMs))
+        return;
+
+    // Queue residency can worsen abruptly, so absorb higher blocking cost at
+    // once. Recovery remains gradual to avoid reopening a saturated batch from
+    // one unusually fast completion.
+    if (perGeneratedBlockingMs >= blockingPerGeneratedMs_)
+        blockingPerGeneratedMs_ = perGeneratedBlockingMs;
+    else
+        blockingPerGeneratedMs_ +=
+            kEwmaAlpha * (perGeneratedBlockingMs - blockingPerGeneratedMs_);
+}
+
+void DeadlineAdmissionPredictor::observeZeroGenerationRecovery() {
+    if (!hasEstimate_ || blockingPerGeneratedMs_ <= perGeneratedMs_)
+        return;
+
+    blockingPerGeneratedMs_ +=
+        kEwmaAlpha * (perGeneratedMs_ - blockingPerGeneratedMs_);
+    if (blockingPerGeneratedMs_ - perGeneratedMs_ < 0.01)
+        blockingPerGeneratedMs_ = perGeneratedMs_;
 }
 
 void DeadlineAdmissionPredictor::observeDeliveryMiss(double latenessMs) {
@@ -223,8 +264,9 @@ DeadlineAdmissionDecision DeadlineAdmissionPredictor::predict(
     decision.predictedMipmapsMs = mipmapsMs_;
     decision.predictedOpticalFlowMs = opticalFlowMs_;
     decision.predictedTotalLsfgMs =
-        std::max(mipmapsMs_, opticalFlowMs_)
-        + perGeneratedMs_ * static_cast<double>(generationCount);
+        sharedWorkMs_
+        + std::max(perGeneratedMs_, blockingPerGeneratedMs_)
+            * static_cast<double>(generationCount);
     decision.safetyMarginMs = std::max(
         kSafetyMarginFloorMs,
         decision.predictedTotalLsfgMs * kSafetyMarginRatio);
@@ -269,7 +311,9 @@ void DeadlineAdmissionPredictor::reset() {
     hasEstimate_ = false;
     mipmapsMs_ = 0.0;
     opticalFlowMs_ = 0.0;
+    sharedWorkMs_ = 0.0;
     perGeneratedMs_ = 0.0;
+    blockingPerGeneratedMs_ = 0.0;
     deliveryReserveMs_ = 0.0;
 }
 

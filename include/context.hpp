@@ -357,6 +357,7 @@ private:
         double windowHandoffMs{0.0};
         double windowDispatchMs{0.0};
         double windowWaitIdleMs{0.0};
+        double windowFramegenCompletionWaitMs{0.0};
         double windowGeneratedPresentMs{0.0};
         double windowSourceIntervalMs{0.0};
         double windowSourceIntervalMaxMs{0.0};

@@ -23,7 +23,8 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("1.0F / initialFlowScale", source)
         self.assertIn("float initialFlowScale = conf.flowScale", source)
 
-    def test_completed_gpu_timing_drives_controller_without_new_wait(self) -> None:
+    def test_existing_completion_wait_feeds_deadline_predictor(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn("getContextGpuTiming", source)
@@ -33,7 +34,13 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("timing.transitionActive", source)
         self.assertIn("requestContextFlowScale", source)
         self.assertIn("getContextFlowScaleState", source)
-        self.assertIn("updateAdaptiveFlowGovernor();", source)
+        self.assertIn("updateAdaptiveFlowGovernor(framegenCompletionWaitMs);", source)
+        self.assertIn("updateAdaptiveFlowGovernor(0.0);", source)
+        self.assertIn("observeBlockingCompletion", source)
+        self.assertIn("observeZeroGenerationRecovery", source)
+        self.assertIn("timing.generationCount == generatedFrameCount", source)
+        self.assertIn("framegen_completion_wait_avg_ms", source)
+        self.assertIn("windowFramegenCompletionWaitMs", header)
         self.assertNotIn("vkDeviceWaitIdle", source)
 
         # Adaptive LSFG still owns cadence. Ordinary scheduler transitions hold

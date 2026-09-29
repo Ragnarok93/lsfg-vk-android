@@ -1515,7 +1515,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             : AndroidFrameCycleMode::Generate;
     this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
 
-    const auto updateAdaptiveFlowGovernor = [&]() {
+    const auto updateAdaptiveFlowGovernor = [&](double blockingCompletionWaitMs) {
         const LSFG::AdaptiveFlowGpuTiming timing = conf.performance
             ? LSFG_3_1P::getContextGpuTiming(*this->lsfgCtxId)
             : LSFG_3_1::getContextGpuTiming(*this->lsfgCtxId);
@@ -1554,6 +1554,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     .generationCount = timing.generationCount,
                     .valid = true,
                 });
+            if (blockingCompletionWaitMs > 0.0
+                    && timing.generationCount == generatedFrameCount) {
+                // Reuse the host completion wait already required on this
+                // path; never add a synchronization point just for admission.
+                this->deadlineAdmissionPredictor_.observeBlockingCompletion(
+                    timing.generationCount, blockingCompletionWaitMs,
+                    std::max(timing.mipmapsMs, timing.opticalFlowMs));
+            }
         }
 
         if (!conf.adaptiveFlowScale || !this->adaptiveFlowRuntimeAvailable_)
@@ -1969,6 +1977,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowHandoffMs = 0.0;
             metrics.windowDispatchMs = 0.0;
             metrics.windowWaitIdleMs = 0.0;
+            metrics.windowFramegenCompletionWaitMs = 0.0;
             metrics.windowGeneratedPresentMs = 0.0;
             metrics.windowSourceIntervalMs = 0.0;
             metrics.windowSourceIntervalMaxMs = 0.0;
@@ -2014,6 +2023,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const double handoffAvgMs = sourceCount > 0.0 ? metrics.windowHandoffMs / sourceCount : 0.0;
             const double dispatchAvgMs = sourceCount > 0.0 ? metrics.windowDispatchMs / sourceCount : 0.0;
             const double waitIdleAvgMs = sourceCount > 0.0 ? metrics.windowWaitIdleMs / sourceCount : 0.0;
+            const double framegenCompletionWaitAvgMs = sourceCount > 0.0
+                ? metrics.windowFramegenCompletionWaitMs / sourceCount : 0.0;
             const double generatedPresentAvgMs = generatedCount > 0.0
                 ? metrics.windowGeneratedPresentMs / generatedCount : 0.0;
             const double sourceIntervalAvgMs = metrics.windowSourceIntervals > 0
@@ -2095,6 +2106,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " ahb_async_fallbacks_total=" << metrics.totalAsyncFallbacks
                       << " framegen_dispatch_avg_ms=" << dispatchAvgMs
                       << " framegen_wait_avg_ms=" << waitIdleAvgMs
+                      << " framegen_completion_wait_avg_ms="
+                      << framegenCompletionWaitAvgMs
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
                       << " source_interval_avg_ms=" << sourceIntervalAvgMs
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
@@ -2389,6 +2402,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowHandoffMs = 0.0;
             metrics.windowDispatchMs = 0.0;
             metrics.windowWaitIdleMs = 0.0;
+            metrics.windowFramegenCompletionWaitMs = 0.0;
             metrics.windowGeneratedPresentMs = 0.0;
             metrics.windowSourceIntervalMs = 0.0;
             metrics.windowSourceIntervalMaxMs = 0.0;
@@ -2715,7 +2729,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         recordBatchCompleteDependency();
         metrics.windowDispatchMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - historyAdvanceStart).count();
-        updateAdaptiveFlowGovernor();
+        updateAdaptiveFlowGovernor(0.0);
+        this->deadlineAdmissionPredictor_.observeZeroGenerationRecovery();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
         if (this->sourceHistoryWarmupRemaining_ > 0)
@@ -2872,14 +2887,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // 3. Compatibility/error fallback only. The normal SYNC_FD path queues the
     //    game-device copies against framegen completion and does not block here.
     bool framegenReady = true;
+    double framegenCompletionWaitMs = 0.0;
     if (requireHostCompletionWait) {
         const auto waitIdleStart = RuntimeMetrics::Clock::now();
         const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
         framegenReady = conf.performance
             ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
             : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
+        framegenCompletionWaitMs = std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - waitIdleStart).count();
+        metrics.windowWaitIdleMs += framegenCompletionWaitMs;
+        metrics.windowFramegenCompletionWaitMs += framegenCompletionWaitMs;
     }
     if (!framegenReady) {
         this->lastBatchCompleteDependency_ = {};
@@ -2913,7 +2931,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         std::cerr << "lsfg-vk: runtime stage=framegen-idle-ready"
                   << " host_wait=" << (requireHostCompletionWait ? 1 : 0)
                   << "\n";
-    updateAdaptiveFlowGovernor();
+    updateAdaptiveFlowGovernor(framegenCompletionWaitMs);
 
     // 4. Generated presentation is opportunistic. Never wait for a synthetic
     // swapchain image: if WSI has no image immediately available, drop this and

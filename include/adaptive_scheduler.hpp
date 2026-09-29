@@ -93,6 +93,15 @@ struct DeadlineAdmissionDecision {
 class DeadlineAdmissionPredictor {
 public:
     void observe(const DeadlineAdmissionObservation& observation);
+    /// Include the measured host-side framegen completion time for the batch.
+    /// sharedWorkMs is the same batch's GPU timing already observed above.
+    void observeBlockingCompletion(
+        std::size_t generationCount,
+        double completionMs,
+        double sharedWorkMs);
+    /// Gradually release learned queue-residency cost after a zero-generation
+    /// cycle so a rejected batch cannot leave generation permanently closed.
+    void observeZeroGenerationRecovery();
     /// Learn unmodeled submit-to-delivery pressure only from a frame that was
     /// admitted but still missed its synthetic deadline/WSI opportunity.
     void observeDeliveryMiss(double latenessMs);
@@ -120,7 +129,9 @@ private:
     bool hasEstimate_{false};
     double mipmapsMs_{0.0};
     double opticalFlowMs_{0.0};
+    double sharedWorkMs_{0.0};
     double perGeneratedMs_{0.0};
+    double blockingPerGeneratedMs_{0.0};
     double deliveryReserveMs_{0.0};
 };
 
