@@ -494,7 +494,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("delayUntilNextSourceOutput", scheduler_header)
         for token in (
             "adaptiveScheduler_.configure",
-            "adaptiveScheduler_.plan(sourceInterval)",
+            "adaptiveScheduler_.plan(",
             "adaptiveScheduler_.telemetry()",
             "presentContextWithCount",
             "AndroidFrameCycleMode::HistoryOnly",

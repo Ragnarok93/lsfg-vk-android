@@ -174,7 +174,7 @@ int main() {
         transition.flowTransition = true;
         controller.observe(transition);
         bool sawTransitionSettle = false;
-        for (int i = 0; i < 180; ++i) {
+        for (int i = 0; i < 40; ++i) {
             controller.observe(sample(16.2, 5.0));
             sawTransitionSettle = sawTransitionSettle
                 || controller.telemetry().reason
