@@ -972,8 +972,11 @@ int main() {
         // not a slow ramp-up controller.
         FixedSourceCadenceGovernor governor;
         assert(governor.plan(40ms, 3, 0, false) == 0);
-        assert(governor.telemetry().baselineValid);
+        assert(!governor.telemetry().baselineValid);
 
+        // The first eligible interval establishes the clean baseline; the
+        // following interval is the first eligible generation opportunity.
+        assert(governor.plan(40ms, 3, 0, true) == 0);
         std::size_t count = governor.plan(40ms, 3, 0, true);
         assert(count == 3);
         assert(governor.telemetry().generationLimit == 3);
@@ -985,12 +988,33 @@ int main() {
     }
 
     {
+        // A protected-Adreno history warmup can report a short interval while
+        // generation is disallowed. That burst must not become the Fixed
+        // baseline, or HistoryMaintenance feedback can lock generation at zero.
+        FixedSourceCadenceGovernor governor;
+        assert(governor.plan(
+            8ms, 2, 0, false, SourceCadenceObservation::SourceOnly) == 0);
+        assert(!governor.telemetry().baselineValid);
+        assert(governor.plan(
+            33ms, 2, 0, true,
+            SourceCadenceObservation::HistoryMaintenance) == 0);
+        assert(governor.telemetry().baselineValid);
+        assert(std::abs(
+            governor.telemetry().baselineSourceFps - (1000.0 / 33.0)) < 0.1);
+        assert(governor.plan(
+            33ms, 2, 0, true,
+            SourceCadenceObservation::HistoryMaintenance) == 2);
+    }
+
+    {
         // Hot Fixed multiplier changes must take effect on the next eligible
         // generated cycle. A 2x -> 3x -> 4x request maps to 1 -> 2 -> 3
         // generated frames without waiting for a recovery ramp.
         FixedSourceCadenceGovernor governor;
         assert(governor.plan(
             40ms, 1, 0, false, SourceCadenceObservation::SourceOnly) == 0);
+        assert(governor.plan(
+            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance) == 0);
         assert(governor.plan(
             40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance) == 1);
         assert(governor.plan(
@@ -1006,6 +1030,8 @@ int main() {
         FixedSourceCadenceGovernor governor;
         governor.plan(
             40ms, 3, 0, false, SourceCadenceObservation::SourceOnly);
+        assert(governor.plan(
+            40ms, 3, 0, true, SourceCadenceObservation::HistoryMaintenance) == 0);
         assert(governor.plan(
             40ms, 3, 0, true, SourceCadenceObservation::HistoryMaintenance) == 3);
         for (int i = 0; i < 12; ++i)
@@ -1040,6 +1066,8 @@ int main() {
         FixedSourceCadenceGovernor governor;
         governor.plan(40ms, 1, 0, false);
         std::size_t count = governor.plan(40ms, 1, 0, true);
+        assert(count == 0);
+        count = governor.plan(40ms, 1, 0, true);
         assert(count == 1);
         bool backedOff = false;
         for (int i = 0; i < 3; ++i) {
