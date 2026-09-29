@@ -5,9 +5,15 @@
 #include <cmath>
 
 namespace {
-constexpr std::array<float, 4> kQualityStates{1.00F, 0.90F, 0.80F, 0.70F};
-constexpr std::array<float, 4> kBalancedStates{0.80F, 0.70F, 0.625F, 0.55F};
-constexpr std::array<float, 4> kLowStates{0.55F, 0.45F, 0.35F, 0.25F};
+constexpr std::array<float, 7> kQualityStates{
+    1.00F, 0.95F, 0.90F, 0.85F, 0.80F, 0.75F, 0.70F,
+};
+constexpr std::array<float, 6> kBalancedStates{
+    0.80F, 0.75F, 0.70F, 0.65F, 0.60F, 0.55F,
+};
+constexpr std::array<float, 7> kLowStates{
+    0.55F, 0.50F, 0.45F, 0.40F, 0.35F, 0.30F, 0.25F,
+};
 constexpr std::array<float, 16> kAutoStates{
     1.00F, 0.95F, 0.90F, 0.85F, 0.80F, 0.75F, 0.70F, 0.65F,
     0.60F, 0.55F, 0.50F, 0.45F, 0.40F, 0.35F, 0.30F, 0.25F,
@@ -16,7 +22,7 @@ constexpr std::array<float, 16> kAutoStates{
 constexpr double kPressureRatio = 0.90;
 constexpr double kRecoveryPredictedRatio = 0.82;
 constexpr double kMinimumFlowBudgetRatio = 0.10;
-constexpr double kMinimumPredictedReliefRatio = 0.03;
+constexpr double kMinimumPredictedReliefRatio = 0.025;
 constexpr double kMinimumGlobalPressureLsfgBudgetRatio = 0.40;
 constexpr double kDownConfirmSeconds = 0.90;
 constexpr double kGlobalDownConfirmSeconds = 0.50;
@@ -281,6 +287,12 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
 
     const bool pressure =
         computePressure || globalPressure || wsiFlowPressure;
+    const bool autoTargetProbe =
+        preset_ == AdaptiveFlowPreset::Auto
+        && globalPressure
+        && observation.outputTargeted
+        && observation.outputDeficit
+        && !observation.outputTargetSatisfied;
 
     if (pressure && canLower) {
         const double currentScale = static_cast<double>(presetStates[index]);
@@ -298,8 +310,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         const bool globallyProfitable =
             !globalOnlyPressure
             || telemetry_.pressureRatio >= kMinimumGlobalPressureLsfgBudgetRatio;
-        if (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
-                || predictedReliefRatio < kMinimumPredictedReliefRatio
+        if ((!autoTargetProbe
+                    && (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
+                        || predictedReliefRatio < kMinimumPredictedReliefRatio))
                 || !globallyProfitable) {
             resetEvidence();
             telemetry_.reason = AdaptiveFlowDecisionReason::InsufficientFlowContribution;

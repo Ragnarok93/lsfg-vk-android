@@ -68,9 +68,9 @@ int main() {
         const auto quality = AdaptiveFlowController::statesForPreset(AdaptiveFlowPreset::Quality);
         const auto balanced = AdaptiveFlowController::statesForPreset(AdaptiveFlowPreset::Balanced);
         const auto low = AdaptiveFlowController::statesForPreset(AdaptiveFlowPreset::Low);
-        assert(quality.size() == 4 && near(quality.front(), 1.00F) && near(quality.back(), 0.70F));
-        assert(balanced.size() == 4 && near(balanced.front(), 0.80F) && near(balanced.back(), 0.55F));
-        assert(low.size() == 4 && near(low.front(), 0.55F) && near(low.back(), 0.25F));
+        assert(quality.size() == 7 && near(quality.front(), 1.00F) && near(quality.back(), 0.70F));
+        assert(balanced.size() == 6 && near(balanced.front(), 0.80F) && near(balanced.back(), 0.55F));
+        assert(low.size() == 7 && near(low.front(), 0.55F) && near(low.back(), 0.25F));
     }
 
     {
@@ -140,7 +140,7 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 12; ++i)
             controller.observe(sample(16.2, 5.0));
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
         assert(controller.telemetry().reason == AdaptiveFlowDecisionReason::SustainedPressure
             || controller.telemetry().reason == AdaptiveFlowDecisionReason::EvaluatingDownstep
             || controller.telemetry().reason == AdaptiveFlowDecisionReason::Cooldown);
@@ -152,7 +152,7 @@ int main() {
                     == AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
         }
         assert(benefitConfirmed);
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
     }
 
     {
@@ -176,14 +176,14 @@ int main() {
         assert(near(controller.currentScale(), 0.80F));
         for (int i = 0; i < 12; ++i)
             controller.observe(sample(16.2, 5.0));
-        assert(near(controller.currentScale(), 0.70F));
+        assert(near(controller.currentScale(), 0.75F));
     }
 
     {
         // Degradation never passes the preset hard floor, but each downstep
         // must first prove useful before another downstep is allowed.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Low);
-        for (int step = 0; step < 3; ++step) {
+        for (int step = 0; step < 6; ++step) {
             const float before = controller.currentScale();
             for (int i = 0; i < 30 && near(controller.currentScale(), before); ++i)
                 controller.observe(sample(16.4, 7.0, 16.666, false, true));
@@ -203,10 +203,10 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 12; ++i)
             controller.observe(sample(16.2, 5.0));
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
         for (int i = 0; i < 30; ++i)
             controller.observe(sample(8.0, 2.0));
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
         for (int i = 0; i < 20; ++i)
             controller.observe(sample(8.0, 2.0));
         assert(near(controller.currentScale(), 1.00F));
@@ -219,7 +219,7 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 12; ++i)
             controller.observe(sample(16.2, 5.0));
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
 
         for (int i = 0; i < 70; ++i)
             controller.observe(sample(12.5, 1.0));
@@ -232,10 +232,10 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 12; ++i)
             controller.observe(sample(16.2, 6.0));
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
         for (int i = 0; i < 60; ++i)
-            controller.observe(sample(11.8, 9.0));
-        assert(near(controller.currentScale(), 0.90F));
+            controller.observe(sample(14.0, 9.0));
+        assert(near(controller.currentScale(), 0.95F));
     }
 
     {
@@ -245,14 +245,14 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 12; ++i)
             controller.observe(sample(16.2, 5.0));
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
 
         for (int i = 0; i < 20; ++i)
             controller.observe(sample(8.0, 2.0));
         auto resumed = sample(8.0, 2.0);
         resumed.elapsed = 10s;
         controller.observe(resumed);
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
     }
 
     {
@@ -262,10 +262,10 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 6; ++i) {
             controller.observe(sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false));
         }
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
         assert(
             controller.telemetry().reason
                 == AdaptiveFlowDecisionReason::SustainedGlobalPressure
@@ -284,10 +284,10 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 6; ++i) {
             controller.observe(sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false));
         }
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
 
         for (int i = 0; i < 70; ++i) {
             controller.observe(sample(
@@ -303,10 +303,10 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 6; ++i) {
             controller.observe(sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false));
         }
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
 
         // Establish that the downstep itself was useful before testing whether
         // stale headroom is allowed to restore quality.
@@ -315,14 +315,14 @@ int main() {
                 5.5, 1.8, 16.666, false, false,
                 90.0, true, false, false, false));
         }
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
 
         for (int i = 0; i < 70; ++i) {
             controller.observe(sample(
                 5.0, 1.5, 16.666, false, false,
                 0.0, false, false, false, false));
         }
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
     }
 
     {
@@ -364,7 +364,7 @@ int main() {
         bool lowered = false;
         for (int i = 0; i < 12 && !lowered; ++i) {
             auto observation = sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false);
             observation.wsiPresentationPressure = true;
             observation.wsiLossRate = 0.35;
@@ -373,14 +373,14 @@ int main() {
             observation.outputFps = 54.0;
             observation.sourceFps = 30.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.90F);
+            lowered = near(controller.currentScale(), 0.95F);
         }
         assert(lowered);
 
         bool reverted = false;
         for (int i = 0; i < 12; ++i) {
             auto observation = sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false);
             observation.wsiPresentationPressure = true;
             observation.wsiLossRate = 0.35;
@@ -405,7 +405,7 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         for (int i = 0; i < 12; ++i)
             controller.observe(sample(16.2, 5.0));
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
         bool confirmed = false;
         for (int i = 0; i < 10; ++i) {
             controller.observe(sample(12.0, 3.5));
@@ -414,7 +414,7 @@ int main() {
                     == AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
         }
         assert(confirmed);
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
     }
 
     {
@@ -422,7 +422,7 @@ int main() {
         // enough to justify a Flow downstep when the entire LSFG cycle is far
         // below its own generation budget. This Low-preset sample deliberately
         // clears the old flow/budget and predicted-relief gates, matching the
-        // useless 0.55 -> 0.45 trial seen in the logs.
+        // useless 0.55 -> 0.50 trial seen in the logs.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Low);
         for (int i = 0; i < 30; ++i) {
             controller.observe(sample(
@@ -445,7 +445,7 @@ int main() {
             controller.observe(sample(
                 7.6, 2.2, 8.333, false, false,
                 99.0, true, true, false, true));
-            lowered = near(controller.currentScale(), 0.45F);
+            lowered = near(controller.currentScale(), 0.50F);
         }
         assert(lowered);
     }
@@ -473,18 +473,18 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Balanced);
         for (int i = 0; i < 4; ++i) {
             controller.observe(sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true));
         }
         controller.observe(sample(
-            8.0, 3.0, 16.666, true, false,
+            8.0, 5.0, 16.666, true, false,
             99.0, true, true));
         bool lowered = false;
         for (int i = 0; i < 14 && !lowered; ++i) {
             controller.observe(sample(
-                8.0, 3.0, 16.666, false, false,
+                8.0, 5.0, 16.666, false, false,
                 99.0, true, true));
-            lowered = near(controller.currentScale(), 0.70F);
+            lowered = near(controller.currentScale(), 0.75F);
         }
         assert(lowered);
         for (int i = 0; i < 10; ++i) {
@@ -492,7 +492,7 @@ int main() {
                 5.5, 1.8, 16.666, false, false,
                 90.0, true, false));
         }
-        assert(near(controller.currentScale(), 0.70F));
+        assert(near(controller.currentScale(), 0.75F));
     }
 
     {
@@ -526,7 +526,7 @@ int main() {
             controller.observe(sample(
                 90.0, 35.0, 65.0, true, true,
                 8.0, true, true, false, true));
-            lowered = near(controller.currentScale(), 0.70F);
+            lowered = near(controller.currentScale(), 0.75F);
         }
         assert(lowered);
         assert(controller.telemetry().computePressure);
@@ -549,7 +549,7 @@ int main() {
                 8.0, true, true, false, false);
             retained.retainedGeneratedTimingSample = true;
             controller.observe(retained);
-            lowered = near(controller.currentScale(), 0.70F);
+            lowered = near(controller.currentScale(), 0.75F);
         }
         assert(lowered);
         assert(controller.telemetry().computePressure);
