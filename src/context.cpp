@@ -966,7 +966,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     : "native-current")
               << " fixed_generation="
               << (this->conservativeCrossDeviceSync_
-                    ? "requested-ceiling"
+                    ? "cadence-governed-ceiling"
                     : "native-current")
               << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
               << '\n';
@@ -1937,8 +1937,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             || this->adaptiveFlowWarmupRemaining_ > 0
             || this->adaptiveFlowCadenceHandoffPending_);
 
-    // Capacity feedback remains advisory. On generation-first Adreno it is
-    // diagnostics only; configured target demand stays authoritative.
+    // Capacity feedback remains advisory. In Adaptive mode on generation-first
+    // Adreno it is diagnostics only; fixed mode still uses its cadence
+    // governor below to admit the requested generation count.
     double capacityIntervalMs = 0.0;
     if (conf.adaptiveFramegen && this->currentSourceTimeline_.valid
             && this->currentSourceTimeline_.intervalNs > 0) {
@@ -1977,12 +1978,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->lastDispatchedGeneratedFrameCount_,
             !this->requiresSourceHistoryWarmup_,
             previousSourceCadenceObservation);
+    // Fixed mode remains cadence-governed on every device, including the
+    // protected Adreno path. generationFirstAdreno still controls downstream
+    // Adaptive admission/capacity gates; it must not bypass this governor.
     size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(
             sourceInterval, adaptiveFlowTransitionActiveAtCycleStart)
-        : (generationFirstAdreno
-            ? requestedFixedGeneratedFrameCount
-            : governedFixedGeneratedFrameCount);
+        : governedFixedGeneratedFrameCount;
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();

@@ -62,7 +62,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn('" deadline_semantics="', compatibility_log)
         self.assertIn('"generation-first"', compatibility_log)
 
-    def test_adreno_generation_first_never_uses_resource_pressure_as_a_generation_veto(self) -> None:
+    def test_adreno_generation_first_keeps_fixed_cadence_governor_without_source_protection_gates(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         scheduler = (ROOT / "src/adaptive_scheduler.cpp").read_text(encoding="utf-8")
         header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
@@ -78,12 +78,23 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertNotIn("setSourceProtectionBaseline", scheduler)
         self.assertNotIn("conservativeFixedSourceProtectionGap", source)
         self.assertNotIn("conservativeAdmissionRejectedHistoryGap", source)
+        planning_start = source.index(
+            "size_t plannedGeneratedFrameCount = conf.adaptiveFramegen"
+        )
+        planning_end = source.index(
+            "size_t generatedFrameCount = plannedGeneratedFrameCount",
+            planning_start,
+        )
+        fixed_planning = source[planning_start:planning_end]
         self.assertIn(
+            ": governedFixedGeneratedFrameCount;",
+            fixed_planning,
+            "Fixed Adreno must route requested work through the cadence governor.",
+        )
+        self.assertNotIn(
             "generationFirstAdreno\n"
             "            ? requestedFixedGeneratedFrameCount",
-            source,
-            "Fixed Adreno must honor the selected multiplier even when the "
-            "source cadence slows under load.",
+            fixed_planning,
         )
         self.assertIn(
             "&& !generationFirstAdreno",
@@ -358,7 +369,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn('" governor_adapter="', constructor_log)
         self.assertIn('"target-authoritative"', constructor_log)
         self.assertIn('" fixed_generation="', constructor_log)
-        self.assertIn('"requested-ceiling"', constructor_log)
+        self.assertIn('"cadence-governed-ceiling"', constructor_log)
 
 
     def test_xclipse_async_selection_remains_capability_driven(self) -> None:
