@@ -25,6 +25,7 @@ enum class AdaptiveFlowDecisionReason : uint8_t {
     SustainedPressure,
     SustainedGlobalPressure,
     SustainedOutputPressure,
+    SustainedSourcePressure,
     EvaluatingDownstep,
     DownstepBenefitConfirmed,
     DownstepReverted,
@@ -53,6 +54,8 @@ struct AdaptiveFlowObservation {
     bool wsiPresentationPressure{false};
     double wsiLossRate{};
     double sourceFps{};
+    /// Clean source cadence target used by Fixed multiplier mode.
+    double sourceTargetFps{};
     double outputFps{};
     /// Required output cadence: Adaptive LSFG target or fixed multiplier base.
     double outputTargetFps{};
@@ -100,6 +103,7 @@ struct AdaptiveFlowTelemetry {
     bool downstepEvaluationActive{false};
     bool outputDeficit{false};
     bool outputPressure{false};
+    bool sourcePressure{false};
 };
 
 /// A quality-seeking governor for Flow Scale. It owns no Vulkan objects and
@@ -142,6 +146,7 @@ private:
     // Direct missed-output pressure uses a shorter control loop, but retains
     // the same post-change benefit check before another state is selected.
     bool downstepOutputDriven_{false};
+    bool downstepSourceDriven_{false};
     std::size_t downstepPreviousIndex_{};
     double downstepEvaluationStartedSeconds_{};
     double downstepBaselinePressureRatio_{};

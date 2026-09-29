@@ -659,5 +659,89 @@ int main() {
         assert(near(controller.currentScale(), 0.95F));
     }
 
+    {
+        // A target-driven downstep must not be rolled back while the target
+        // remains missed. Otherwise Flow oscillates one state up/down while
+        // the user-visible cadence never recovers.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        bool lowered = false;
+        for (int i = 0; i < 6 && !lowered; ++i) {
+            auto observation = sample(16.0, 5.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = false;
+            observation.outputDeficit = true;
+            observation.outputFps = 48.0;
+            observation.sourceFps = 24.0;
+            controller.observe(observation);
+            lowered = near(controller.currentScale(), 0.95F);
+        }
+        assert(lowered);
+
+        auto transition = sample(16.0, 5.0, 50.0);
+        transition.flowTransition = true;
+        controller.observe(transition);
+        for (int i = 0; i < 40; ++i) {
+            auto observation = sample(16.0, 5.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = false;
+            observation.outputDeficit = true;
+            observation.outputFps = 48.0;
+            observation.sourceFps = 24.0;
+            controller.observe(observation);
+        }
+        assert(controller.currentScale() <= 0.90F);
+        assert(controller.telemetry().reason
+            != AdaptiveFlowDecisionReason::DownstepReverted);
+    }
+
+    {
+        // Fixed multiplier mode must protect the clean source cadence even if
+        // generated output currently appears to meet its output-rate target.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        bool lowered = false;
+        for (int i = 0; i < 8 && !lowered; ++i) {
+            auto observation = sample(16.0, 5.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = true;
+            observation.outputDeficit = false;
+            observation.outputFps = 60.0;
+            observation.fixedMultiplierBaseTarget = true;
+            observation.sourceFps = 22.0;
+            observation.sourceTargetFps = 30.0;
+            controller.observe(observation);
+            lowered = near(controller.currentScale(), 0.95F);
+        }
+        assert(lowered);
+        for (int i = 0; i < 50; ++i) {
+            auto observation = sample(8.0, 2.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = true;
+            observation.outputDeficit = false;
+            observation.outputFps = 60.0;
+            observation.fixedMultiplierBaseTarget = true;
+            observation.sourceFps = 22.0;
+            observation.sourceTargetFps = 30.0;
+            controller.observe(observation);
+        }
+        assert(controller.currentScale() <= 0.95F);
+        const float sourceDeficitScale = controller.currentScale();
+        for (int i = 0; i < 60; ++i) {
+            auto observation = sample(8.0, 2.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = true;
+            observation.outputFps = 60.0;
+            observation.fixedMultiplierBaseTarget = true;
+            observation.sourceFps = 30.0;
+            observation.sourceTargetFps = 30.0;
+            controller.observe(observation);
+        }
+        assert(controller.currentScale() > sourceDeficitScale);
+    }
+
     return 0;
 }

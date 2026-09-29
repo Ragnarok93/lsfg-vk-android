@@ -131,7 +131,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertNotIn("adaptiveFlowGlobalOutputFps_", deficit)
         self.assertNotIn("metrics.lastWindowOutputFps", deficit)
 
-    def test_adaptive_flow_uses_scale_sensitive_cost_and_output_pressure(self) -> None:
+    def test_adaptive_flow_uses_scale_sensitive_output_and_source_pressure(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         controller = (ROOT / "src/adaptive_flow_controller.cpp").read_text(
             encoding="utf-8"
@@ -164,9 +164,13 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("fixedMultiplierOutputTargetFps", source)
         self.assertIn(".outputTargetFps = outputTargetFps", source)
         self.assertIn(".fixedMultiplierBaseTarget = fixedMultiplierOutputTargeted", source)
+        self.assertIn(".sourceTargetFps = fixedMultiplierBaseSourceFps", source)
         self.assertIn("const bool outputPressure =", controller)
-        self.assertIn("computePressure || globalPressure || wsiFlowPressure || outputPressure", controller)
+        self.assertIn("const bool sourcePressure =", controller)
+        self.assertIn("|| outputPressure || sourcePressure", controller)
+        self.assertIn("sourceRecoverySatisfied", controller)
         self.assertIn("SustainedOutputPressure", controller)
+        self.assertIn("SustainedSourcePressure", controller)
         self.assertIn(
             "this->deadlineAdmissionPredictor_.reset();",
             source[source.index("if (flowTelemetry.changed"):],
