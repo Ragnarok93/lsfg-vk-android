@@ -990,10 +990,20 @@ std::size_t FixedSourceCadenceGovernor::plan(
         cooldownSeconds_ = std::max(0.0, cooldownSeconds_ - evidenceSeconds);
 
         if (!hasBaseline_) {
-            // The first trustworthy source interval is measurement only.
-            // The configured Fixed multiplier has already seeded
-            // generationLimit_, but generation remains blocked until a clean
-            // baseline exists and the caller allows interpolation.
+            // A source-history warmup interval can include the handoff burst
+            // that caused the reset. Do not promote it to the clean baseline
+            // while the caller still disallows generation.
+            if (!generationAllowed) {
+                telemetry_.intervalRatio = 0.0;
+                telemetry_.baselineValid = false;
+                telemetry_.baselineSourceFps = 0.0;
+                telemetry_.generationLimit = generationLimit_;
+                return 0;
+            }
+
+            // The first eligible source interval is measurement only. The
+            // configured Fixed multiplier has already seeded generationLimit_,
+            // but generation remains blocked until the next clean interval.
             baselineIntervalSeconds_ = intervalSeconds;
             hasBaseline_ = true;
             pressureSeconds_ = 0.0;
