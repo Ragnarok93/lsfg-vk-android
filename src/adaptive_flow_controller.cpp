@@ -30,6 +30,7 @@ constexpr double kUpConfirmSeconds = 4.0;
 constexpr double kGlobalGpuPressurePercent = 96.0;
 constexpr double kGlobalGpuRecoveryPercent = 88.0;
 constexpr double kTransitionCooldownSeconds = 1.25;
+constexpr double kFlowTransitionSettleSeconds = 2.50;
 constexpr double kSchedulerTransitionHoldSeconds = 1.25;
 constexpr double kDownstepEvaluationSeconds = 0.80;
 constexpr double kDownstepNoBenefitHoldSeconds = 4.0;
@@ -67,6 +68,7 @@ void AdaptiveFlowController::configure(bool enabled, AdaptiveFlowPreset preset) 
     cooldownUntilSeconds_ = 0.0;
     schedulerHoldUntilSeconds_ = 0.0;
     flowTransitionHoldActive_ = false;
+    flowTransitionSettleUntilSeconds_ = 0.0;
     downstepEvaluationActive_ = false;
     downstepBenefitSeen_ = false;
     resetEvidence();
@@ -95,6 +97,7 @@ void AdaptiveFlowController::reset() {
     cooldownUntilSeconds_ = 0.0;
     schedulerHoldUntilSeconds_ = 0.0;
     flowTransitionHoldActive_ = false;
+    flowTransitionSettleUntilSeconds_ = 0.0;
     downstepEvaluationActive_ = false;
     downstepBenefitSeen_ = false;
     resetEvidence();
@@ -128,8 +131,14 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             : 0.0;
     observedSeconds_ += evidenceSeconds;
 
-    if (observation.flowTransition)
+    if (observation.flowTransition) {
         flowTransitionHoldActive_ = true;
+        // The backend transition may finish before its output cadence has
+        // re-established. Extend the barrier from the latest transition
+        // sample so old pressure cannot immediately schedule another handoff.
+        flowTransitionSettleUntilSeconds_ =
+            observedSeconds_ + kFlowTransitionSettleSeconds;
+    }
     if (flowTransitionHoldActive_) {
         if (downstepEvaluationActive_) {
             downstepEvaluationStartedSeconds_ = observedSeconds_;
@@ -140,6 +149,16 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         resetEvidence();
         telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
         telemetry_.reason = AdaptiveFlowDecisionReason::FlowTransition;
+        return telemetry_.currentScale;
+    }
+    if (observedSeconds_ < flowTransitionSettleUntilSeconds_) {
+        if (downstepEvaluationActive_) {
+            downstepEvaluationStartedSeconds_ = observedSeconds_;
+            downstepBenefitSeen_ = false;
+        }
+        resetEvidence();
+        telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
+        telemetry_.reason = AdaptiveFlowDecisionReason::FlowTransitionSettle;
         return telemetry_.currentScale;
     }
 
@@ -464,6 +483,8 @@ const char* AdaptiveFlowController::reasonName(AdaptiveFlowDecisionReason reason
     case AdaptiveFlowDecisionReason::Disabled: return "disabled";
     case AdaptiveFlowDecisionReason::InvalidTelemetry: return "invalid_telemetry";
     case AdaptiveFlowDecisionReason::FlowTransition: return "flow_transition";
+    case AdaptiveFlowDecisionReason::FlowTransitionSettle:
+        return "flow_transition_settle";
     case AdaptiveFlowDecisionReason::SchedulerTransition: return "adaptive_lsfg_transition";
     case AdaptiveFlowDecisionReason::Cooldown: return "cooldown";
     case AdaptiveFlowDecisionReason::InsufficientFlowContribution: return "insufficient_flow_contribution";

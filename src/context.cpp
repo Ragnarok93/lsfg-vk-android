@@ -834,12 +834,10 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood;
 
     // Presentation-engine confirmation is telemetry-only. VK_GOOGLE_display_timing
-    // was already enabled opportunistically at device creation; on Xclipse/generic
-    // paths resolve its asynchronous history query and leave desiredPresentTime=0
-    // so this cannot change present cadence. Keep the device-proven Adreno path
-    // completely untouched.
-    if (info.androidDisplayTimingSupported
-            && !this->conservativeCrossDeviceSync_) {
+    // was already enabled opportunistically at device creation; resolve its
+    // asynchronous history query on every supported Android path and leave
+    // desiredPresentTime=0 so confirmation cannot change present cadence.
+    if (info.androidDisplayTimingSupported) {
         this->getPastPresentationTimingGoogle_ =
             reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
                 Layer::ovkGetDeviceProcAddr(
@@ -1933,6 +1931,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             : (this->lastDispatchedGeneratedFrameCount_ > 0
                 ? SourceCadenceObservation::Generated
                 : SourceCadenceObservation::SourceOnly);
+    const bool adaptiveFlowTransitionActiveAtCycleStart =
+        conf.adaptiveFlowScale
+        && (this->adaptiveFlowTransitionPending_
+            || this->adaptiveFlowWarmupRemaining_ > 0
+            || this->adaptiveFlowCadenceHandoffPending_);
 
     // Capacity feedback remains advisory. On generation-first Adreno it is
     // diagnostics only; configured target demand stays authoritative.
@@ -1975,7 +1978,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             !this->requiresSourceHistoryWarmup_,
             previousSourceCadenceObservation);
     size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
-        ? this->adaptiveScheduler_.plan(sourceInterval)
+        ? this->adaptiveScheduler_.plan(
+            sourceInterval, adaptiveFlowTransitionActiveAtCycleStart)
         : (generationFirstAdreno
             ? requestedFixedGeneratedFrameCount
             : governedFixedGeneratedFrameCount);
@@ -2002,7 +2006,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     } else {
         const bool hadValidSourceTimeline = this->currentSourceTimeline_.valid;
         this->currentSourceTimeline_ = this->sourceTimeline_.observe(
-            sourceArrivalTimeNs, sourceInterval, false);
+            sourceArrivalTimeNs,
+            sourceInterval,
+            false,
+            adaptiveFlowTransitionActiveAtCycleStart);
         if (hadValidSourceTimeline
                 && !this->currentSourceTimeline_.valid
                 && sourceInterval.count() > 0) {
@@ -2398,6 +2405,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             conf.adaptiveFlowScale
             && (this->adaptiveFlowTransitionPending_
                 || this->adaptiveFlowWarmupRemaining_ > 0
+                || this->adaptiveFlowCadenceHandoffPending_
                 || std::fabs(
                     this->adaptiveFlowRequestedScale_
                     - this->adaptiveFlowActiveScale_) > 0.0005F);
@@ -2484,8 +2492,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         const auto& outputCadence =
             this->lsfgOutputCadenceTracker_.snapshot();
+        const bool outputCadenceValidForControl =
+            outputCadence.valid && !adaptiveFlowTransitionActive;
         const bool adaptiveOutputTargeted =
-            conf.adaptiveFramegen && conf.fpsLimit > 0 && outputCadence.valid;
+            conf.adaptiveFramegen
+            && conf.fpsLimit > 0
+            && outputCadenceValidForControl;
         const bool adaptiveOutputDeficit =
             adaptiveOutputTargeted && outputCadence.deficitConfirmed;
         constexpr double kFixedMultiplierOutputTolerance = 0.98;
@@ -2517,7 +2529,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 * static_cast<double>(conf.multiplier)
             : 0.0;
         const bool fixedMultiplierOutputTargeted =
-            outputCadence.valid && fixedMultiplierOutputTargetFps > 0.0;
+            outputCadenceValidForControl && fixedMultiplierOutputTargetFps > 0.0;
         const bool fixedMultiplierOutputSatisfied =
             fixedMultiplierOutputTargeted
             && outputCadence.outputFps
@@ -2525,17 +2537,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     * kFixedMultiplierOutputTolerance;
         const bool fixedMultiplierOutputDeficit =
             fixedMultiplierOutputTargeted && !fixedMultiplierOutputSatisfied;
-        const bool outputTargeted =
+        const bool outputTargetValid =
             adaptiveOutputTargeted || fixedMultiplierOutputTargeted;
-        const bool outputTargetSatisfied = adaptiveOutputTargeted
-            ? outputCadence.targetSatisfiedConfirmed
-            : (!fixedMultiplierOutputTargeted || fixedMultiplierOutputSatisfied);
+        const bool outputTargeted = outputTargetValid;
+        const bool outputTargetSatisfied = outputTargetValid
+            && (adaptiveOutputTargeted
+                ? outputCadence.targetSatisfiedConfirmed
+                : fixedMultiplierOutputSatisfied);
         const double outputTargetFps = adaptiveOutputTargeted
             ? static_cast<double>(conf.fpsLimit)
             : fixedMultiplierOutputTargetFps;
         const bool outputDeficit =
             adaptiveOutputDeficit || fixedMultiplierOutputDeficit;
 
+        this->adaptiveFlowOutputTargetValid_ = outputTargetValid;
         this->adaptiveFlowOutputTargeted_ = outputTargeted;
         this->adaptiveFlowOutputTargetFps_ = outputTargetFps;
         this->adaptiveFlowOutputTargetSatisfied_ = outputTargetSatisfied;
@@ -2646,6 +2661,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // A Flow-scale transition invalidates rolling output evidence too:
             // its bounded history-only cycles are not an output deficit.
             this->lsfgOutputCadenceTracker_.beginTransition();
+            this->adaptiveFlowCadenceHandoffPending_ = true;
             if (conf.performance)
                 LSFG_3_1P::requestContextFlowScale(
                     *this->lsfgCtxId, selectedScale);
@@ -2682,6 +2698,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (observation.retainedGeneratedTimingSample ? 1 : 0)
                       << " source_fps=" << observation.sourceFps
                       << " target_fps=" << conf.fpsLimit
+                      << " output_target_valid=" << (outputTargetValid ? 1 : 0)
                       << " output_targeted=" << (outputTargeted ? 1 : 0)
                       << " output_target_fps=" << outputTargetFps
                       << " output_target_satisfied="
@@ -2717,7 +2734,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "preset=%s target=%.3f minimum=%.3f state_index=%zu state_count=%zu "
                 "previous=%.3f requested=%.3f active=%.3f transition=%d "
                 "warmup_remaining=%u timing_valid=%d reason=%s "
-                "source_fps=%.3f target_fps=%u multiplier=%zu adaptive=%d "
+                "source_fps=%.3f target_fps=%u output_target_valid=%d multiplier=%zu adaptive=%d "
                 "predicted_next_total_ms=%.3f flow_ms=%.3f lsfg_ms=%.3f "
                 "budget_ms=%.3f generation_count=%zu generated_work=%d retained_timing=%d "
                 "gpu=%.1f pressure_valid=%d output_fps=%.3f output_target_fps=%.3f fixed_base=%d output_deficit=%d "
@@ -2738,6 +2755,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 AdaptiveFlowController::reasonName(flowTelemetry.reason),
                 observation.sourceFps,
                 conf.fpsLimit,
+                outputTargetValid ? 1 : 0,
                 conf.multiplier,
                 conf.adaptiveFramegen ? 1 : 0,
                 flowTelemetry.estimatedNextTotalMs,
@@ -3151,11 +3169,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // the previous completed one-second metrics window. A pause while this
         // present call is in flight clears stale evidence rather than creating
         // a false output deficit.
-        const bool adaptiveFlowTransitionActiveForCadence =
+        const bool adaptiveFlowTransitionBackendActiveForCadence =
             conf.adaptiveFlowScale
             && (adaptiveFlowTransitionWarmupActive
                 || this->adaptiveFlowTransitionPending_
                 || this->adaptiveFlowWarmupRemaining_ > 0);
+        const bool adaptiveFlowTransitionActiveForCadence =
+            adaptiveFlowTransitionBackendActiveForCadence
+            || this->adaptiveFlowCadenceHandoffPending_;
         if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
             this->lsfgOutputCadenceTracker_.observe(
                 std::chrono::milliseconds(250), 0, 0);
@@ -3167,6 +3188,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     : this->lastGeneratedFrameCount_;
             this->lsfgOutputCadenceTracker_.observe(
                 sourceInterval, 1, cadenceGeneratedFrames);
+        }
+        if (this->adaptiveFlowCadenceHandoffPending_
+                && !adaptiveFlowTransitionBackendActiveForCadence) {
+            this->adaptiveFlowCadenceHandoffPending_ = false;
         }
 
         const double elapsedSeconds = std::chrono::duration<double>(
@@ -3483,7 +3508,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_flow_multiplier=" << conf.multiplier
                       << " adaptive_flow_adaptive_framegen="
                       << (conf.adaptiveFramegen ? 1 : 0)
-                      << " adaptive_flow_output_targeted="
+                      << " adaptive_flow_output_target_valid="
+                       << (this->adaptiveFlowOutputTargetValid_ ? 1 : 0)
+                       << " adaptive_flow_output_targeted="
                       << (this->adaptiveFlowOutputTargeted_ ? 1 : 0)
                       << " adaptive_flow_output_target_fps="
                       << this->adaptiveFlowOutputTargetFps_
@@ -3588,7 +3615,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "flow_deficit=%d flow_reason=%s multiplier=%zu adaptive=%d target=%u "
                 "flow_preset=%s flow_target=%.3f flow_minimum=%.3f "
                 "flow_state_index=%zu flow_state_count=%zu "
-                "flow_requested=%.3f flow_transition=%d flow_warmup_remaining=%u "
+                "flow_requested=%.3f flow_transition=%d flow_target_valid=%d "
+                 "flow_warmup_remaining=%u "
                 "flow_timing_valid=%d flow_target_satisfied=%d "
                 "flow_predicted_next_total_ms=%.3f flow_source_fps=%.3f "
                 "flow_budget_ms=%.3f",
@@ -5812,6 +5840,8 @@ void LsContext::resetAdaptiveSourceEpoch(
         this->adaptiveFlowController_.currentScale();
     this->adaptiveFlowWarmupRemaining_ = 0;
     this->adaptiveFlowTransitionPending_ = false;
+    this->adaptiveFlowCadenceHandoffPending_ = false;
+    this->adaptiveFlowOutputTargetValid_ = false;
     this->adaptiveFlowOutputTargeted_ = false;
     this->adaptiveFlowOutputTargetFps_ = 0.0;
     this->adaptiveFlowOutputTargetSatisfied_ = false;
@@ -5877,6 +5907,8 @@ void LsContext::enterSourceOnlyBypass() {
         this->adaptiveFlowController_.currentScale();
     this->adaptiveFlowWarmupRemaining_ = 0;
     this->adaptiveFlowTransitionPending_ = false;
+    this->adaptiveFlowCadenceHandoffPending_ = false;
+    this->adaptiveFlowOutputTargetValid_ = false;
     this->adaptiveFlowOutputTargeted_ = false;
     this->adaptiveFlowOutputTargetFps_ = 0.0;
     this->adaptiveFlowOutputTargetSatisfied_ = false;

@@ -18,6 +18,7 @@ enum class AdaptiveFlowDecisionReason : uint8_t {
     Disabled,
     InvalidTelemetry,
     FlowTransition,
+    FlowTransitionSettle,
     SchedulerTransition,
     Cooldown,
     InsufficientFlowContribution,

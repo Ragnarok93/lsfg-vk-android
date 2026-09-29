@@ -83,6 +83,7 @@ struct AdaptiveFlowRuntimeSnapshot {
     bool presentationLastChangeOutputDeficit{false};
     bool presentationProvisionalLowerActive{false};
     bool presentationUpwardProbePending{false};
+    bool outputTargetValid{false};
     bool outputTargeted{false};
     double outputTargetFps{0.0};
     bool outputTargetSatisfied{false};
@@ -187,6 +188,7 @@ public:
                 presentationCapacity.provisionalLowerActive,
             .presentationUpwardProbePending =
                 presentationCapacity.upwardProbePending,
+            .outputTargetValid = adaptiveFlowOutputTargetValid_,
             .outputTargeted = adaptiveFlowOutputTargeted_,
             .outputTargetFps = adaptiveFlowOutputTargetFps_,
             .outputTargetSatisfied = adaptiveFlowOutputTargetSatisfied_,
@@ -272,12 +274,16 @@ private:
     float adaptiveFlowActiveScale_{1.0F};
     uint32_t adaptiveFlowWarmupRemaining_{0};
     bool adaptiveFlowTransitionPending_{false};
+    // Skip the first post-commit cadence sample: its interval belongs to the
+    // final transition cycle even though the backend state has committed.
+    bool adaptiveFlowCadenceHandoffPending_{false};
     bool adaptiveFlowTimingValid_{false};
     double adaptiveFlowMipmapsMs_{0.0};
     double adaptiveFlowWorkMs_{0.0};
     double adaptiveFlowTotalLsfgMs_{0.0};
     double adaptiveFlowBudgetMs_{0.0};
     size_t adaptiveFlowGenerationCount_{0};
+    bool adaptiveFlowOutputTargetValid_{false};
     bool adaptiveFlowOutputTargeted_{false};
     double adaptiveFlowOutputTargetFps_{0.0};
     bool adaptiveFlowOutputTargetSatisfied_{false};
@@ -320,11 +326,10 @@ private:
     uint64_t adaptivePresentPeriodNs_{0};
     uint32_t adaptivePresentId_{1};
 
-    // Xclipse/generic display-confirmation telemetry. This is deliberately
-    // independent of adaptive presentation pacing: generated presents carry a
-    // unique VK_GOOGLE_display_timing ID with desiredPresentTime=0, then past
-    // timing records are polled asynchronously. The proven Adreno path never
-    // enables this instrumentation.
+    // Display-confirmation telemetry is deliberately independent of adaptive
+    // presentation pacing: supported devices attach a unique
+    // VK_GOOGLE_display_timing ID with desiredPresentTime=0, then past timing
+    // records are polled asynchronously. It never changes present cadence.
     bool generatedDisplayConfirmationEnabled_{false};
     PFN_vkGetPastPresentationTimingGOOGLE getPastPresentationTimingGoogle_{nullptr};
     uint32_t generatedDisplayPresentId_{0x80000001U};

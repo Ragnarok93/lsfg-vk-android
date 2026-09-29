@@ -171,10 +171,18 @@ int main() {
         for (int i = 0; i < 9; ++i)
             controller.observe(sample(16.2, 5.0));
         controller.observe(sample(16.2, 5.0, 16.666, true));
-        for (int i = 0; i < 10; ++i)
+        bool sawTransitionSettle = false;
+        for (int i = 0; i < 140; ++i) {
             controller.observe(sample(16.2, 5.0));
+            sawTransitionSettle = sawTransitionSettle
+                || controller.telemetry().reason
+                    == AdaptiveFlowDecisionReason::FlowTransitionSettle;
+        }
+        assert(sawTransitionSettle);
+        // The transition barrier spans the entire post-handoff dwell. A second
+        // downstep may happen only after that dwell and a fresh pressure window.
         assert(near(controller.currentScale(), 0.80F));
-        for (int i = 0; i < 12; ++i)
+        for (int i = 0; i < 80; ++i)
             controller.observe(sample(16.2, 5.0));
         assert(near(controller.currentScale(), 0.75F));
     }

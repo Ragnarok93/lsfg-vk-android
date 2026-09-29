@@ -20,6 +20,7 @@ struct AdaptiveSchedulerTelemetry {
     bool costBackedOff{false};
     bool costProbe{false};
     bool discontinuityReset{false};
+    bool cadenceHeld{false};
     bool configWarmStart{false};
     bool capacityPromoted{false};
     bool safeGenerationHintValid{false};
@@ -52,7 +53,8 @@ public:
     SourceTimelineSample observe(
         uint64_t sourceArrivalTimeNs,
         std::chrono::nanoseconds sourceInterval,
-        bool discontinuity = false);
+        bool discontinuity = false,
+        bool preserveCadence = false);
 
     [[nodiscard]] uint64_t syntheticDesiredTimeNs(
         const SourceTimelineSample& sample, double interpolationFraction) const;
@@ -366,7 +368,9 @@ public:
     /// Observe a real/source frame interval and return the number of generated
     /// frames for this source cycle. This is an output planner only: it never
     /// sleeps and never modifies source pacing.
-    std::size_t plan(std::chrono::nanoseconds sourceInterval);
+    std::size_t plan(
+        std::chrono::nanoseconds sourceInterval,
+        bool preserveCadence = false);
 
     /// Supply a predictor-derived capacity hint for the next generation level.
     /// Invalid hints disable the early-promotion path without affecting the

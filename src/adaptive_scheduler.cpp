@@ -36,7 +36,8 @@ constexpr unsigned kIntegerDensityReleaseSamples = 8;
 SourceTimelineSample SourceProtectedTimeline::observe(
         uint64_t sourceArrivalTimeNs,
         std::chrono::nanoseconds sourceInterval,
-        bool discontinuity) {
+        bool discontinuity,
+        bool preserveCadence) {
     SourceTimelineSample sample{};
     const auto intervalCount = sourceInterval.count();
     if (sourceArrivalTimeNs == 0 || intervalCount <= 0)
@@ -61,6 +62,22 @@ SourceTimelineSample SourceProtectedTimeline::observe(
             ? std::numeric_limits<uint64_t>::max()
             : base + delta;
     };
+
+    if (preserveCadence && initialized_) {
+        ++sourceIndex_;
+        sample.sourceIndex = sourceIndex_;
+        sample.intervalNs = std::max<uint64_t>(1ULL, predictedIntervalNs_);
+        sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
+        sample.sourceDeadlineErrorNs = 0;
+        sourceDesiredTimeNs_ = addSaturated(
+            sourceArrivalTimeNs, sample.intervalNs);
+        sample.sourceDesiredTimeNs = sourceDesiredTimeNs_;
+        sample.valid = true;
+        // Keep the established cadence and only move the phase anchor to the
+        // real source arrival that completed the Flow handoff.
+        lastIntervalNs_ = sample.intervalNs;
+        return sample;
+    }
 
     if (!initialized_) {
         initialized_ = true;
@@ -1190,12 +1207,15 @@ double AdaptiveFrameScheduler::stabilizeGenerationDensity(
     return desiredDensity;
 }
 
-std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval) {
+std::size_t AdaptiveFrameScheduler::plan(
+        std::chrono::nanoseconds sourceInterval,
+        bool preserveCadence) {
     telemetry_.sourceRateSnapped = false;
     telemetry_.costRaised = false;
     telemetry_.costBackedOff = false;
     telemetry_.costProbe = false;
     telemetry_.discontinuityReset = false;
+    telemetry_.cadenceHeld = false;
     telemetry_.configWarmStart = false;
     telemetry_.capacityPromoted = false;
     telemetry_.safeGenerationHintValid = safeGenerationHintValid_;
@@ -1220,12 +1240,22 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     if (!(intervalSeconds > 0.0) || !std::isfinite(intervalSeconds))
         return 0;
 
+    // A Flow graph handoff can lengthen one or more present cycles while the
+    // active graph continues producing output. Keep the established source
+    // cadence for scheduling; the real interval remains telemetry evidence.
+    const bool cadenceHeld =
+        preserveCadence
+        && lastTrustedSourceIntervalSeconds_ > 0.0
+        && intervalSeconds < 0.250;
+    telemetry_.cadenceHeld = cadenceHeld;
+
     // Distinguish a suspend/stall from a legitimately slow source by comparing
     // against established cadence rather than an absolute FPS band. The first
     // sample at any source rate is always eligible. After an extreme outlier,
     // consume that one sample as a discontinuity and let the next real interval
     // establish the new cadence without synthetic catch-up debt.
-    if (lastTrustedSourceIntervalSeconds_ > 0.0
+    if (!cadenceHeld
+            && lastTrustedSourceIntervalSeconds_ > 0.0
             && intervalSeconds
                 > lastTrustedSourceIntervalSeconds_ * kDiscontinuityRatio) {
         const bool preserveWarmStart = reconfigureWarmStartPending_;
@@ -1240,8 +1270,13 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     // cleared by an explicit lifecycle reset(), so config writes observed just
     // after resume can still distinguish a running game from first startup.
     runtimeCadenceEstablished_ = true;
-    observedTimeSeconds_ += intervalSeconds;
-    updateSourceRate(intervalSeconds);
+    observedTimeSeconds_ += cadenceHeld
+        ? lastTrustedSourceIntervalSeconds_
+        : intervalSeconds;
+    if (cadenceHeld)
+        telemetry_.sourceFps = 1.0 / intervalSeconds;
+    else
+        updateSourceRate(intervalSeconds);
     lastTrustedSourceIntervalSeconds_ = smoothedSourceIntervalSeconds_;
 
     const double wantedGenerated = std::clamp(

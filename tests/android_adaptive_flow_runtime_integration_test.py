@@ -667,6 +667,10 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("flowTransitionHoldActive_", controller_header)
         self.assertIn("if (observation.flowTransition)", controller)
         self.assertIn("flow_transition", controller)
+        self.assertIn("FlowTransitionSettle", controller_header)
+        self.assertIn("flow_transition_settle", controller)
+        self.assertIn("preserveCadence", scheduler_header)
+        self.assertIn("preserveCadence", scheduler)
         self.assertIn("beginTransition", scheduler_header)
         self.assertIn(
             "void LsfgOutputCadenceTracker::beginTransition()",
@@ -697,6 +701,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         cadence_block = source[cadence_start:cadence_end]
         self.assertIn("adaptiveFlowTransitionActiveForCadence", cadence_block)
         self.assertIn("adaptiveFlowTransitionWarmupActive", cadence_block)
+        self.assertIn("adaptiveFlowCadenceHandoffPending_", source)
+        self.assertIn("outputTargetValid", source)
+        self.assertIn("output_target_valid=", source)
         self.assertIn("adaptiveFlowTransitionPending_", cadence_block)
         self.assertIn("cadenceGeneratedFrames", cadence_block)
 

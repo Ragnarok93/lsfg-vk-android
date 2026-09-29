@@ -119,6 +119,32 @@ int main() {
     }
 
     {
+        // Flow graph warmup can delay a source present, but that delay must not
+        // become a new source cadence or phase rebase. Re-anchor the protected
+        // timeline at the real source arrival while retaining the established
+        // cadence prediction.
+        SourceProtectedTimeline timeline;
+        assert(timeline.observe(7'500'000'000ULL, 16ms).valid);
+        const auto steady = timeline.observe(7'516'000'000ULL, 16ms);
+        assert(steady.valid);
+        assert(steady.intervalNs == 16'000'000ULL);
+
+        const auto transition = timeline.observe(
+            7'556'000'000ULL, 40ms, false, true);
+        assert(transition.valid);
+        assert(!transition.rebased);
+        assert(transition.sourceIndex == steady.sourceIndex + 1);
+        assert(transition.sourceDeadlineErrorNs == 0);
+        assert(transition.intervalNs == 16'000'000ULL);
+        assert(transition.sourceDesiredTimeNs == 7'572'000'000ULL);
+
+        const auto resumed = timeline.observe(7'572'000'000ULL, 16ms);
+        assert(resumed.valid);
+        assert(!resumed.rebased);
+        assert(resumed.sourceDesiredTimeNs == 7'588'000'000ULL);
+    }
+
+    {
         // Source timeline discontinuities are cadence-relative in every mode.
         // A suspend-like outlier must not create a historical synthetic span or
         // a delayed source deadline, while a slow-but-stable cadence remains valid.
