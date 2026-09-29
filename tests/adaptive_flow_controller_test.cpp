@@ -170,7 +170,9 @@ int main() {
         AdaptiveFlowController controller(AdaptiveFlowPreset::Balanced);
         for (int i = 0; i < 9; ++i)
             controller.observe(sample(16.2, 5.0));
-        controller.observe(sample(16.2, 5.0, 16.666, true));
+        auto transition = sample(16.2, 5.0, 16.666, true);
+        transition.flowTransition = true;
+        controller.observe(transition);
         bool sawTransitionSettle = false;
         for (int i = 0; i < 180; ++i) {
             controller.observe(sample(16.2, 5.0));
