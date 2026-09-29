@@ -3057,14 +3057,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto cycleEnd = RuntimeMetrics::Clock::now();
         const double cycleMs = std::chrono::duration<double, std::milli>(
             cycleEnd - cycleStart).count();
+        // Android can stop the guest while it is already inside this
+        // present call.
         const bool adaptiveFlowTransitionActiveForCadence =
             conf.adaptiveFlowScale
             && (adaptiveFlowTransitionWarmupActive
                 || this->adaptiveFlowTransitionPending_
                 || this->adaptiveFlowWarmupRemaining_ > 0);
-        if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
-            // Android can stop the guest while it is already inside this
-            // present call. In that case sourceInterval was sampled before the
+        if (cycleMs >= kRuntimeTimingDiscontinuityMs) { In that case sourceInterval was sampled before the
             // stop and looks normal, while host wall-clock dispatch/wait/cycle
             // timers absorb the entire pause. Drop the whole current metrics
             // window so a Quick Menu/suspend boundary cannot masquerade as a
