@@ -139,6 +139,9 @@ private:
 
     bool downstepEvaluationActive_{false};
     bool downstepBenefitSeen_{false};
+    // Direct missed-output pressure uses a shorter control loop, but retains
+    // the same post-change benefit check before another state is selected.
+    bool downstepOutputDriven_{false};
     std::size_t downstepPreviousIndex_{};
     double downstepEvaluationStartedSeconds_{};
     double downstepBaselinePressureRatio_{};
