@@ -630,7 +630,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         )
         guard_start = source.index("adaptiveFlowTransitionWarmupActive")
         guard_end = source.index(
-            "const double adaptiveFlowBatchBudgetMs", guard_start
+            "const auto& outputCadenceForPresentation", guard_start
         )
         guard = source[guard_start:guard_end]
 
