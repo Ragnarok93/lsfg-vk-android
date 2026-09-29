@@ -5812,6 +5812,11 @@ void LsContext::resetAdaptiveSourceEpoch(
         this->adaptiveFlowController_.currentScale();
     this->adaptiveFlowWarmupRemaining_ = 0;
     this->adaptiveFlowTransitionPending_ = false;
+    this->adaptiveFlowOutputTargeted_ = false;
+    this->adaptiveFlowOutputTargetFps_ = 0.0;
+    this->adaptiveFlowOutputTargetSatisfied_ = false;
+    this->adaptiveFlowFixedTargeted_ = false;
+    this->adaptiveFlowFixedTargetSatisfied_ = false;
     this->adaptiveFlowReason_ =
         this->adaptiveFlowController_.telemetry().reason;
 }
@@ -5872,6 +5877,11 @@ void LsContext::enterSourceOnlyBypass() {
         this->adaptiveFlowController_.currentScale();
     this->adaptiveFlowWarmupRemaining_ = 0;
     this->adaptiveFlowTransitionPending_ = false;
+    this->adaptiveFlowOutputTargeted_ = false;
+    this->adaptiveFlowOutputTargetFps_ = 0.0;
+    this->adaptiveFlowOutputTargetSatisfied_ = false;
+    this->adaptiveFlowFixedTargeted_ = false;
+    this->adaptiveFlowFixedTargetSatisfied_ = false;
     this->adaptiveFlowReason_ = adaptiveFlowController_.telemetry().reason;
     this->runtimeMetrics.hasLastSourcePresent = false;
     this->runtimeMetrics.lastSourcePresent = {};
