@@ -595,5 +595,31 @@ int main() {
         assert(lowered);
     }
 
+
+    {
+        // A Flow graph transition is a control barrier, not evidence. It must
+        // clear the in-flight downstep evaluation even when the transition
+        // sample itself has no valid GPU timing.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 12; ++i)
+            controller.observe(sample(16.2, 5.0));
+        assert(near(controller.currentScale(), 0.95F));
+
+        auto transition = sample(16.2, 5.0);
+        transition.flowTransition = true;
+        transition.valid = false;
+        controller.observe(transition);
+        assert(near(controller.currentScale(), 0.95F));
+        assert(
+            controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::FlowTransition);
+
+        // The post-transition samples must first re-establish the evaluation
+        // window; the barrier cannot cascade into another immediate downstep.
+        for (int i = 0; i < 7; ++i)
+            controller.observe(sample(16.2, 5.0));
+        assert(near(controller.currentScale(), 0.95F));
+    }
+
     return 0;
 }
