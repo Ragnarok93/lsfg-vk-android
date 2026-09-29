@@ -184,8 +184,16 @@ int main() {
         // The transition barrier spans the entire post-handoff dwell. A second
         // downstep may happen only after that dwell and a fresh pressure window.
         assert(near(controller.currentScale(), 0.80F));
-        for (int i = 0; i < 80; ++i)
+        bool sawSecondDownstep = false;
+        for (int i = 0; i < 80; ++i) {
             controller.observe(sample(16.2, 5.0));
+            sawSecondDownstep = sawSecondDownstep
+                || controller.telemetry().reason
+                    == AdaptiveFlowDecisionReason::SustainedPressure;
+        }
+        assert(sawSecondDownstep);
+        for (int i = 0; i < 10; ++i)
+            controller.observe(sample(13.0, 3.5));
         assert(near(controller.currentScale(), 0.75F));
     }
 
