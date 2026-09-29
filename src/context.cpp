@@ -3157,6 +3157,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowHistoryPreprocessHostWaitMs = 0.0;
             metrics.windowDispatchMs = 0.0;
             metrics.windowWaitIdleMs = 0.0;
+            metrics.windowFramegenCompletionWaitMs = 0.0;
             metrics.windowGeneratedPresentMs = 0.0;
             metrics.windowSourceIntervalMs = 0.0;
             metrics.windowSourceIntervalMaxMs = 0.0;
@@ -3308,6 +3309,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 : 0.0;
             const double dispatchAvgMs = sourceCount > 0.0 ? metrics.windowDispatchMs / sourceCount : 0.0;
             const double waitIdleAvgMs = sourceCount > 0.0 ? metrics.windowWaitIdleMs / sourceCount : 0.0;
+            const double framegenCompletionWaitAvgMs = sourceCount > 0.0
+                ? metrics.windowFramegenCompletionWaitMs / sourceCount : 0.0;
             const double generatedPresentAvgMs = generatedCount > 0.0
                 ? metrics.windowGeneratedPresentMs / generatedCount : 0.0;
             const double sourceIntervalAvgMs = metrics.windowSourceIntervals > 0
@@ -3405,6 +3408,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << metrics.totalHistoryHostCompletions
                       << " framegen_dispatch_avg_ms=" << dispatchAvgMs
                       << " framegen_wait_avg_ms=" << waitIdleAvgMs
+                      << " framegen_completion_wait_avg_ms="
+                      << framegenCompletionWaitAvgMs
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
                       << " source_interval_avg_ms=" << sourceIntervalAvgMs
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
@@ -3624,7 +3629,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "late=%llu admission=%llu deadline=%llu wsi=%llu cap_drop=%llu "
                 "presentation_cap=%zu presentation_duty=%.3f wsi_reject_ratio=%.3f "
                 "cycle_avg_ms=%.3f cycle_max_ms=%.3f handoff_ms=%.3f dispatch_ms=%.3f "
-                "wait_ms=%.3f source_interval_ms=%.3f source_interval_max_ms=%.3f "
+                "wait_ms=%.3f framegen_completion_wait_ms=%.3f "
+                "source_interval_ms=%.3f source_interval_max_ms=%.3f "
                 "deadline_error_ms=%.3f rebases=%llu "
                 "deadline_semantics=%s compute_ready_budget_ms=%.3f "
                 "presentation_slot_budget_ms=%.3f planned=%zu admitted=%zu "
@@ -3658,6 +3664,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 handoffAvgMs,
                 dispatchAvgMs,
                 waitIdleAvgMs,
+                framegenCompletionWaitAvgMs,
                 sourceIntervalAvgMs,
                 metrics.windowSourceIntervalMaxMs,
                 sourceDeadlineErrorAvgMs,
@@ -3779,6 +3786,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowHistoryPreprocessHostWaitMs = 0.0;
             metrics.windowDispatchMs = 0.0;
             metrics.windowWaitIdleMs = 0.0;
+            metrics.windowFramegenCompletionWaitMs = 0.0;
             metrics.windowGeneratedPresentMs = 0.0;
             metrics.windowSourceIntervalMs = 0.0;
             metrics.windowSourceIntervalMaxMs = 0.0;
@@ -4113,6 +4121,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - waitIdleStart).count();
         metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
+        metrics.windowFramegenCompletionWaitMs += framegenBlockingCompletionMs;
         if (framegenReady && generatedFrameCount > 0) {
             // This is the cost that actually blocks the matching source present
             // on protected Adreno. GPU timestamps omit queue residency and were
@@ -4971,6 +4980,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             }
         }
 
+        if (conf.adaptiveFramegen && !generationFirstAdreno)
+            this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
@@ -5311,6 +5322,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - waitIdleStart).count();
         metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
+        metrics.windowFramegenCompletionWaitMs += framegenBlockingCompletionMs;
+    }
+    if (requireHostCompletionWait && framegenReady
+            && generatedFrameCount > 0
+            && framegenBlockingCompletionMs > 0.0) {
+        this->deadlineAdmissionPredictor_.observeBlockingCompletion(
+            generatedFrameCount, framegenBlockingCompletionMs);
     }
     if (requireHostCompletionWait && framegenReady) {
         metrics.windowGeneratedCompleted += generatedFrameCount;

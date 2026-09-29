@@ -733,6 +733,24 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("observedSourceFps", source)
         self.assertIn(".sourceFps = observationSourceFps", source)
 
+    def test_source_only_cycles_recover_and_report_completion_latency(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("windowFramegenCompletionWaitMs", header)
+        self.assertIn("framegen_completion_wait_avg_ms=", source)
+
+        wait_start = source.index("bool framegenReady = true;")
+        wait_end = source.index("if (!framegenReady)", wait_start)
+        host_wait = source[wait_start:wait_end]
+        self.assertIn("windowFramegenCompletionWaitMs += framegenBlockingCompletionMs", host_wait)
+        self.assertIn("deadlineAdmissionPredictor_.observeBlockingCompletion", host_wait)
+
+        history_search = source.index("const auto presentCompatibilitySourceOnly")
+        history_start = source.index("if (historyOnly) {", history_search)
+        history_end = source.index("metrics.windowAdaptiveZeroGenerationCycles++", history_start)
+        self.assertIn("deadlineAdmissionPredictor_.observeSourceOnlyRecovery", source[history_start:history_end])
+
 
 if __name__ == "__main__":
     unittest.main()
