@@ -133,6 +133,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
 
     def test_adaptive_flow_uses_scale_sensitive_cost_and_output_pressure(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        controller = (ROOT / "src/adaptive_flow_controller.cpp").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn(
             "const double observationScaleSensitiveFlowMs = std::max(",
