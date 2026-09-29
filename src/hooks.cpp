@@ -635,6 +635,16 @@ namespace {
                 << (adaptiveFlow.lsfgOutputValid ? 1 : 0) << '\n'
                 << "adaptive_flow_lsfg_output_fps="
                 << adaptiveFlow.lsfgOutputFps << '\n'
+                << "adaptive_flow_output_targeted="
+                << (adaptiveFlow.outputTargeted ? 1 : 0) << '\n'
+                << "adaptive_flow_output_target_fps="
+                << adaptiveFlow.outputTargetFps << '\n'
+                << "adaptive_flow_output_target_satisfied="
+                << (adaptiveFlow.outputTargetSatisfied ? 1 : 0) << '\n'
+                << "adaptive_flow_fixed_targeted="
+                << (adaptiveFlow.fixedTargeted ? 1 : 0) << '\n'
+                << "adaptive_flow_fixed_target_satisfied="
+                << (adaptiveFlow.fixedTargetSatisfied ? 1 : 0) << '\n'
                 << "adaptive_flow_global_p95_ms="
                 << adaptiveFlow.globalFrameTimeP95Ms << '\n'
                 << "adaptive_flow_global_slow_ratio="
