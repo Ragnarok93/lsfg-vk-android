@@ -131,7 +131,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertNotIn("adaptiveFlowGlobalOutputFps_", deficit)
         self.assertNotIn("metrics.lastWindowOutputFps", deficit)
 
-    def test_adaptive_flow_uses_scale_sensitive_cost_and_native_cadence_with_global_pressure(self) -> None:
+    def test_adaptive_flow_uses_scale_sensitive_cost_and_output_pressure(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn(
@@ -156,6 +156,14 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             source,
             "Flow decisions must use the native LSFG rolling cadence, not GameNative's stride-modified FPS.",
         )
+        self.assertIn("const bool adaptiveOutputDeficit", source)
+        self.assertIn("const bool fixedMultiplierOutputDeficit", source)
+        self.assertIn("fixedMultiplierOutputTargetFps", source)
+        self.assertIn(".outputTargetFps = outputTargetFps", source)
+        self.assertIn(".fixedMultiplierBaseTarget = fixedMultiplierOutputTargeted", source)
+        self.assertIn("const bool outputPressure =", controller)
+        self.assertIn("computePressure || globalPressure || wsiFlowPressure || outputPressure", controller)
+        self.assertIn("SustainedOutputPressure", controller)
         self.assertIn(
             "this->deadlineAdmissionPredictor_.reset();",
             source[source.index("if (flowTelemetry.changed"):],

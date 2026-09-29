@@ -111,6 +111,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     telemetry_.computePressure = false;
     telemetry_.wsiPressure = false;
     telemetry_.outputDeficit = false;
+    telemetry_.outputPressure = false;
     telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
 
     if (!enabled_) {
@@ -156,6 +157,14 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool computePressure =
         freshGeneratedComputePressure || retainedSevereComputePressure;
     const bool wsiPressure = observation.wsiPresentationPressure;
+    // Output cadence is the governing user-visible contract. A valid missed
+    // Adaptive target or fixed multiplier base is actionable even when Android
+    // cannot provide a fresh whole-device GPU-utilization sample.
+    const bool outputPressure =
+        observation.outputCadenceValid
+        && observation.outputTargeted
+        && observation.outputDeficit
+        && !observation.outputTargetSatisfied;
     const bool globalGpuPressure =
         observation.globalPressureValid
         && observation.globalGpuUsagePercent >= kGlobalGpuPressurePercent;
@@ -167,6 +176,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     telemetry_.computePressure = computePressure;
     telemetry_.wsiPressure = wsiPressure;
     telemetry_.globalPressure = globalPressure;
+    telemetry_.outputPressure = outputPressure;
 
     // Scheduler transitions suppress ordinary near-budget noise, but they
     // must not hide a completed generated batch that is already slower than
@@ -286,13 +296,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool canRaise = index > 0;
 
     const bool pressure =
-        computePressure || globalPressure || wsiFlowPressure;
-    const bool autoTargetProbe =
-        preset_ == AdaptiveFlowPreset::Auto
-        && globalPressure
-        && observation.outputTargeted
-        && observation.outputDeficit
-        && !observation.outputTargetSatisfied;
+        computePressure || globalPressure || wsiFlowPressure || outputPressure;
+    const bool outputTargetProbe = outputPressure;
 
     if (pressure && canLower) {
         const double currentScale = static_cast<double>(presetStates[index]);
@@ -306,13 +311,19 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         // material-contribution gate under local and global pressure so quality
         // is never traded for a few tenths of a millisecond that cannot
         // plausibly recover the requested cadence.
-        const bool globalOnlyPressure = globalPressure && !computePressure;
+        const bool outputDrivenPressure = outputPressure && !computePressure;
+        const bool materiallyUsefulForOutput =
+            observation.flowMs >= 1.0 && predictedReliefMs >= 0.25;
+        const bool globalOnlyPressure =
+            globalPressure && !computePressure && !outputPressure;
         const bool globallyProfitable =
             !globalOnlyPressure
             || telemetry_.pressureRatio >= kMinimumGlobalPressureLsfgBudgetRatio;
-        if ((!autoTargetProbe
-                    && (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
-                        || predictedReliefRatio < kMinimumPredictedReliefRatio))
+        if ((outputDrivenPressure
+                    ? !materiallyUsefulForOutput
+                    : (!outputTargetProbe
+                        && (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
+                            || predictedReliefRatio < kMinimumPredictedReliefRatio)))
                 || !globallyProfitable) {
             resetEvidence();
             telemetry_.reason = AdaptiveFlowDecisionReason::InsufficientFlowContribution;
@@ -321,7 +332,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
 
         pressureSeconds_ += evidenceSeconds;
         headroomSeconds_ = 0.0;
-        const double downConfirmSeconds = globalPressure
+        const double downConfirmSeconds = globalPressure && !outputPressure
             ? kGlobalDownConfirmSeconds : kDownConfirmSeconds;
         if (pressureSeconds_ >= downConfirmSeconds) {
             downstepEvaluationActive_ = true;
@@ -345,9 +356,11 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
             telemetry_.changed = true;
             telemetry_.downstepEvaluationActive = true;
-            telemetry_.reason = globalPressure
-                ? AdaptiveFlowDecisionReason::SustainedGlobalPressure
-                : AdaptiveFlowDecisionReason::SustainedPressure;
+            telemetry_.reason = outputPressure
+                ? AdaptiveFlowDecisionReason::SustainedOutputPressure
+                : (globalPressure
+                    ? AdaptiveFlowDecisionReason::SustainedGlobalPressure
+                    : AdaptiveFlowDecisionReason::SustainedPressure);
             cooldownUntilSeconds_ = observedSeconds_ + kTransitionCooldownSeconds;
             resetEvidence();
         } else {
@@ -438,6 +451,7 @@ const char* AdaptiveFlowController::reasonName(AdaptiveFlowDecisionReason reason
     case AdaptiveFlowDecisionReason::InsufficientFlowContribution: return "insufficient_flow_contribution";
     case AdaptiveFlowDecisionReason::SustainedPressure: return "sustained_gpu_pressure";
     case AdaptiveFlowDecisionReason::SustainedGlobalPressure: return "sustained_global_gpu_pressure";
+    case AdaptiveFlowDecisionReason::SustainedOutputPressure: return "sustained_output_pressure";
     case AdaptiveFlowDecisionReason::EvaluatingDownstep: return "evaluating_downstep";
     case AdaptiveFlowDecisionReason::DownstepBenefitConfirmed: return "downstep_benefit_confirmed";
     case AdaptiveFlowDecisionReason::DownstepReverted: return "downstep_reverted_no_benefit";

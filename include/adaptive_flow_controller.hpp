@@ -22,6 +22,7 @@ enum class AdaptiveFlowDecisionReason : uint8_t {
     InsufficientFlowContribution,
     SustainedPressure,
     SustainedGlobalPressure,
+    SustainedOutputPressure,
     EvaluatingDownstep,
     DownstepBenefitConfirmed,
     DownstepReverted,
@@ -51,9 +52,13 @@ struct AdaptiveFlowObservation {
     double wsiLossRate{};
     double sourceFps{};
     double outputFps{};
+    /// Required output cadence: Adaptive LSFG target or fixed multiplier base.
+    double outputTargetFps{};
     bool outputCadenceValid{false};
     bool outputTargeted{false};
     bool outputTargetSatisfied{false};
+    /// True when outputTargetFps is source cadence times the fixed multiplier.
+    bool fixedMultiplierBaseTarget{false};
     /// Whole-device GPU utilization sampled out-of-band by GameNative.
     double globalGpuUsagePercent{};
     /// True when the global GPU sample is fresh and trustworthy.
@@ -90,6 +95,7 @@ struct AdaptiveFlowTelemetry {
     bool wsiPressure{false};
     bool downstepEvaluationActive{false};
     bool outputDeficit{false};
+    bool outputPressure{false};
 };
 
 /// A quality-seeking governor for Flow Scale. It owns no Vulkan objects and

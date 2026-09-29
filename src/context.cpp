@@ -2474,11 +2474,37 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         const auto& outputCadence =
             this->lsfgOutputCadenceTracker_.snapshot();
+        const bool adaptiveOutputTargeted =
+            conf.adaptiveFramegen && conf.fpsLimit > 0 && outputCadence.valid;
+        const bool adaptiveOutputDeficit =
+            adaptiveOutputTargeted && outputCadence.deficitConfirmed;
+        constexpr double kFixedMultiplierOutputTolerance = 0.98;
+        const double fixedMultiplierOutputTargetFps =
+            !conf.adaptiveFramegen
+            && conf.multiplier > 1
+            && adaptiveTelemetry.smoothedSourceFps > 0.0
+            ? adaptiveTelemetry.smoothedSourceFps
+                * static_cast<double>(conf.multiplier)
+            : 0.0;
+        const bool fixedMultiplierOutputTargeted =
+            outputCadence.valid && fixedMultiplierOutputTargetFps > 0.0;
+        const bool fixedMultiplierOutputSatisfied =
+            fixedMultiplierOutputTargeted
+            && outputCadence.outputFps
+                >= fixedMultiplierOutputTargetFps
+                    * kFixedMultiplierOutputTolerance;
+        const bool fixedMultiplierOutputDeficit =
+            fixedMultiplierOutputTargeted && !fixedMultiplierOutputSatisfied;
+        const bool outputTargeted =
+            adaptiveOutputTargeted || fixedMultiplierOutputTargeted;
+        const bool outputTargetSatisfied = adaptiveOutputTargeted
+            ? outputCadence.targetSatisfiedConfirmed
+            : (!fixedMultiplierOutputTargeted || fixedMultiplierOutputSatisfied);
+        const double outputTargetFps = adaptiveOutputTargeted
+            ? static_cast<double>(conf.fpsLimit)
+            : fixedMultiplierOutputTargetFps;
         const bool outputDeficit =
-            conf.adaptiveFramegen
-            && conf.fpsLimit > 0
-            && outputCadence.valid
-            && outputCadence.deficitConfirmed;
+            adaptiveOutputDeficit || fixedMultiplierOutputDeficit;
 
         // Keep compute/deadline pressure and downstream WSI pressure separate.
         // A WSI rejection never trains the deadline predictor and only becomes
@@ -2538,10 +2564,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .wsiLossRate = presentationCapacity.wsiRejectionRatio,
             .sourceFps = adaptiveTelemetry.smoothedSourceFps,
             .outputFps = outputCadence.outputFps,
+            .outputTargetFps = outputTargetFps,
             .outputCadenceValid = outputCadence.valid,
-            .outputTargeted = outputCadence.targeted,
-            .outputTargetSatisfied =
-                outputCadence.targetSatisfiedConfirmed,
+            .outputTargeted = outputTargeted,
+            .outputTargetSatisfied = outputTargetSatisfied,
+            .fixedMultiplierBaseTarget = fixedMultiplierOutputTargeted,
             .globalGpuUsagePercent =
                 this->adaptiveFlowGlobalGpuUsagePercent_,
             .globalPressureValid = this->adaptiveFlowGlobalPressureValid_,
@@ -2623,6 +2650,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " global_pressure_valid="
                       << (observation.globalPressureValid ? 1 : 0)
                       << " output_fps=" << observation.outputFps
+                      << " output_target_fps=" << observation.outputTargetFps
+                      << " fixed_multiplier_base_target="
+                      << (observation.fixedMultiplierBaseTarget ? 1 : 0)
                       << " output_deficit="
                       << (observation.outputDeficit ? 1 : 0)
                       << " output_satisfied="
@@ -2644,7 +2674,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "source_fps=%.3f target_fps=%u multiplier=%zu adaptive=%d "
                 "predicted_next_total_ms=%.3f flow_ms=%.3f lsfg_ms=%.3f "
                 "budget_ms=%.3f generation_count=%zu generated_work=%d retained_timing=%d "
-                "gpu=%.1f pressure_valid=%d output_fps=%.3f output_deficit=%d "
+                "gpu=%.1f pressure_valid=%d output_fps=%.3f output_target_fps=%.3f fixed_base=%d output_deficit=%d "
                 "output_satisfied=%d compute_pressure=%d wsi_pressure=%d wsi_loss_rate=%.3f",
                 static_cast<unsigned long long>(this->runtimeSessionId_),
                 static_cast<unsigned long long>(this->configRevision_),
@@ -2674,6 +2704,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 observation.globalGpuUsagePercent,
                 observation.globalPressureValid ? 1 : 0,
                 observation.outputFps,
+                observation.outputTargetFps,
+                observation.fixedMultiplierBaseTarget ? 1 : 0,
                 observation.outputDeficit ? 1 : 0,
                 observation.outputTargetSatisfied ? 1 : 0,
                 flowTelemetry.computePressure ? 1 : 0,
