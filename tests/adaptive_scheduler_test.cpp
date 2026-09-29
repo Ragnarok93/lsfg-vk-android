@@ -1095,6 +1095,9 @@ int main() {
             40ms, 1, 0, false, SourceCadenceObservation::SourceOnly);
         std::size_t count = governor.plan(
             40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance);
+        assert(count == 0);
+        count = governor.plan(
+            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance);
         assert(count == 1);
 
         bool backedOff = false;
