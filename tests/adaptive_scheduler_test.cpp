@@ -977,6 +977,7 @@ int main() {
         // The first eligible interval establishes the clean baseline; the
         // following interval is the first eligible generation opportunity.
         assert(governor.plan(40ms, 3, 0, true) == 0);
+        assert(governor.plan(40ms, 3, 0, true) == 0);
         std::size_t count = governor.plan(40ms, 3, 0, true);
         assert(count == 3);
         assert(governor.telemetry().generationLimit == 3);
@@ -995,6 +996,11 @@ int main() {
         assert(governor.plan(
             8ms, 2, 0, false, SourceCadenceObservation::SourceOnly) == 0);
         assert(!governor.telemetry().baselineValid);
+        // The first eligible interval is only a candidate; the next
+        // no-generated interval must confirm the real cadence before probing.
+        assert(governor.plan(
+            16ms, 2, 0, true,
+            SourceCadenceObservation::HistoryMaintenance) == 0);
         assert(governor.plan(
             33ms, 2, 0, true,
             SourceCadenceObservation::HistoryMaintenance) == 0);
@@ -1016,6 +1022,8 @@ int main() {
         assert(governor.plan(
             40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance) == 0);
         assert(governor.plan(
+            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance) == 0);
+        assert(governor.plan(
             40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance) == 1);
         assert(governor.plan(
             40ms, 2, 1, true, SourceCadenceObservation::Generated) == 2);
@@ -1030,6 +1038,8 @@ int main() {
         FixedSourceCadenceGovernor governor;
         governor.plan(
             40ms, 3, 0, false, SourceCadenceObservation::SourceOnly);
+        assert(governor.plan(
+            40ms, 3, 0, true, SourceCadenceObservation::HistoryMaintenance) == 0);
         assert(governor.plan(
             40ms, 3, 0, true, SourceCadenceObservation::HistoryMaintenance) == 0);
         assert(governor.plan(
@@ -1068,6 +1078,8 @@ int main() {
         std::size_t count = governor.plan(40ms, 1, 0, true);
         assert(count == 0);
         count = governor.plan(40ms, 1, 0, true);
+        assert(count == 0);
+        count = governor.plan(40ms, 1, 0, true);
         assert(count == 1);
         bool backedOff = false;
         for (int i = 0; i < 3; ++i) {
@@ -1094,6 +1106,9 @@ int main() {
         governor.plan(
             40ms, 1, 0, false, SourceCadenceObservation::SourceOnly);
         std::size_t count = governor.plan(
+            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance);
+        assert(count == 0);
+        count = governor.plan(
             40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance);
         assert(count == 0);
         count = governor.plan(
@@ -1131,6 +1146,8 @@ int main() {
         FixedSourceCadenceGovernor governor;
         governor.plan(125ms, 2, 0, false);
         std::size_t count = governor.plan(125ms, 2, 0, true);
+        assert(count == 0);
+        count = governor.plan(125ms, 2, 0, true);
         assert(count == 0);
         count = governor.plan(125ms, 2, 0, true);
         assert(count == 2);
