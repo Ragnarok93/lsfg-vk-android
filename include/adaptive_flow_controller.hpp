@@ -25,6 +25,7 @@ enum class AdaptiveFlowDecisionReason : uint8_t {
     EvaluatingDownstep,
     DownstepBenefitConfirmed,
     DownstepReverted,
+    NoBenefitHold,
     InsufficientRecoveryHeadroom,
     SustainedHeadroom,
 };
@@ -136,6 +137,11 @@ private:
     bool downstepBaselineComputePressure_{false};
     bool downstepBaselineWsiPressure_{false};
     bool downstepBaselineGlobalPressure_{false};
+    bool downstepBaselineOutputDeficit_{false};
+
+    bool noBenefitDownstepBlocked_{false};
+    std::size_t noBenefitBlockedIndex_{};
+    double noBenefitNoPressureSeconds_{};
 
     AdaptiveFlowTelemetry telemetry_{};
 };

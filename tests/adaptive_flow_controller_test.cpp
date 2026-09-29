@@ -384,9 +384,48 @@ int main() {
         }
         assert(reverted);
         assert(near(controller.currentScale(), 1.00F));
-        for (int i = 0; i < 20; ++i)
-            controller.observe(sample(16.2, 5.0));
-        assert(near(controller.currentScale(), 1.00F));
+
+        // Repeating the same pressure after the no-benefit hold must not
+        // schedule the identical failed state transition again.
+        bool repeatedRejectedProbe = false;
+        bool reportedNoBenefitHold = false;
+        for (int i = 0; i < 80; ++i) {
+            auto observation = sample(
+                8.0, 5.0, 16.666, false, false,
+                99.0, true, true, false, false);
+            observation.wsiPresentationPressure = true;
+            observation.wsiLossRate = 0.35;
+            observation.outputTargeted = true;
+            observation.outputCadenceValid = true;
+            observation.outputFps = 54.0;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+            repeatedRejectedProbe = repeatedRejectedProbe
+                || !near(controller.currentScale(), 1.00F);
+            reportedNoBenefitHold = reportedNoBenefitHold
+                || controller.telemetry().reason
+                    == AdaptiveFlowDecisionReason::NoBenefitHold;
+        }
+        assert(!repeatedRejectedProbe);
+        assert(reportedNoBenefitHold);
+
+        // Materially worse output is new evidence and may retry the same step.
+        bool retriedOnWorseOutput = false;
+        for (int i = 0; i < 12 && !retriedOnWorseOutput; ++i) {
+            auto observation = sample(
+                8.0, 5.0, 16.666, false, false,
+                99.0, true, true, false, false);
+            observation.wsiPresentationPressure = true;
+            observation.wsiLossRate = 0.35;
+            observation.outputTargeted = true;
+            observation.outputCadenceValid = true;
+            observation.outputFps = 48.0;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+            retriedOnWorseOutput = !near(controller.currentScale(), 1.00F);
+        }
+        assert(retriedOnWorseOutput);
+        assert(near(controller.currentScale(), 0.95F));
     }
 
     {
