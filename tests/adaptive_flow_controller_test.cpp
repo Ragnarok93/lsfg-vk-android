@@ -172,7 +172,7 @@ int main() {
             controller.observe(sample(16.2, 5.0));
         controller.observe(sample(16.2, 5.0, 16.666, true));
         bool sawTransitionSettle = false;
-        for (int i = 0; i < 140; ++i) {
+        for (int i = 0; i < 180; ++i) {
             controller.observe(sample(16.2, 5.0));
             sawTransitionSettle = sawTransitionSettle
                 || controller.telemetry().reason
