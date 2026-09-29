@@ -1131,6 +1131,8 @@ int main() {
         FixedSourceCadenceGovernor governor;
         governor.plan(125ms, 2, 0, false);
         std::size_t count = governor.plan(125ms, 2, 0, true);
+        assert(count == 0);
+        count = governor.plan(125ms, 2, 0, true);
         assert(count == 2);
         for (int i = 0; i < 8; ++i)
             count = governor.plan(
