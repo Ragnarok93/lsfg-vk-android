@@ -555,5 +555,45 @@ int main() {
         assert(controller.telemetry().computePressure);
     }
 
+    {
+        // A sustained missed output target is direct Adaptive Flow pressure.
+        // The governor must downstep without a whole-device GPU sample: that
+        // sample is advisory and may be unavailable on Android.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Low);
+        bool lowered = false;
+        for (int i = 0; i < 20 && !lowered; ++i) {
+            auto observation = sample(16.0, 5.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = false;
+            observation.outputDeficit = true;
+            observation.outputFps = 70.0;
+            observation.sourceFps = 18.0;
+            controller.observe(observation);
+            lowered = near(controller.currentScale(), 0.50F);
+        }
+        assert(lowered);
+    }
+
+    {
+        // Fixed-multiplier operation uses the required generated cadence
+        // (source cadence times multiplier) as the same direct output-pressure
+        // signal, without requiring Adaptive LSFG or global GPU telemetry.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Low);
+        bool lowered = false;
+        for (int i = 0; i < 20 && !lowered; ++i) {
+            auto observation = sample(16.0, 5.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = false;
+            observation.outputDeficit = true;
+            observation.outputFps = 42.0;
+            observation.sourceFps = 16.0;
+            controller.observe(observation);
+            lowered = near(controller.currentScale(), 0.50F);
+        }
+        assert(lowered);
+    }
+
     return 0;
 }
