@@ -26,13 +26,18 @@ constexpr double kMinimumPredictedReliefRatio = 0.025;
 constexpr double kMinimumGlobalPressureLsfgBudgetRatio = 0.40;
 constexpr double kDownConfirmSeconds = 0.90;
 constexpr double kGlobalDownConfirmSeconds = 0.50;
+// A missed output target is the user-visible contract; react faster when it
+// is the only actionable pressure signal.
+constexpr double kOutputDownConfirmSeconds = 0.45;
 constexpr double kUpConfirmSeconds = 4.0;
 constexpr double kGlobalGpuPressurePercent = 96.0;
 constexpr double kGlobalGpuRecoveryPercent = 88.0;
 constexpr double kTransitionCooldownSeconds = 1.25;
+constexpr double kOutputTransitionCooldownSeconds = 0.75;
 constexpr double kFlowTransitionSettleSeconds = 2.50;
 constexpr double kSchedulerTransitionHoldSeconds = 1.25;
 constexpr double kDownstepEvaluationSeconds = 0.80;
+constexpr double kOutputDownstepEvaluationSeconds = 0.40;
 constexpr double kDownstepNoBenefitHoldSeconds = 4.0;
 constexpr double kMaterialPressureRatioRelief = 0.05;
 constexpr double kMaterialOutputGainRatio = 1.02;
@@ -71,6 +76,7 @@ void AdaptiveFlowController::configure(bool enabled, AdaptiveFlowPreset preset) 
     flowTransitionSettleUntilSeconds_ = 0.0;
     downstepEvaluationActive_ = false;
     downstepBenefitSeen_ = false;
+    downstepOutputDriven_ = false;
     resetEvidence();
     selectTargetState();
     if (!enabled_)
@@ -100,6 +106,7 @@ void AdaptiveFlowController::reset() {
     flowTransitionSettleUntilSeconds_ = 0.0;
     downstepEvaluationActive_ = false;
     downstepBenefitSeen_ = false;
+    downstepOutputDriven_ = false;
     resetEvidence();
     selectTargetState();
     if (!enabled_)
@@ -290,8 +297,12 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             || outputBenefit || sourceBenefit || computeBenefit
             || wsiBenefit || globalBenefit;
 
+        const double downstepEvaluationSeconds =
+            downstepOutputDriven_
+                ? kOutputDownstepEvaluationSeconds
+                : kDownstepEvaluationSeconds;
         if (observedSeconds_ - downstepEvaluationStartedSeconds_
-                < kDownstepEvaluationSeconds) {
+                < downstepEvaluationSeconds) {
             resetEvidence();
             telemetry_.downstepEvaluationActive = true;
             telemetry_.reason = AdaptiveFlowDecisionReason::EvaluatingDownstep;
@@ -303,6 +314,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         resetEvidence();
         if (downstepBenefitSeen_) {
             downstepBenefitSeen_ = false;
+            downstepOutputDriven_ = false;
             telemetry_.reason =
                 AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
             return telemetry_.currentScale;
@@ -313,6 +325,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             downstepPreviousIndex_, presetStates.size() - 1);
         telemetry_.currentScale = presetStates[telemetry_.stateIndex];
         telemetry_.changed = true;
+        downstepOutputDriven_ = false;
         telemetry_.reason = AdaptiveFlowDecisionReason::DownstepReverted;
         cooldownUntilSeconds_ =
             observedSeconds_ + kDownstepNoBenefitHoldSeconds;
@@ -368,8 +381,12 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
 
         pressureSeconds_ += evidenceSeconds;
         headroomSeconds_ = 0.0;
-        const double downConfirmSeconds = globalPressure && !outputPressure
-            ? kGlobalDownConfirmSeconds : kDownConfirmSeconds;
+        const double downConfirmSeconds =
+            outputPressure
+                ? kOutputDownConfirmSeconds
+                : (globalPressure
+                    ? kGlobalDownConfirmSeconds
+                    : kDownConfirmSeconds);
         if (pressureSeconds_ >= downConfirmSeconds) {
             downstepEvaluationActive_ = true;
             downstepBenefitSeen_ = false;
@@ -388,6 +405,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             downstepBaselineComputePressure_ = computePressure;
             downstepBaselineWsiPressure_ = wsiPressure;
             downstepBaselineGlobalPressure_ = globalPressure;
+            downstepOutputDriven_ = outputPressure;
             telemetry_.stateIndex++;
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
             telemetry_.changed = true;
@@ -397,7 +415,10 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                 : (globalPressure
                     ? AdaptiveFlowDecisionReason::SustainedGlobalPressure
                     : AdaptiveFlowDecisionReason::SustainedPressure);
-            cooldownUntilSeconds_ = observedSeconds_ + kTransitionCooldownSeconds;
+            cooldownUntilSeconds_ = observedSeconds_
+                + (outputPressure
+                    ? kOutputTransitionCooldownSeconds
+                    : kTransitionCooldownSeconds);
             resetEvidence();
         } else {
             telemetry_.reason = AdaptiveFlowDecisionReason::None;
