@@ -128,14 +128,15 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             : 0.0;
     observedSeconds_ += evidenceSeconds;
 
-    const bool flowTransitionBarrier =
-        observation.flowTransition || flowTransitionHoldActive_;
-    if (flowTransitionBarrier) {
+    if (observation.flowTransition)
+        flowTransitionHoldActive_ = true;
+    if (flowTransitionHoldActive_) {
         if (downstepEvaluationActive_) {
             downstepEvaluationStartedSeconds_ = observedSeconds_;
             downstepBenefitSeen_ = false;
         }
-        flowTransitionHoldActive_ = observation.flowTransition;
+        if (!observation.flowTransition)
+            flowTransitionHoldActive_ = false;
         resetEvidence();
         telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
         telemetry_.reason = AdaptiveFlowDecisionReason::FlowTransition;
