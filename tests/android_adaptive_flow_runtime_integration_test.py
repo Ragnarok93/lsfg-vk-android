@@ -131,7 +131,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertNotIn("adaptiveFlowGlobalOutputFps_", deficit)
         self.assertNotIn("metrics.lastWindowOutputFps", deficit)
 
-    def test_adaptive_flow_uses_only_scale_sensitive_cost_and_ignores_adreno_sidecar(self) -> None:
+    def test_adaptive_flow_uses_scale_sensitive_cost_and_native_cadence_with_global_pressure(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn(
@@ -147,11 +147,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             source,
         )
         self.assertIn(
-            ".globalPressureValid =\n"
-            "                !this->conservativeCrossDeviceSync_\n"
-            "                && this->adaptiveFlowGlobalPressureValid_",
+            ".globalPressureValid = this->adaptiveFlowGlobalPressureValid_",
             source,
-            "Adreno must not govern Flow from the unreliable Android GPU sidecar.",
+            "Protected Adreno may use fresh validated GPU pressure, while cadence remains native.",
         )
         self.assertIn(
             ".outputFps = outputCadence.outputFps",
@@ -446,7 +444,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "adaptive_flow_generation_count=",
             "adaptive_flow_global_pressure_valid=",
             "adaptive_flow_global_gpu_percent=",
-            "adaptive_flow_global_output_fps=",
+            "adaptive_flow_global_source_fps=",
             "adaptive_flow_lsfg_output_valid=",
             "adaptive_flow_lsfg_output_fps=",
             "adaptive_flow_global_p95_ms=",
@@ -497,14 +495,15 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         for field in (
             "timestamp_ms",
             "gpu_usage_percent",
-            "output_fps",
+            "source_fps",
             "frame_time_p95_ms",
             "slow_frame_ratio",
         ):
             self.assertIn(f'key == "{field}"', reader)
         self.assertIn("consumed != value.size()", reader)
         self.assertIn("sawTimestamp", reader)
-        self.assertIn("sawOutput", reader)
+        self.assertIn("sawSource", reader)
+        self.assertIn('key == "output_fps"', reader)
         self.assertIn("sawFrameTime", reader)
         self.assertIn("sawSlowRatio", reader)
 

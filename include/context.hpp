@@ -63,7 +63,7 @@ struct AdaptiveFlowRuntimeSnapshot {
     size_t generationCount{0};
     bool globalPressureValid{false};
     double globalGpuUsagePercent{0.0};
-    double globalOutputFps{0.0};
+    double globalSourceFps{0.0};
     bool lsfgOutputValid{false};
     double lsfgOutputFps{0.0};
     double globalFrameTimeP95Ms{0.0};
@@ -156,7 +156,7 @@ public:
             .generationCount = adaptiveFlowGenerationCount_,
             .globalPressureValid = adaptiveFlowGlobalPressureValid_,
             .globalGpuUsagePercent = adaptiveFlowGlobalGpuUsagePercent_,
-            .globalOutputFps = adaptiveFlowGlobalOutputFps_,
+            .globalSourceFps = adaptiveFlowGlobalSourceFps_,
             .lsfgOutputValid = outputCadence.valid,
             .lsfgOutputFps = outputCadence.outputFps,
             .globalFrameTimeP95Ms = adaptiveFlowGlobalFrameTimeP95Ms_,
@@ -279,7 +279,7 @@ private:
     std::chrono::steady_clock::time_point adaptiveFlowNextPressureRead_{};
     bool adaptiveFlowGlobalPressureValid_{false};
     double adaptiveFlowGlobalGpuUsagePercent_{0.0};
-    double adaptiveFlowGlobalOutputFps_{0.0};
+    double adaptiveFlowGlobalSourceFps_{0.0};
     double adaptiveFlowGlobalFrameTimeP95Ms_{0.0};
     double adaptiveFlowGlobalSlowFrameRatio_{0.0};
     bool adaptiveFlowGeneratedTimingValid_{false};

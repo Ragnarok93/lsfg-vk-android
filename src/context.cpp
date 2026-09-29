@@ -253,7 +253,7 @@ double adaptiveFlowFrameBudgetMs(
 struct RuntimePressureSample {
     bool valid{false};
     double gpuUsagePercent{0.0};
-    double outputFps{0.0};
+    double sourceFps{0.0};
     double frameTimeP95Ms{0.0};
     double slowFrameRatio{0.0};
 };
@@ -281,7 +281,7 @@ RuntimePressureSample readRuntimePressure(
 
     bool sawTimestamp = false;
     bool sawGpu = false;
-    bool sawOutput = false;
+    bool sawSource = false;
     bool sawFrameTime = false;
     bool sawSlowRatio = false;
     std::string line;
@@ -294,6 +294,7 @@ RuntimePressureSample readRuntimePressure(
         const bool knownKey =
             key == "timestamp_ms"
             || key == "gpu_usage_percent"
+            || key == "source_fps"
             || key == "output_fps"
             || key == "frame_time_p95_ms"
             || key == "slow_frame_ratio";
@@ -315,9 +316,9 @@ RuntimePressureSample readRuntimePressure(
         } else if (key == "gpu_usage_percent") {
             sample.gpuUsagePercent = parsed;
             sawGpu = true;
-        } else if (key == "output_fps") {
-            sample.outputFps = parsed;
-            sawOutput = true;
+        } else if (key == "source_fps" || key == "output_fps") {
+            sample.sourceFps = parsed;
+            sawSource = true;
         } else if (key == "frame_time_p95_ms") {
             sample.frameTimeP95Ms = parsed;
             sawFrameTime = true;
@@ -333,12 +334,12 @@ RuntimePressureSample readRuntimePressure(
     sample.valid =
         sawTimestamp
         && sawGpu
-        && sawOutput
+        && sawSource
         && sawFrameTime
         && sawSlowRatio
         && sample.gpuUsagePercent >= 0.0
         && sample.gpuUsagePercent <= 100.0
-        && sample.outputFps >= 0.0
+        && sample.sourceFps >= 0.0
         && sample.frameTimeP95Ms >= 0.0
         && sample.slowFrameRatio >= 0.0
         && sample.slowFrameRatio <= 1.0;
@@ -2161,6 +2162,24 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    const bool adaptiveFlowTransitionWarmupActive =
+        conf.adaptiveFlowScale
+        && this->adaptiveFlowTransitionPending_
+        && this->adaptiveFlowWarmupRemaining_ > 0;
+    if (adaptiveFlowTransitionWarmupActive) {
+        // A pending graph needs three temporal history writes before it can
+        // become active. On generation-first devices, every generated cycle
+        // can otherwise starve that handoff indefinitely. Preserve the source
+        // present and use the bounded history-only path for this transition.
+        generatedFrameCount = 0;
+        interpolationGenerationCount = 0;
+        std::cerr << "lsfg-vk: adaptive-flow-transition-warmup"
+                  << " generated=0"
+                  << " warmup_remaining="
+                  << this->adaptiveFlowWarmupRemaining_
+                  << "\n";
+    }
+
     const auto& outputCadenceForPresentation =
         this->lsfgOutputCadenceTracker_.snapshot();
     const bool presentationOutputDeficit =
@@ -2237,7 +2256,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // Admission and presentation-cap limiting are complete before any framegen
     // dispatch. Re-space the surviving batch evenly across the protected source
     // interval; rejected opportunities are consumed and never become catch-up debt.
-    interpolationGenerationCount = generatedFrameCount;
+    if (!adaptiveFlowTransitionWarmupActive)
+        interpolationGenerationCount = generatedFrameCount;
 
     // Flow GPU timestamps cover the complete submitted batch. Keep the budget
     // and predictor value attached to that exact batch instead of comparing a
@@ -2436,8 +2456,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->adaptiveFlowGlobalPressureValid_ = pressure.valid;
             this->adaptiveFlowGlobalGpuUsagePercent_ =
                 pressure.valid ? pressure.gpuUsagePercent : 0.0;
-            this->adaptiveFlowGlobalOutputFps_ =
-                pressure.valid ? pressure.outputFps : 0.0;
+            this->adaptiveFlowGlobalSourceFps_ =
+                pressure.valid ? pressure.sourceFps : 0.0;
             this->adaptiveFlowGlobalFrameTimeP95Ms_ =
                 pressure.valid ? pressure.frameTimeP95Ms : 0.0;
             this->adaptiveFlowGlobalSlowFrameRatio_ =
@@ -2524,9 +2544,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 outputCadence.targetSatisfiedConfirmed,
             .globalGpuUsagePercent =
                 this->adaptiveFlowGlobalGpuUsagePercent_,
-            .globalPressureValid =
-                !this->conservativeCrossDeviceSync_
-                && this->adaptiveFlowGlobalPressureValid_,
+            .globalPressureValid = this->adaptiveFlowGlobalPressureValid_,
             .outputDeficit = outputDeficit,
             .syntheticDropPressure = false,
             .generatedWorkSample = generatedWorkSample,
@@ -3401,8 +3419,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (this->adaptiveFlowGlobalPressureValid_ ? 1 : 0)
                       << " adaptive_flow_global_gpu_percent="
                       << this->adaptiveFlowGlobalGpuUsagePercent_
-                      << " adaptive_flow_global_output_fps="
-                      << this->adaptiveFlowGlobalOutputFps_
+                      << " adaptive_flow_global_source_fps="
+                      << this->adaptiveFlowGlobalSourceFps_
                       << " adaptive_flow_lsfg_output_valid="
                       << (this->lsfgOutputCadenceTracker_.snapshot().valid ? 1 : 0)
                       << " adaptive_flow_lsfg_output_fps="
@@ -5686,7 +5704,7 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->adaptiveFlowNextPressureRead_ = {};
     this->adaptiveFlowGlobalPressureValid_ = false;
     this->adaptiveFlowGlobalGpuUsagePercent_ = 0.0;
-    this->adaptiveFlowGlobalOutputFps_ = 0.0;
+    this->adaptiveFlowGlobalSourceFps_ = 0.0;
     this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
     this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
     this->adaptiveFlowLastObservedComputeDrops_ =
@@ -5731,7 +5749,7 @@ void LsContext::enterSourceOnlyBypass() {
     this->adaptiveFlowNextPressureRead_ = {};
     this->adaptiveFlowGlobalPressureValid_ = false;
     this->adaptiveFlowGlobalGpuUsagePercent_ = 0.0;
-    this->adaptiveFlowGlobalOutputFps_ = 0.0;
+    this->adaptiveFlowGlobalSourceFps_ = 0.0;
     this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
     this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
     this->lastGeneratedFrameCount_ = 0;
