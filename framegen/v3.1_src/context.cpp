@@ -413,6 +413,8 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
             // for one shadow update; only spend that work when the batch budget
             // has explicit headroom. A zero-generation cycle can advance the
             // pending graph directly without also refreshing the active graph.
+            // A bounded output-preserving transition explicitly authorizes the
+            // shadow update so the handoff does not create a source-only hole.
             const double shadowPreprocessEstimateMs =
                 this->lastAdaptiveFlowGpuTiming_.valid
                     && !this->lastAdaptiveFlowGpuTiming_.transitionActive
@@ -435,7 +437,8 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
                     this->dispatchAdaptiveFlowPreprocess(
                         data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
                 }
-                if (generationCount == 0 || shadowBudgetAvailable) {
+                if (generationCount == 0 || shadowBudgetAvailable
+                        || adaptiveFlowBatch.preserveOutputDuringTransition) {
                     this->dispatchAdaptiveFlowPreprocess(
                         data.cmdBuffer1,
                         pendingGraph,
