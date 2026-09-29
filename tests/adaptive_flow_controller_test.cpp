@@ -185,11 +185,10 @@ int main() {
         // downstep may happen only after that dwell and a fresh pressure window.
         assert(near(controller.currentScale(), 0.80F));
         bool sawSecondDownstep = false;
-        for (int i = 0; i < 80; ++i) {
+        for (int i = 0; i < 80 && !sawSecondDownstep; ++i) {
             controller.observe(sample(16.2, 5.0));
-            sawSecondDownstep = sawSecondDownstep
-                || controller.telemetry().reason
-                    == AdaptiveFlowDecisionReason::SustainedPressure;
+            sawSecondDownstep = controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::SustainedPressure;
         }
         assert(sawSecondDownstep);
         for (int i = 0; i < 10; ++i)
