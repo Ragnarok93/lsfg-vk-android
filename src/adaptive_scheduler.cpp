@@ -818,6 +818,10 @@ void LsfgOutputCadenceTracker::clearWindow() {
         snapshot_.targetSatisfiedConfirmed = true;
 }
 
+void LsfgOutputCadenceTracker::beginTransition() {
+    clearWindow();
+}
+
 void LsfgOutputCadenceTracker::rebuildSnapshot(double evidenceSeconds) {
     constexpr double kWindowSeconds = 0.40;
     constexpr double kMinimumCoverageSeconds = 0.25;

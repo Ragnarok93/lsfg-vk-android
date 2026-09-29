@@ -66,6 +66,7 @@ void AdaptiveFlowController::configure(bool enabled, AdaptiveFlowPreset preset) 
     observedSeconds_ = 0.0;
     cooldownUntilSeconds_ = 0.0;
     schedulerHoldUntilSeconds_ = 0.0;
+    flowTransitionHoldActive_ = false;
     downstepEvaluationActive_ = false;
     downstepBenefitSeen_ = false;
     resetEvidence();
@@ -93,6 +94,7 @@ void AdaptiveFlowController::reset() {
     observedSeconds_ = 0.0;
     cooldownUntilSeconds_ = 0.0;
     schedulerHoldUntilSeconds_ = 0.0;
+    flowTransitionHoldActive_ = false;
     downstepEvaluationActive_ = false;
     downstepBenefitSeen_ = false;
     resetEvidence();
@@ -125,6 +127,20 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             ? std::min(elapsedSeconds, 0.250)
             : 0.0;
     observedSeconds_ += evidenceSeconds;
+
+    const bool flowTransitionBarrier =
+        observation.flowTransition || flowTransitionHoldActive_;
+    if (flowTransitionBarrier) {
+        if (downstepEvaluationActive_) {
+            downstepEvaluationStartedSeconds_ = observedSeconds_;
+            downstepBenefitSeen_ = false;
+        }
+        flowTransitionHoldActive_ = observation.flowTransition;
+        resetEvidence();
+        telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
+        telemetry_.reason = AdaptiveFlowDecisionReason::FlowTransition;
+        return telemetry_.currentScale;
+    }
 
     if (!observation.valid
             || !(observation.frameBudgetMs > 0.0)
@@ -446,6 +462,7 @@ const char* AdaptiveFlowController::reasonName(AdaptiveFlowDecisionReason reason
     case AdaptiveFlowDecisionReason::None: return "none";
     case AdaptiveFlowDecisionReason::Disabled: return "disabled";
     case AdaptiveFlowDecisionReason::InvalidTelemetry: return "invalid_telemetry";
+    case AdaptiveFlowDecisionReason::FlowTransition: return "flow_transition";
     case AdaptiveFlowDecisionReason::SchedulerTransition: return "adaptive_lsfg_transition";
     case AdaptiveFlowDecisionReason::Cooldown: return "cooldown";
     case AdaptiveFlowDecisionReason::InsufficientFlowContribution: return "insufficient_flow_contribution";

@@ -2394,6 +2394,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
 
     const auto updateAdaptiveFlowGovernor = [&]() {
+        const bool adaptiveFlowTransitionActive =
+            conf.adaptiveFlowScale
+            && (this->adaptiveFlowTransitionPending_
+                || this->adaptiveFlowWarmupRemaining_ > 0
+                || std::fabs(
+                    this->adaptiveFlowRequestedScale_
+                    - this->adaptiveFlowActiveScale_) > 0.0005F);
         const LSFG::AdaptiveFlowGpuTiming timing = conf.performance
             ? LSFG_3_1P::getContextGpuTiming(*this->lsfgCtxId)
             : LSFG_3_1::getContextGpuTiming(*this->lsfgCtxId);
@@ -2415,7 +2422,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                           << '\n';
             }
         }
-        const bool timingUsable = timingFresh && !timing.transitionActive;
+        const bool timingUsable =
+            timingFresh
+            && !timing.transitionActive
+            && !adaptiveFlowTransitionActive;
         const bool generatedWorkSample =
             timingUsable && timing.generationCount > 0;
 
@@ -2479,11 +2489,31 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const bool adaptiveOutputDeficit =
             adaptiveOutputTargeted && outputCadence.deficitConfirmed;
         constexpr double kFixedMultiplierOutputTolerance = 0.98;
+        const auto& fixedCadenceTelemetry =
+            this->fixedSourceCadenceGovernor_.telemetry();
+        // Keep fixed-multiplier pressure anchored to the clean source cadence.
+        // Using the currently degraded source rate would make the target
+        // self-ratchet downward and hide the source-FPS failure from Flow.
+        const double fixedMultiplierBaseSourceFps =
+            !conf.adaptiveFramegen
+            && fixedCadenceTelemetry.baselineValid
+            && fixedCadenceTelemetry.baselineSourceFps > 0.0
+            ? fixedCadenceTelemetry.baselineSourceFps
+            : 0.0;
+        const double observedSourceFps =
+            sourceIntervalMs > 0.0
+            && sourceIntervalMs < kAdaptiveFlowCadenceDiscontinuityMs
+            && std::isfinite(sourceIntervalMs)
+            ? 1000.0 / sourceIntervalMs
+            : 0.0;
+        const double observationSourceFps = conf.adaptiveFramegen
+            ? adaptiveTelemetry.smoothedSourceFps
+            : observedSourceFps;
         const double fixedMultiplierOutputTargetFps =
             !conf.adaptiveFramegen
             && conf.multiplier > 1
-            && adaptiveTelemetry.smoothedSourceFps > 0.0
-            ? adaptiveTelemetry.smoothedSourceFps
+            && fixedMultiplierBaseSourceFps > 0.0
+            ? fixedMultiplierBaseSourceFps
                 * static_cast<double>(conf.multiplier)
             : 0.0;
         const bool fixedMultiplierOutputTargeted =
@@ -2527,7 +2557,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const bool wsiPresentationPressure =
             newWsiDropPressure || presentationCapacity.pressure;
         const bool retainedTimingUsable =
-            this->adaptiveFlowGeneratedTimingValid_
+            !adaptiveFlowTransitionActive
+            && this->adaptiveFlowGeneratedTimingValid_
             && this->adaptiveFlowRetainedGenerationCount_ > 0;
         const double observationMipmapsMs = generatedWorkSample
             ? timing.mipmapsMs : this->adaptiveFlowRetainedMipmapsMs_;
@@ -2562,7 +2593,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .computeDeadlinePressure = computeDropPressure,
             .wsiPresentationPressure = wsiPresentationPressure,
             .wsiLossRate = presentationCapacity.wsiRejectionRatio,
-            .sourceFps = adaptiveTelemetry.smoothedSourceFps,
+            .sourceFps = observationSourceFps,
             .outputFps = outputCadence.outputFps,
             .outputTargetFps = outputTargetFps,
             .outputCadenceValid = outputCadence.valid,
@@ -2578,6 +2609,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .retainedGeneratedTimingSample =
                 !generatedWorkSample && retainedTimingUsable,
             .schedulerTransition = schedulerTransition,
+            .flowTransition = adaptiveFlowTransitionActive,
             .valid = observationBudgetValid
                 && sourceInterval.count() > 0
                 && retainedTimingUsable
@@ -2605,6 +2637,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // Cost measurements are scale-specific. Never admit a new batch
             // using an estimate learned at the previous Flow Scale.
             this->deadlineAdmissionPredictor_.reset();
+            // A Flow-scale transition invalidates rolling output evidence too:
+            // its bounded history-only cycles are not an output deficit.
+            this->lsfgOutputCadenceTracker_.beginTransition();
             if (conf.performance)
                 LSFG_3_1P::requestContextFlowScale(
                     *this->lsfgCtxId, selectedScale);
@@ -3022,6 +3057,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto cycleEnd = RuntimeMetrics::Clock::now();
         const double cycleMs = std::chrono::duration<double, std::milli>(
             cycleEnd - cycleStart).count();
+        const bool adaptiveFlowTransitionActiveForCadence =
+            conf.adaptiveFlowScale
+            && (adaptiveFlowTransitionWarmupActive
+                || this->adaptiveFlowTransitionPending_
+                || this->adaptiveFlowWarmupRemaining_ > 0);
         if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
             // Android can stop the guest while it is already inside this
             // present call. In that case sourceInterval was sampled before the
@@ -3108,7 +3148,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
             this->lsfgOutputCadenceTracker_.observe(
                 std::chrono::milliseconds(250), 0, 0);
-        } else if (sourceInterval.count() > 0) {
+        } else if (sourceInterval.count() > 0
+                && !adaptiveFlowTransitionActiveForCadence) {
             const size_t cadenceGeneratedFrames =
                 this->deferredAdrenoCompletionEnabled_
                     ? deferredDeliveredGeneratedFrameCount

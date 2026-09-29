@@ -323,6 +323,8 @@ public:
         std::chrono::nanoseconds elapsed,
         std::size_t sourceFrames,
         std::size_t generatedFrames);
+    /// Clear rolling cadence evidence when Flow graph history is being rebuilt.
+    void beginTransition();
     void reset();
 
     [[nodiscard]] const LsfgOutputCadenceSnapshot& snapshot() const {

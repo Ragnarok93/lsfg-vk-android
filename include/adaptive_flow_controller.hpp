@@ -17,6 +17,7 @@ enum class AdaptiveFlowDecisionReason : uint8_t {
     None,
     Disabled,
     InvalidTelemetry,
+    FlowTransition,
     SchedulerTransition,
     Cooldown,
     InsufficientFlowContribution,
@@ -75,6 +76,8 @@ struct AdaptiveFlowObservation {
     bool retainedGeneratedTimingSample{false};
     /// True when Adaptive LSFG has just changed/snap/probed/backed-off/reset.
     bool schedulerTransition{false};
+    /// True while a pending Flow graph is rebuilding temporal history.
+    bool flowTransition{false};
     bool valid{false};
 };
 
@@ -130,6 +133,7 @@ private:
     double headroomSeconds_{};
     double cooldownUntilSeconds_{};
     double schedulerHoldUntilSeconds_{};
+    bool flowTransitionHoldActive_{false};
 
     bool downstepEvaluationActive_{false};
     bool downstepBenefitSeen_{false};
