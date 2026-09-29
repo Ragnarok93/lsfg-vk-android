@@ -2888,17 +2888,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     //    game-device copies against framegen completion and does not block here.
     bool framegenReady = true;
     double framegenCompletionWaitMs = 0.0;
+    const double waitIdleMsBeforeFramegen = metrics.windowWaitIdleMs;
     if (requireHostCompletionWait) {
         const auto waitIdleStart = RuntimeMetrics::Clock::now();
         const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
         framegenReady = conf.performance
             ? LSFG_3_1P::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs)
             : LSFG_3_1::waitContext(*this->lsfgCtxId, framegenCompletionTimeoutNs);
-        framegenCompletionWaitMs = std::chrono::duration<double, std::milli>(
+        metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(
             RuntimeMetrics::Clock::now() - waitIdleStart).count();
-        metrics.windowWaitIdleMs += framegenCompletionWaitMs;
-        metrics.windowFramegenCompletionWaitMs += framegenCompletionWaitMs;
     }
+    framegenCompletionWaitMs =
+        metrics.windowWaitIdleMs - waitIdleMsBeforeFramegen;
+    metrics.windowFramegenCompletionWaitMs += framegenCompletionWaitMs;
     if (!framegenReady) {
         this->lastBatchCompleteDependency_ = {};
         const uint64_t framegenCompletionTimeoutNs = runtimeWaitTimeoutNs();
