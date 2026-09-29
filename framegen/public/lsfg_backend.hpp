@@ -36,6 +36,9 @@ struct AdaptiveFlowBatchMetadata {
     uint64_t batchId{0};
     double frameBudgetMs{0.0};
     double predictedTotalLsfgMs{0.0};
+    // A bounded prepared-graph handoff may keep generated output flowing while
+    // the pending graph receives its three source-history writes.
+    bool preserveOutputDuringTransition{false};
 };
 
 struct AdaptiveFlowGpuTiming {
