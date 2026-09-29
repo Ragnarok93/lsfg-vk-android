@@ -588,5 +588,42 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn('"LSFG_FLOW"', source)
         self.assertIn('"LSFG_METRICS"', source)
 
+    def test_protected_adreno_adaptive_flow_accepts_global_gpu_pressure(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        observation_start = source.index("AdaptiveFlowObservation observation")
+        observation_end = source.index(
+            "const float previousScale", observation_start
+        )
+        observation = source[observation_start:observation_end]
+
+        # The protected Adreno transport may reject unreliable sidecar cadence,
+        # but its fresh GPU-utilization sample is still valid evidence for the
+        # Adaptive Flow actuator when native output is below target.
+        self.assertIn(
+            ".globalPressureValid = this->adaptiveFlowGlobalPressureValid_",
+            observation,
+        )
+        self.assertNotIn(
+            "!this->conservativeCrossDeviceSync_",
+            observation,
+        )
+
+    def test_pending_flow_transition_forces_bounded_history_only_warmup(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        guard_start = source.index("adaptiveFlowTransitionWarmupActive")
+        guard_end = source.index(
+            "const double adaptiveFlowBatchBudgetMs", guard_start
+        )
+        guard = source[guard_start:guard_end]
+
+        # A transition cannot wait indefinitely for a rare zero-generation
+        # opportunity. It must preserve the source present while forcing only
+        # the bounded number of history-maintenance cycles needed by the
+        # prebuilt pending graph.
+        self.assertIn("adaptiveFlowWarmupRemaining_ > 0", guard)
+        self.assertIn("generatedFrameCount = 0", guard)
+        self.assertIn("interpolationGenerationCount = 0", guard)
+
+
 if __name__ == "__main__":
     unittest.main()
