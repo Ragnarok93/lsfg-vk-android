@@ -168,7 +168,7 @@ int main() {
         // Adaptive-LSFG transitions suppress evidence so both governors do not
         // react to the same transient.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Balanced);
-        for (int i = 0; i < 9; ++i)
+        for (int i = 0; i < 12; ++i)
             controller.observe(sample(16.2, 5.0));
         auto transition = sample(16.2, 5.0, 16.666, true);
         transition.flowTransition = true;
