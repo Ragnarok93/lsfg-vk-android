@@ -135,6 +135,7 @@ private:
     double cooldownUntilSeconds_{};
     double schedulerHoldUntilSeconds_{};
     bool flowTransitionHoldActive_{false};
+    double flowTransitionSettleUntilSeconds_{};
 
     bool downstepEvaluationActive_{false};
     bool downstepBenefitSeen_{false};
