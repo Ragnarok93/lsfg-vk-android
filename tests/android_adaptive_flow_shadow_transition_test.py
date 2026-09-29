@@ -155,14 +155,19 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
                 context_source.as_posix(),
             )
 
-            guard_start = source.index("adaptiveFlowBatch.preserveOutputDuringTransition")
-            guard_end = source.index(
-                "if (this->pendingFlowWarmupFrames_ + 1 <",
-                guard_start,
+            condition_start = source.index(
+                "if (this->pendingFlowWarmupFrames_ + 1 <"
             )
-            transition_guard = source[guard_start:guard_end]
-            self.assertNotIn("generationCount = 0", transition_guard)
-            self.assertNotIn("interpolationGenerationCount = 0", transition_guard)
+            condition_end = source.index(
+                "if (generationCount > 0)\n                    activeGraph.beta->Dispatch",
+                condition_start,
+            )
+            transition_condition = source[condition_start:condition_end]
+            self.assertIn(
+                "adaptiveFlowBatch.preserveOutputDuringTransition",
+                transition_condition,
+                context_source.as_posix(),
+            )
 
 
 if __name__ == "__main__":
