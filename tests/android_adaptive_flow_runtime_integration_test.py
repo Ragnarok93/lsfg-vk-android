@@ -623,21 +623,25 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             observation,
         )
 
-    def test_pending_flow_transition_forces_bounded_history_only_warmup(self) -> None:
+    def test_pending_flow_transition_preserves_generated_output_during_warmup(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(
+            encoding="utf-8"
+        )
         guard_start = source.index("adaptiveFlowTransitionWarmupActive")
         guard_end = source.index(
             "const double adaptiveFlowBatchBudgetMs", guard_start
         )
         guard = source[guard_start:guard_end]
 
-        # A transition cannot wait indefinitely for a rare zero-generation
-        # opportunity. It must preserve the source present while forcing only
-        # the bounded number of history-maintenance cycles needed by the
-        # prebuilt pending graph.
+        # The backend owns the bounded three-frame shadow handoff. The outer
+        # runtime must keep the admitted generated batch intact so the source
+        # cadence has no transition-sized hole.
         self.assertIn("adaptiveFlowWarmupRemaining_ > 0", guard)
-        self.assertIn("generatedFrameCount = 0", guard)
-        self.assertIn("interpolationGenerationCount = 0", guard)
+        self.assertIn("output_preserved", guard)
+        self.assertNotIn("generatedFrameCount = 0", guard)
+        self.assertNotIn("interpolationGenerationCount = 0", guard)
+        self.assertIn("preserveOutputDuringTransition", backend)
 
 
     def test_flow_transition_is_cadence_and_controller_barrier(self) -> None:
