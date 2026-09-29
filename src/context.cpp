@@ -2167,14 +2167,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && this->adaptiveFlowTransitionPending_
         && this->adaptiveFlowWarmupRemaining_ > 0;
     if (adaptiveFlowTransitionWarmupActive) {
-        // A pending graph needs three temporal history writes before it can
-        // become active. On generation-first devices, every generated cycle
-        // can otherwise starve that handoff indefinitely. Preserve the source
-        // present and use the bounded history-only path for this transition.
-        generatedFrameCount = 0;
-        interpolationGenerationCount = 0;
+        // The pending graph now receives its bounded history writes through
+        // the backend shadow path. Keep the already-admitted generated batch
+        // flowing during the handoff so the transition does not create a
+        // source-only presentation hole.
         std::cerr << "lsfg-vk: adaptive-flow-transition-warmup"
-                  << " generated=0"
+                  << " generated=" << generatedFrameCount
+                  << " output_preserved=" << (generatedFrameCount > 0 ? 1 : 0)
                   << " warmup_remaining="
                   << this->adaptiveFlowWarmupRemaining_
                   << "\n";
@@ -2256,8 +2255,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     // Admission and presentation-cap limiting are complete before any framegen
     // dispatch. Re-space the surviving batch evenly across the protected source
     // interval; rejected opportunities are consumed and never become catch-up debt.
-    if (!adaptiveFlowTransitionWarmupActive)
-        interpolationGenerationCount = generatedFrameCount;
+    interpolationGenerationCount = generatedFrameCount;
 
     // Flow GPU timestamps cover the complete submitted batch. Keep the budget
     // and predictor value attached to that exact batch instead of comparing a
@@ -2317,6 +2315,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->deadlineBatchDecision_.valid
                     ? this->deadlineBatchDecision_.predictedTotalLsfgMs
                     : 0.0,
+            .preserveOutputDuringTransition =
+                adaptiveFlowTransitionWarmupActive && generatedFrameCount > 0,
         };
     };
     if (this->currentSourceTimeline_.valid) {
@@ -2536,6 +2536,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const bool outputDeficit =
             adaptiveOutputDeficit || fixedMultiplierOutputDeficit;
 
+        this->adaptiveFlowOutputTargeted_ = outputTargeted;
+        this->adaptiveFlowOutputTargetFps_ = outputTargetFps;
+        this->adaptiveFlowOutputTargetSatisfied_ = outputTargetSatisfied;
+        this->adaptiveFlowFixedTargeted_ = fixedMultiplierOutputTargeted;
+        this->adaptiveFlowFixedTargetSatisfied_ = fixedMultiplierOutputSatisfied;
+
         // Keep compute/deadline pressure and downstream WSI pressure separate.
         // A WSI rejection never trains the deadline predictor and only becomes
         // a Flow actuator when the controller also sees global GPU pressure and
@@ -2676,6 +2682,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (observation.retainedGeneratedTimingSample ? 1 : 0)
                       << " source_fps=" << observation.sourceFps
                       << " target_fps=" << conf.fpsLimit
+                      << " output_targeted=" << (outputTargeted ? 1 : 0)
+                      << " output_target_fps=" << outputTargetFps
+                      << " output_target_satisfied="
+                      << (outputTargetSatisfied ? 1 : 0)
+                      << " output_deficit=" << (outputDeficit ? 1 : 0)
                       << " multiplier=" << conf.multiplier
                       << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
                       << " predicted_next_total_ms="
@@ -3472,8 +3483,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_flow_multiplier=" << conf.multiplier
                       << " adaptive_flow_adaptive_framegen="
                       << (conf.adaptiveFramegen ? 1 : 0)
+                      << " adaptive_flow_output_targeted="
+                      << (this->adaptiveFlowOutputTargeted_ ? 1 : 0)
+                      << " adaptive_flow_output_target_fps="
+                      << this->adaptiveFlowOutputTargetFps_
                       << " adaptive_flow_output_target_satisfied="
-                      << (this->lsfgOutputCadenceTracker_.snapshot().targetSatisfiedConfirmed ? 1 : 0)
+                      << (this->adaptiveFlowOutputTargetSatisfied_ ? 1 : 0)
+                      << " adaptive_flow_fixed_targeted="
+                      << (this->adaptiveFlowFixedTargeted_ ? 1 : 0)
+                      << " adaptive_flow_fixed_target_satisfied="
+                      << (this->adaptiveFlowFixedTargetSatisfied_ ? 1 : 0)
                       << " adaptive_flow_requested=" << this->adaptiveFlowRequestedScale_
                       << " adaptive_flow_active=" << this->adaptiveFlowActiveScale_
                       << " adaptive_flow_transition="
