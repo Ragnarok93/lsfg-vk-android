@@ -635,5 +635,84 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("interpolationGenerationCount = 0", guard)
 
 
+    def test_flow_transition_is_cadence_and_controller_barrier(self) -> None:
+        controller_header = (ROOT / "include/adaptive_flow_controller.hpp").read_text(
+            encoding="utf-8"
+        )
+        controller = (ROOT / "src/adaptive_flow_controller.cpp").read_text(
+            encoding="utf-8"
+        )
+        scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(
+            encoding="utf-8"
+        )
+        scheduler = (ROOT / "src/adaptive_scheduler.cpp").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        # A Flow graph transition is not a quality observation. Its bounded
+        # history-only cycles must not be allowed to satisfy output-deficit
+        # confirmation or contaminate a provisional downstep evaluation.
+        self.assertIn("FlowTransition", controller_header)
+        self.assertIn("bool flowTransition{false};", controller_header)
+        self.assertIn("flowTransitionHoldActive_", controller_header)
+        self.assertIn("if (observation.flowTransition)", controller)
+        self.assertIn("flow_transition", controller)
+        self.assertIn("beginTransition", scheduler_header)
+        self.assertIn(
+            "void LsfgOutputCadenceTracker::beginTransition()",
+            scheduler,
+        )
+        self.assertIn("adaptiveFlowTransitionActive", source)
+        self.assertIn(
+            ".flowTransition = adaptiveFlowTransitionActive",
+            source,
+        )
+        self.assertIn(
+            "retainedTimingUsable =\n"
+            "            !adaptiveFlowTransitionActive",
+            source,
+        )
+        self.assertIn(
+            "lsfgOutputCadenceTracker_.beginTransition();",
+            source,
+        )
+
+        cadence_start = source.index(
+            "Control feedback uses a fresh rolling LSFG presentation cadence"
+        )
+        cadence_end = source.index(
+            "const double elapsedSeconds",
+            cadence_start,
+        )
+        cadence_block = source[cadence_start:cadence_end]
+        self.assertIn("adaptiveFlowTransitionActiveForCadence", cadence_block)
+        self.assertIn("adaptiveFlowTransitionWarmupActive", cadence_block)
+        self.assertIn("adaptiveFlowTransitionPending_", cadence_block)
+        self.assertIn("cadenceGeneratedFrames", cadence_block)
+
+    def test_fixed_multiplier_flow_target_uses_clean_source_baseline(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        target_start = source.index(
+            "const double fixedMultiplierOutputTargetFps"
+        )
+        target_end = source.index(
+            "const bool fixedMultiplierOutputTargeted",
+            target_start,
+        )
+        target_block = source[target_start:target_end]
+
+        # Fixed mode must compare output against the clean source cadence that
+        # preceded generated work. If the target follows the degraded source,
+        # source-FPS collapse makes the target self-ratchet downward and Flow
+        # never sees the fixed multiplier deficit.
+        self.assertIn("fixedMultiplierBaseSourceFps", target_block)
+        self.assertNotIn("adaptiveTelemetry.smoothedSourceFps", target_block)
+        self.assertIn("fixedSourceCadenceGovernor_.telemetry()", source)
+        self.assertIn("observedSourceFps", source)
+        self.assertIn(".sourceFps = observationSourceFps", source)
+
+
 if __name__ == "__main__":
     unittest.main()
