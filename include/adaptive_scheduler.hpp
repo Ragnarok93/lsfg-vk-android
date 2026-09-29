@@ -205,6 +205,9 @@ public:
 
 private:
     bool hasBaseline_{false};
+    // A candidate baseline must survive one additional no-generated interval
+    // after a reset before it can authorize synthetic work.
+    bool baselinePriming_{false};
     double baselineIntervalSeconds_{};
     std::size_t generationLimit_{0};
     std::size_t requestedGeneratedFrames_{0};
