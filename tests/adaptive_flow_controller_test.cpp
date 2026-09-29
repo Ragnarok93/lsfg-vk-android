@@ -135,6 +135,27 @@ int main() {
     }
 
     {
+        // A direct missed output target is user-visible pressure. It should
+        // move one discrete Flow state within roughly half a second rather
+        // than waiting through the ordinary long pressure confirmation window.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        bool lowered = false;
+        for (int i = 0; i < 6 && !lowered; ++i) {
+            auto observation = sample(16.0, 5.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = false;
+            observation.outputDeficit = true;
+            observation.outputFps = 42.0;
+            observation.sourceFps = 16.0;
+            controller.observe(observation);
+            lowered = near(controller.currentScale(), 0.95F);
+        }
+        assert(lowered);
+
+    }
+
+    {
         // Sustained pressure with a material scale-sensitive contribution lowers
         // one state, then observes a cooldown instead of cascading immediately.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
