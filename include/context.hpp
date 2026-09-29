@@ -83,7 +83,11 @@ struct AdaptiveFlowRuntimeSnapshot {
     bool presentationLastChangeOutputDeficit{false};
     bool presentationProvisionalLowerActive{false};
     bool presentationUpwardProbePending{false};
+    bool outputTargeted{false};
+    double outputTargetFps{0.0};
     bool outputTargetSatisfied{false};
+    bool fixedTargeted{false};
+    bool fixedTargetSatisfied{false};
     bool outputDeficit{false};
     bool syntheticDropPressure{false};
     const char* reason{"none"};
@@ -183,7 +187,11 @@ public:
                 presentationCapacity.provisionalLowerActive,
             .presentationUpwardProbePending =
                 presentationCapacity.upwardProbePending,
-            .outputTargetSatisfied = outputCadence.targetSatisfiedConfirmed,
+            .outputTargeted = adaptiveFlowOutputTargeted_,
+            .outputTargetFps = adaptiveFlowOutputTargetFps_,
+            .outputTargetSatisfied = adaptiveFlowOutputTargetSatisfied_,
+            .fixedTargeted = adaptiveFlowFixedTargeted_,
+            .fixedTargetSatisfied = adaptiveFlowFixedTargetSatisfied_,
             .outputDeficit = telemetry.outputDeficit,
             .syntheticDropPressure =
                 adaptiveFlowComputePressure_ || adaptiveFlowWsiPressure_,
@@ -270,6 +278,11 @@ private:
     double adaptiveFlowTotalLsfgMs_{0.0};
     double adaptiveFlowBudgetMs_{0.0};
     size_t adaptiveFlowGenerationCount_{0};
+    bool adaptiveFlowOutputTargeted_{false};
+    double adaptiveFlowOutputTargetFps_{0.0};
+    bool adaptiveFlowOutputTargetSatisfied_{false};
+    bool adaptiveFlowFixedTargeted_{false};
+    bool adaptiveFlowFixedTargetSatisfied_{false};
     AdaptiveFlowDecisionReason adaptiveFlowReason_{AdaptiveFlowDecisionReason::None};
 
     // Whole-device pressure is sampled by GameNative at 500 ms and published
