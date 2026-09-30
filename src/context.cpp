@@ -966,7 +966,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     : "native-current")
               << " fixed_generation="
               << (this->conservativeCrossDeviceSync_
-                    ? "cadence-governed-ceiling"
+                    ? "requested-count"
                     : "native-current")
               << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
               << '\n';
@@ -1937,9 +1937,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             || this->adaptiveFlowWarmupRemaining_ > 0
             || this->adaptiveFlowCadenceHandoffPending_);
 
-    // Capacity feedback remains advisory. In Adaptive mode on generation-first
-    // Adreno it is diagnostics only; fixed mode still uses its cadence
-    // governor below to admit the requested generation count.
+    // Capacity feedback is advisory in Adaptive mode on generation-first
+    // Adreno. Fixed mode always requests the selected multiplier.
     double capacityIntervalMs = 0.0;
     if (conf.adaptiveFramegen && this->currentSourceTimeline_.valid
             && this->currentSourceTimeline_.intervalNs > 0) {
@@ -1969,22 +1968,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         safeGenerationHintValid);
 
     if (conf.adaptiveFramegen)
-        this->fixedSourceCadenceGovernor_.reset();
-    const size_t governedFixedGeneratedFrameCount = conf.adaptiveFramegen
-        ? 0
-        : this->fixedSourceCadenceGovernor_.plan(
+        this->fixedSourceCadenceTracker_.reset();
+    else
+        this->fixedSourceCadenceTracker_.observe(
             sourceInterval,
-            requestedFixedGeneratedFrameCount,
             this->lastDispatchedGeneratedFrameCount_,
             !this->requiresSourceHistoryWarmup_,
             previousSourceCadenceObservation);
-    // Fixed mode remains cadence-governed on every device, including the
-    // protected Adreno path. generationFirstAdreno still controls downstream
-    // Adaptive admission/capacity gates; it must not bypass this governor.
     size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(
             sourceInterval, adaptiveFlowTransitionActiveAtCycleStart)
-        : governedFixedGeneratedFrameCount;
+        : requestedFixedGeneratedFrameCount;
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
@@ -2375,10 +2369,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && generatedFrameCount == 0
         && (conservativeFractionalHistoryGap
             || conservativeZeroDemandHistoryGap);
-    // Fixed generation rejection is still a history-maintenance
-    // cycle. Whether the governor planned zero work or deadline admission
-    // reduced planned work to zero, keep the source pair coherent instead of
-    // reclassifying the cycle as a true source-only bypass.
+    // A Fixed zero-generation cycle still needs history maintenance when
+    // output retirement prevents dispatch. Keep the source pair coherent.
     const bool conservativeFixedHistoryGap =
         this->conservativeCrossDeviceSync_
         && !conf.adaptiveFramegen
@@ -2504,7 +2496,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             adaptiveOutputTargeted && outputCadence.deficitConfirmed;
         constexpr double kFixedMultiplierOutputTolerance = 0.98;
         const auto& fixedCadenceTelemetry =
-            this->fixedSourceCadenceGovernor_.telemetry();
+            this->fixedSourceCadenceTracker_.telemetry();
         // Keep fixed-multiplier pressure anchored to the clean source cadence.
         // Using the currently degraded source rate would make the target
         // self-ratchet downward and hide the source-FPS failure from Flow.
@@ -3464,15 +3456,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " fixed_requested_generated="
                       << requestedFixedGeneratedFrameCount
                       << " fixed_source_baseline_fps="
-                      << this->fixedSourceCadenceGovernor_.telemetry().baselineSourceFps
+                      << this->fixedSourceCadenceTracker_.telemetry().baselineSourceFps
                       << " fixed_source_interval_ratio="
-                      << this->fixedSourceCadenceGovernor_.telemetry().intervalRatio
-                      << " fixed_generation_limit="
-                      << this->fixedSourceCadenceGovernor_.telemetry().generationLimit
-                      << " fixed_source_backoff="
-                      << (this->fixedSourceCadenceGovernor_.telemetry().backedOff ? 1 : 0)
-                      << " fixed_source_raise="
-                      << (this->fixedSourceCadenceGovernor_.telemetry().raised ? 1 : 0)
+                      << this->fixedSourceCadenceTracker_.telemetry().intervalRatio
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
@@ -3536,7 +3522,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (this->adaptiveFlowFixedTargetSatisfied_ ? 1 : 0)
                       << " adaptive_flow_source_target_fps="
                       << (this->adaptiveFlowFixedTargeted_
-                          ? this->fixedSourceCadenceGovernor_.telemetry()
+                          ? this->fixedSourceCadenceTracker_.telemetry()
                                 .baselineSourceFps
                           : 0.0)
                       << " adaptive_flow_source_pressure="
@@ -3944,8 +3930,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adreno_execution=sep18-built\n";
         }
 
-        // The newer governors may create a zero-generation Fixed or Adaptive
-        // cadence gap. Execute it through the same September 18 zero-count
+        // Adaptive scheduling or Fixed output retirement may create a
+        // zero-generation cadence gap. Execute it through the September 18
         // private preprocessing route: source handoff is already host-complete,
         // and the backend's preprocessingFence wait completes before return.
         if (generatedFrameCount == 0 && !sourceHistoryWarmupActive) {
@@ -5830,7 +5816,7 @@ void LsContext::resetAdaptiveSourceEpoch(
 
     if (resetScheduler)
         this->adaptiveScheduler_.reset();
-    this->fixedSourceCadenceGovernor_.reset();
+    this->fixedSourceCadenceTracker_.reset();
     this->advanceAdaptiveFlowTimingEpoch();
     this->deadlineAdmissionPredictor_.reset();
     this->generatedPresentationCapacityTracker_.reset();
@@ -5904,7 +5890,7 @@ void LsContext::enterSourceOnlyBypass() {
 
     this->advanceAdaptiveFlowTimingEpoch();
     this->adaptiveScheduler_.reset();
-    this->fixedSourceCadenceGovernor_.reset();
+    this->fixedSourceCadenceTracker_.reset();
     this->deadlineAdmissionPredictor_.reset();
     this->adaptiveFlowController_.reset();
     this->sourceTimeline_.reset();

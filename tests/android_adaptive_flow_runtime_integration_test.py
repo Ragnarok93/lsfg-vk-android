@@ -729,7 +729,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         # never sees the fixed multiplier deficit.
         self.assertIn("fixedMultiplierBaseSourceFps", target_block)
         self.assertNotIn("adaptiveTelemetry.smoothedSourceFps", target_block)
-        self.assertIn("fixedSourceCadenceGovernor_.telemetry()", source)
+        self.assertIn("fixedSourceCadenceTracker_.telemetry()", source)
         self.assertIn("observedSourceFps", source)
         self.assertIn(".sourceFps = observationSourceFps", source)
 

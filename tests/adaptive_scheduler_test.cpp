@@ -966,200 +966,34 @@ int main() {
 
 
     {
-        // Fixed mode is an explicit multiplier request. Once a clean source
-        // baseline exists and generation is allowed, the requested generation
-        // count is authoritative immediately; the governor is a backoff guard,
-        // not a slow ramp-up controller.
-        FixedSourceCadenceGovernor governor;
-        assert(governor.plan(40ms, 3, 0, false) == 0);
-        assert(!governor.telemetry().baselineValid);
-
-        // The first eligible interval establishes the clean baseline; the
-        // following interval is the first eligible generation opportunity.
-        assert(governor.plan(40ms, 3, 0, true) == 0);
-        assert(governor.plan(40ms, 3, 0, true) == 0);
-        std::size_t count = governor.plan(40ms, 3, 0, true);
-        assert(count == 3);
-        assert(governor.telemetry().generationLimit == 3);
-        for (int i = 0; i < 12; ++i) {
-            count = governor.plan(
-                40ms, 3, count, true, SourceCadenceObservation::Generated);
-            assert(count == 3);
-        }
-    }
-
-    {
-        // A protected-Adreno history warmup can report a short interval while
-        // generation is disallowed. That burst must not become the Fixed
-        // baseline, or HistoryMaintenance feedback can lock generation at zero.
-        FixedSourceCadenceGovernor governor;
-        assert(governor.plan(
-            8ms, 2, 0, false, SourceCadenceObservation::SourceOnly) == 0);
-        assert(!governor.telemetry().baselineValid);
-        // The first eligible interval is only a candidate; the next
-        // no-generated interval must confirm the real cadence before probing.
-        assert(governor.plan(
-            16ms, 2, 0, true,
-            SourceCadenceObservation::HistoryMaintenance) == 0);
-        assert(governor.plan(
-            33ms, 2, 0, true,
-            SourceCadenceObservation::HistoryMaintenance) == 0);
-        assert(governor.telemetry().baselineValid);
-        assert(std::abs(
-            governor.telemetry().baselineSourceFps - (1000.0 / 33.0)) < 0.1);
-        assert(governor.plan(
-            33ms, 2, 0, true,
-            SourceCadenceObservation::HistoryMaintenance) == 2);
-    }
-
-    {
-        // Hot Fixed multiplier changes must take effect on the next eligible
-        // generated cycle. A 2x -> 3x -> 4x request maps to 1 -> 2 -> 3
-        // generated frames without waiting for a recovery ramp.
-        FixedSourceCadenceGovernor governor;
-        assert(governor.plan(
-            40ms, 1, 0, false, SourceCadenceObservation::SourceOnly) == 0);
-        assert(governor.plan(
-            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance) == 0);
-        assert(governor.plan(
-            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance) == 0);
-        assert(governor.plan(
-            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance) == 1);
-        assert(governor.plan(
-            40ms, 2, 1, true, SourceCadenceObservation::Generated) == 2);
-        assert(governor.plan(
-            40ms, 3, 2, true, SourceCadenceObservation::Generated) == 3);
-    }
-
-    {
-        // Generated work must not tighten the clean-source baseline. Otherwise
-        // Fixed mode can manufacture an unrealistically fast baseline and then
-        // permanently suppress higher requested multipliers.
-        FixedSourceCadenceGovernor governor;
-        governor.plan(
-            40ms, 3, 0, false, SourceCadenceObservation::SourceOnly);
-        assert(governor.plan(
-            40ms, 3, 0, true, SourceCadenceObservation::HistoryMaintenance) == 0);
-        assert(governor.plan(
-            40ms, 3, 0, true, SourceCadenceObservation::HistoryMaintenance) == 0);
-        assert(governor.plan(
-            40ms, 3, 0, true, SourceCadenceObservation::HistoryMaintenance) == 3);
-        for (int i = 0; i < 12; ++i)
-            governor.plan(
-                30ms, 3, 3, true, SourceCadenceObservation::Generated);
-        assert(std::abs(governor.telemetry().baselineSourceFps - 25.0) < 0.01);
-    }
-
-    {
-        // A severe cadence regression correlated with Fixed generated load must
-        // back off before the slower cadence can inflate its own deadline budget.
-        FixedSourceCadenceGovernor governor;
-        governor.plan(40ms, 3, 0, false);
-        std::size_t count = governor.plan(40ms, 3, 0, true);
-        for (int i = 0; i < 20 && count < 3; ++i)
-            count = governor.plan(40ms, 3, count, true);
-        assert(count == 3);
-
-        bool backedOff = false;
-        for (int i = 0; i < 3; ++i) {
-            count = governor.plan(70ms, 3, count, true);
-            backedOff = backedOff || governor.telemetry().backedOff;
-        }
-        assert(backedOff);
-        assert(count <= 2);
-    }
-
-    {
-        // If even one synthetic frame causes a large source-cadence collapse,
-        // Fixed mode may temporarily choose HistoryOnly rather than preserve the
-        // multiplier at the expense of the real source timeline.
-        FixedSourceCadenceGovernor governor;
-        governor.plan(40ms, 1, 0, false);
-        std::size_t count = governor.plan(40ms, 1, 0, true);
-        assert(count == 0);
-        count = governor.plan(40ms, 1, 0, true);
-        assert(count == 0);
-        count = governor.plan(40ms, 1, 0, true);
-        assert(count == 1);
-        bool backedOff = false;
-        for (int i = 0; i < 3; ++i) {
-            count = governor.plan(70ms, 1, count, true);
-            backedOff = backedOff || governor.telemetry().backedOff;
-        }
-        assert(backedOff);
-        assert(count == 0);
-
-        // Only genuine source-only evidence may re-anchor a naturally slower
-        // game cadence and eventually permit a cautious one-frame probe again.
-        for (int i = 0; i < 20 && count == 0; ++i)
-            count = governor.plan(
-                60ms, 1, 0, true, SourceCadenceObservation::SourceOnly);
-        assert(count == 1);
-    }
-
-    {
-        // A HistoryOnly interval is still LSFG-active on protected Adreno.
-        // Once Fixed backs off, those maintenance intervals must not redefine a
-        // faster clean baseline as a naturally slower game and immediately
-        // restart the same hitch-producing probe loop.
-        FixedSourceCadenceGovernor governor;
-        governor.plan(
-            40ms, 1, 0, false, SourceCadenceObservation::SourceOnly);
-        std::size_t count = governor.plan(
-            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance);
-        assert(count == 0);
-        count = governor.plan(
-            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance);
-        assert(count == 0);
-        count = governor.plan(
-            40ms, 1, 0, true, SourceCadenceObservation::HistoryMaintenance);
-        assert(count == 1);
-
-        bool backedOff = false;
-        for (int i = 0; i < 3; ++i) {
-            count = governor.plan(
-                70ms, 1, count, true, SourceCadenceObservation::Generated);
-            backedOff = backedOff || governor.telemetry().backedOff;
-        }
-        assert(backedOff);
-        assert(count == 0);
-
-        for (int i = 0; i < 20; ++i)
-            count = governor.plan(
-                60ms, 1, 0, true,
-                SourceCadenceObservation::HistoryMaintenance);
-        assert(governor.telemetry().baselineSourceFps > 24.0);
-        assert(count == 0);
-
-        // Clean source-only evidence can still establish a genuinely slower
-        // scene and eventually permit a cautious probe.
-        for (int i = 0; i < 20 && count == 0; ++i)
-            count = governor.plan(
-                60ms, 1, 0, true, SourceCadenceObservation::SourceOnly);
-        assert(count == 1);
-    }
-
-    {
-        // Stable slow sources are treated identically to stable fast sources:
-        // the explicit Fixed multiplier is honored immediately after baseline
-        // measurement, with backoff reserved for proven cadence regression.
-        FixedSourceCadenceGovernor governor;
-        governor.plan(125ms, 2, 0, false);
-        std::size_t count = governor.plan(125ms, 2, 0, true);
-        assert(count == 0);
-        count = governor.plan(125ms, 2, 0, true);
-        assert(count == 0);
-        count = governor.plan(125ms, 2, 0, true);
-        assert(count == 2);
+        // Fixed source cadence is a signal for Flow Scale, never a generation
+        // limit. Warmup and history maintenance do not establish a fast target.
+        FixedSourceCadenceTracker tracker;
+        tracker.observe(8ms, 0, false, SourceCadenceObservation::SourceOnly);
+        assert(!tracker.telemetry().baselineValid);
+        tracker.observe(16ms, 0, true, SourceCadenceObservation::HistoryMaintenance);
+        assert(!tracker.telemetry().baselineValid);
+        tracker.observe(40ms, 0, true, SourceCadenceObservation::HistoryMaintenance);
+        assert(tracker.telemetry().baselineValid);
+        assert(std::abs(tracker.telemetry().baselineSourceFps - 25.0) < 0.01);
         for (int i = 0; i < 8; ++i)
-            count = governor.plan(
-                125ms, 2, count, true, SourceCadenceObservation::Generated);
-        assert(count == 2);
-        assert(!governor.telemetry().backedOff);
+            tracker.observe(70ms, 3, true, SourceCadenceObservation::Generated);
+        assert(tracker.telemetry().intervalRatio > 1.7);
+        assert(std::abs(tracker.telemetry().baselineSourceFps - 25.0) < 0.01);
+        tracker.reset();
+        assert(!tracker.telemetry().baselineValid);
     }
 
-
-
+    {
+        // Only a truly source-only interval can update the Flow target.
+        FixedSourceCadenceTracker tracker;
+        tracker.observe(40ms, 0, true, SourceCadenceObservation::SourceOnly);
+        tracker.observe(40ms, 0, true, SourceCadenceObservation::SourceOnly);
+        tracker.observe(60ms, 0, true, SourceCadenceObservation::HistoryMaintenance);
+        assert(std::abs(tracker.telemetry().baselineSourceFps - 25.0) < 0.01);
+        tracker.observe(60ms, 0, true, SourceCadenceObservation::SourceOnly);
+        assert(tracker.telemetry().baselineSourceFps < 25.0);
+    }
 
     {
         // Generation-first Adreno mode treats resource pressure as telemetry,

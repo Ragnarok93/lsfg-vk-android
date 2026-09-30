@@ -262,9 +262,9 @@ private:
     bool runtimeConfigSignatureValid_{false};
 
     AdaptiveFrameScheduler adaptiveScheduler_;
-    FixedSourceCadenceGovernor fixedSourceCadenceGovernor_;
+    FixedSourceCadenceTracker fixedSourceCadenceTracker_;
     std::size_t lastDispatchedGeneratedFrameCount_{0};
-    // Classifies the previous intercepted source cycle for cadence/governor diagnostics.
+    // Classifies the previous intercepted source cycle for Flow cadence diagnostics.
     SourceCadenceObservation lastSourceCadenceObservation_{
         SourceCadenceObservation::SourceOnly};
     AdaptiveFlowController adaptiveFlowController_;
