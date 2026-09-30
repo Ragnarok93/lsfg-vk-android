@@ -4,6 +4,7 @@
 #include "core/sampler.hpp"
 #include "core/device.hpp"
 #include "common/exception.hpp"
+#include "core/resource_stats.hpp"
 
 #include <memory>
 
@@ -32,6 +33,7 @@ Sampler::Sampler(const Core::Device& device,
     auto res = vkCreateSampler(device.handle(), &desc, nullptr, &samplerHandle);
     if (res != VK_SUCCESS || samplerHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Unable to create sampler");
+    recordSamplerConstruction();
 
     // store sampler in shared ptr
     this->sampler = std::shared_ptr<VkSampler>(

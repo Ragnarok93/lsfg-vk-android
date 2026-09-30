@@ -4,6 +4,7 @@
 #include "core/shadermodule.hpp"
 #include "core/device.hpp"
 #include "common/exception.hpp"
+#include "core/resource_stats.hpp"
 
 #include <vector>
 #include <cstdint>
@@ -48,6 +49,7 @@ ShaderModule::ShaderModule(const Core::Device& device, const std::vector<uint8_t
     res = vkCreateDescriptorSetLayout(device.handle(), &layoutDesc, nullptr, &descriptorSetLayout);
     if (res != VK_SUCCESS || !descriptorSetLayout)
         throw LSFG::vulkan_error(res, "Failed to create descriptor set layout");
+    recordShaderModuleConstruction();
 
     // store module and layout in shared ptr
     this->shaderModule = std::shared_ptr<VkShaderModule>(

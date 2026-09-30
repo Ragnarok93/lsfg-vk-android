@@ -4,6 +4,7 @@
 #include "core/buffer.hpp"
 #include "core/device.hpp"
 #include "common/exception.hpp"
+#include "core/resource_stats.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -90,6 +91,7 @@ void Buffer::construct(const Core::Device& device, const void* data, VkBufferUsa
         throw LSFG::vulkan_error(res, "Failed to map memory for Vulkan buffer");
     std::copy_n(reinterpret_cast<const uint8_t*>(data), this->size, buf);
     vkUnmapMemory(device.handle(), memoryHandle);
+    recordBufferConstruction(static_cast<uint64_t>(memReqs.size));
 
     // Store buffer and memory only after every operation has succeeded. The
     // stack guard owns partial Vulkan construction on all exceptional paths.

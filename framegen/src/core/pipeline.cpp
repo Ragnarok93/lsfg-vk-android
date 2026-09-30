@@ -6,6 +6,7 @@
 #include "core/shadermodule.hpp"
 #include "core/commandbuffer.hpp"
 #include "common/exception.hpp"
+#include "core/resource_stats.hpp"
 
 #include <memory>
 #include <utility>
@@ -62,6 +63,7 @@ Pipeline::Pipeline(const Core::Device& device, const ShaderModule& shader) {
     if (res != VK_SUCCESS || !pipelineHandle)
         throw LSFG::vulkan_error(res, "Failed to create compute pipeline");
     handles.pipeline = pipelineHandle;
+    recordPipelineConstruction();
 
     // Store both handles in shared owners only after all Vulkan construction
     // succeeded. The stack guard covers allocation failures in the owners.
