@@ -63,11 +63,16 @@ class AndroidAdrenoRegressionRepairTest(unittest.TestCase):
         self.assertIn("recordSuccessfulOutputCycle(*state, *state->context", bypass)
         self.assertNotIn("state->context->present(", bypass)
 
-        # Keep the new Xclipse FIFO solution isolated to active swapchain setup.
-        self.assertIn("bool xclipseFifoMailboxBacked = false;", hooks)
+        # WSI selection is intentionally generalized at swapchain setup, while
+        # the protected Adreno execution island remains free of this policy.
+        self.assertIn("bool residentFifoMailboxBacked = false;", hooks)
+        self.assertIn("activeConf.targeted", hooks)
         self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
         self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
-        self.assertIn("xclipse-fifo-backend", hooks)
+        self.assertIn("resident-fifo-backend", hooks)
+        adreno_start = context.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        adreno_end = context.index("// END ADRENO_364178AF_EXECUTION", adreno_start)
+        self.assertNotIn("residentFifoMailboxBacked", context[adreno_start:adreno_end])
 
         self.assertIn("void enterSourceOnlyBypass();", header)
         self.assertIn("void LsContext::enterSourceOnlyBypass()", context)
