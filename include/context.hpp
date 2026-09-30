@@ -50,17 +50,20 @@ struct AdaptiveFlowRuntimeSnapshot {
     float minimumScale{0.0F};
     float requestedScale{0.0F};
     float activeScale{0.0F};
+    std::size_t stateIndex{0};
+    std::size_t stateCount{0};
     bool transitionPending{false};
     uint32_t warmupRemaining{0};
     bool timingValid{false};
     double mipmapsMs{0.0};
     double flowMs{0.0};
     double totalLsfgMs{0.0};
+    double predictedNextTotalMs{0.0};
     double budgetMs{0.0};
     size_t generationCount{0};
     bool globalPressureValid{false};
     double globalGpuUsagePercent{0.0};
-    double globalOutputFps{0.0};
+    double globalSourceFps{0.0};
     bool lsfgOutputValid{false};
     double lsfgOutputFps{0.0};
     double globalFrameTimeP95Ms{0.0};
@@ -80,6 +83,12 @@ struct AdaptiveFlowRuntimeSnapshot {
     bool presentationLastChangeOutputDeficit{false};
     bool presentationProvisionalLowerActive{false};
     bool presentationUpwardProbePending{false};
+    bool outputTargetValid{false};
+    bool outputTargeted{false};
+    double outputTargetFps{0.0};
+    bool outputTargetSatisfied{false};
+    bool fixedTargeted{false};
+    bool fixedTargetSatisfied{false};
     bool outputDeficit{false};
     bool syntheticDropPressure{false};
     const char* reason{"none"};
@@ -139,17 +148,20 @@ public:
             .minimumScale = telemetry.minimumScale,
             .requestedScale = adaptiveFlowRequestedScale_,
             .activeScale = adaptiveFlowActiveScale_,
+            .stateIndex = telemetry.stateIndex,
+            .stateCount = telemetry.stateCount,
             .transitionPending = adaptiveFlowTransitionPending_,
             .warmupRemaining = adaptiveFlowWarmupRemaining_,
             .timingValid = adaptiveFlowTimingValid_,
             .mipmapsMs = adaptiveFlowMipmapsMs_,
             .flowMs = adaptiveFlowWorkMs_,
             .totalLsfgMs = adaptiveFlowTotalLsfgMs_,
+            .predictedNextTotalMs = telemetry.estimatedNextTotalMs,
             .budgetMs = adaptiveFlowBudgetMs_,
             .generationCount = adaptiveFlowGenerationCount_,
             .globalPressureValid = adaptiveFlowGlobalPressureValid_,
             .globalGpuUsagePercent = adaptiveFlowGlobalGpuUsagePercent_,
-            .globalOutputFps = adaptiveFlowGlobalOutputFps_,
+            .globalSourceFps = adaptiveFlowGlobalSourceFps_,
             .lsfgOutputValid = outputCadence.valid,
             .lsfgOutputFps = outputCadence.outputFps,
             .globalFrameTimeP95Ms = adaptiveFlowGlobalFrameTimeP95Ms_,
@@ -176,6 +188,12 @@ public:
                 presentationCapacity.provisionalLowerActive,
             .presentationUpwardProbePending =
                 presentationCapacity.upwardProbePending,
+            .outputTargetValid = adaptiveFlowOutputTargetValid_,
+            .outputTargeted = adaptiveFlowOutputTargeted_,
+            .outputTargetFps = adaptiveFlowOutputTargetFps_,
+            .outputTargetSatisfied = adaptiveFlowOutputTargetSatisfied_,
+            .fixedTargeted = adaptiveFlowFixedTargeted_,
+            .fixedTargetSatisfied = adaptiveFlowFixedTargetSatisfied_,
             .outputDeficit = telemetry.outputDeficit,
             .syntheticDropPressure =
                 adaptiveFlowComputePressure_ || adaptiveFlowWsiPressure_,
@@ -244,9 +262,9 @@ private:
     bool runtimeConfigSignatureValid_{false};
 
     AdaptiveFrameScheduler adaptiveScheduler_;
-    FixedSourceCadenceGovernor fixedSourceCadenceGovernor_;
+    FixedSourceCadenceTracker fixedSourceCadenceTracker_;
     std::size_t lastDispatchedGeneratedFrameCount_{0};
-    // Classifies the previous intercepted source cycle for cadence/governor diagnostics.
+    // Classifies the previous intercepted source cycle for Flow cadence diagnostics.
     SourceCadenceObservation lastSourceCadenceObservation_{
         SourceCadenceObservation::SourceOnly};
     AdaptiveFlowController adaptiveFlowController_;
@@ -256,12 +274,21 @@ private:
     float adaptiveFlowActiveScale_{1.0F};
     uint32_t adaptiveFlowWarmupRemaining_{0};
     bool adaptiveFlowTransitionPending_{false};
+    // Skip the first post-commit cadence sample: its interval belongs to the
+    // final transition cycle even though the backend state has committed.
+    bool adaptiveFlowCadenceHandoffPending_{false};
     bool adaptiveFlowTimingValid_{false};
     double adaptiveFlowMipmapsMs_{0.0};
     double adaptiveFlowWorkMs_{0.0};
     double adaptiveFlowTotalLsfgMs_{0.0};
     double adaptiveFlowBudgetMs_{0.0};
     size_t adaptiveFlowGenerationCount_{0};
+    bool adaptiveFlowOutputTargetValid_{false};
+    bool adaptiveFlowOutputTargeted_{false};
+    double adaptiveFlowOutputTargetFps_{0.0};
+    bool adaptiveFlowOutputTargetSatisfied_{false};
+    bool adaptiveFlowFixedTargeted_{false};
+    bool adaptiveFlowFixedTargetSatisfied_{false};
     AdaptiveFlowDecisionReason adaptiveFlowReason_{AdaptiveFlowDecisionReason::None};
 
     // Whole-device pressure is sampled by GameNative at 500 ms and published
@@ -271,7 +298,7 @@ private:
     std::chrono::steady_clock::time_point adaptiveFlowNextPressureRead_{};
     bool adaptiveFlowGlobalPressureValid_{false};
     double adaptiveFlowGlobalGpuUsagePercent_{0.0};
-    double adaptiveFlowGlobalOutputFps_{0.0};
+    double adaptiveFlowGlobalSourceFps_{0.0};
     double adaptiveFlowGlobalFrameTimeP95Ms_{0.0};
     double adaptiveFlowGlobalSlowFrameRatio_{0.0};
     bool adaptiveFlowGeneratedTimingValid_{false};
@@ -299,11 +326,10 @@ private:
     uint64_t adaptivePresentPeriodNs_{0};
     uint32_t adaptivePresentId_{1};
 
-    // Xclipse/generic display-confirmation telemetry. This is deliberately
-    // independent of adaptive presentation pacing: generated presents carry a
-    // unique VK_GOOGLE_display_timing ID with desiredPresentTime=0, then past
-    // timing records are polled asynchronously. The proven Adreno path never
-    // enables this instrumentation.
+    // Display-confirmation telemetry is deliberately independent of adaptive
+    // presentation pacing: supported devices attach a unique
+    // VK_GOOGLE_display_timing ID with desiredPresentTime=0, then past timing
+    // records are polled asynchronously. It never changes present cadence.
     bool generatedDisplayConfirmationEnabled_{false};
     PFN_vkGetPastPresentationTimingGOOGLE getPastPresentationTimingGoogle_{nullptr};
     uint32_t generatedDisplayPresentId_{0x80000001U};
@@ -467,6 +493,7 @@ private:
         double windowHistoryPreprocessHostWaitMs{0.0};
         double windowDispatchMs{0.0};
         double windowWaitIdleMs{0.0};
+        double windowFramegenCompletionWaitMs{0.0};
         double windowGeneratedPresentMs{0.0};
         double windowSourceIntervalMs{0.0};
         double windowSourceIntervalMaxMs{0.0};

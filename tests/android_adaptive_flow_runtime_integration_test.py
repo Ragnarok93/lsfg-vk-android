@@ -131,8 +131,11 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertNotIn("adaptiveFlowGlobalOutputFps_", deficit)
         self.assertNotIn("metrics.lastWindowOutputFps", deficit)
 
-    def test_adaptive_flow_uses_only_scale_sensitive_cost_and_ignores_adreno_sidecar(self) -> None:
+    def test_adaptive_flow_uses_scale_sensitive_output_and_source_pressure(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        controller = (ROOT / "src/adaptive_flow_controller.cpp").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn(
             "const double observationScaleSensitiveFlowMs = std::max(",
@@ -147,17 +150,27 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             source,
         )
         self.assertIn(
-            ".globalPressureValid =\n"
-            "                !this->conservativeCrossDeviceSync_\n"
-            "                && this->adaptiveFlowGlobalPressureValid_",
+            ".globalPressureValid = this->adaptiveFlowGlobalPressureValid_",
             source,
-            "Adreno must not govern Flow from the unreliable Android GPU sidecar.",
+            "Protected Adreno may use fresh validated GPU pressure, while cadence remains native.",
         )
         self.assertIn(
             ".outputFps = outputCadence.outputFps",
             source,
             "Flow decisions must use the native LSFG rolling cadence, not GameNative's stride-modified FPS.",
         )
+        self.assertIn("const bool adaptiveOutputDeficit", source)
+        self.assertIn("const bool fixedMultiplierOutputDeficit", source)
+        self.assertIn("fixedMultiplierOutputTargetFps", source)
+        self.assertIn(".outputTargetFps = outputTargetFps", source)
+        self.assertIn(".fixedMultiplierBaseTarget = fixedMultiplierOutputTargeted", source)
+        self.assertIn(".sourceTargetFps = fixedMultiplierBaseSourceFps", source)
+        self.assertIn("const bool outputPressure =", controller)
+        self.assertIn("const bool sourcePressure =", controller)
+        self.assertIn("|| outputPressure || sourcePressure", controller)
+        self.assertIn("sourceRecoverySatisfied", controller)
+        self.assertIn("SustainedOutputPressure", controller)
+        self.assertIn("SustainedSourcePressure", controller)
         self.assertIn(
             "this->deadlineAdmissionPredictor_.reset();",
             source[source.index("if (flowTelemetry.changed"):],
@@ -446,7 +459,7 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "adaptive_flow_generation_count=",
             "adaptive_flow_global_pressure_valid=",
             "adaptive_flow_global_gpu_percent=",
-            "adaptive_flow_global_output_fps=",
+            "adaptive_flow_global_source_fps=",
             "adaptive_flow_lsfg_output_valid=",
             "adaptive_flow_lsfg_output_fps=",
             "adaptive_flow_global_p95_ms=",
@@ -466,6 +479,11 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
             "adaptive_flow_presentation_last_change_output_deficit=",
             "adaptive_flow_presentation_provisional_lower=",
             "adaptive_flow_presentation_upward_probe=",
+            "adaptive_flow_output_targeted=",
+            "adaptive_flow_output_target_fps=",
+            "adaptive_flow_output_target_satisfied=",
+            "adaptive_flow_fixed_targeted=",
+            "adaptive_flow_fixed_target_satisfied=",
             "adaptive_flow_output_deficit=",
             "adaptive_flow_synthetic_drop_pressure=",
             "adaptive_flow_reason=",
@@ -497,14 +515,15 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         for field in (
             "timestamp_ms",
             "gpu_usage_percent",
-            "output_fps",
+            "source_fps",
             "frame_time_p95_ms",
             "slow_frame_ratio",
         ):
             self.assertIn(f'key == "{field}"', reader)
         self.assertIn("consumed != value.size()", reader)
         self.assertIn("sawTimestamp", reader)
-        self.assertIn("sawOutput", reader)
+        self.assertIn("sawSource", reader)
+        self.assertIn('key == "output_fps"', reader)
         self.assertIn("sawFrameTime", reader)
         self.assertIn("sawSlowRatio", reader)
 
@@ -549,6 +568,188 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         # alter the restored known-good WSI pacing contract.
         self.assertIn("adaptiveDisplayTimingEnabled_ = false", context)
         self.assertIn("fifo_override=0", context)
+
+
+    def test_auto_config_and_transition_telemetry_contract(self) -> None:
+        config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        context_header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+
+        self.assertIn('preset == "auto"', config)
+        self.assertIn("Adaptive Flow preset must be quality, balanced, low, or auto", config)
+        self.assertIn("AdaptiveFlowPreset::Auto", source)
+        self.assertIn("stateIndex", context_header)
+        self.assertIn("stateCount", context_header)
+
+        for field in (
+            "adaptive_flow_state_index=",
+            "adaptive_flow_state_count=",
+            "adaptive_flow_predicted_next_total_ms=",
+            "adaptive_flow_target_fps=",
+            "preset=",
+            "target=",
+            "minimum=",
+            "state_index=",
+            "state_count=",
+            "previous=",
+            "requested=",
+            "active=",
+            "transition=",
+            "warmup_remaining=",
+            "timing_valid=",
+            "target_fps=",
+            "multiplier=",
+            "adaptive=",
+            "predicted_next_total_ms=",
+        ):
+            self.assertIn(field, source)
+
+        self.assertIn('"LSFG_FLOW"', source)
+        self.assertIn('"LSFG_METRICS"', source)
+
+    def test_protected_adreno_adaptive_flow_accepts_global_gpu_pressure(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        observation_start = source.index("AdaptiveFlowObservation observation")
+        observation_end = source.index(
+            "const float previousScale", observation_start
+        )
+        observation = source[observation_start:observation_end]
+
+        # The protected Adreno transport may reject unreliable sidecar cadence,
+        # but its fresh GPU-utilization sample is still valid evidence for the
+        # Adaptive Flow actuator when native output is below target.
+        self.assertIn(
+            ".globalPressureValid = this->adaptiveFlowGlobalPressureValid_",
+            observation,
+        )
+        self.assertNotIn(
+            "!this->conservativeCrossDeviceSync_",
+            observation,
+        )
+
+    def test_pending_flow_transition_preserves_generated_output_during_warmup(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(
+            encoding="utf-8"
+        )
+        guard_start = source.index("adaptiveFlowTransitionWarmupActive")
+        guard_end = source.index(
+            "const auto& outputCadenceForPresentation", guard_start
+        )
+        guard = source[guard_start:guard_end]
+
+        # The backend owns the bounded three-frame shadow handoff. The outer
+        # runtime must keep the admitted generated batch intact so the source
+        # cadence has no transition-sized hole.
+        self.assertIn("adaptiveFlowWarmupRemaining_ > 0", guard)
+        self.assertIn("output_preserved", guard)
+        self.assertNotIn("generatedFrameCount = 0", guard)
+        self.assertNotIn("interpolationGenerationCount = 0", guard)
+        self.assertIn("preserveOutputDuringTransition", backend)
+
+
+    def test_flow_transition_is_cadence_and_controller_barrier(self) -> None:
+        controller_header = (ROOT / "include/adaptive_flow_controller.hpp").read_text(
+            encoding="utf-8"
+        )
+        controller = (ROOT / "src/adaptive_flow_controller.cpp").read_text(
+            encoding="utf-8"
+        )
+        scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(
+            encoding="utf-8"
+        )
+        scheduler = (ROOT / "src/adaptive_scheduler.cpp").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        # A Flow graph transition is not a quality observation. Its bounded
+        # history-only cycles must not be allowed to satisfy output-deficit
+        # confirmation or contaminate a provisional downstep evaluation.
+        self.assertIn("FlowTransition", controller_header)
+        self.assertIn("bool flowTransition{false};", controller_header)
+        self.assertIn("flowTransitionHoldActive_", controller_header)
+        self.assertIn("if (observation.flowTransition)", controller)
+        self.assertIn("flow_transition", controller)
+        self.assertIn("FlowTransitionSettle", controller_header)
+        self.assertIn("flow_transition_settle", controller)
+        self.assertIn("preserveCadence", scheduler_header)
+        self.assertIn("preserveCadence", scheduler)
+        self.assertIn("beginTransition", scheduler_header)
+        self.assertIn(
+            "void LsfgOutputCadenceTracker::beginTransition()",
+            scheduler,
+        )
+        self.assertIn("adaptiveFlowTransitionActive", source)
+        self.assertIn(
+            ".flowTransition = adaptiveFlowTransitionActive",
+            source,
+        )
+        self.assertIn(
+            "retainedTimingUsable =\n"
+            "            !adaptiveFlowTransitionActive",
+            source,
+        )
+        self.assertIn(
+            "lsfgOutputCadenceTracker_.beginTransition();",
+            source,
+        )
+
+        cadence_start = source.index(
+            "Control feedback uses a fresh rolling LSFG presentation cadence"
+        )
+        cadence_end = source.index(
+            "const double elapsedSeconds",
+            cadence_start,
+        )
+        cadence_block = source[cadence_start:cadence_end]
+        self.assertIn("adaptiveFlowTransitionActiveForCadence", cadence_block)
+        self.assertIn("adaptiveFlowTransitionWarmupActive", cadence_block)
+        self.assertIn("adaptiveFlowCadenceHandoffPending_", source)
+        self.assertIn("outputTargetValid", source)
+        self.assertIn("output_target_valid=", source)
+        self.assertIn("adaptiveFlowTransitionPending_", cadence_block)
+        self.assertIn("cadenceGeneratedFrames", cadence_block)
+
+    def test_fixed_multiplier_flow_target_uses_clean_source_baseline(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        target_start = source.index(
+            "const double fixedMultiplierOutputTargetFps"
+        )
+        target_end = source.index(
+            "const bool fixedMultiplierOutputTargeted",
+            target_start,
+        )
+        target_block = source[target_start:target_end]
+
+        # Fixed mode must compare output against the clean source cadence that
+        # preceded generated work. If the target follows the degraded source,
+        # source-FPS collapse makes the target self-ratchet downward and Flow
+        # never sees the fixed multiplier deficit.
+        self.assertIn("fixedMultiplierBaseSourceFps", target_block)
+        self.assertNotIn("adaptiveTelemetry.smoothedSourceFps", target_block)
+        self.assertIn("fixedSourceCadenceTracker_.telemetry()", source)
+        self.assertIn("observedSourceFps", source)
+        self.assertIn(".sourceFps = observationSourceFps", source)
+
+    def test_source_only_cycles_recover_and_report_completion_latency(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("windowFramegenCompletionWaitMs", header)
+        self.assertIn("framegen_completion_wait_avg_ms=", source)
+
+        wait_start = source.index("bool framegenReady = true;")
+        wait_end = source.index("if (!framegenReady)", wait_start)
+        host_wait = source[wait_start:wait_end]
+        self.assertIn("windowFramegenCompletionWaitMs += framegenBlockingCompletionMs", host_wait)
+        self.assertIn("deadlineAdmissionPredictor_.observeBlockingCompletion", host_wait)
+
+        history_search = source.index("const auto presentCompatibilitySourceOnly")
+        history_start = source.index("if (historyOnly) {", history_search)
+        history_end = source.index("metrics.windowAdaptiveZeroGenerationCycles++", history_start)
+        self.assertIn("deadlineAdmissionPredictor_.observeSourceOnlyRecovery", source[history_start:history_end])
 
 
 if __name__ == "__main__":

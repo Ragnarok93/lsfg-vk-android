@@ -62,7 +62,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn('" deadline_semantics="', compatibility_log)
         self.assertIn('"generation-first"', compatibility_log)
 
-    def test_adreno_generation_first_never_uses_resource_pressure_as_a_generation_veto(self) -> None:
+    def test_adreno_generation_first_honors_fixed_count_without_source_protection_gates(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         scheduler = (ROOT / "src/adaptive_scheduler.cpp").read_text(encoding="utf-8")
         header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
@@ -78,12 +78,23 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertNotIn("setSourceProtectionBaseline", scheduler)
         self.assertNotIn("conservativeFixedSourceProtectionGap", source)
         self.assertNotIn("conservativeAdmissionRejectedHistoryGap", source)
+        planning_start = source.index(
+            "size_t plannedGeneratedFrameCount = conf.adaptiveFramegen"
+        )
+        planning_end = source.index(
+            "size_t generatedFrameCount = plannedGeneratedFrameCount",
+            planning_start,
+        )
+        fixed_planning = source[planning_start:planning_end]
         self.assertIn(
+            ": requestedFixedGeneratedFrameCount;",
+            fixed_planning,
+            "Fixed Adreno must honor the selected multiplier.",
+        )
+        self.assertNotIn(
             "generationFirstAdreno\n"
             "            ? requestedFixedGeneratedFrameCount",
-            source,
-            "Fixed Adreno must honor the selected multiplier even when the "
-            "source cadence slows under load.",
+            fixed_planning,
         )
         self.assertIn(
             "&& !generationFirstAdreno",
@@ -91,7 +102,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             "Deadline/source-protection gates must be disabled on generation-first Adreno.",
         )
 
-    def test_fixed_mode_restores_cadence_governor_without_source_pacing(self) -> None:
+    def test_fixed_mode_tracks_source_pressure_without_governing_generation(self) -> None:
         header = (ROOT / "include/adaptive_scheduler.hpp").read_text(
             encoding="utf-8"
         )
@@ -103,28 +114,21 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         )
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("class FixedSourceCadenceGovernor", header)
-        self.assertIn("fixedSourceCadenceGovernor_", context_header)
-        self.assertIn("FixedSourceCadenceGovernor::plan", scheduler)
-        self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
-        self.assertIn("fixed_generation_limit=", source)
+        self.assertIn("class FixedSourceCadenceTracker", header)
+        self.assertIn("fixedSourceCadenceTracker_", context_header)
+        self.assertIn("FixedSourceCadenceTracker::observe", scheduler)
+        self.assertIn("fixedSourceCadenceTracker_.observe(", source)
+        self.assertNotIn("FixedSourceCadenceGovernor", header + scheduler + source)
+        self.assertNotIn("fixed_generation_limit=", source)
 
-        governor_header_start = header.index("class FixedSourceCadenceGovernor")
-        governor_header_end = header.index("\n};", governor_header_start) + len("\n};")
-        governor_header = header[governor_header_start:governor_header_end]
-        governor_impl_start = scheduler.index("FixedSourceCadenceGovernor::plan")
-        governor_impl_end = scheduler.index(
-            "FixedSourceCadenceGovernor::reset", governor_impl_start
-        )
-        governor_impl = scheduler[governor_impl_start:governor_impl_end]
         planning_start = source.index(
-            "if (conf.adaptiveFramegen)\n        this->fixedSourceCadenceGovernor_.reset();"
+            "if (conf.adaptiveFramegen)\n        this->fixedSourceCadenceTracker_.reset();"
         )
         planning_end = source.index("const auto& adaptiveTelemetry", planning_start)
         fixed_planning = source[planning_start:planning_end]
-
-        self.assertNotIn("sleep_for", governor_header)
-        self.assertNotIn("sleep_for", governor_impl)
+        self.assertIn(": requestedFixedGeneratedFrameCount;", fixed_planning)
+        self.assertNotIn("governedFixedGeneratedFrameCount", fixed_planning)
+        self.assertNotIn("sleep_for", header + scheduler)
         self.assertNotIn("sleep_for", fixed_planning)
 
     def test_zero_generation_keeps_adreno_temporal_history_coherent(self) -> None:
@@ -358,7 +362,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
         self.assertIn('" governor_adapter="', constructor_log)
         self.assertIn('"target-authoritative"', constructor_log)
         self.assertIn('" fixed_generation="', constructor_log)
-        self.assertIn('"requested-ceiling"', constructor_log)
+        self.assertIn('"requested-count"', constructor_log)
 
 
     def test_xclipse_async_selection_remains_capability_driven(self) -> None:

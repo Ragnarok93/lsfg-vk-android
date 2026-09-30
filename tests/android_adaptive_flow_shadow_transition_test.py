@@ -58,6 +58,8 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             self.assertIn("data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool", source,
                           context_source.as_posix())
             self.assertIn("shadowBudgetAvailable", source, context_source.as_posix())
+            self.assertIn("preserveOutputDuringTransition", source,
+                          context_source.as_posix())
             self.assertIn("shadowPreprocessEstimateMs", source, context_source.as_posix())
             self.assertIn("generationCount == 0 || shadowBudgetAvailable", source,
                           context_source.as_posix())
@@ -135,13 +137,37 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
                 context_source.as_posix(),
             )
 
-    def test_pending_transition_is_last_value_wins_and_cancellable(self) -> None:
+    def test_pending_transition_preserves_generated_output_during_warmup(self) -> None:
+        backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("preserveOutputDuringTransition", backend)
+
         for _, _, context_source, _ in BACKENDS:
             source = context_source.read_text(encoding="utf-8")
             self.assertIn("requestFlowScale", source, context_source.as_posix())
             self.assertIn("pendingFlowWarmupFrames_ = 0", source, context_source.as_posix())
             self.assertIn("pendingFlowGraphIndex_.reset()", source, context_source.as_posix())
             self.assertIn("requestedFlowScale_", source, context_source.as_posix())
+            self.assertIn(
+                "adaptiveFlowBatch.preserveOutputDuringTransition",
+                source,
+                context_source.as_posix(),
+            )
+
+            condition_start = source.index(
+                "if (this->pendingFlowWarmupFrames_ + 1 <"
+            )
+            condition_end = source.index(
+                "if (generationCount > 0)\n                    activeGraph.beta->Dispatch",
+                condition_start,
+            )
+            transition_condition = source[condition_start:condition_end]
+            self.assertIn(
+                "adaptiveFlowBatch.preserveOutputDuringTransition",
+                transition_condition,
+                context_source.as_posix(),
+            )
 
 
 if __name__ == "__main__":

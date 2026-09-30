@@ -10,17 +10,23 @@ enum class AdaptiveFlowPreset : uint8_t {
     Quality,
     Balanced,
     Low,
+    Auto,
 };
 
 enum class AdaptiveFlowDecisionReason : uint8_t {
     None,
     Disabled,
     InvalidTelemetry,
+    FlowTransition,
+    FlowTransitionSettle,
     SchedulerTransition,
     Cooldown,
     InsufficientFlowContribution,
     SustainedPressure,
     SustainedGlobalPressure,
+    SustainedOutputPressure,
+    SustainedSourcePressure,
+    ExploratorySourcePressure,
     EvaluatingDownstep,
     DownstepBenefitConfirmed,
     DownstepReverted,
@@ -49,10 +55,19 @@ struct AdaptiveFlowObservation {
     bool wsiPresentationPressure{false};
     double wsiLossRate{};
     double sourceFps{};
+    /// Clean source cadence target used by Fixed multiplier mode.
+    double sourceTargetFps{};
+    /// True whenever Fixed multiplier mode is active, even before a clean
+    /// source reference has been established.
+    bool fixedMultiplierMode{false};
     double outputFps{};
+    /// Required output cadence: Adaptive LSFG target or fixed multiplier base.
+    double outputTargetFps{};
     bool outputCadenceValid{false};
     bool outputTargeted{false};
     bool outputTargetSatisfied{false};
+    /// True when outputTargetFps is source cadence times the fixed multiplier.
+    bool fixedMultiplierBaseTarget{false};
     /// Whole-device GPU utilization sampled out-of-band by GameNative.
     double globalGpuUsagePercent{};
     /// True when the global GPU sample is fresh and trustworthy.
@@ -69,6 +84,8 @@ struct AdaptiveFlowObservation {
     bool retainedGeneratedTimingSample{false};
     /// True when Adaptive LSFG has just changed/snap/probed/backed-off/reset.
     bool schedulerTransition{false};
+    /// True while a pending Flow graph is rebuilding temporal history.
+    bool flowTransition{false};
     bool valid{false};
 };
 
@@ -77,6 +94,7 @@ struct AdaptiveFlowTelemetry {
     float minimumScale{1.0F};
     float currentScale{1.0F};
     std::size_t stateIndex{};
+    std::size_t stateCount{};
     bool changed{false};
     AdaptiveFlowDecisionReason reason{AdaptiveFlowDecisionReason::None};
     double pressureRatio{};
@@ -88,6 +106,10 @@ struct AdaptiveFlowTelemetry {
     bool wsiPressure{false};
     bool downstepEvaluationActive{false};
     bool outputDeficit{false};
+    bool outputPressure{false};
+    bool sourcePressure{false};
+    bool exploratorySourcePressure{false};
+    double sourceReferenceFps{};
 };
 
 /// A quality-seeking governor for Flow Scale. It owns no Vulkan objects and
@@ -113,6 +135,7 @@ public:
 
 private:
     void resetEvidence();
+    void resetFixedExploration();
     void selectTargetState();
 
     bool enabled_{false};
@@ -122,9 +145,16 @@ private:
     double headroomSeconds_{};
     double cooldownUntilSeconds_{};
     double schedulerHoldUntilSeconds_{};
+    bool flowTransitionHoldActive_{false};
+    double flowTransitionSettleUntilSeconds_{};
 
     bool downstepEvaluationActive_{false};
     bool downstepBenefitSeen_{false};
+    // Direct missed-output pressure uses a shorter control loop, but retains
+    // the same post-change benefit check before another state is selected.
+    bool downstepOutputDriven_{false};
+    bool downstepSourceDriven_{false};
+    bool downstepExploratorySourceDriven_{false};
     std::size_t downstepPreviousIndex_{};
     double downstepEvaluationStartedSeconds_{};
     double downstepBaselinePressureRatio_{};
@@ -138,6 +168,13 @@ private:
     bool downstepBaselineComputePressure_{false};
     bool downstepBaselineWsiPressure_{false};
     bool downstepBaselineGlobalPressure_{false};
+
+    // When Fixed mode starts without a trustworthy source-only baseline,
+    // lower Flow experimentally and retain only steps that measurably recover
+    // source cadence. This reference never becomes the clean fixed target.
+    bool fixedExplorationReferenceValid_{false};
+    bool fixedExplorationProbePending_{false};
+    double fixedExplorationBestSourceFps_{};
 
     AdaptiveFlowTelemetry telemetry_{};
 };

@@ -39,5 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tests/android_restored_baseline_build_policy_test.py
+          python3 tests/gamenative_adaptive_config_test.py
           python3 tests/android_adaptive_flow_runtime_integration_test.py
           python3 tests/android_adaptive_flow_shadow_transition_test.py
+          python3 tests/android_display_confirmation_telemetry_test.py

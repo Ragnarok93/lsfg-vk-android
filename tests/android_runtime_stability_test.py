@@ -457,14 +457,15 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("FixedSourceCadenceGovernor", scheduler)
-        self.assertIn("fixedSourceCadenceGovernor_", header)
-        self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
+        self.assertIn("FixedSourceCadenceTracker", scheduler)
+        self.assertIn("fixedSourceCadenceTracker_", header)
+        self.assertIn("fixedSourceCadenceTracker_.observe(", source)
         self.assertIn("generationFirstAdreno", source)
         self.assertIn("requestedFixedGeneratedFrameCount", source)
         self.assertNotIn("fixedAdrenoHistoricalGeneration", source)
-        self.assertIn("fixed_generation_limit=", source)
-        self.assertIn("FixedSourceCadenceGovernor::plan", scheduler_source)
+        self.assertIn(": requestedFixedGeneratedFrameCount;", source)
+        self.assertNotIn("fixed_generation_limit=", source)
+        self.assertNotIn("FixedSourceCadenceGovernor", scheduler_source)
         self.assertNotIn("sleep_for", scheduler + scheduler_source)
 
         pacing_start = hooks.index("bool adaptivePresentationPacing")
@@ -494,7 +495,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("delayUntilNextSourceOutput", scheduler_header)
         for token in (
             "adaptiveScheduler_.configure",
-            "adaptiveScheduler_.plan(sourceInterval)",
+            "adaptiveScheduler_.plan(",
             "adaptiveScheduler_.telemetry()",
             "presentContextWithCount",
             "AndroidFrameCycleMode::HistoryOnly",
@@ -909,16 +910,36 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("fifoBoundedCompletion", completion_policy)
         self.assertNotIn("VK_PRESENT_MODE_FIFO_KHR", completion_policy)
 
-    def test_fifo_async_completion_does_not_train_deadline_predictor_from_host_wait(self) -> None:
-        """FIFO must not turn a presentation-mode choice into blocking-completion evidence for Adaptive admission."""
+    def test_fifo_async_completion_only_trains_predictor_after_host_wait_fallback(self) -> None:
+        """A valid async FIFO dependency chain is never trained from a host wait."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("bool framegenReady = true;", source.index("bool requireHostCompletionWait"))
+        policy_start = source.index("bool requireHostCompletionWait")
+        start = source.index("bool framegenReady = true;", policy_start)
         end = source.index("updateAdaptiveFlowGovernor();", start)
+        host_wait_policy = source[policy_start:start]
         completion = source[start:end]
 
+        # A valid exported async dependency starts with host waiting disabled.
+        # Host completion may train admission only after that dependency path
+        # actually falls back to a measured blocking wait.
+        self.assertIn(
+            "bool requireHostCompletionWait =\n"
+            "        !this->asyncFramegenCompletionEnabled_",
+            host_wait_policy,
+        )
+        self.assertIn("framegenSync.gpuDependenciesExported", host_wait_policy)
+        self.assertNotIn("VK_PRESENT_MODE_FIFO_KHR", host_wait_policy)
         self.assertNotIn("fifoBoundedCompletion", completion)
-        self.assertNotIn("observeBlockingCompletion", completion)
         self.assertNotIn('runtime stage=fifo-bounded-completion', completion)
+
+        observation_start = completion.index(
+            "if (requireHostCompletionWait && framegenReady"
+        )
+        observation_end = completion.index("if (!framegenReady)", observation_start)
+        observation = completion[observation_start:observation_end]
+        self.assertIn("generatedFrameCount > 0", observation)
+        self.assertIn("framegenBlockingCompletionMs > 0.0", observation)
+        self.assertIn("observeBlockingCompletion", observation)
 
     def test_fifo_admitted_batch_is_not_amputated_by_post_dispatch_deadline(self) -> None:
         """Once FIFO work is admitted and dispatched, wall-clock slot expiry must not delete it."""

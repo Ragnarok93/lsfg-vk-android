@@ -48,6 +48,10 @@ class AndroidSuspendTimeoutGuardTest(unittest.TestCase):
         self.assertIn("if (!framegenReady) {", wait_block[wait_block.index("resumeCompletionRecheckNs"):])
         self.assertIn("framegenRecoveredAfterTimeout", wait_block)
         self.assertIn("if (!framegenRecoveredAfterTimeout)", wait_block)
+        self.assertIn(
+            "metrics.windowFramegenCompletionWaitMs += framegenBlockingCompletionMs;",
+            wait_block,
+        )
         self.assertNotIn(
             "metrics.windowWaitIdleMs += std::chrono::duration<double, std::milli>(\n        RuntimeMetrics::Clock::now() - waitIdleStart).count();",
             wait_block,

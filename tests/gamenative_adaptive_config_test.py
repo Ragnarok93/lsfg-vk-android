@@ -30,3 +30,8 @@ def test_runtime_off_remains_multiplier_one_resident_semantics():
     assert ".enable = true" in SOURCE
     assert ".targeted = true" in SOURCE
     assert "if (game.multiplier < 1)" in SOURCE
+
+
+def test_auto_preset_is_accepted_by_native_config():
+    assert 'preset == "auto"' in SOURCE
+    assert "Adaptive Flow preset must be quality, balanced, low, or auto" in SOURCE

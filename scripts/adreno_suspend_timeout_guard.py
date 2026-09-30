@@ -17,6 +17,7 @@ OLD_WAIT = '''    if (requireHostCompletionWait) {
             std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - waitIdleStart).count();
         metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
+        metrics.windowFramegenCompletionWaitMs += framegenBlockingCompletionMs;
     }
 '''
 
@@ -60,6 +61,7 @@ NEW_WAIT = '''    if (requireHostCompletionWait) {
                 std::chrono::duration<double, std::milli>(
                     RuntimeMetrics::Clock::now() - waitIdleStart).count();
             metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
+            metrics.windowFramegenCompletionWaitMs += framegenBlockingCompletionMs;
         } else {
             // A SIGSTOP/SIGCONT recovery is lifecycle time, not framegen cost.
             framegenBlockingCompletionMs = 0.0;
