@@ -361,6 +361,10 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.apiVersion = properties.apiVersion;
     this->diagnostics.spirvTargetVersion =
         static_cast<uint32_t>(decision.spirvTarget);
+    this->diagnostics.vulkanPath = vulkanPathName(decision.vulkanPath);
+    this->diagnostics.synchronizationPath =
+        synchronizationPathName(decision.synchronizationPath);
+    this->diagnostics.capabilitySummary = "supported";
     this->diagnostics.driverVersion = properties.driverVersion;
     this->diagnostics.driverId = hasDriverProperties
         ? driverProperties.driverID

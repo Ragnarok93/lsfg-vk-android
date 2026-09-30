@@ -39,10 +39,15 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <sstream>
 
 namespace {
 
 std::mutex lsfgDisableEnvMutex;
+std::mutex framegenContextBuildLogMutex;
+std::string lastFramegenContextBuildSignature;
+std::chrono::steady_clock::time_point lastFramegenContextBuildTime{};
+std::atomic<uint64_t> framegenContextCreateEpoch{0};
 
 class ScopedLsfgDisable {
 public:
@@ -703,6 +708,65 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported)
             throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
                 "Exact game/framegen ICD has no supported AHB image transport for LSFG format");
+
+        const uint64_t contextCreateEpoch =
+            framegenContextCreateEpoch.fetch_add(1, std::memory_order_relaxed) + 1;
+        std::ostringstream buildSignature;
+        buildSignature
+            << extent.width << 'x' << extent.height
+            << "|format=" << static_cast<uint32_t>(format)
+            << "|generation_capacity=" << (runtimeMultiplier - 1)
+            << "|performance=" << (conf.performance ? 1 : 0)
+            << "|adaptive_flow=" << (conf.adaptiveFlowScale ? 1 : 0)
+            << "|flow_states=";
+        if (adaptiveFlowScales.empty()) {
+            buildSignature << initialFlowScale;
+        } else {
+            for (size_t i = 0; i < adaptiveFlowScales.size(); ++i) {
+                if (i != 0) buildSignature << ',';
+                buildSignature << adaptiveFlowScales.at(i);
+            }
+        }
+        buildSignature
+            << "|transport=" << LSFG::ahbTransportModeName(ahbTransportMode)
+            << "|sync=" << backendDiagnostics.synchronizationPath
+            << "|shader_target=0x" << std::hex
+            << backendDiagnostics.spirvTargetVersion << std::dec;
+
+        const auto buildNow = std::chrono::steady_clock::now();
+        bool duplicateEffectiveBuild = false;
+        {
+            const std::scoped_lock buildLogLock(framegenContextBuildLogMutex);
+            duplicateEffectiveBuild =
+                buildSignature.str() == lastFramegenContextBuildSignature
+                && lastFramegenContextBuildTime.time_since_epoch().count() != 0
+                && buildNow - lastFramegenContextBuildTime
+                    < std::chrono::seconds(2);
+            lastFramegenContextBuildSignature = buildSignature.str();
+            lastFramegenContextBuildTime = buildNow;
+        }
+
+        std::cerr << "lsfg-vk: framegen-context-create"
+                  << " epoch=" << contextCreateEpoch
+                  << " reason=swapchain-create"
+                  << " duplicate_effective=" << (duplicateEffectiveBuild ? 1 : 0)
+                  << " extent=" << extent.width << 'x' << extent.height
+                  << " format=" << static_cast<uint32_t>(format)
+                  << " generation_capacity=" << (runtimeMultiplier - 1)
+                  << " flow_states="
+                  << (adaptiveFlowScales.empty() ? 1 : adaptiveFlowScales.size())
+                  << " transport=" << LSFG::ahbTransportModeName(ahbTransportMode)
+                  << " vulkan_path=" << backendDiagnostics.vulkanPath
+                  << " sync_path=" << backendDiagnostics.synchronizationPath
+                  << " shader_target=0x" << std::hex
+                  << backendDiagnostics.spirvTargetVersion << std::dec
+                  << '\n';
+        if (duplicateEffectiveBuild) {
+            std::cerr << "lsfg-vk: framegen-context-rebuild-warning"
+                      << " epoch=" << contextCreateEpoch
+                      << " effective_config_unchanged=1"
+                      << '\n';
+        }
 
         // Android path: use AHardwareBuffer-backed images for sharing with framegen.
         // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL

@@ -61,6 +61,7 @@ jobs:
           python3 tests/android_batch_optimization_test.py
           python3 tests/android_bannerlator_engine_scheduling_test.py
           python3 tests/android_adaptive_flow_resource_sharing_test.py
+          python3 tests/android_context_build_configuration_test.py
           python3 tests/android_candidate_b4_beta4_predicate_test.py
           python3 tests/android_candidate_b13_beta4_fused_mask_test.py
           python3 tests/android_candidate_b14_mipmaps_tail_fusion_test.py

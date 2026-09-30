@@ -65,6 +65,9 @@ struct AndroidFrameSyncFds {
 struct BackendDiagnostics {
     uint32_t apiVersion{VK_API_VERSION_1_0};
     uint32_t spirvTargetVersion{0};
+    std::string vulkanPath;
+    std::string synchronizationPath;
+    std::string capabilitySummary;
     uint32_t driverVersion{0};
     VkDriverId driverId{static_cast<VkDriverId>(0)};
     std::string driverName;
