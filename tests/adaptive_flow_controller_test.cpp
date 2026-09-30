@@ -236,16 +236,16 @@ int main() {
     }
 
     {
-        // Recovery is intentionally slower and only happens when the estimated
-        // next quality state still fits comfortably in budget.
+        // Recovery remains slower than downscaling, but the faster controller
+        // must restore quality inside roughly half the previous dwell.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        for (int i = 0; i < 12; ++i)
+        for (int i = 0; i < 5; ++i)
             controller.observe(sample(16.2, 5.0));
         assert(near(controller.currentScale(), 0.95F));
-        for (int i = 0; i < 30; ++i)
+        for (int i = 0; i < 10; ++i)
             controller.observe(sample(8.0, 2.0));
         assert(near(controller.currentScale(), 0.95F));
-        for (int i = 0; i < 20; ++i)
+        for (int i = 0; i < 10; ++i)
             controller.observe(sample(8.0, 2.0));
         assert(near(controller.currentScale(), 1.00F));
     }
