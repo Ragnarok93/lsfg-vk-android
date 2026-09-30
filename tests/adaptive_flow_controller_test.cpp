@@ -882,5 +882,39 @@ int main() {
         assert(!controller.telemetry().sourcePressure);
     }
 
+    {
+        // Severe thermal state is advisory only. With no source/output/LSFG
+        // pressure it must never lower Flow Scale.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 20; ++i) {
+            auto observation = sample(8.0, 2.0, 16.666);
+            observation.thermalPressureValid = true;
+            observation.thermalStatus = 4;
+            controller.observe(observation);
+        }
+        assert(near(controller.currentScale(), 1.00F));
+        assert(controller.telemetry().thermalPressure);
+    }
+
+    {
+        // Once real LSFG compute pressure exists, severe thermal state may
+        // accelerate confirmation. The same three 100 ms samples are below
+        // the ordinary 400 ms confirmation interval.
+        AdaptiveFlowController normal(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 3; ++i)
+            normal.observe(sample(16.2, 5.0));
+        assert(near(normal.currentScale(), 1.00F));
+
+        AdaptiveFlowController thermal(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 3; ++i) {
+            auto observation = sample(16.2, 5.0);
+            observation.thermalPressureValid = true;
+            observation.thermalStatus = 4;
+            thermal.observe(observation);
+        }
+        assert(near(thermal.currentScale(), 0.95F));
+        assert(thermal.telemetry().thermalPressure);
+    }
+
     return 0;
 }

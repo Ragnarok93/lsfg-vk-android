@@ -304,6 +304,8 @@ private:
     std::chrono::steady_clock::time_point adaptiveFlowNextPressureRead_{};
     bool adaptiveFlowGlobalPressureValid_{false};
     double adaptiveFlowGlobalGpuUsagePercent_{0.0};
+    bool adaptiveFlowThermalPressureValid_{false};
+    int adaptiveFlowThermalStatus_{0};
     double adaptiveFlowGlobalSourceFps_{0.0};
     double adaptiveFlowGlobalFrameTimeP95Ms_{0.0};
     double adaptiveFlowGlobalSlowFrameRatio_{0.0};

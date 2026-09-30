@@ -258,6 +258,8 @@ double adaptiveFlowFrameBudgetMs(
 struct RuntimePressureSample {
     bool valid{false};
     double gpuUsagePercent{0.0};
+    bool thermalStatusValid{false};
+    int thermalStatus{0};
     double sourceFps{0.0};
     double frameTimeP95Ms{0.0};
     double slowFrameRatio{0.0};
@@ -299,6 +301,7 @@ RuntimePressureSample readRuntimePressure(
         const bool knownKey =
             key == "timestamp_ms"
             || key == "gpu_usage_percent"
+            || key == "thermal_status"
             || key == "source_fps"
             || key == "output_fps"
             || key == "frame_time_p95_ms"
@@ -321,6 +324,12 @@ RuntimePressureSample readRuntimePressure(
         } else if (key == "gpu_usage_percent") {
             sample.gpuUsagePercent = parsed;
             sawGpu = true;
+        } else if (key == "thermal_status") {
+            const int thermal = static_cast<int>(parsed);
+            if (parsed == static_cast<double>(thermal) && thermal >= 0 && thermal <= 6) {
+                sample.thermalStatus = thermal;
+                sample.thermalStatusValid = true;
+            }
         } else if (key == "source_fps" || key == "output_fps") {
             sample.sourceFps = parsed;
             sawSource = true;
@@ -2537,6 +2546,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->adaptiveFlowGlobalPressureValid_ = pressure.valid;
             this->adaptiveFlowGlobalGpuUsagePercent_ =
                 pressure.valid ? pressure.gpuUsagePercent : 0.0;
+            this->adaptiveFlowThermalPressureValid_ =
+                pressure.valid && pressure.thermalStatusValid;
+            this->adaptiveFlowThermalStatus_ =
+                this->adaptiveFlowThermalPressureValid_
+                    ? pressure.thermalStatus : 0;
             this->adaptiveFlowGlobalSourceFps_ =
                 pressure.valid ? pressure.sourceFps : 0.0;
             this->adaptiveFlowGlobalFrameTimeP95Ms_ =
@@ -2690,6 +2704,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .globalGpuUsagePercent =
                 this->adaptiveFlowGlobalGpuUsagePercent_,
             .globalPressureValid = this->adaptiveFlowGlobalPressureValid_,
+            .thermalStatus = this->adaptiveFlowThermalStatus_,
+            .thermalPressureValid = this->adaptiveFlowThermalPressureValid_,
             .outputDeficit = outputDeficit,
             .syntheticDropPressure = false,
             .generatedWorkSample = generatedWorkSample,
@@ -2787,6 +2803,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << observation.globalGpuUsagePercent
                       << " global_pressure_valid="
                       << (observation.globalPressureValid ? 1 : 0)
+                      << " thermal_status=" << observation.thermalStatus
+                      << " thermal_valid="
+                      << (observation.thermalPressureValid ? 1 : 0)
+                      << " thermal_pressure="
+                      << (flowTelemetry.thermalPressure ? 1 : 0)
                       << " output_fps=" << observation.outputFps
                       << " output_target_fps=" << observation.outputTargetFps
                       << " fixed_multiplier_base_target="
@@ -5935,6 +5956,8 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->adaptiveFlowNextPressureRead_ = {};
     this->adaptiveFlowGlobalPressureValid_ = false;
     this->adaptiveFlowGlobalGpuUsagePercent_ = 0.0;
+    this->adaptiveFlowThermalPressureValid_ = false;
+    this->adaptiveFlowThermalStatus_ = 0;
     this->adaptiveFlowGlobalSourceFps_ = 0.0;
     this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
     this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
@@ -5987,6 +6010,8 @@ void LsContext::enterSourceOnlyBypass() {
     this->adaptiveFlowNextPressureRead_ = {};
     this->adaptiveFlowGlobalPressureValid_ = false;
     this->adaptiveFlowGlobalGpuUsagePercent_ = 0.0;
+    this->adaptiveFlowThermalPressureValid_ = false;
+    this->adaptiveFlowThermalStatus_ = 0;
     this->adaptiveFlowGlobalSourceFps_ = 0.0;
     this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
     this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;

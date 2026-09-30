@@ -26,6 +26,9 @@ constexpr double kMinimumPredictedReliefRatio = 0.025;
 constexpr double kMinimumGlobalPressureLsfgBudgetRatio = 0.40;
 constexpr double kDownConfirmSeconds = 0.40;
 constexpr double kGlobalDownConfirmSeconds = 0.20;
+constexpr double kThermalAcceleratedConfirmSeconds = 0.25;
+constexpr int kThermalStatusSevere = 3;
+constexpr int kThermalStatusModerate = 2;
 // Target/source pressure is user-visible; keep this loop comfortably faster
 // than the previous confirmation/evaluation/cooldown chain.
 constexpr double kOutputDownConfirmSeconds = 0.15;
@@ -136,6 +139,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     telemetry_.flowBudgetRatio = 0.0;
     telemetry_.globalGpuUsagePercent = 0.0;
     telemetry_.globalPressure = false;
+    telemetry_.thermalStatus = 0;
+    telemetry_.thermalPressure = false;
     telemetry_.computePressure = false;
     telemetry_.wsiPressure = false;
     telemetry_.outputDeficit = false;
@@ -284,6 +289,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool globalPressure =
         globalGpuPressure
         && (actionableOutputDeficit || observation.syntheticDropPressure);
+    const bool thermalSevere =
+        observation.thermalPressureValid
+        && observation.thermalStatus >= kThermalStatusSevere;
     const bool wsiFlowPressure =
         wsiPressure && globalGpuPressure && actionableOutputDeficit;
     const bool recoveryWsiPressure =
@@ -291,6 +299,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     telemetry_.computePressure = computePressure;
     telemetry_.wsiPressure = wsiPressure;
     telemetry_.globalPressure = globalPressure;
+    telemetry_.thermalStatus =
+        observation.thermalPressureValid ? observation.thermalStatus : 0;
+    telemetry_.thermalPressure = thermalSevere;
     telemetry_.outputPressure = outputPressure;
     telemetry_.sourcePressure = sourcePressure;
     telemetry_.exploratorySourcePressure = exploratorySourcePressure;
@@ -464,6 +475,11 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         || outputPressure || sourcePressure || exploratorySourcePressure;
     const bool targetPressure = outputPressure || sourcePressure;
     const bool fastPressure = targetPressure || exploratorySourcePressure;
+    // Thermal status is never an actuator by itself. It only shortens the
+    // confirmation interval after an existing LSFG/source/output pressure
+    // signal has already made Flow a legitimate actuator.
+    const bool thermalAcceleratedPressure =
+        thermalSevere && pressure && !fastPressure && !globalPressure;
 
     if (pressure && canLower) {
         const double currentScale = static_cast<double>(presetStates[index]);
@@ -510,7 +526,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                 ? kOutputDownConfirmSeconds
                 : (globalPressure
                     ? kGlobalDownConfirmSeconds
-                    : kDownConfirmSeconds);
+                    : (thermalAcceleratedPressure
+                        ? kThermalAcceleratedConfirmSeconds
+                        : kDownConfirmSeconds));
         if (pressureSeconds_ >= downConfirmSeconds) {
             downstepEvaluationActive_ = true;
             downstepBenefitSeen_ = false;
@@ -564,6 +582,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool globalRecoveryHeadroom =
         !observation.globalPressureValid
         || observation.globalGpuUsagePercent <= kGlobalGpuRecoveryPercent;
+    const bool thermalRecoveryHeadroom =
+        !observation.thermalPressureValid
+        || observation.thermalStatus <= kThermalStatusModerate;
     const bool outputRecoverySatisfied =
         fixedMultiplierMode
         || !observation.outputTargeted
@@ -589,7 +610,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             && !recoveryWsiPressure
             && outputRecoverySatisfied
             && sourceRecoverySatisfied
-            && globalRecoveryHeadroom) {
+            && globalRecoveryHeadroom
+            && thermalRecoveryHeadroom) {
         const double currentScale = static_cast<double>(presetStates[index]);
         const double higherScale = static_cast<double>(presetStates[index - 1]);
         const double addedFlowMs = observation.flowMs

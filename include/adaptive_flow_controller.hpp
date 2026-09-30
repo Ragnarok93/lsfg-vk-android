@@ -72,6 +72,10 @@ struct AdaptiveFlowObservation {
     double globalGpuUsagePercent{};
     /// True when the global GPU sample is fresh and trustworthy.
     bool globalPressureValid{false};
+    /// Android thermal status (0..6) sampled out-of-band by GameNative.
+    /// This is advisory and can only accelerate an already-established Flow pressure signal.
+    int thermalStatus{0};
+    bool thermalPressureValid{false};
     /// Whole-output cadence is materially below target or slow-frame pressure is high.
     bool outputDeficit{false};
     /// A synthetic opportunity was rejected/dropped since the previous observation.
@@ -102,6 +106,8 @@ struct AdaptiveFlowTelemetry {
     double estimatedNextTotalMs{};
     double globalGpuUsagePercent{};
     bool globalPressure{false};
+    int thermalStatus{0};
+    bool thermalPressure{false};
     bool computePressure{false};
     bool wsiPressure{false};
     bool downstepEvaluationActive{false};
