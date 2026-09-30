@@ -720,7 +720,8 @@ int main() {
         for (int i = 0; i < 8; ++i) {
             auto observation = sample(8.0, 5.0, 50.0);
             observation.fixedMultiplierMode = true;
-            observation.sourceFps = i < 3 ? 20.0 : 22.0;
+            observation.sourceFps =
+                i < 3 ? 20.0 : (i < 6 ? 22.0 : 24.0);
             controller.observe(observation);
         }
         assert(controller.currentScale() <= 0.90F);
