@@ -69,7 +69,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
             self.assertNotIn(stale_early_return, present, source_path.as_posix())
 
             mipmaps = present.index("this->mipmaps.Dispatch")
-            alpha = present.index("dispatchAlphaStageMajor(", mipmaps)
+            alpha = present.index("this->alpha.at(6 - i).Dispatch(", mipmaps)
             self.assertIn("if (generationCount > 0)", present, source_path.as_posix())
             beta_guard = present.index("if (generationCount > 0)", alpha)
             beta = present.index("this->beta.Dispatch", beta_guard)
