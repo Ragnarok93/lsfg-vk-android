@@ -3,6 +3,7 @@
 
 #include "v3_1/context.hpp"
 #include "common/utils.hpp"
+#include "core/resource_stats.hpp"
 #include "common/exception.hpp"
 
 #include <vector>
@@ -1008,9 +1009,17 @@ Context::Context(Vulkan& vk,
     this->adaptiveFlowGraphs_.reserve(adaptiveFlowScales.size() - 1);
 
     const auto outputImages = this->generate.getOutImages();
+    const auto resourceStatsBefore = Core::snapshotResourceConstructionStats();
+    const auto prebuildStarted = std::chrono::steady_clock::now();
     for (size_t i = 1; i < adaptiveFlowScales.size(); ++i)
         this->adaptiveFlowGraphs_.emplace_back(
             this->buildAdaptiveFlowGraph(vk, adaptiveFlowScales.at(i), outputImages));
+    const auto prebuildFinished = std::chrono::steady_clock::now();
+    const auto addedResources =
+        Core::snapshotResourceConstructionStats() - resourceStatsBefore;
+    const double prebuildMs =
+        std::chrono::duration<double, std::milli>(
+            prebuildFinished - prebuildStarted).count();
 
     double scaleArea = 0.0;
     for (const float scale : adaptiveFlowScales)
@@ -1028,6 +1037,15 @@ Context::Context(Vulkan& vk,
               << " target=" << adaptiveFlowScales.front()
               << " min=" << adaptiveFlowScales.back()
               << " scale_area_ratio=" << (scaleArea / targetArea)
+              << " added_images=" << addedResources.images
+              << " added_image_bytes=" << addedResources.imageBytes
+              << " added_buffers=" << addedResources.buffers
+              << " added_buffer_bytes=" << addedResources.bufferBytes
+              << " added_descriptor_sets=" << addedResources.descriptorSets
+              << " added_samplers=" << addedResources.samplers
+              << " added_pipelines=" << addedResources.pipelines
+              << " added_shader_modules=" << addedResources.shaderModules
+              << " prebuild_ms=" << prebuildMs
               << " history_frames=" << kAdaptiveFlowHistoryFrames
               << '\n';
 }
