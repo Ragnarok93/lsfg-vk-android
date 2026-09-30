@@ -422,20 +422,30 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
             // for one shadow update; only spend that work when the batch budget
             // has explicit headroom. A zero-generation cycle can advance the
             // pending graph directly without also refreshing the active graph.
-            // A bounded output-preserving transition explicitly authorizes the
-            // shadow update so the handoff does not create a source-only hole.
+            // A transition must not turn a Flow downstep into extra source
+            // pressure. Budget the pending graph from measured work: a prior
+            // shadow sample is best; before the first sample, mipmaps is a
+            // conservative proxy because it dominates shadow preprocessing.
             const double shadowPreprocessEstimateMs =
                 this->lastAdaptiveFlowGpuTiming_.valid
-                    && !this->lastAdaptiveFlowGpuTiming_.transitionActive
-                    ? std::max(
-                        0.0,
-                        this->lastAdaptiveFlowGpuTiming_.opticalFlowMs * 1.10)
+                    ? (this->lastAdaptiveFlowGpuTiming_.shadowPreprocessMs > 0.0
+                        ? this->lastAdaptiveFlowGpuTiming_.shadowPreprocessMs * 1.10
+                        : std::max(
+                            0.0,
+                            this->lastAdaptiveFlowGpuTiming_.mipmapsMs * 1.10))
                     : 0.0;
+            const double shadowActiveEstimateMs =
+                adaptiveFlowBatch.predictedTotalLsfgMs > 0.0
+                    ? adaptiveFlowBatch.predictedTotalLsfgMs
+                    : (this->lastAdaptiveFlowGpuTiming_.valid
+                        ? std::max(
+                            0.0,
+                            this->lastAdaptiveFlowGpuTiming_.totalLsfgMs)
+                        : 0.0);
             const double shadowHeadroomMs =
                 adaptiveFlowBatch.frameBudgetMs > 0.0
-                    && adaptiveFlowBatch.predictedTotalLsfgMs > 0.0
-                    ? adaptiveFlowBatch.frameBudgetMs
-                        - adaptiveFlowBatch.predictedTotalLsfgMs
+                    && shadowActiveEstimateMs > 0.0
+                    ? adaptiveFlowBatch.frameBudgetMs - shadowActiveEstimateMs
                     : 0.0;
             const bool shadowBudgetAvailable =
                 shadowPreprocessEstimateMs > 0.0
@@ -446,8 +456,7 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
                     this->dispatchAdaptiveFlowPreprocess(
                         data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
                 }
-                if (generationCount == 0 || shadowBudgetAvailable
-                        || adaptiveFlowBatch.preserveOutputDuringTransition) {
+                if (generationCount == 0 || shadowBudgetAvailable) {
                     Core::TimestampQueryPool* shadowTimingPool = nullptr;
                     if (generationCount > 0
                             && data.adaptiveFlowShadowTimingQueryPool.supported()) {
@@ -463,6 +472,14 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
                         shadowTimingPool->write(data.cmdBuffer1.handle(), 2);
                     adaptiveFlowShadowSubmitted = true;
                     data.adaptiveFlowShadowSubmitted = generationCount > 0;
+                } else if (generationCount > 0 && (this->frameIdx % 30U) == 0U) {
+                    std::cerr << "lsfg-vk: adaptive-flow-shadow-deferred"
+                              << " active_ms=" << shadowActiveEstimateMs
+                              << " shadow_ms=" << shadowPreprocessEstimateMs
+                              << " budget_ms=" << adaptiveFlowBatch.frameBudgetMs
+                              << " headroom_ms=" << shadowHeadroomMs
+                              << " generated=" << generationCount
+                              << '\n';
                 }
                 if (generationCount > 0)
                     activeGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
