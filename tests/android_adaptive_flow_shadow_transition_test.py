@@ -58,11 +58,19 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             self.assertIn("data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool", source,
                           context_source.as_posix())
             self.assertIn("shadowBudgetAvailable", source, context_source.as_posix())
-            self.assertIn("preserveOutputDuringTransition", source,
-                          context_source.as_posix())
             self.assertIn("shadowPreprocessEstimateMs", source, context_source.as_posix())
+            self.assertIn("shadowActiveEstimateMs", source, context_source.as_posix())
+            self.assertIn("lastAdaptiveFlowGpuTiming_.shadowPreprocessMs", source,
+                          context_source.as_posix())
+            self.assertIn("lastAdaptiveFlowGpuTiming_.mipmapsMs", source,
+                          context_source.as_posix())
             self.assertIn("generationCount == 0 || shadowBudgetAvailable", source,
                           context_source.as_posix())
+            self.assertNotIn(
+                "|| adaptiveFlowBatch.preserveOutputDuringTransition",
+                source,
+                context_source.as_posix(),
+            )
             self.assertIn("data.cmdBuffer1, pendingGraph", source,
                           context_source.as_posix())
             self.assertIn("generationGraphIndex = pendingIndex", source,
@@ -137,24 +145,13 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
                 context_source.as_posix(),
             )
 
-    def test_pending_transition_preserves_generated_output_during_warmup(self) -> None:
-        backend = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("preserveOutputDuringTransition", backend)
-
+    def test_pending_transition_preserves_generated_output_without_forcing_shadow_work(self) -> None:
         for _, _, context_source, _ in BACKENDS:
             source = context_source.read_text(encoding="utf-8")
             self.assertIn("requestFlowScale", source, context_source.as_posix())
             self.assertIn("pendingFlowWarmupFrames_ = 0", source, context_source.as_posix())
             self.assertIn("pendingFlowGraphIndex_.reset()", source, context_source.as_posix())
             self.assertIn("requestedFlowScale_", source, context_source.as_posix())
-            self.assertIn(
-                "adaptiveFlowBatch.preserveOutputDuringTransition",
-                source,
-                context_source.as_posix(),
-            )
-
             condition_start = source.index(
                 "if (this->pendingFlowWarmupFrames_ + 1 <"
             )
@@ -164,7 +161,12 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             )
             transition_condition = source[condition_start:condition_end]
             self.assertIn(
-                "adaptiveFlowBatch.preserveOutputDuringTransition",
+                "generationCount == 0 || shadowBudgetAvailable",
+                transition_condition,
+                context_source.as_posix(),
+            )
+            self.assertNotIn(
+                "preserveOutputDuringTransition",
                 transition_condition,
                 context_source.as_posix(),
             )
