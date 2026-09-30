@@ -36,7 +36,7 @@ constexpr double kTransitionCooldownSeconds = 0.50;
 constexpr double kOutputTransitionCooldownSeconds = 0.25;
 // The backend's three-frame graph/history handoff is unchanged. This dwell
 // only prevents stale pre-transition evidence from leaking past it.
-constexpr double kFlowTransitionSettleSeconds = 0.20;
+constexpr double kFlowTransitionSettleSeconds = 0.25;
 constexpr double kSchedulerTransitionHoldSeconds = 0.50;
 constexpr double kDownstepEvaluationSeconds = 0.30;
 constexpr double kOutputDownstepEvaluationSeconds = 0.15;
