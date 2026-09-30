@@ -36,56 +36,6 @@ uint64_t framegenWaitTimeoutNs() {
 }
 
 
-void dispatchAlphaStageMajor(const Core::CommandBuffer& buffer,
-        std::array<Shaders::Alpha, 7>& alpha, uint64_t frameCount) {
-    for (size_t stage = 0; stage < Shaders::Alpha::StageCount; ++stage) {
-        Utils::BarrierBuilder barriers(buffer);
-        for (auto it = alpha.rbegin(); it != alpha.rend(); ++it)
-            it->PushBarriers(barriers, frameCount, stage);
-        barriers.build();
-
-        // All Alpha instances use the same stage pipeline from ShaderPool.
-        // Keep it bound while only descriptors/extents change per mip level.
-        alpha.back().BindStagePipeline(buffer, stage);
-        for (auto it = alpha.rbegin(); it != alpha.rend(); ++it)
-            it->DispatchStage(buffer, frameCount, stage);
-    }
-}
-
-void dispatchGammaDeltaPaired(const Core::CommandBuffer& buffer,
-        std::array<Shaders::Gamma, 7>& gamma,
-        std::array<Shaders::Delta, 3>& delta,
-        uint64_t frameCount, uint64_t passIndex,
-        size_t activeGenerationCount) {
-    static_assert(Shaders::Gamma::StageCount == 5);
-    static_assert(Shaders::Delta::StageCount == 10);
-
-    for (size_t level = 0; level < gamma.size(); ++level) {
-        if (level < 4) {
-            gamma.at(level).Dispatch(
-                buffer, frameCount, passIndex, activeGenerationCount);
-            continue;
-        }
-
-        auto& pairedDelta = delta.at(level - 4);
-        for (size_t step = 0; step < Shaders::Delta::StageCount; ++step) {
-            Utils::BarrierBuilder barriers(buffer);
-            if (step < Shaders::Gamma::StageCount)
-                gamma.at(level).PushStepBarriers(barriers, frameCount, step);
-            pairedDelta.PushStepBarriers(barriers, frameCount, step);
-            barriers.build();
-
-            // Gamma must remain first at shared steps: Delta consumes the same
-            // level's temporal inputs and later levels consume prior outputs.
-            if (step < Shaders::Gamma::StageCount) {
-                gamma.at(level).DispatchStep(
-                    buffer, frameCount, passIndex, activeGenerationCount, step);
-            }
-            pairedDelta.DispatchStep(
-                buffer, frameCount, passIndex, activeGenerationCount, step);
-        }
-    }
-}
 }
 
 #ifdef __ANDROID__
@@ -537,7 +487,7 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);
         if (adaptiveFlowTimingPool != nullptr)
             adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 1);
-        dispatchAlphaStageMajor(data.cmdBuffer1, this->alpha, this->frameIdx);
+        for (size_t i = 0; i < 7; i++)\n            this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
         if (generationCount > 0)
             this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
     }
@@ -545,7 +495,7 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 2);
 #else
     this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);
-    dispatchAlphaStageMajor(data.cmdBuffer1, this->alpha, this->frameIdx);
+    for (size_t i = 0; i < 7; i++)\n        this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
     if (generationCount > 0)
         this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
 #endif
@@ -711,21 +661,29 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
 #ifdef __ANDROID__
         if (!this->adaptiveFlowScales_.empty()) {
             const auto generationGraph = this->flowGraph(generationGraphIndex);
-            dispatchGammaDeltaPaired(
-                buf2, *generationGraph.gamma, *generationGraph.delta,
-                this->frameIdx, pass, interpolationCount);
+            for (size_t i = 0; i < 7; i++) {
+                generationGraph.gamma->at(i).Dispatch(
+                    buf2, this->frameIdx, pass, interpolationCount);
+                if (i >= 4)
+                    generationGraph.delta->at(i - 4).Dispatch(
+                        buf2, this->frameIdx, pass, interpolationCount);
+            }
             generationGraph.generate->Dispatch(
                 buf2, this->frameIdx, pass, interpolationCount);
         } else {
-            dispatchGammaDeltaPaired(
-                buf2, this->gamma, this->delta,
-                this->frameIdx, pass, interpolationCount);
+            for (size_t i = 0; i < 7; i++) {
+                this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
+                if (i >= 4)
+                    this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
+            }
             this->generate.Dispatch(buf2, this->frameIdx, pass, interpolationCount);
         }
 #else
-        dispatchGammaDeltaPaired(
-            buf2, this->gamma, this->delta,
-            this->frameIdx, pass, interpolationCount);
+        for (size_t i = 0; i < 7; i++) {
+            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
+            if (i >= 4)
+                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
+        }
         this->generate.Dispatch(buf2, this->frameIdx, pass, interpolationCount);
 #endif
 
@@ -1139,7 +1097,7 @@ void Context::dispatchAdaptiveFlowPreprocess(
     graph.mipmaps->Dispatch(buffer, this->frameIdx);
     if (timingPool != nullptr)
         timingPool->write(buffer.handle(), 1);
-    dispatchAlphaStageMajor(buffer, *graph.alpha, this->frameIdx);
+    for (size_t i = 0; i < 7; ++i)\n        graph.alpha->at(6 - i).Dispatch(buffer, this->frameIdx);
 }
 
 void Context::recordAdaptiveFlowGpuTiming(
