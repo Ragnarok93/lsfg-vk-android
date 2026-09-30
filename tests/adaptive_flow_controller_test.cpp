@@ -129,8 +129,9 @@ int main() {
         // sub-confirmation pressure burst after the faster control-loop tune.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         assert(near(controller.currentScale(), 1.00F));
-        for (int i = 0; i < 3; ++i)
-            controller.observe(sample(16.0, 5.0));
+        // One 100 ms sample remains below the 200 ms ordinary-pressure
+        // confirmation gate. A second sample is now intentionally actionable.
+        controller.observe(sample(16.0, 5.0));
         assert(near(controller.currentScale(), 1.00F));
     }
 
