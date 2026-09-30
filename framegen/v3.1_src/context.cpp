@@ -487,7 +487,8 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);
         if (adaptiveFlowTimingPool != nullptr)
             adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 1);
-        for (size_t i = 0; i < 7; i++)\n            this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
+        for (size_t i = 0; i < 7; i++)
+            this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
         if (generationCount > 0)
             this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
     }
@@ -495,7 +496,8 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 2);
 #else
     this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);
-    for (size_t i = 0; i < 7; i++)\n        this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
+    for (size_t i = 0; i < 7; i++)
+        this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
     if (generationCount > 0)
         this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
 #endif
@@ -1097,7 +1099,8 @@ void Context::dispatchAdaptiveFlowPreprocess(
     graph.mipmaps->Dispatch(buffer, this->frameIdx);
     if (timingPool != nullptr)
         timingPool->write(buffer.handle(), 1);
-    for (size_t i = 0; i < 7; ++i)\n        graph.alpha->at(6 - i).Dispatch(buffer, this->frameIdx);
+    for (size_t i = 0; i < 7; ++i)
+        graph.alpha->at(6 - i).Dispatch(buffer, this->frameIdx);
 }
 
 void Context::recordAdaptiveFlowGpuTiming(
