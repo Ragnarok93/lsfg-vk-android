@@ -986,28 +986,26 @@ namespace {
             : choosePresentMode(
                 deviceInfo->physicalDevice, pCreateInfo->surface,
                 pCreateInfo->presentMode, configuredPresentMode);
-        bool xclipseFifoMailboxBacked = false;
+        bool residentFifoMailboxBacked = false;
 #ifdef __ANDROID__
-        // Samsung's FIFO WSI accepts every synthetic/source present but does not
-        // expose their visible scanout cadence. The device trace shows that this
-        // produces ghosting/hitching while the same batches are stable through
-        // MAILBOX. Keep FIFO as the logical policy (and GameNative refresh vote),
-        // but use the proven nonblocking WSI backend for active Xclipse LSFG.
-        // Adreno and generic devices never enter this branch.
-        if (deviceInfo->xclipseDevice
+        // Keep the resident Android LSFG swapchain nonblocking across generation
+        // Off/On. Logical FIFO remains the configured policy, while MAILBOX is
+        // used as the physical WSI backing when available. Source-only Off then
+        // stays a soft resident bypass instead of crossing back into FIFO.
+        if (activeConf.targeted
                 && configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR) {
             const auto mailboxPresentMode = choosePresentMode(
                 deviceInfo->physicalDevice, pCreateInfo->surface,
                 pCreateInfo->presentMode, VK_PRESENT_MODE_MAILBOX_KHR);
             if (mailboxPresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
                 createInfo.presentMode = mailboxPresentMode;
-                xclipseFifoMailboxBacked = true;
+                residentFifoMailboxBacked = true;
             }
-            std::cerr << "lsfg-vk: init stage=xclipse-fifo-backend"
+            std::cerr << "lsfg-vk: init stage=resident-fifo-backend"
                       << " logicalPresentMode=" << configuredPresentMode
                       << " actualPresentMode=" << createInfo.presentMode
                       << " backend="
-                      << (xclipseFifoMailboxBacked ? "mailbox" : "fifo-fallback")
+                      << (residentFifoMailboxBacked ? "mailbox" : "fifo-fallback")
                       << "\n";
         }
 #endif
@@ -1105,7 +1103,7 @@ namespace {
                       << " chosen_present_mode=" << createInfo.presentMode
                       << " actual_create_info_present_mode=" << createInfo.presentMode
                       << " fifo_backend="
-                      << (xclipseFifoMailboxBacked ? "mailbox" : "native")
+                      << (residentFifoMailboxBacked ? "mailbox" : "native")
                       << " image_count=" << imageCount
                       << " source_queue=application-present"
                       << " generated_queue=compatibility-selected"
