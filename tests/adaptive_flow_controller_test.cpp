@@ -107,8 +107,8 @@ int main() {
         // one-state controller so recovery does not require a chain of costly
         // Flow-graph handoffs.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
-        bool lowered = false;
-        for (int i = 0; i < 16 && !lowered; ++i) {
+        bool changed = false;
+        for (int i = 0; i < 16 && !changed; ++i) {
             auto observation = sample(
                 36.3, 11.7, 66.666, false, false,
                 97.0, true, true, false, true);
@@ -118,9 +118,10 @@ int main() {
             observation.outputTargetSatisfied = false;
             observation.sourceFps = 12.4;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.90F);
+            changed = controller.telemetry().changed;
         }
-        assert(lowered);
+        assert(changed);
+        assert(near(controller.currentScale(), 0.90F));
         assert(controller.telemetry().stateIndex == 2);
     }
 
@@ -139,8 +140,8 @@ int main() {
         // move two discrete Flow states within roughly half a second, reducing
         // both recovery latency and the number of graph-history handoffs.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        bool lowered = false;
-        for (int i = 0; i < 6 && !lowered; ++i) {
+        bool changed = false;
+        for (int i = 0; i < 6 && !changed; ++i) {
             auto observation = sample(16.0, 5.0, 50.0);
             observation.outputCadenceValid = true;
             observation.outputTargeted = true;
@@ -149,9 +150,10 @@ int main() {
             observation.outputFps = 42.0;
             observation.sourceFps = 16.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.90F);
+            changed = controller.telemetry().changed;
         }
-        assert(lowered);
+        assert(changed);
+        assert(near(controller.currentScale(), 0.90F));
 
     }
 
