@@ -158,6 +158,58 @@ int main() {
     }
 
     {
+        // Once pressure has cleared and the larger recovery step is predicted
+        // to fit comfortably, one confirmed recovery decision should regain
+        // two .05 Flow states. This both restores quality at least twice as
+        // fast and halves the number of graph/history handoffs needed.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        bool lowered = false;
+        for (int i = 0; i < 8 && !lowered; ++i) {
+            auto observation = sample(16.0, 5.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = false;
+            observation.outputDeficit = true;
+            observation.outputFps = 42.0;
+            observation.sourceFps = 16.0;
+            controller.observe(observation);
+            lowered = near(controller.currentScale(), 0.90F);
+        }
+        assert(lowered);
+
+        // Keep the target missed long enough to commit the downstep rather
+        // than letting the recovery path merely revert an unproven probe.
+        for (int i = 0; i < 4; ++i) {
+            auto observation = sample(12.0, 3.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = false;
+            observation.outputDeficit = true;
+            observation.outputFps = 44.0;
+            observation.sourceFps = 18.0;
+            controller.observe(observation);
+        }
+        assert(near(controller.currentScale(), 0.90F));
+
+        bool recovered = false;
+        for (int i = 0; i < 40 && !recovered; ++i) {
+            auto observation = sample(8.0, 2.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = true;
+            observation.outputDeficit = false;
+            observation.outputFps = 65.0;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+            recovered = controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::SustainedHeadroom;
+        }
+        assert(recovered);
+        assert(near(controller.currentScale(), 1.00F));
+        assert(controller.telemetry().stateIndex == 0);
+    }
+
+    {
         // Sustained pressure with a material scale-sensitive contribution lowers
         // one state, then observes a cooldown instead of cascading immediately.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
