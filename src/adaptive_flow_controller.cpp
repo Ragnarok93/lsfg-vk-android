@@ -24,22 +24,25 @@ constexpr double kRecoveryPredictedRatio = 0.82;
 constexpr double kMinimumFlowBudgetRatio = 0.10;
 constexpr double kMinimumPredictedReliefRatio = 0.025;
 constexpr double kMinimumGlobalPressureLsfgBudgetRatio = 0.40;
-constexpr double kDownConfirmSeconds = 0.90;
-constexpr double kGlobalDownConfirmSeconds = 0.50;
-// A missed output target is the user-visible contract; react faster when it
-// is the only actionable pressure signal.
-constexpr double kOutputDownConfirmSeconds = 0.45;
-constexpr double kUpConfirmSeconds = 4.0;
+constexpr double kDownConfirmSeconds = 0.40;
+constexpr double kGlobalDownConfirmSeconds = 0.20;
+// Target/source pressure is user-visible; keep this loop comfortably faster
+// than the previous confirmation/evaluation/cooldown chain.
+constexpr double kOutputDownConfirmSeconds = 0.15;
+constexpr double kUpConfirmSeconds = 1.75;
 constexpr double kGlobalGpuPressurePercent = 96.0;
 constexpr double kGlobalGpuRecoveryPercent = 88.0;
-constexpr double kTransitionCooldownSeconds = 1.25;
-constexpr double kOutputTransitionCooldownSeconds = 0.75;
-constexpr double kFlowTransitionSettleSeconds = 0.50;
-constexpr double kSchedulerTransitionHoldSeconds = 1.25;
-constexpr double kDownstepEvaluationSeconds = 0.80;
-constexpr double kOutputDownstepEvaluationSeconds = 0.40;
-constexpr double kDownstepNoBenefitHoldSeconds = 4.0;
+constexpr double kTransitionCooldownSeconds = 0.50;
+constexpr double kOutputTransitionCooldownSeconds = 0.25;
+// The backend's three-frame graph/history handoff is unchanged. This dwell
+// only prevents stale pre-transition evidence from leaking past it.
+constexpr double kFlowTransitionSettleSeconds = 0.20;
+constexpr double kSchedulerTransitionHoldSeconds = 0.50;
+constexpr double kDownstepEvaluationSeconds = 0.30;
+constexpr double kOutputDownstepEvaluationSeconds = 0.15;
+constexpr double kDownstepNoBenefitHoldSeconds = 2.0;
 constexpr double kSourceTargetSatisfiedRatio = 0.98;
+constexpr double kExploratorySourceDropRatio = 0.97;
 constexpr double kMaterialPressureRatioRelief = 0.05;
 constexpr double kMaterialOutputGainRatio = 1.02;
 constexpr double kMaterialSourceGainRatio = 1.03;
@@ -79,6 +82,8 @@ void AdaptiveFlowController::configure(bool enabled, AdaptiveFlowPreset preset) 
     downstepBenefitSeen_ = false;
     downstepOutputDriven_ = false;
     downstepSourceDriven_ = false;
+    downstepExploratorySourceDriven_ = false;
+    resetFixedExploration();
     resetEvidence();
     selectTargetState();
     if (!enabled_)
@@ -100,6 +105,12 @@ void AdaptiveFlowController::resetEvidence() {
     headroomSeconds_ = 0.0;
 }
 
+void AdaptiveFlowController::resetFixedExploration() {
+    fixedExplorationReferenceValid_ = false;
+    fixedExplorationProbePending_ = false;
+    fixedExplorationBestSourceFps_ = 0.0;
+}
+
 void AdaptiveFlowController::reset() {
     observedSeconds_ = 0.0;
     cooldownUntilSeconds_ = 0.0;
@@ -110,6 +121,8 @@ void AdaptiveFlowController::reset() {
     downstepBenefitSeen_ = false;
     downstepOutputDriven_ = false;
     downstepSourceDriven_ = false;
+    downstepExploratorySourceDriven_ = false;
+    resetFixedExploration();
     resetEvidence();
     selectTargetState();
     if (!enabled_)
@@ -128,6 +141,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     telemetry_.outputDeficit = false;
     telemetry_.outputPressure = false;
     telemetry_.sourcePressure = false;
+    telemetry_.exploratorySourcePressure = false;
+    telemetry_.sourceReferenceFps = 0.0;
     telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
 
     if (!enabled_) {
@@ -204,24 +219,65 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool computePressure =
         freshGeneratedComputePressure || retainedSevereComputePressure;
     const bool wsiPressure = observation.wsiPresentationPressure;
-    // Adaptive output targets are actionable. In Fixed mode the separate clean
-    // source target governs Flow; an output deficit can mean the selected
-    // multiplier exceeds what the display can present.
+    const bool fixedMultiplierMode =
+        observation.fixedMultiplierMode
+        || observation.fixedMultiplierBaseTarget;
+    const bool sourceSampleValid =
+        observation.sourceFps > 0.0 && std::isfinite(observation.sourceFps);
+    const bool sourceTargetValid =
+        fixedMultiplierMode
+        && observation.sourceTargetFps > 0.0
+        && std::isfinite(observation.sourceTargetFps);
+
+    // A clean source target always supersedes exploratory state. If startup
+    // never produced two trustworthy source-only intervals, use a separate
+    // recovery reference to probe lower Flow states one at a time. A probe is
+    // retained only when the source cadence measurably improves.
+    if (!fixedMultiplierMode || sourceTargetValid) {
+        resetFixedExploration();
+    } else if (sourceSampleValid
+            && observation.generatedWorkSample
+            && observation.generationCount > 0) {
+        if (!fixedExplorationReferenceValid_) {
+            fixedExplorationReferenceValid_ = true;
+            fixedExplorationBestSourceFps_ = observation.sourceFps;
+            fixedExplorationProbePending_ = true;
+        } else if (!downstepEvaluationActive_
+                && observation.sourceFps > fixedExplorationBestSourceFps_) {
+            fixedExplorationBestSourceFps_ = observation.sourceFps;
+        }
+
+        if (!fixedExplorationProbePending_
+                && observation.sourceFps
+                    < fixedExplorationBestSourceFps_
+                        * kExploratorySourceDropRatio) {
+            fixedExplorationProbePending_ = true;
+        }
+    }
+
+    // Adaptive output targets are actionable. In Fixed mode the clean source
+    // target governs Flow; a fixed output deficit alone may only reflect an
+    // unreachable display cadence and must not back off the multiplier.
     const bool actionableOutputDeficit =
-        observation.outputDeficit && !observation.fixedMultiplierBaseTarget;
+        observation.outputDeficit && !fixedMultiplierMode;
     const bool outputPressure =
         observation.outputCadenceValid
         && observation.outputTargeted
         && actionableOutputDeficit
         && !observation.outputTargetSatisfied;
     const bool sourcePressure =
-        observation.fixedMultiplierBaseTarget
-        && observation.sourceTargetFps > 0.0
-        && std::isfinite(observation.sourceTargetFps)
-        && observation.sourceFps > 0.0
-        && std::isfinite(observation.sourceFps)
+        sourceTargetValid
+        && sourceSampleValid
         && observation.sourceFps
             < observation.sourceTargetFps * kSourceTargetSatisfiedRatio;
+    const bool exploratorySourcePressure =
+        fixedMultiplierMode
+        && !sourceTargetValid
+        && fixedExplorationReferenceValid_
+        && fixedExplorationProbePending_
+        && sourceSampleValid
+        && observation.generatedWorkSample
+        && observation.generationCount > 0;
     const bool globalGpuPressure =
         observation.globalPressureValid
         && observation.globalGpuUsagePercent >= kGlobalGpuPressurePercent;
@@ -231,12 +287,18 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool wsiFlowPressure =
         wsiPressure && globalGpuPressure && actionableOutputDeficit;
     const bool recoveryWsiPressure =
-        wsiPressure && !observation.fixedMultiplierBaseTarget;
+        wsiPressure && !fixedMultiplierMode;
     telemetry_.computePressure = computePressure;
     telemetry_.wsiPressure = wsiPressure;
     telemetry_.globalPressure = globalPressure;
     telemetry_.outputPressure = outputPressure;
     telemetry_.sourcePressure = sourcePressure;
+    telemetry_.exploratorySourcePressure = exploratorySourcePressure;
+    telemetry_.sourceReferenceFps = sourceTargetValid
+        ? observation.sourceTargetFps
+        : (fixedExplorationReferenceValid_
+            ? fixedExplorationBestSourceFps_
+            : 0.0);
 
     // Scheduler transitions suppress ordinary near-budget noise, but they
     // must not hide a completed generated batch that is already slower than
@@ -319,12 +381,20 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                 && !downstepBaselineWsiPressure_)
             || (downstepSourceDriven_ && sourcePressure);
 
-        downstepBenefitSeen_ = downstepBenefitSeen_
-            || outputBenefit || sourceBenefit || computeBenefit
-            || wsiBenefit || globalBenefit || targetPressureRemains;
+        if (downstepExploratorySourceDriven_) {
+            // Missing-baseline probes must recover source cadence. Cheaper GPU
+            // work alone is not enough to justify a quality reduction.
+            downstepBenefitSeen_ = downstepBenefitSeen_ || sourceBenefit;
+        } else {
+            downstepBenefitSeen_ = downstepBenefitSeen_
+                || outputBenefit || sourceBenefit || computeBenefit
+                || wsiBenefit || globalBenefit || targetPressureRemains;
+        }
 
         const double downstepEvaluationSeconds =
-            (downstepOutputDriven_ || downstepSourceDriven_)
+            (downstepOutputDriven_
+                || downstepSourceDriven_
+                || downstepExploratorySourceDriven_)
                 ? kOutputDownstepEvaluationSeconds
                 : kDownstepEvaluationSeconds;
         if (observedSeconds_ - downstepEvaluationStartedSeconds_
@@ -339,9 +409,18 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         telemetry_.downstepEvaluationActive = false;
         resetEvidence();
         if (downstepBenefitSeen_) {
+            if (downstepExploratorySourceDriven_) {
+                fixedExplorationReferenceValid_ = true;
+                fixedExplorationBestSourceFps_ = std::max(
+                    fixedExplorationBestSourceFps_, observation.sourceFps);
+                const auto presetStates = states(preset_);
+                fixedExplorationProbePending_ =
+                    telemetry_.stateIndex + 1 < presetStates.size();
+            }
             downstepBenefitSeen_ = false;
             downstepOutputDriven_ = false;
             downstepSourceDriven_ = false;
+            downstepExploratorySourceDriven_ = false;
             telemetry_.reason =
                 AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
             return telemetry_.currentScale;
@@ -352,8 +431,11 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             downstepPreviousIndex_, presetStates.size() - 1);
         telemetry_.currentScale = presetStates[telemetry_.stateIndex];
         telemetry_.changed = true;
+        if (downstepExploratorySourceDriven_)
+            fixedExplorationProbePending_ = false;
         downstepOutputDriven_ = false;
         downstepSourceDriven_ = false;
+        downstepExploratorySourceDriven_ = false;
         telemetry_.reason = AdaptiveFlowDecisionReason::DownstepReverted;
         cooldownUntilSeconds_ =
             observedSeconds_ + kDownstepNoBenefitHoldSeconds;
@@ -374,8 +456,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
 
     const bool pressure =
         computePressure || globalPressure || wsiFlowPressure
-        || outputPressure || sourcePressure;
+        || outputPressure || sourcePressure || exploratorySourcePressure;
     const bool targetPressure = outputPressure || sourcePressure;
+    const bool fastPressure = targetPressure || exploratorySourcePressure;
 
     if (pressure && canLower) {
         const double currentScale = static_cast<double>(presetStates[index]);
@@ -389,19 +472,26 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         // material-contribution gate under local and global pressure so quality
         // is never traded for a few tenths of a millisecond that cannot
         // plausibly recover the requested cadence.
+        // A trustworthy source/output miss remains authoritative all the way
+        // to the preset floor. Do not stop early because one 0.05 Flow step
+        // looks small in isolation. Missing-baseline exploration retains the
+        // material-contribution probe gate.
         const bool targetDrivenPressure = targetPressure && !computePressure;
-        const bool materiallyUsefulForTarget =
+        const bool exploratoryDrivenPressure =
+            exploratorySourcePressure && !targetPressure && !computePressure;
+        const bool materiallyUsefulForExploration =
             observation.flowMs >= 1.0 && predictedReliefMs >= 0.25;
         const bool globalOnlyPressure =
-            globalPressure && !computePressure && !targetPressure;
+            globalPressure && !computePressure && !fastPressure;
         const bool globallyProfitable =
             !globalOnlyPressure
             || telemetry_.pressureRatio >= kMinimumGlobalPressureLsfgBudgetRatio;
-        if ((targetDrivenPressure
-                    ? !materiallyUsefulForTarget
-                    : (!targetPressure
+        if ((!targetDrivenPressure
+                && ((exploratoryDrivenPressure
+                        && !materiallyUsefulForExploration)
+                    || (!fastPressure
                         && (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
-                            || predictedReliefRatio < kMinimumPredictedReliefRatio)))
+                            || predictedReliefRatio < kMinimumPredictedReliefRatio))))
                 || !globallyProfitable) {
             resetEvidence();
             telemetry_.reason = AdaptiveFlowDecisionReason::InsufficientFlowContribution;
@@ -411,7 +501,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         pressureSeconds_ += evidenceSeconds;
         headroomSeconds_ = 0.0;
         const double downConfirmSeconds =
-            targetPressure
+            fastPressure
                 ? kOutputDownConfirmSeconds
                 : (globalPressure
                     ? kGlobalDownConfirmSeconds
@@ -436,6 +526,10 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             downstepBaselineGlobalPressure_ = globalPressure;
             downstepOutputDriven_ = outputPressure;
             downstepSourceDriven_ = sourcePressure;
+            downstepExploratorySourceDriven_ =
+                exploratorySourcePressure && !targetPressure;
+            if (downstepExploratorySourceDriven_)
+                fixedExplorationProbePending_ = false;
             telemetry_.stateIndex++;
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
             telemetry_.changed = true;
@@ -444,11 +538,13 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                 ? AdaptiveFlowDecisionReason::SustainedOutputPressure
                 : (sourcePressure
                     ? AdaptiveFlowDecisionReason::SustainedSourcePressure
-                    : (globalPressure
-                        ? AdaptiveFlowDecisionReason::SustainedGlobalPressure
-                        : AdaptiveFlowDecisionReason::SustainedPressure));
+                    : (downstepExploratorySourceDriven_
+                        ? AdaptiveFlowDecisionReason::ExploratorySourcePressure
+                        : (globalPressure
+                            ? AdaptiveFlowDecisionReason::SustainedGlobalPressure
+                            : AdaptiveFlowDecisionReason::SustainedPressure)));
             cooldownUntilSeconds_ = observedSeconds_
-                + (targetPressure
+                + (fastPressure
                     ? kOutputTransitionCooldownSeconds
                     : kTransitionCooldownSeconds);
             resetEvidence();
@@ -464,13 +560,12 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         !observation.globalPressureValid
         || observation.globalGpuUsagePercent <= kGlobalGpuRecoveryPercent;
     const bool outputRecoverySatisfied =
-        observation.fixedMultiplierBaseTarget
+        fixedMultiplierMode
         || !observation.outputTargeted
         || observation.outputTargetSatisfied;
     const bool sourceRecoverySatisfied =
-        !observation.fixedMultiplierBaseTarget
-        || (observation.sourceTargetFps > 0.0
-            && std::isfinite(observation.sourceTargetFps)
+        !fixedMultiplierMode
+        || (sourceTargetValid
             && observation.sourceFps >= observation.sourceTargetFps
                 * kSourceTargetSatisfiedRatio);
     const bool retainedHistoryRecoveryEligible =
@@ -553,6 +648,7 @@ const char* AdaptiveFlowController::reasonName(AdaptiveFlowDecisionReason reason
     case AdaptiveFlowDecisionReason::SustainedGlobalPressure: return "sustained_global_gpu_pressure";
     case AdaptiveFlowDecisionReason::SustainedOutputPressure: return "sustained_output_pressure";
     case AdaptiveFlowDecisionReason::SustainedSourcePressure: return "sustained_source_pressure";
+    case AdaptiveFlowDecisionReason::ExploratorySourcePressure: return "exploratory_source_pressure";
     case AdaptiveFlowDecisionReason::EvaluatingDownstep: return "evaluating_downstep";
     case AdaptiveFlowDecisionReason::DownstepBenefitConfirmed: return "downstep_benefit_confirmed";
     case AdaptiveFlowDecisionReason::DownstepReverted: return "downstep_reverted_no_benefit";

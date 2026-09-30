@@ -195,7 +195,9 @@ public:
 
 private:
     bool hasBaseline_{false};
-    // Confirm an eligible no-generated interval before trusting the baseline.
+    // Require two consecutive eligible source-only intervals before trusting
+    // the baseline. History-maintenance/generated startup intervals are never
+    // clean baseline evidence.
     bool baselinePriming_{false};
     double baselineIntervalSeconds_{};
     FixedSourceCadenceTelemetry telemetry_{};

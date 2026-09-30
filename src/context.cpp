@@ -2610,6 +2610,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .wsiLossRate = presentationCapacity.wsiRejectionRatio,
             .sourceFps = observationSourceFps,
             .sourceTargetFps = fixedMultiplierBaseSourceFps,
+            .fixedMultiplierMode =
+                !conf.adaptiveFramegen && conf.multiplier > 1,
             .outputFps = outputCadence.outputFps,
             .outputTargetFps = outputTargetFps,
             .outputCadenceValid = outputCadence.valid,
@@ -2695,6 +2697,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " source_target_fps=" << observation.sourceTargetFps
                       << " source_pressure="
                       << (flowTelemetry.sourcePressure ? 1 : 0)
+                      << " source_exploration="
+                      << (flowTelemetry.exploratorySourcePressure ? 1 : 0)
+                      << " source_reference_fps="
+                      << flowTelemetry.sourceReferenceFps
+                      << " fixed_multiplier_mode="
+                      << (observation.fixedMultiplierMode ? 1 : 0)
                       << " target_fps=" << conf.fpsLimit
                       << " output_target_valid=" << (outputTargetValid ? 1 : 0)
                       << " output_targeted=" << (outputTargeted ? 1 : 0)
@@ -2733,6 +2741,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "previous=%.3f requested=%.3f active=%.3f transition=%d "
                 "warmup_remaining=%u timing_valid=%d reason=%s "
                 "source_fps=%.3f source_target_fps=%.3f source_pressure=%d "
+                "source_exploration=%d source_reference_fps=%.3f fixed_multiplier_mode=%d "
                 "target_fps=%u output_target_valid=%d multiplier=%zu adaptive=%d "
                 "predicted_next_total_ms=%.3f flow_ms=%.3f lsfg_ms=%.3f "
                 "budget_ms=%.3f generation_count=%zu generated_work=%d retained_timing=%d "
@@ -2755,6 +2764,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 observation.sourceFps,
                 observation.sourceTargetFps,
                 flowTelemetry.sourcePressure ? 1 : 0,
+                flowTelemetry.exploratorySourcePressure ? 1 : 0,
+                flowTelemetry.sourceReferenceFps,
+                observation.fixedMultiplierMode ? 1 : 0,
                 conf.fpsLimit,
                 outputTargetValid ? 1 : 0,
                 conf.multiplier,
@@ -3521,7 +3533,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_flow_fixed_target_satisfied="
                       << (this->adaptiveFlowFixedTargetSatisfied_ ? 1 : 0)
                       << " adaptive_flow_source_target_fps="
-                      << (this->adaptiveFlowFixedTargeted_
+                      << (this->fixedSourceCadenceTracker_.telemetry().baselineValid
                           ? this->fixedSourceCadenceTracker_.telemetry()
                                 .baselineSourceFps
                           : 0.0)
@@ -3530,6 +3542,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                               .sourcePressure
                           ? 1
                           : 0)
+                      << " adaptive_flow_source_exploration="
+                      << (this->adaptiveFlowController_.telemetry()
+                              .exploratorySourcePressure
+                          ? 1
+                          : 0)
+                      << " adaptive_flow_source_reference_fps="
+                      << this->adaptiveFlowController_.telemetry().sourceReferenceFps
                       << " adaptive_flow_requested=" << this->adaptiveFlowRequestedScale_
                       << " adaptive_flow_active=" << this->adaptiveFlowActiveScale_
                       << " adaptive_flow_transition="

@@ -934,33 +934,56 @@ void FixedSourceCadenceTracker::observe(
     constexpr double kSourceBaselineAlpha = 0.35;
     const double intervalSeconds =
         std::chrono::duration<double>(sourceInterval).count();
-    if (!(intervalSeconds > 0.0) || !std::isfinite(intervalSeconds)
-            || !generationAllowed)
+    if (!(intervalSeconds > 0.0) || !std::isfinite(intervalSeconds))
         return;
+
+    const bool cleanSourceOnly =
+        generationAllowed
+        && previousDispatchedGeneratedFrames == 0
+        && previousObservation == SourceCadenceObservation::SourceOnly;
+
+    if (!cleanSourceOnly) {
+        // A candidate becomes invalid as soon as history maintenance or
+        // generated work intervenes. This prevents startup/generated cadence
+        // from being mistaken for the clean fixed source reference.
+        if (baselinePriming_) {
+            hasBaseline_ = false;
+            baselinePriming_ = false;
+            baselineIntervalSeconds_ = 0.0;
+        }
+        telemetry_.baselineValid = hasBaseline_;
+        telemetry_.baselineSourceFps =
+            hasBaseline_ && baselineIntervalSeconds_ > 0.0
+                ? 1.0 / baselineIntervalSeconds_
+                : 0.0;
+        telemetry_.intervalRatio =
+            hasBaseline_ && baselineIntervalSeconds_ > 0.0
+                ? intervalSeconds / baselineIntervalSeconds_
+                : 1.0;
+        return;
+    }
 
     if (!hasBaseline_) {
         baselineIntervalSeconds_ = intervalSeconds;
         hasBaseline_ = true;
         baselinePriming_ = true;
+        telemetry_.baselineValid = false;
+        telemetry_.baselineSourceFps = 0.0;
+        telemetry_.intervalRatio = 1.0;
         return;
     }
-    if (baselinePriming_ && previousDispatchedGeneratedFrames == 0) {
+
+    if (baselinePriming_) {
         baselineIntervalSeconds_ = intervalSeconds;
         baselinePriming_ = false;
     } else {
-        baselinePriming_ = false;
-        // Generated work and history maintenance cannot redefine the clean
-        // source target. Only genuine source-only cadence can move it.
-        if (previousDispatchedGeneratedFrames == 0
-                && previousObservation == SourceCadenceObservation::SourceOnly) {
-            baselineIntervalSeconds_ += kSourceBaselineAlpha
-                * (intervalSeconds - baselineIntervalSeconds_);
-        }
+        baselineIntervalSeconds_ += kSourceBaselineAlpha
+            * (intervalSeconds - baselineIntervalSeconds_);
     }
+
     telemetry_.intervalRatio = intervalSeconds / baselineIntervalSeconds_;
-    telemetry_.baselineValid = !baselinePriming_;
-    telemetry_.baselineSourceFps = telemetry_.baselineValid
-        ? 1.0 / baselineIntervalSeconds_ : 0.0;
+    telemetry_.baselineValid = true;
+    telemetry_.baselineSourceFps = 1.0 / baselineIntervalSeconds_;
 }
 
 void FixedSourceCadenceTracker::reset() {
@@ -969,7 +992,6 @@ void FixedSourceCadenceTracker::reset() {
     baselineIntervalSeconds_ = 0.0;
     telemetry_ = {};
 }
-
 
 AdaptiveFrameScheduler::AdaptiveFrameScheduler(
         uint32_t targetFps, std::size_t maxGeneratedFrames)

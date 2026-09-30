@@ -26,6 +26,7 @@ enum class AdaptiveFlowDecisionReason : uint8_t {
     SustainedGlobalPressure,
     SustainedOutputPressure,
     SustainedSourcePressure,
+    ExploratorySourcePressure,
     EvaluatingDownstep,
     DownstepBenefitConfirmed,
     DownstepReverted,
@@ -56,6 +57,9 @@ struct AdaptiveFlowObservation {
     double sourceFps{};
     /// Clean source cadence target used by Fixed multiplier mode.
     double sourceTargetFps{};
+    /// True whenever Fixed multiplier mode is active, even before a clean
+    /// source reference has been established.
+    bool fixedMultiplierMode{false};
     double outputFps{};
     /// Required output cadence: Adaptive LSFG target or fixed multiplier base.
     double outputTargetFps{};
@@ -104,6 +108,8 @@ struct AdaptiveFlowTelemetry {
     bool outputDeficit{false};
     bool outputPressure{false};
     bool sourcePressure{false};
+    bool exploratorySourcePressure{false};
+    double sourceReferenceFps{};
 };
 
 /// A quality-seeking governor for Flow Scale. It owns no Vulkan objects and
@@ -129,6 +135,7 @@ public:
 
 private:
     void resetEvidence();
+    void resetFixedExploration();
     void selectTargetState();
 
     bool enabled_{false};
@@ -147,6 +154,7 @@ private:
     // the same post-change benefit check before another state is selected.
     bool downstepOutputDriven_{false};
     bool downstepSourceDriven_{false};
+    bool downstepExploratorySourceDriven_{false};
     std::size_t downstepPreviousIndex_{};
     double downstepEvaluationStartedSeconds_{};
     double downstepBaselinePressureRatio_{};
@@ -160,6 +168,13 @@ private:
     bool downstepBaselineComputePressure_{false};
     bool downstepBaselineWsiPressure_{false};
     bool downstepBaselineGlobalPressure_{false};
+
+    // When Fixed mode starts without a trustworthy source-only baseline,
+    // lower Flow experimentally and retain only steps that measurably recover
+    // source cadence. This reference never becomes the clean fixed target.
+    bool fixedExplorationReferenceValid_{false};
+    bool fixedExplorationProbePending_{false};
+    double fixedExplorationBestSourceFps_{};
 
     AdaptiveFlowTelemetry telemetry_{};
 };

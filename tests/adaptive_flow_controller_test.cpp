@@ -125,11 +125,11 @@ int main() {
     }
 
     {
-        // Adaptive always starts at the preset target and does not move for a
-        // short pressure burst.
+        // Adaptive always starts at the preset target and still rejects a
+        // sub-confirmation pressure burst after the faster control-loop tune.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         assert(near(controller.currentScale(), 1.00F));
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < 3; ++i)
             controller.observe(sample(16.0, 5.0));
         assert(near(controller.currentScale(), 1.00F));
     }
@@ -652,9 +652,9 @@ int main() {
             controller.telemetry().reason
                 == AdaptiveFlowDecisionReason::FlowTransition);
 
-        // The post-transition samples must first re-establish the evaluation
-        // window; the barrier cannot cascade into another immediate downstep.
-        for (int i = 0; i < 7; ++i)
+        // The backend transition remains the hard barrier; the first
+        // post-transition samples cannot immediately cascade another downstep.
+        for (int i = 0; i < 2; ++i)
             controller.observe(sample(16.2, 5.0));
         assert(near(controller.currentScale(), 0.95F));
     }
@@ -694,6 +694,50 @@ int main() {
         assert(controller.currentScale() <= 0.90F);
         assert(controller.telemetry().reason
             != AdaptiveFlowDecisionReason::DownstepReverted);
+    }
+
+    {
+        // A trustworthy fixed source target remains authoritative even when
+        // the next 0.05 step has little predicted standalone relief. Keep
+        // lowering until the source target recovers or the Auto floor is hit.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
+        for (int i = 0; i < 200 && !near(controller.currentScale(), 0.25F); ++i) {
+            auto observation = sample(8.0, 0.6, 50.0);
+            observation.fixedMultiplierMode = true;
+            observation.fixedMultiplierBaseTarget = true;
+            observation.sourceFps = 20.0;
+            observation.sourceTargetFps = 30.0;
+            controller.observe(observation);
+        }
+        assert(near(controller.currentScale(), 0.25F));
+    }
+
+    {
+        // Fixed mode can start generating before a trustworthy source-only
+        // baseline exists. Bootstrap with one bounded Flow probe and continue
+        // only while source cadence measurably improves.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
+        for (int i = 0; i < 8; ++i) {
+            auto observation = sample(8.0, 5.0, 50.0);
+            observation.fixedMultiplierMode = true;
+            observation.sourceFps = i < 3 ? 20.0 : 22.0;
+            controller.observe(observation);
+        }
+        assert(controller.currentScale() <= 0.90F);
+        assert(controller.telemetry().sourceReferenceFps >= 21.9);
+    }
+
+    {
+        // A missing-baseline exploratory step that does not recover source
+        // cadence is reverted instead of walking quality to the minimum.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
+        for (int i = 0; i < 8; ++i) {
+            auto observation = sample(8.0, 5.0, 50.0);
+            observation.fixedMultiplierMode = true;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+        }
+        assert(near(controller.currentScale(), 1.00F));
     }
 
     {

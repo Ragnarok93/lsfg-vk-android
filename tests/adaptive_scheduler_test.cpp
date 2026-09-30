@@ -967,15 +967,29 @@ int main() {
 
     {
         // Fixed source cadence is a signal for Flow Scale, never a generation
-        // limit. Warmup and history maintenance do not establish a fast target.
+        // limit. Warmup/history/generated startup intervals cannot establish
+        // the clean fixed source reference.
         FixedSourceCadenceTracker tracker;
         tracker.observe(8ms, 0, false, SourceCadenceObservation::SourceOnly);
         assert(!tracker.telemetry().baselineValid);
         tracker.observe(16ms, 0, true, SourceCadenceObservation::HistoryMaintenance);
         assert(!tracker.telemetry().baselineValid);
         tracker.observe(40ms, 0, true, SourceCadenceObservation::HistoryMaintenance);
+        assert(!tracker.telemetry().baselineValid);
+        tracker.observe(55ms, 3, true, SourceCadenceObservation::Generated);
+        assert(!tracker.telemetry().baselineValid);
+
+        tracker.observe(40ms, 0, true, SourceCadenceObservation::SourceOnly);
+        assert(!tracker.telemetry().baselineValid);
+        tracker.observe(50ms, 0, true, SourceCadenceObservation::Generated);
+        assert(!tracker.telemetry().baselineValid);
+
+        tracker.observe(40ms, 0, true, SourceCadenceObservation::SourceOnly);
+        assert(!tracker.telemetry().baselineValid);
+        tracker.observe(40ms, 0, true, SourceCadenceObservation::SourceOnly);
         assert(tracker.telemetry().baselineValid);
         assert(std::abs(tracker.telemetry().baselineSourceFps - 25.0) < 0.01);
+
         for (int i = 0; i < 8; ++i)
             tracker.observe(70ms, 3, true, SourceCadenceObservation::Generated);
         assert(tracker.telemetry().intervalRatio > 1.7);
