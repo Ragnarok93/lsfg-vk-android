@@ -45,12 +45,16 @@ struct AdaptiveFlowGpuTiming {
     double mipmapsMs{0.0};
     double opticalFlowMs{0.0};
     double totalLsfgMs{0.0};
+    double shadowMipmapsMs{0.0};
+    double shadowAlphaMs{0.0};
+    double shadowPreprocessMs{0.0};
     size_t generationCount{0};
     uint64_t sessionEpoch{0};
     uint64_t batchId{0};
     double frameBudgetMs{0.0};
     double predictedTotalLsfgMs{0.0};
     bool transitionActive{false};
+    bool shadowPreprocessSubmitted{false};
     bool valid{false};
 };
 

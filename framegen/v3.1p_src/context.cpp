@@ -299,6 +299,8 @@ Context::Context(Vulkan& vk,
 #ifdef __ANDROID__
         data.adaptiveFlowTimingQueryPool =
             Core::TimestampQueryPool(vk.device, 4);
+        data.adaptiveFlowShadowTimingQueryPool =
+            Core::TimestampQueryPool(vk.device, 3);
 #endif
     }
 
@@ -394,6 +396,7 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
 #ifdef __ANDROID__
     data.adaptiveFlowTransitionCycle =
         !this->adaptiveFlowScales_.empty() && this->pendingFlowGraphIndex_.has_value();
+    data.adaptiveFlowShadowSubmitted = false;
     data.adaptiveFlowBatch = adaptiveFlowBatch;
 #endif
 
@@ -495,11 +498,21 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
                 }
                 if (generationCount == 0 || shadowBudgetAvailable
                         || adaptiveFlowBatch.preserveOutputDuringTransition) {
+                    Core::TimestampQueryPool* shadowTimingPool = nullptr;
+                    if (generationCount > 0
+                            && data.adaptiveFlowShadowTimingQueryPool.supported()) {
+                        shadowTimingPool = &data.adaptiveFlowShadowTimingQueryPool;
+                        shadowTimingPool->reset(data.cmdBuffer1.handle());
+                        shadowTimingPool->write(data.cmdBuffer1.handle(), 0);
+                    }
                     this->dispatchAdaptiveFlowPreprocess(
                         data.cmdBuffer1,
                         pendingGraph,
-                        generationCount == 0 ? adaptiveFlowTimingPool : nullptr);
+                        generationCount == 0 ? adaptiveFlowTimingPool : shadowTimingPool);
+                    if (shadowTimingPool != nullptr)
+                        shadowTimingPool->write(data.cmdBuffer1.handle(), 2);
                     adaptiveFlowShadowSubmitted = true;
+                    data.adaptiveFlowShadowSubmitted = generationCount > 0;
                 }
                 if (generationCount > 0)
                     activeGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
@@ -952,6 +965,8 @@ Context::Context(Vulkan& vk,
 #ifdef __ANDROID__
         data.adaptiveFlowTimingQueryPool =
             Core::TimestampQueryPool(vk.device, 4);
+        data.adaptiveFlowShadowTimingQueryPool =
+            Core::TimestampQueryPool(vk.device, 3);
 #endif
     }
 
@@ -1149,6 +1164,24 @@ void Context::recordAdaptiveFlowGpuTiming(
     const double opticalFlowMs = durations.at(0) + durations.at(1);
     const double totalLsfgMs =
         durations.at(0) + durations.at(1) + durations.at(2);
+
+    double shadowMipmapsMs = 0.0;
+    double shadowAlphaMs = 0.0;
+    double shadowPreprocessMs = 0.0;
+    bool shadowPreprocessSubmitted = false;
+    if (renderData.adaptiveFlowShadowSubmitted
+            && renderData.adaptiveFlowShadowTimingQueryPool.supported()) {
+        const auto shadowDurations =
+            renderData.adaptiveFlowShadowTimingQueryPool.durationsMs(vk.device);
+        if (shadowDurations.size() == 2
+                && std::isfinite(shadowDurations.at(0))
+                && std::isfinite(shadowDurations.at(1))) {
+            shadowMipmapsMs = shadowDurations.at(0);
+            shadowAlphaMs = shadowDurations.at(1);
+            shadowPreprocessMs = shadowMipmapsMs + shadowAlphaMs;
+            shadowPreprocessSubmitted = true;
+        }
+    }
     if (!std::isfinite(mipmapsMs) || !std::isfinite(opticalFlowMs)
             || !std::isfinite(totalLsfgMs)) {
         this->lastAdaptiveFlowGpuTiming_.valid = false;
@@ -1159,6 +1192,9 @@ void Context::recordAdaptiveFlowGpuTiming(
         .mipmapsMs = mipmapsMs,
         .opticalFlowMs = opticalFlowMs,
         .totalLsfgMs = totalLsfgMs,
+        .shadowMipmapsMs = shadowMipmapsMs,
+        .shadowAlphaMs = shadowAlphaMs,
+        .shadowPreprocessMs = shadowPreprocessMs,
         .generationCount = renderData.generationCount,
         .sessionEpoch = renderData.adaptiveFlowBatch.sessionEpoch,
         .batchId = renderData.adaptiveFlowBatch.batchId,
@@ -1166,6 +1202,7 @@ void Context::recordAdaptiveFlowGpuTiming(
         .predictedTotalLsfgMs =
             renderData.adaptiveFlowBatch.predictedTotalLsfgMs,
         .transitionActive = renderData.adaptiveFlowTransitionCycle,
+        .shadowPreprocessSubmitted = shadowPreprocessSubmitted,
         .valid = true,
     };
 }

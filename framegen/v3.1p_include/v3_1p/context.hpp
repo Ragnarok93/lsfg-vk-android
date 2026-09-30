@@ -114,7 +114,9 @@ namespace LSFG_3_1P {
             Core::Fence preprocessingFence; // reused for zero-generation temporal preprocessing
 #ifdef __ANDROID__
             Core::TimestampQueryPool adaptiveFlowTimingQueryPool;
+            Core::TimestampQueryPool adaptiveFlowShadowTimingQueryPool;
             bool adaptiveFlowTransitionCycle{false};
+            bool adaptiveFlowShadowSubmitted{false};
             LSFG::AdaptiveFlowBatchMetadata adaptiveFlowBatch{};
 #endif
 
