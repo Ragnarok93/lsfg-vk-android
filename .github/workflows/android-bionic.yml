@@ -62,6 +62,7 @@ jobs:
           python3 tests/android_bannerlator_engine_scheduling_test.py
           python3 tests/android_adaptive_flow_resource_sharing_test.py
           python3 tests/android_adaptive_flow_resource_accounting_test.py
+          python3 tests/android_adaptive_flow_shadow_timing_test.py
           python3 tests/android_context_build_configuration_test.py
           python3 tests/android_capability_verdict_test.py
           python3 tests/android_adaptive_flow_thermal_test.py

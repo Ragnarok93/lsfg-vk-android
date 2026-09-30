@@ -782,6 +782,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                       << '\n';
         }
 
+        const auto contextBuildStarted = std::chrono::steady_clock::now();
+
         // Android path: use AHardwareBuffer-backed images for sharing with framegen.
         // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL
         // ownership around every shared-image access, so this path is valid on
@@ -840,6 +842,16 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                 this->frame_0.getAhb(), this->frame_1.getAhb(),
                 outAhbs, extent, format);
         }
+
+        const double contextBuildMs =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - contextBuildStarted).count();
+        std::cerr << "lsfg-vk: framegen-context-ready"
+                  << " epoch=" << contextCreateEpoch
+                  << " context_build_ms=" << contextBuildMs
+                  << " adaptive_flow_runtime="
+                  << (this->adaptiveFlowRuntimeAvailable_ ? 1 : 0)
+                  << '\n';
 
         this->lsfgCtxId = std::shared_ptr<int32_t>(
             new int32_t(ctxId),
@@ -2498,6 +2510,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                           << " mipmaps_ms=" << timing.mipmapsMs
                           << " flow_end_ms=" << timing.opticalFlowMs
                           << " frame_interpolation_end_ms=" << timing.totalLsfgMs
+                          << " shadow_preprocess_submitted="
+                          << (timing.shadowPreprocessSubmitted ? 1 : 0)
+                          << " shadow_mipmaps_ms=" << timing.shadowMipmapsMs
+                          << " shadow_alpha_ms=" << timing.shadowAlphaMs
+                          << " shadow_preprocess_ms=" << timing.shadowPreprocessMs
                           << " generation_count=" << timing.generationCount
                           << '\n';
             }
