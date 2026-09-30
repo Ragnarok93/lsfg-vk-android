@@ -553,7 +553,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                 exploratorySourcePressure && !targetPressure;
             if (downstepExploratorySourceDriven_)
                 fixedExplorationProbePending_ = false;
-            telemetry_.stateIndex++;
+            const std::size_t pressureStepCount = fastPressure ? 2U : 1U;
+            telemetry_.stateIndex = std::min(
+                index + pressureStepCount, presetStates.size() - 1);
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
             telemetry_.changed = true;
             telemetry_.downstepEvaluationActive = true;
