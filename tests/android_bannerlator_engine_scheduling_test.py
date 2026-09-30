@@ -7,22 +7,32 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BannerlatorEngineSchedulingTest(unittest.TestCase):
-    def test_alpha_stage_major_schedule_preserves_work_and_batches_sync(self) -> None:
-        levels = list(reversed(range(7)))
-        stages = range(4)
-        schedule = [(stage, level) for stage in stages for level in levels]
+    def test_barrier_batch_contract_matches_inline_builder_capacity(self) -> None:
+        header = (ROOT / "framegen/include/common/utils.hpp").read_text(encoding="utf-8")
+        match = re.search(r"kInlineBarrierCapacity\s*=\s*(\d+)", header)
+        self.assertIsNotNone(match)
+        capacity = int(match.group(1))
 
-        self.assertEqual(28, len(schedule))
-        for stage in stages:
-            self.assertEqual(levels, [level for s, level in schedule if s == stage])
+        per_chain_maxima = {
+            "quality-alpha": 8,
+            "performance-alpha": 4,
+            "quality-gamma": 12,
+            "quality-delta": 12,
+            "performance-gamma": 8,
+            "performance-delta": 8,
+        }
+        for name, barrier_count in per_chain_maxima.items():
+            self.assertLessEqual(
+                barrier_count, capacity,
+                f"{name} exceeds BarrierBuilder capacity",
+            )
 
-        # Per-level scheduling emitted four barriers and four pipeline binds for
-        # each of seven levels. Stage-major keeps all 28 dispatches but emits
-        # one barrier batch and one pipeline bind per stage.
-        self.assertEqual(28, 7 * 4)
-        self.assertEqual(4, len(list(stages)))
+        # These were the unsafe merged batches introduced by the optimization.
+        # They must not be used while BarrierBuilder remains a 16-entry inline builder.
+        self.assertGreater(56, capacity)
+        self.assertGreater(24, capacity)
 
-    def test_both_shader_variants_expose_alpha_stage_primitives(self) -> None:
+    def test_both_shader_variants_keep_stage_primitives_available(self) -> None:
         variants = (
             ("v3.1_include/v3_1/shaders/alpha.hpp", "v3.1_src/shaders/alpha.cpp"),
             ("v3.1p_include/v3_1p/shaders/alpha.hpp", "v3.1p_src/shaders/alpha.cpp"),
@@ -38,31 +48,7 @@ class BannerlatorEngineSchedulingTest(unittest.TestCase):
             self.assertIn("void Alpha::BindStagePipeline(", source)
             self.assertIn("void Alpha::DispatchStage(", source)
 
-    def test_gamma_delta_pairing_preserves_dispatch_order_and_reduces_barriers(self) -> None:
-        gamma_stages = 5
-        delta_stages = 10
-        gamma_only_levels = 4
-        paired_levels = 3
-
-        before_barriers = 7 * gamma_stages + paired_levels * delta_stages
-        after_barriers = gamma_only_levels * gamma_stages + paired_levels * delta_stages
-        self.assertEqual(65, before_barriers)
-        self.assertEqual(50, after_barriers)
-        self.assertEqual(15, before_barriers - after_barriers)
-
-        for level in range(4, 7):
-            order = []
-            for step in range(delta_stages):
-                if step < gamma_stages:
-                    order.append(("gamma", level, step))
-                order.append(("delta", level - 4, step))
-            for step in range(gamma_stages):
-                self.assertLess(
-                    order.index(("gamma", level, step)),
-                    order.index(("delta", level - 4, step)),
-                )
-
-    def test_gamma_delta_step_primitives_exist_in_both_variants(self) -> None:
+    def test_gamma_delta_step_primitives_remain_available(self) -> None:
         for variant in ("v3.1", "v3.1p"):
             namespace = "v3_1" if variant == "v3.1" else "v3_1p"
             for shader, stages in (("gamma", 5), ("delta", 10)):
@@ -79,40 +65,21 @@ class BannerlatorEngineSchedulingTest(unittest.TestCase):
                 self.assertIn(f"void {class_name}::PushStepBarriers(", source)
                 self.assertIn(f"void {class_name}::DispatchStep(", source)
 
-    def test_contexts_pair_gamma_delta_steps(self) -> None:
+    def test_contexts_keep_alpha_barriers_per_mip_level(self) -> None:
         for backend in ("v3.1_src", "v3.1p_src"):
             source = (ROOT / "framegen" / backend / "context.cpp").read_text(encoding="utf-8")
-            self.assertIn("void dispatchGammaDeltaPaired(", source)
-            self.assertIn("gamma.at(level).PushStepBarriers(", source)
-            self.assertIn("pairedDelta.PushStepBarriers(", source)
-            self.assertIn("gamma.at(level).DispatchStep(", source)
-            self.assertIn("pairedDelta.DispatchStep(", source)
-            self.assertGreaterEqual(source.count("dispatchGammaDeltaPaired("), 4)
-            self.assertNotIn("generationGraph.gamma->at(i).Dispatch(", source)
+            self.assertNotIn("dispatchAlphaStageMajor(", source)
+            self.assertRegex(source, re.compile(r"alpha\.at\(6 - i\)\.Dispatch\("))
+            self.assertRegex(source, re.compile(r"graph\.alpha->at\(6 - i\)\.Dispatch\("))
 
-    def test_contexts_use_one_stage_major_alpha_scheduler(self) -> None:
+    def test_contexts_keep_gamma_delta_barriers_independent(self) -> None:
         for backend in ("v3.1_src", "v3.1p_src"):
             source = (ROOT / "framegen" / backend / "context.cpp").read_text(encoding="utf-8")
-            self.assertIn("void dispatchAlphaStageMajor(", source)
-            helper_start = source.index("void dispatchAlphaStageMajor(")
-            helper_end = source.index("\n}\n", helper_start) + 3
-            helper = source[helper_start:helper_end]
-            self.assertIn("stage < Shaders::Alpha::StageCount", helper)
-            self.assertIn("it->PushBarriers(barriers, frameCount, stage);", helper)
-            self.assertIn("alpha.back().BindStagePipeline(buffer, stage);", helper)
-            self.assertIn("it->DispatchStage(buffer, frameCount, stage);", helper)
-
-            # Active fixed graph, non-Android fallback, and Adaptive Flow graph
-            # must all route through the same stage-major scheduler.
-            self.assertGreaterEqual(
-                source.count("dispatchAlphaStageMajor("),
-                4,
-                f"{backend} still has a per-level Alpha dispatch path",
-            )
-            self.assertNotRegex(
-                source,
-                re.compile(r"alpha\.at\(6 - i\)\.Dispatch\("),
-            )
+            self.assertNotIn("dispatchGammaDeltaPaired(", source)
+            self.assertIn("generationGraph.gamma->at(i).Dispatch(", source)
+            self.assertIn("generationGraph.delta->at(i - 4).Dispatch(", source)
+            self.assertIn("this->gamma.at(i).Dispatch(", source)
+            self.assertIn("this->delta.at(i - 4).Dispatch(", source)
 
 
 if __name__ == "__main__":
