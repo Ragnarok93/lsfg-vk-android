@@ -127,7 +127,8 @@ void LSFG_3_1P::initialize(const LSFG::DeviceIdentity& identity, VkFormat shared
         device->descriptorPool = Core::DescriptorPool(device->device);
 
         device->resources = Pool::ResourcePool(device->isHdr, device->flowScale);
-        device->shaders = Pool::ShaderPool(loader);
+        device->shaders = Pool::ShaderPool(
+            loader, device->device.getDiagnostics().spirvTargetVersion);
     } catch (...) {
         resetRuntime();
         throw;

@@ -78,6 +78,12 @@ jobs:
             -o /tmp/lsfg-capabilities-test
           /tmp/lsfg-capabilities-test
           g++ -std=c++20 -Wall -Wextra -Werror \
+            -Iframegen/include \
+            framegen/src/core/spirv_compat.cpp \
+            framegen/tests/spirv_compat_test.cpp \
+            -o /tmp/lsfg-spirv-compat-test
+          /tmp/lsfg-spirv-compat-test
+          g++ -std=c++20 -Wall -Wextra -Werror \
             -Iinclude \
             src/adaptive_flow_controller.cpp \
             tests/adaptive_flow_controller_test.cpp \

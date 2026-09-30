@@ -2,6 +2,7 @@
 #include "core/shadermodule.hpp"
 #include "core/device.hpp"
 #include "core/pipeline.hpp"
+#include "core/spirv_compat.hpp"
 
 #include <vulkan/vulkan_core.h>
 
@@ -26,8 +27,16 @@ Core::ShaderModule ShaderPool::getShader(
     if (bytecode.empty())
         throw std::runtime_error("Shader code is empty: " + name);
 
-    // create the shader module
-    Core::ShaderModule shader(device, bytecode, types);
+    const auto compatible = Core::prepareSpirvForTarget(
+        bytecode, this->spirvTargetVersion);
+    if (!compatible.supported) {
+        throw std::runtime_error(
+            "Shader compatibility rejected " + name + ": "
+            + compatible.rejectionReason);
+    }
+
+    // create the shader module from the validated device-compatible payload.
+    Core::ShaderModule shader(device, compatible.code, types);
     shaders[name] = shader;
     return shader;
 }
