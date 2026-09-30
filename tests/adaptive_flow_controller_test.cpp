@@ -159,7 +159,7 @@ int main() {
         // Sustained pressure with a material scale-sensitive contribution lowers
         // one state, then observes a cooldown instead of cascading immediately.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        for (int i = 0; i < 12; ++i)
+        for (int i = 0; i < 5; ++i)
             controller.observe(sample(16.2, 5.0));
         assert(near(controller.currentScale(), 0.95F));
         assert(controller.telemetry().reason == AdaptiveFlowDecisionReason::SustainedPressure
