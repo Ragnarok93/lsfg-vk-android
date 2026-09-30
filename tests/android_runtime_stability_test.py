@@ -854,8 +854,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         # The target remains loader/context-resident for immediate hot re-enable.
         self.assertIn(".targeted = true", config)
 
-        # Do not weaken the newly working Xclipse FIFO implementation.
-        self.assertIn("xclipseFifoMailboxBacked", hooks)
+        # Preserve the proven logical-FIFO/MAILBOX implementation and extend
+        # that physical WSI backing to every targeted Android resident layer.
+        self.assertIn("residentFifoMailboxBacked", hooks)
+        self.assertIn("activeConf.targeted", hooks)
         self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
         self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
 

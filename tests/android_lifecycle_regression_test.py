@@ -71,9 +71,10 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         self.assertIn("recordSuccessfulOutputCycle(*state, *state->context", bypass)
         self.assertNotIn("state->context->present(", bypass)
 
-        # Xclipse FIFO remains the active-swapchain policy: logical FIFO may be
-        # backed by MAILBOX while generation is enabled, and Off does not mutate it.
-        self.assertIn("xclipseFifoMailboxBacked", hooks)
+        # Logical FIFO is physically MAILBOX-backed for targeted Android LSFG,
+        # so Off keeps the same nonblocking resident WSI instead of retuning it.
+        self.assertIn("residentFifoMailboxBacked", hooks)
+        self.assertIn("activeConf.targeted", hooks)
         self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
         self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
 
