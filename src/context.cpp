@@ -47,6 +47,7 @@ std::mutex lsfgDisableEnvMutex;
 std::mutex framegenContextBuildLogMutex;
 std::string lastFramegenContextBuildSignature;
 std::chrono::steady_clock::time_point lastFramegenContextBuildTime{};
+uint64_t lastFramegenContextBuildEpoch{0};
 std::atomic<uint64_t> framegenContextCreateEpoch{0};
 
 class ScopedLsfgDisable {
@@ -90,6 +91,76 @@ size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 
 #ifdef __ANDROID__
 constexpr uint32_t kConservativeSourceReprimeFrames = 2;
+
+struct FramegenContextBuildConfig {
+    bool performance{false};
+    size_t generationCapacity{0};
+    VkExtent2D extent{};
+    VkFormat format{VK_FORMAT_UNDEFINED};
+    LSFG::AhbTransportMode ahbTransportMode{LSFG::AhbTransportMode::Unsupported};
+    bool adaptiveFlowEnabled{false};
+    AdaptiveFlowPreset adaptiveFlowPreset{AdaptiveFlowPreset::Quality};
+    std::vector<float> adaptiveFlowStates;
+    float initialFlowScale{1.0F};
+    bool hdr{false};
+    LSFG::FramegenSupportDecision supportDecision{};
+    std::string vulkanPath;
+    std::string synchronizationPath;
+    uint32_t spirvTargetVersion{0};
+};
+
+const char* framegenContextCreationReasonName(
+        FramegenContextCreationReason reason) noexcept {
+    switch (reason) {
+        case FramegenContextCreationReason::SwapchainCreate:
+            return "swapchain-create";
+        case FramegenContextCreationReason::SwapchainRecreate:
+            return "swapchain-recreate";
+    }
+    return "unknown";
+}
+
+std::string framegenFlowStateValues(const std::vector<float>& states) {
+    std::ostringstream out;
+    for (size_t i = 0; i < states.size(); ++i) {
+        if (i != 0) out << ',';
+        out << states.at(i);
+    }
+    return out.str();
+}
+
+std::string framegenContextBuildSignature(
+        const FramegenContextBuildConfig& config) {
+    std::ostringstream out;
+    out << config.extent.width << 'x' << config.extent.height
+        << "|format=" << static_cast<uint32_t>(config.format)
+        << "|generation_capacity=" << config.generationCapacity
+        << "|model=" << (config.performance ? "performance" : "quality")
+        << "|hdr=" << (config.hdr ? 1 : 0)
+        << "|adaptive_flow=" << (config.adaptiveFlowEnabled ? 1 : 0)
+        << "|adaptive_flow_preset="
+        << AdaptiveFlowController::presetName(config.adaptiveFlowPreset)
+        << "|flow_states=" << framegenFlowStateValues(config.adaptiveFlowStates)
+        << "|transport=" << LSFG::ahbTransportModeName(config.ahbTransportMode)
+        << "|support=" << (config.supportDecision.supported ? 1 : 0)
+        << "|vulkan_path=" << config.vulkanPath
+        << "|sync=" << config.synchronizationPath
+        << "|shader_target=0x" << std::hex << config.spirvTargetVersion << std::dec
+        << "|fp16=" << (config.supportDecision.fp16 ? 1 : 0)
+        << "|null_descriptor=" << (config.supportDecision.nullDescriptor ? 1 : 0)
+        << "|external_sync_fd=" << (config.supportDecision.externalSyncFd ? 1 : 0)
+        << "|external_opaque_fd=" << (config.supportDecision.externalOpaqueFd ? 1 : 0);
+    return out.str();
+}
+
+uint64_t stableDiagnosticHash(std::string_view text) noexcept {
+    uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char ch : text) {
+        hash ^= static_cast<uint64_t>(ch);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
 
 const char* sourceHistoryInvalidationReasonName(
         SourceHistoryInvalidationReason reason) noexcept {
@@ -605,7 +676,8 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
 
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
-        VkPresentModeKHR presentMode)
+        VkPresentModeKHR presentMode,
+        FramegenContextCreationReason creationReason)
         : swapchain(swapchain), swapchainImages(swapchainImages),
           presentWaitRetirements_(swapchainImages.size()),
           extent(extent), presentMode_(presentMode),
@@ -723,63 +795,138 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED, reason);
         }
 
+        const FramegenContextBuildConfig buildConfig{
+            .performance = conf.performance,
+            .generationCapacity = runtimeMultiplier - 1,
+            .extent = extent,
+            .format = format,
+            .ahbTransportMode = ahbTransportMode,
+            .adaptiveFlowEnabled = conf.adaptiveFlowScale,
+            .adaptiveFlowPreset = this->adaptiveFlowPreset_,
+            .adaptiveFlowStates = adaptiveFlowScales.empty()
+                ? std::vector<float>{initialFlowScale}
+                : adaptiveFlowScales,
+            .initialFlowScale = initialFlowScale,
+            .hdr = conf.hdr,
+            .supportDecision = backendDiagnostics.supportDecision,
+            .vulkanPath = backendDiagnostics.vulkanPath,
+            .synchronizationPath = backendDiagnostics.synchronizationPath,
+            .spirvTargetVersion = backendDiagnostics.spirvTargetVersion,
+        };
+        const std::string buildSignature =
+            framegenContextBuildSignature(buildConfig);
+        const uint64_t buildSignatureHash = stableDiagnosticHash(buildSignature);
         const uint64_t contextCreateEpoch =
             framegenContextCreateEpoch.fetch_add(1, std::memory_order_relaxed) + 1;
-        std::ostringstream buildSignature;
-        buildSignature
-            << extent.width << 'x' << extent.height
-            << "|format=" << static_cast<uint32_t>(format)
-            << "|generation_capacity=" << (runtimeMultiplier - 1)
-            << "|performance=" << (conf.performance ? 1 : 0)
-            << "|adaptive_flow=" << (conf.adaptiveFlowScale ? 1 : 0)
-            << "|flow_states=";
-        if (adaptiveFlowScales.empty()) {
-            buildSignature << initialFlowScale;
-        } else {
-            for (size_t i = 0; i < adaptiveFlowScales.size(); ++i) {
-                if (i != 0) buildSignature << ',';
-                buildSignature << adaptiveFlowScales.at(i);
-            }
-        }
-        buildSignature
-            << "|transport=" << LSFG::ahbTransportModeName(ahbTransportMode)
-            << "|sync=" << backendDiagnostics.synchronizationPath
-            << "|shader_target=0x" << std::hex
-            << backendDiagnostics.spirvTargetVersion << std::dec;
+        this->framegenContextCreateEpoch_ = contextCreateEpoch;
+        this->framegenBuildSignatureHash_ = buildSignatureHash;
 
         const auto buildNow = std::chrono::steady_clock::now();
         bool duplicateEffectiveBuild = false;
+        double rebuildIntervalMs = -1.0;
+        uint64_t previousContextEpoch = 0;
         {
             const std::scoped_lock buildLogLock(framegenContextBuildLogMutex);
+            if (lastFramegenContextBuildTime.time_since_epoch().count() != 0) {
+                rebuildIntervalMs = std::chrono::duration<double, std::milli>(
+                    buildNow - lastFramegenContextBuildTime).count();
+            }
+            previousContextEpoch = lastFramegenContextBuildEpoch;
             duplicateEffectiveBuild =
-                buildSignature.str() == lastFramegenContextBuildSignature
+                buildSignature == lastFramegenContextBuildSignature
                 && lastFramegenContextBuildTime.time_since_epoch().count() != 0
                 && buildNow - lastFramegenContextBuildTime
                     < std::chrono::seconds(2);
-            lastFramegenContextBuildSignature = buildSignature.str();
+            lastFramegenContextBuildSignature = buildSignature;
             lastFramegenContextBuildTime = buildNow;
+            lastFramegenContextBuildEpoch = contextCreateEpoch;
         }
+        const std::string flowStateValues =
+            framegenFlowStateValues(buildConfig.adaptiveFlowStates);
+        const char* creationReasonName =
+            framegenContextCreationReasonName(creationReason);
 
         std::cerr << "lsfg-vk: framegen-context-create"
                   << " epoch=" << contextCreateEpoch
-                  << " reason=swapchain-create"
+                  << " reason=" << creationReasonName
+                  << " immutable_config=1"
                   << " duplicate_effective=" << (duplicateEffectiveBuild ? 1 : 0)
-                  << " extent=" << extent.width << 'x' << extent.height
-                  << " format=" << static_cast<uint32_t>(format)
-                  << " generation_capacity=" << (runtimeMultiplier - 1)
-                  << " flow_states="
-                  << (adaptiveFlowScales.empty() ? 1 : adaptiveFlowScales.size())
-                  << " transport=" << LSFG::ahbTransportModeName(ahbTransportMode)
-                  << " vulkan_path=" << backendDiagnostics.vulkanPath
-                  << " sync_path=" << backendDiagnostics.synchronizationPath
+                  << " rebuild_interval_ms=" << rebuildIntervalMs
+                  << " build_signature_hash=" << buildSignatureHash
+                  << " extent=" << buildConfig.extent.width << 'x'
+                  << buildConfig.extent.height
+                  << " format=" << static_cast<uint32_t>(buildConfig.format)
+                  << " generation_capacity=" << buildConfig.generationCapacity
+                  << " model=" << (buildConfig.performance ? "performance" : "quality")
+                  << " hdr=" << (buildConfig.hdr ? 1 : 0)
+                  << " adaptive_flow=" << (buildConfig.adaptiveFlowEnabled ? 1 : 0)
+                  << " adaptive_flow_preset="
+                  << AdaptiveFlowController::presetName(buildConfig.adaptiveFlowPreset)
+                  << " flow_states=" << buildConfig.adaptiveFlowStates.size()
+                  << " flow_state_values=" << flowStateValues
+                  << " transport=" << LSFG::ahbTransportModeName(buildConfig.ahbTransportMode)
+                  << " support=" << (buildConfig.supportDecision.supported ? 1 : 0)
+                  << " vulkan_path=" << buildConfig.vulkanPath
+                  << " sync_path=" << buildConfig.synchronizationPath
                   << " shader_target=0x" << std::hex
-                  << backendDiagnostics.spirvTargetVersion << std::dec
+                  << buildConfig.spirvTargetVersion << std::dec
+                  << " fp16=" << (buildConfig.supportDecision.fp16 ? 1 : 0)
+                  << " null_descriptor="
+                  << (buildConfig.supportDecision.nullDescriptor ? 1 : 0)
+                  << " external_sync_fd="
+                  << (buildConfig.supportDecision.externalSyncFd ? 1 : 0)
+                  << " external_opaque_fd="
+                  << (buildConfig.supportDecision.externalOpaqueFd ? 1 : 0)
                   << '\n';
+        __android_log_print(
+            ANDROID_LOG_INFO, "LSFG_CONTEXT",
+            "event=create epoch=%llu reason=%s immutable_config=1 duplicate_effective=%d "
+            "rebuild_interval_ms=%.3f build_signature_hash=%llu extent=%ux%u format=%u "
+            "generation_capacity=%zu model=%s hdr=%d adaptive_flow=%d "
+            "adaptive_flow_preset=%s flow_states=%zu flow_state_values=%s transport=%s "
+            "support=%d vulkan_path=%s sync_path=%s shader_target=0x%x fp16=%d "
+            "null_descriptor=%d external_sync_fd=%d external_opaque_fd=%d",
+            static_cast<unsigned long long>(contextCreateEpoch),
+            creationReasonName,
+            duplicateEffectiveBuild ? 1 : 0,
+            rebuildIntervalMs,
+            static_cast<unsigned long long>(buildSignatureHash),
+            buildConfig.extent.width,
+            buildConfig.extent.height,
+            static_cast<unsigned>(buildConfig.format),
+            buildConfig.generationCapacity,
+            buildConfig.performance ? "performance" : "quality",
+            buildConfig.hdr ? 1 : 0,
+            buildConfig.adaptiveFlowEnabled ? 1 : 0,
+            AdaptiveFlowController::presetName(buildConfig.adaptiveFlowPreset),
+            buildConfig.adaptiveFlowStates.size(),
+            flowStateValues.c_str(),
+            LSFG::ahbTransportModeName(buildConfig.ahbTransportMode),
+            buildConfig.supportDecision.supported ? 1 : 0,
+            buildConfig.vulkanPath.c_str(),
+            buildConfig.synchronizationPath.c_str(),
+            buildConfig.spirvTargetVersion,
+            buildConfig.supportDecision.fp16 ? 1 : 0,
+            buildConfig.supportDecision.nullDescriptor ? 1 : 0,
+            buildConfig.supportDecision.externalSyncFd ? 1 : 0,
+            buildConfig.supportDecision.externalOpaqueFd ? 1 : 0);
         if (duplicateEffectiveBuild) {
             std::cerr << "lsfg-vk: framegen-context-rebuild-warning"
                       << " epoch=" << contextCreateEpoch
+                      << " previous_epoch=" << previousContextEpoch
                       << " effective_config_unchanged=1"
+                      << " rebuild_interval_ms=" << rebuildIntervalMs
+                      << " swapchain_specific_rebuild=1"
                       << '\n';
+            __android_log_print(
+                ANDROID_LOG_WARN, "LSFG_CONTEXT",
+                "event=rapid-rebuild epoch=%llu previous_epoch=%llu "
+                "effective_config_unchanged=1 rebuild_interval_ms=%.3f "
+                "swapchain_specific_rebuild=1 build_signature_hash=%llu",
+                static_cast<unsigned long long>(contextCreateEpoch),
+                static_cast<unsigned long long>(previousContextEpoch),
+                rebuildIntervalMs,
+                static_cast<unsigned long long>(buildSignatureHash));
         }
 
         const auto contextBuildStarted = std::chrono::steady_clock::now();
@@ -789,34 +936,34 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         // ownership around every shared-image access, so this path is valid on
         // stock Android ICDs as well as wrapper/custom drivers.
         this->frame_0 = Mini::Image(info.device, info.physicalDevice,
-            extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-            ahbTransportMode, LSFG::AhbImageRole::Input);
+            buildConfig.extent, buildConfig.format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+            buildConfig.ahbTransportMode, LSFG::AhbImageRole::Input);
         this->frame_1 = Mini::Image(info.device, info.physicalDevice,
-            extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-            ahbTransportMode, LSFG::AhbImageRole::Input);
+            buildConfig.extent, buildConfig.format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+            buildConfig.ahbTransportMode, LSFG::AhbImageRole::Input);
 
-        for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
+        for (size_t i = 0; i < static_cast<size_t>(buildConfig.generationCapacity); ++i)
             this->out_n.emplace_back(info.device, info.physicalDevice,
-                extent, format,
+                buildConfig.extent, buildConfig.format,
                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-                ahbTransportMode, LSFG::AhbImageRole::Output);
+                buildConfig.ahbTransportMode, LSFG::AhbImageRole::Output);
 
         // Create framegen context using AHB sharing
         std::vector<AHardwareBuffer*> outAhbs;
-        outAhbs.reserve(runtimeMultiplier - 1);
-        for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
+        outAhbs.reserve(buildConfig.generationCapacity);
+        for (size_t i = 0; i < static_cast<size_t>(buildConfig.generationCapacity); ++i)
             outAhbs.push_back(this->out_n.at(i).getAhb());
 
-        if (conf.adaptiveFlowScale) {
+        if (buildConfig.adaptiveFlowEnabled) {
             try {
-                if (conf.performance)
+                if (buildConfig.performance)
                     ctxId = LSFG_3_1P::createAdaptiveContextFromAHB(
                         this->frame_0.getAhb(), this->frame_1.getAhb(),
-                        outAhbs, extent, format, adaptiveFlowScales);
+                        outAhbs, buildConfig.extent, buildConfig.format, buildConfig.adaptiveFlowStates);
                 else
                     ctxId = LSFG_3_1::createAdaptiveContextFromAHB(
                         this->frame_0.getAhb(), this->frame_1.getAhb(),
-                        outAhbs, extent, format, adaptiveFlowScales);
+                        outAhbs, buildConfig.extent, buildConfig.format, buildConfig.adaptiveFlowStates);
                 this->adaptiveFlowRuntimeAvailable_ = true;
             } catch (const std::exception& e) {
                 std::cerr << "lsfg-vk: adaptive-flow-fallback mode=fixed-target"
@@ -824,23 +971,23 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                           << " reason=" << e.what() << '\n';
                 this->adaptiveFlowController_.configure(
                     false, this->adaptiveFlowPreset_);
-                if (conf.performance)
+                if (buildConfig.performance)
                     ctxId = LSFG_3_1P::createContextFromAHB(
                         this->frame_0.getAhb(), this->frame_1.getAhb(),
-                        outAhbs, extent, format);
+                        outAhbs, buildConfig.extent, buildConfig.format);
                 else
                     ctxId = LSFG_3_1::createContextFromAHB(
                         this->frame_0.getAhb(), this->frame_1.getAhb(),
-                        outAhbs, extent, format);
+                        outAhbs, buildConfig.extent, buildConfig.format);
             }
-        } else if (conf.performance) {
+        } else if (buildConfig.performance) {
             ctxId = LSFG_3_1P::createContextFromAHB(
                 this->frame_0.getAhb(), this->frame_1.getAhb(),
-                outAhbs, extent, format);
+                outAhbs, buildConfig.extent, buildConfig.format);
         } else {
             ctxId = LSFG_3_1::createContextFromAHB(
                 this->frame_0.getAhb(), this->frame_1.getAhb(),
-                outAhbs, extent, format);
+                outAhbs, buildConfig.extent, buildConfig.format);
         }
 
         const double contextBuildMs =
@@ -848,10 +995,21 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                 std::chrono::steady_clock::now() - contextBuildStarted).count();
         std::cerr << "lsfg-vk: framegen-context-ready"
                   << " epoch=" << contextCreateEpoch
+                  << " build_signature_hash=" << buildSignatureHash
+                  << " context_id=" << ctxId
                   << " context_build_ms=" << contextBuildMs
                   << " adaptive_flow_runtime="
                   << (this->adaptiveFlowRuntimeAvailable_ ? 1 : 0)
                   << '\n';
+        __android_log_print(
+            ANDROID_LOG_INFO, "LSFG_CONTEXT",
+            "event=ready epoch=%llu build_signature_hash=%llu context_id=%d "
+            "context_build_ms=%.3f adaptive_flow_runtime=%d",
+            static_cast<unsigned long long>(contextCreateEpoch),
+            static_cast<unsigned long long>(buildSignatureHash),
+            ctxId,
+            contextBuildMs,
+            this->adaptiveFlowRuntimeAvailable_ ? 1 : 0);
 
         this->lsfgCtxId = std::shared_ptr<int32_t>(
             new int32_t(ctxId),
@@ -1949,6 +2107,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // One-shot context identity marker. Mode-boundary recreation should
         // produce a new backend context id and a new runtime config revision.
         std::cerr << "lsfg-vk: runtime stage=framegen-context-epoch"
+                  << " context_epoch=" << this->framegenContextCreateEpoch_
+                  << " build_signature_hash=" << this->framegenBuildSignatureHash_
                   << " context_id="
                   << (this->lsfgCtxId ? *this->lsfgCtxId : -1)
                   << " config_revision=" << this->configRevision_
@@ -2895,6 +3055,25 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 flowTelemetry.computePressure ? 1 : 0,
                 flowTelemetry.wsiPressure ? 1 : 0,
                 observation.wsiLossRate);
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_FLOW",
+                "context_epoch=%llu build_signature_hash=%llu "
+                "flow_mipmaps_ms=%.3f flow_optical_ms=%.3f flow_lsfg_ms=%.3f "
+                "flow_generation_count=%zu flow_output_target_fps=%.3f "
+                "flow_output_targeted=%d thermal_status=%d thermal_valid=%d "
+                "thermal_pressure=%d",
+                static_cast<unsigned long long>(this->framegenContextCreateEpoch_),
+                static_cast<unsigned long long>(this->framegenBuildSignatureHash_),
+                observation.mipmapsMs,
+                observation.flowMs,
+                observation.totalLsfgMs,
+                observation.generationCount,
+                observation.outputTargetFps,
+                outputTargeted ? 1 : 0,
+                observation.thermalStatus,
+                observation.thermalPressureValid ? 1 : 0,
+                flowTelemetry.thermalPressure ? 1 : 0);
 #endif
         }
 
@@ -3815,6 +3994,29 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->adaptiveFlowController_.telemetry().estimatedNextTotalMs,
                 adaptiveTelemetry.smoothedSourceFps,
                 this->adaptiveFlowBudgetMs_);
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_METRICS",
+                "context_epoch=%llu build_signature_hash=%llu "
+                "flow_mipmaps_ms=%.3f flow_optical_ms=%.3f flow_lsfg_ms=%.3f "
+                "flow_generation_count=%zu flow_output_target_fps=%.3f "
+                "flow_output_targeted=%d flow_fixed_targeted=%d "
+                "flow_fixed_target_satisfied=%d thermal_status=%d thermal_valid=%d "
+                "thermal_pressure=%d flow_global_gpu_percent=%.1f",
+                static_cast<unsigned long long>(this->framegenContextCreateEpoch_),
+                static_cast<unsigned long long>(this->framegenBuildSignatureHash_),
+                this->adaptiveFlowMipmapsMs_,
+                this->adaptiveFlowWorkMs_,
+                this->adaptiveFlowTotalLsfgMs_,
+                this->adaptiveFlowGenerationCount_,
+                this->adaptiveFlowOutputTargetFps_,
+                this->adaptiveFlowOutputTargeted_ ? 1 : 0,
+                this->adaptiveFlowFixedTargeted_ ? 1 : 0,
+                this->adaptiveFlowFixedTargetSatisfied_ ? 1 : 0,
+                this->adaptiveFlowThermalStatus_,
+                this->adaptiveFlowThermalPressureValid_ ? 1 : 0,
+                this->adaptiveFlowController_.telemetry().thermalPressure ? 1 : 0,
+                this->adaptiveFlowGlobalGpuUsagePercent_);
             __android_log_print(
                 ANDROID_LOG_INFO,
                 "LSFG_METRICS",

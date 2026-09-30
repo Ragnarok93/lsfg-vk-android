@@ -25,6 +25,11 @@
 #include <unordered_set>
 #include <vector>
 
+enum class FramegenContextCreationReason {
+    SwapchainCreate,
+    SwapchainRecreate,
+};
+
 #ifdef __ANDROID__
 enum class SourceHistoryInvalidationReason {
     None,
@@ -113,7 +118,9 @@ public:
     ///
     LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
-        VkPresentModeKHR presentMode);
+        VkPresentModeKHR presentMode,
+        FramegenContextCreationReason creationReason =
+            FramegenContextCreationReason::SwapchainCreate);
 
     ///
     /// Custom present logic.
@@ -258,6 +265,8 @@ private:
 
 #ifdef __ANDROID__
     uint64_t runtimeSessionId_{0};
+    uint64_t framegenContextCreateEpoch_{0};
+    uint64_t framegenBuildSignatureHash_{0};
     // Adreno source-present count can advance while a private framegen batch
     // remains in flight. Track the input slot consumed by framegen separately
     // so source-only bypasses cannot flip the shared AHB pair out of parity.

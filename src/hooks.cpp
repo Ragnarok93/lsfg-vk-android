@@ -1121,9 +1121,12 @@ namespace {
             state->deviceInfo = deviceInfo;
             state->present = createInfo.presentMode;
             state->configuredPresent = configuredPresentMode;
+            const auto contextCreationReason = pCreateInfo->oldSwapchain
+                ? FramegenContextCreationReason::SwapchainRecreate
+                : FramegenContextCreationReason::SwapchainCreate;
             state->context = std::make_shared<LsContext>(
                 *deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
-                swapchainImages, createInfo.presentMode);
+                swapchainImages, createInfo.presentMode, contextCreationReason);
             if (pCreateInfo->oldSwapchain)
                 retireSwapchainState(pCreateInfo->oldSwapchain);
             const auto supportDecision = state->context->framegenSupportDecision();
