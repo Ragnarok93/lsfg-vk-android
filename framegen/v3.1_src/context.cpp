@@ -238,9 +238,11 @@ public:
           userFlowScale_(validateUserFlowScale(userFlowScale)),
           savedDescriptorPool_(vk.descriptorPool),
           savedResources_(std::move(vk.resources)) {
+        const auto sharedSamplers = savedResources_.sharedSamplerCache();
         vk_.flowScale = 1.0F / userFlowScale_;
         vk_.descriptorPool = descriptorPool;
-        vk_.resources = Pool::ResourcePool(vk_.isHdr, vk_.flowScale);
+        vk_.resources = Pool::ResourcePool(
+            vk_.isHdr, vk_.flowScale, sharedSamplers);
     }
 
     ScopedAdaptiveFlowConstruction(const ScopedAdaptiveFlowConstruction&) = delete;
@@ -1019,6 +1021,10 @@ Context::Context(Vulkan& vk,
     std::cerr << "lsfg-vk: adaptive-flow-resources states="
               << adaptiveFlowScales.size()
               << " descriptor_pool_mode=per-state"
+              << " sampler_cache=shared"
+              << " shared_samplers=" << vk.resources.samplerCount()
+              << " shared_pipelines=" << vk.shaders.pipelineCount()
+              << " shared_shader_modules=" << vk.shaders.shaderCount()
               << " target=" << adaptiveFlowScales.front()
               << " min=" << adaptiveFlowScales.back()
               << " scale_area_ratio=" << (scaleArea / targetArea)

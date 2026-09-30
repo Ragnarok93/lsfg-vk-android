@@ -58,6 +58,9 @@ namespace LSFG::Pool {
         ///
         Core::Pipeline getPipeline(
             const Core::Device& device, const std::string& name);
+
+        [[nodiscard]] size_t shaderCount() const { return shaders.size(); }
+        [[nodiscard]] size_t pipelineCount() const { return pipelines.size(); }
     private:
         std::function<std::vector<uint8_t>(const std::string&)> source;
         uint32_t spirvTargetVersion{0x00010600u};
