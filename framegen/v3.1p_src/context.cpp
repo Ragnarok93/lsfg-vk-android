@@ -51,6 +51,41 @@ void dispatchAlphaStageMajor(const Core::CommandBuffer& buffer,
             it->DispatchStage(buffer, frameCount, stage);
     }
 }
+
+void dispatchGammaDeltaPaired(const Core::CommandBuffer& buffer,
+        std::array<Shaders::Gamma, 7>& gamma,
+        std::array<Shaders::Delta, 3>& delta,
+        uint64_t frameCount, uint64_t passIndex,
+        size_t activeGenerationCount) {
+    static_assert(Shaders::Gamma::StageCount == 5);
+    static_assert(Shaders::Delta::StageCount == 10);
+
+    for (size_t level = 0; level < gamma.size(); ++level) {
+        if (level < 4) {
+            gamma.at(level).Dispatch(
+                buffer, frameCount, passIndex, activeGenerationCount);
+            continue;
+        }
+
+        auto& pairedDelta = delta.at(level - 4);
+        for (size_t step = 0; step < Shaders::Delta::StageCount; ++step) {
+            Utils::BarrierBuilder barriers(buffer);
+            if (step < Shaders::Gamma::StageCount)
+                gamma.at(level).PushStepBarriers(barriers, frameCount, step);
+            pairedDelta.PushStepBarriers(barriers, frameCount, step);
+            barriers.build();
+
+            // Gamma must remain first at shared steps: Delta consumes the same
+            // level's temporal inputs and later levels consume prior outputs.
+            if (step < Shaders::Gamma::StageCount) {
+                gamma.at(level).DispatchStep(
+                    buffer, frameCount, passIndex, activeGenerationCount, step);
+            }
+            pairedDelta.DispatchStep(
+                buffer, frameCount, passIndex, activeGenerationCount, step);
+        }
+    }
+}
 }
 
 #ifdef __ANDROID__
@@ -661,29 +696,21 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
 #ifdef __ANDROID__
         if (!this->adaptiveFlowScales_.empty()) {
             const auto generationGraph = this->flowGraph(generationGraphIndex);
-            for (size_t i = 0; i < 7; i++) {
-                generationGraph.gamma->at(i).Dispatch(
-                    buf2, this->frameIdx, pass, interpolationCount);
-                if (i >= 4)
-                    generationGraph.delta->at(i - 4).Dispatch(
-                        buf2, this->frameIdx, pass, interpolationCount);
-            }
+            dispatchGammaDeltaPaired(
+                buf2, *generationGraph.gamma, *generationGraph.delta,
+                this->frameIdx, pass, interpolationCount);
             generationGraph.generate->Dispatch(
                 buf2, this->frameIdx, pass, interpolationCount);
         } else {
-            for (size_t i = 0; i < 7; i++) {
-                this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
-                if (i >= 4)
-                    this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
-            }
+            dispatchGammaDeltaPaired(
+                buf2, this->gamma, this->delta,
+                this->frameIdx, pass, interpolationCount);
             this->generate.Dispatch(buf2, this->frameIdx, pass, interpolationCount);
         }
 #else
-        for (size_t i = 0; i < 7; i++) {
-            this->gamma.at(i).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
-            if (i >= 4)
-                this->delta.at(i - 4).Dispatch(buf2, this->frameIdx, pass, interpolationCount);
-        }
+        dispatchGammaDeltaPaired(
+            buf2, this->gamma, this->delta,
+            this->frameIdx, pass, interpolationCount);
         this->generate.Dispatch(buf2, this->frameIdx, pass, interpolationCount);
 #endif
 

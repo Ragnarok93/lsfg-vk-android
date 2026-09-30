@@ -38,6 +38,58 @@ class BannerlatorEngineSchedulingTest(unittest.TestCase):
             self.assertIn("void Alpha::BindStagePipeline(", source)
             self.assertIn("void Alpha::DispatchStage(", source)
 
+    def test_gamma_delta_pairing_preserves_dispatch_order_and_reduces_barriers(self) -> None:
+        gamma_stages = 5
+        delta_stages = 10
+        gamma_only_levels = 4
+        paired_levels = 3
+
+        before_barriers = 7 * gamma_stages + paired_levels * delta_stages
+        after_barriers = gamma_only_levels * gamma_stages + paired_levels * delta_stages
+        self.assertEqual(65, before_barriers)
+        self.assertEqual(50, after_barriers)
+        self.assertEqual(15, before_barriers - after_barriers)
+
+        for level in range(4, 7):
+            order = []
+            for step in range(delta_stages):
+                if step < gamma_stages:
+                    order.append(("gamma", level, step))
+                order.append(("delta", level - 4, step))
+            for step in range(gamma_stages):
+                self.assertLess(
+                    order.index(("gamma", level, step)),
+                    order.index(("delta", level - 4, step)),
+                )
+
+    def test_gamma_delta_step_primitives_exist_in_both_variants(self) -> None:
+        for variant in ("v3.1", "v3.1p"):
+            namespace = "v3_1" if variant == "v3.1" else "v3_1p"
+            for shader, stages in (("gamma", 5), ("delta", 10)):
+                header = (
+                    ROOT / "framegen" / f"{variant}_include" / namespace / "shaders" / f"{shader}.hpp"
+                ).read_text(encoding="utf-8")
+                source = (
+                    ROOT / "framegen" / f"{variant}_src" / "shaders" / f"{shader}.cpp"
+                ).read_text(encoding="utf-8")
+                class_name = shader.capitalize()
+                self.assertIn(f"static constexpr size_t StageCount = {stages};", header)
+                self.assertIn("void PushStepBarriers(", header)
+                self.assertIn("void DispatchStep(", header)
+                self.assertIn(f"void {class_name}::PushStepBarriers(", source)
+                self.assertIn(f"void {class_name}::DispatchStep(", source)
+
+    def test_contexts_pair_gamma_delta_steps(self) -> None:
+        for backend in ("v3.1_src", "v3.1p_src"):
+            source = (ROOT / "framegen" / backend / "context.cpp").read_text(encoding="utf-8")
+            self.assertIn("void dispatchGammaDeltaPaired(", source)
+            self.assertIn("gamma.at(level).PushStepBarriers(", source)
+            self.assertIn("pairedDelta.PushStepBarriers(", source)
+            self.assertIn("gamma.at(level).DispatchStep(", source)
+            self.assertIn("pairedDelta.DispatchStep(", source)
+            self.assertGreaterEqual(source.count("dispatchGammaDeltaPaired("), 4)
+            self.assertNotIn("generationGraph.gamma->at(i).Dispatch(", source)
+
     def test_contexts_use_one_stage_major_alpha_scheduler(self) -> None:
         for backend in ("v3.1_src", "v3.1p_src"):
             source = (ROOT / "framegen" / backend / "context.cpp").read_text(encoding="utf-8")
