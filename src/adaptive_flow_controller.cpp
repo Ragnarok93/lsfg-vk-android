@@ -204,13 +204,15 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool computePressure =
         freshGeneratedComputePressure || retainedSevereComputePressure;
     const bool wsiPressure = observation.wsiPresentationPressure;
-    // Output cadence is the governing user-visible contract. A valid missed
-    // Adaptive target or fixed multiplier base is actionable even when Android
-    // cannot provide a fresh whole-device GPU-utilization sample.
+    // Adaptive output targets are actionable. In Fixed mode the separate clean
+    // source target governs Flow; an output deficit can mean the selected
+    // multiplier exceeds what the display can present.
+    const bool actionableOutputDeficit =
+        observation.outputDeficit && !observation.fixedMultiplierBaseTarget;
     const bool outputPressure =
         observation.outputCadenceValid
         && observation.outputTargeted
-        && observation.outputDeficit
+        && actionableOutputDeficit
         && !observation.outputTargetSatisfied;
     const bool sourcePressure =
         observation.fixedMultiplierBaseTarget
@@ -225,9 +227,11 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         && observation.globalGpuUsagePercent >= kGlobalGpuPressurePercent;
     const bool globalPressure =
         globalGpuPressure
-        && (observation.outputDeficit || observation.syntheticDropPressure);
+        && (actionableOutputDeficit || observation.syntheticDropPressure);
     const bool wsiFlowPressure =
-        wsiPressure && globalGpuPressure && observation.outputDeficit;
+        wsiPressure && globalGpuPressure && actionableOutputDeficit;
+    const bool recoveryWsiPressure =
+        wsiPressure && !observation.fixedMultiplierBaseTarget;
     telemetry_.computePressure = computePressure;
     telemetry_.wsiPressure = wsiPressure;
     telemetry_.globalPressure = globalPressure;
@@ -460,7 +464,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         !observation.globalPressureValid
         || observation.globalGpuUsagePercent <= kGlobalGpuRecoveryPercent;
     const bool outputRecoverySatisfied =
-        !observation.outputTargeted
+        observation.fixedMultiplierBaseTarget
+        || !observation.outputTargeted
         || observation.outputTargetSatisfied;
     const bool sourceRecoverySatisfied =
         !observation.fixedMultiplierBaseTarget
@@ -472,16 +477,16 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         !observation.generatedWorkSample
         && observation.globalPressureValid
         && globalRecoveryHeadroom
-        && !observation.outputDeficit
+        && !actionableOutputDeficit
         && !observation.syntheticDropPressure;
     const bool recoveryTimingEligible =
         observation.generatedWorkSample || retainedHistoryRecoveryEligible;
     if (canRaise
             && !observation.deadlineMissed
             && recoveryTimingEligible
-            && !observation.outputDeficit
+            && !actionableOutputDeficit
             && !observation.syntheticDropPressure
-            && !wsiPressure
+            && !recoveryWsiPressure
             && outputRecoverySatisfied
             && sourceRecoverySatisfied
             && globalRecoveryHeadroom) {

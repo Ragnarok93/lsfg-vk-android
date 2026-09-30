@@ -743,5 +743,64 @@ int main() {
         assert(controller.currentScale() > sourceDeficitScale);
     }
 
+    {
+        // A fixed multiplier can request an output rate above the display
+        // cadence. That output deficit must not downscale Flow while the source
+        // remains at its clean baseline.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        for (int i = 0; i < 40; ++i) {
+            auto observation = sample(
+                8.0, 2.0, 50.0, false, false, 80.0, true, true);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = false;
+            observation.fixedMultiplierBaseTarget = true;
+            observation.sourceFps = 30.0;
+            observation.sourceTargetFps = 30.0;
+            controller.observe(observation);
+        }
+
+        assert(near(controller.currentScale(), 1.00F));
+        assert(!controller.telemetry().outputPressure);
+        assert(!controller.telemetry().sourcePressure);
+    }
+
+    {
+        // Once source pacing recovers, Flow must be allowed to rise even if
+        // the display still cannot show the fixed multiplier's full output.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
+        bool lowered = false;
+        for (int i = 0; i < 30 && !lowered; ++i) {
+            auto observation = sample(8.0, 5.0, 50.0);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = true;
+            observation.outputFps = 60.0;
+            observation.fixedMultiplierBaseTarget = true;
+            observation.sourceFps = 22.0;
+            observation.sourceTargetFps = 30.0;
+            controller.observe(observation);
+            lowered = controller.currentScale() < 1.00F;
+        }
+        assert(lowered);
+        const float sourceDeficitScale = controller.currentScale();
+
+        for (int i = 0; i < 100; ++i) {
+            auto observation = sample(8.0, 2.0, 50.0, false, false, 80.0, true, true);
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = false;
+            observation.outputFps = 60.0;
+            observation.fixedMultiplierBaseTarget = true;
+            observation.sourceFps = 30.0;
+            observation.sourceTargetFps = 30.0;
+            controller.observe(observation);
+        }
+
+        assert(controller.currentScale() > sourceDeficitScale);
+        assert(!controller.telemetry().outputPressure);
+        assert(!controller.telemetry().sourcePressure);
+    }
+
     return 0;
 }
