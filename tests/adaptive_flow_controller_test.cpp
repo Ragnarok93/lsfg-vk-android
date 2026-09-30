@@ -103,9 +103,9 @@ int main() {
     }
 
     {
-        // Auto must probe the next .05 state when the target is missed under
-        // sustained whole-device pressure, even when the first probe is below
-        // the ordinary material-contribution threshold.
+        // Direct target pressure must move at least twice as fast as the old
+        // one-state controller so recovery does not require a chain of costly
+        // Flow-graph handoffs.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
         bool lowered = false;
         for (int i = 0; i < 16 && !lowered; ++i) {
@@ -118,10 +118,10 @@ int main() {
             observation.outputTargetSatisfied = false;
             observation.sourceFps = 12.4;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.95F);
+            lowered = near(controller.currentScale(), 0.90F);
         }
         assert(lowered);
-        assert(controller.telemetry().stateIndex == 1);
+        assert(controller.telemetry().stateIndex == 2);
     }
 
     {
@@ -136,8 +136,8 @@ int main() {
 
     {
         // A direct missed output target is user-visible pressure. It should
-        // move one discrete Flow state within roughly half a second rather
-        // than waiting through the ordinary long pressure confirmation window.
+        // move two discrete Flow states within roughly half a second, reducing
+        // both recovery latency and the number of graph-history handoffs.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         bool lowered = false;
         for (int i = 0; i < 6 && !lowered; ++i) {
@@ -149,7 +149,7 @@ int main() {
             observation.outputFps = 42.0;
             observation.sourceFps = 16.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.95F);
+            lowered = near(controller.currentScale(), 0.90F);
         }
         assert(lowered);
 
