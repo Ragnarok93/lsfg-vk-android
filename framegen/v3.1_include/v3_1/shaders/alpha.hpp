@@ -31,8 +31,26 @@ namespace LSFG_3_1::Shaders {
         ///
         Alpha(Vulkan& vk, Core::Image inImg);
 
+        static constexpr size_t StageCount = 4;
+
         ///
-        /// Dispatch the shaderchain.
+        /// Append the synchronization required before one Alpha stage.
+        ///
+        void PushBarriers(Utils::BarrierBuilder& barriers, uint64_t frameCount, size_t stage);
+
+        ///
+        /// Bind the pipeline used by one Alpha stage.
+        ///
+        void BindStagePipeline(const Core::CommandBuffer& buf, size_t stage);
+
+        ///
+        /// Dispatch one Alpha stage. The caller must have emitted the stage barriers
+        /// and bound the matching pipeline.
+        ///
+        void DispatchStage(const Core::CommandBuffer& buf, uint64_t frameCount, size_t stage);
+
+        ///
+        /// Dispatch the shaderchain using the legacy per-level ordering.
         ///
         void Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount);
 

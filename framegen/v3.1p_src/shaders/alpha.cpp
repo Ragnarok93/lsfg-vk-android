@@ -9,6 +9,7 @@
 #include <utility>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 using namespace LSFG_3_1P::Shaders;
 
@@ -87,52 +88,59 @@ Alpha::Alpha(Vulkan& vk, Core::Image inImg) : inImg(std::move(inImg)) {
             .build();
 }
 
+
+void Alpha::PushBarriers(Utils::BarrierBuilder& barriers, uint64_t frameCount, size_t stage) {
+    switch (stage) {
+    case 0:
+        barriers
+            .addW2R(this->inImg)
+            .addR2W(this->tempImg1);
+        break;
+    case 1:
+        barriers
+            .addW2R(this->tempImg1)
+            .addR2W(this->tempImg2);
+        break;
+    case 2:
+        barriers
+            .addW2R(this->tempImg2)
+            .addR2W(this->tempImgs3);
+        break;
+    case 3:
+        barriers
+            .addW2R(this->tempImgs3)
+            .addR2W(this->outImgs.at(frameCount % 3));
+        break;
+    default:
+        throw std::out_of_range("Alpha stage");
+    }
+}
+
+void Alpha::BindStagePipeline(const Core::CommandBuffer& buf, size_t stage) {
+    this->pipelines.at(stage).bind(buf);
+}
+
+void Alpha::DispatchStage(const Core::CommandBuffer& buf, uint64_t frameCount, size_t stage) {
+    const auto extent = stage < 2
+        ? this->tempImg1.getExtent()
+        : this->tempImgs3.at(0).getExtent();
+    const uint32_t threadsX = (extent.width + 7) >> 3;
+    const uint32_t threadsY = (extent.height + 7) >> 3;
+
+    if (stage < StageCount - 1) {
+        this->descriptorSets.at(stage).bind(buf, this->pipelines.at(stage));
+    } else {
+        this->lastDescriptorSet.at(frameCount % 3).bind(buf, this->pipelines.at(stage));
+    }
+    buf.dispatch(threadsX, threadsY, 1);
+}
+
 void Alpha::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount) {
-    // first pass
-    const auto halfExtent = this->tempImg1.getExtent();
-    uint32_t threadsX = (halfExtent.width + 7) >> 3;
-    uint32_t threadsY = (halfExtent.height + 7) >> 3;
-
-    Utils::BarrierBuilder(buf)
-        .addW2R(this->inImg)
-        .addR2W(this->tempImg1)
-        .build();
-
-    this->pipelines.at(0).bind(buf);
-    this->descriptorSets.at(0).bind(buf, this->pipelines.at(0));
-    buf.dispatch(threadsX, threadsY, 1);
-
-    // second pass
-    Utils::BarrierBuilder(buf)
-        .addW2R(this->tempImg1)
-        .addR2W(this->tempImg2)
-        .build();
-
-    this->pipelines.at(1).bind(buf);
-    this->descriptorSets.at(1).bind(buf, this->pipelines.at(1));
-    buf.dispatch(threadsX, threadsY, 1);
-
-    // third pass
-    const auto quarterExtent = this->tempImgs3.at(0).getExtent();
-    threadsX = (quarterExtent.width + 7) >> 3;
-    threadsY = (quarterExtent.height + 7) >> 3;
-
-    Utils::BarrierBuilder(buf)
-        .addW2R(this->tempImg2)
-        .addR2W(this->tempImgs3)
-        .build();
-
-    this->pipelines.at(2).bind(buf);
-    this->descriptorSets.at(2).bind(buf, this->pipelines.at(2));
-    buf.dispatch(threadsX, threadsY, 1);
-
-    // fourth pass
-    Utils::BarrierBuilder(buf)
-        .addW2R(this->tempImgs3)
-        .addR2W(this->outImgs.at(frameCount % 3))
-        .build();
-
-    this->pipelines.at(3).bind(buf);
-    this->lastDescriptorSet.at(frameCount % 3).bind(buf, this->pipelines.at(3));
-    buf.dispatch(threadsX, threadsY, 1);
+    for (size_t stage = 0; stage < StageCount; ++stage) {
+        Utils::BarrierBuilder barriers(buf);
+        this->PushBarriers(barriers, frameCount, stage);
+        barriers.build();
+        this->BindStagePipeline(buf, stage);
+        this->DispatchStage(buf, frameCount, stage);
+    }
 }
