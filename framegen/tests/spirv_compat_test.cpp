@@ -76,17 +76,51 @@ void spirv14_gets_memory_model_extension() {
     assert(raw.find("SPV_KHR_vulkan_memory_model") != std::string::npos);
 }
 
-void demote_capability_is_rejected_below_16() {
-    const auto source = bytes({
+void spirv16_only_features_are_rejected_below_16() {
+    const auto demoteCapability = bytes({
         kMagic, kSpirv16, 0, 1, 0,
         (2u << 16) | 17u, 1u,
         (2u << 16) | 17u, 5379u,
         (3u << 16) | 14u, 0u, 3u,
     });
-    const auto result = prepareSpirvForTarget(source, kSpirv15);
+    auto result = prepareSpirvForTarget(demoteCapability, kSpirv15);
     assert(!result.supported);
-    assert(result.rejectionReason.find("DemoteToHelperInvocation")
-        != std::string::npos);
+    assert(result.rejectionReason.find("1.6-only capability") != std::string::npos);
+
+    const auto terminateInstruction = bytes({
+        kMagic, kSpirv16, 0, 1, 0,
+        (2u << 16) | 17u, 1u,
+        (3u << 16) | 14u, 0u, 3u,
+        (1u << 16) | 4416u,
+    });
+    result = prepareSpirvForTarget(terminateInstruction, kSpirv15);
+    assert(!result.supported);
+    assert(result.rejectionReason.find("1.6-only instruction") != std::string::npos);
+
+    const auto dotCapability = bytes({
+        kMagic, kSpirv16, 0, 1, 0,
+        (2u << 16) | 17u, 1u,
+        (2u << 16) | 17u, 6019u,
+        (3u << 16) | 14u, 0u, 3u,
+    });
+    result = prepareSpirvForTarget(dotCapability, kSpirv15);
+    assert(!result.supported);
+    assert(result.rejectionReason.find("1.6-only capability") != std::string::npos);
+}
+
+void spirv15_promoted_features_need_an_explicit_14_extension_path() {
+    for (const uint32_t capability : {4448u, 5302u, 5347u}) {
+        const auto source = bytes({
+            kMagic, kSpirv15, 0, 1, 0,
+            (2u << 16) | 17u, 1u,
+            (2u << 16) | 17u, capability,
+            (3u << 16) | 14u, 0u, 3u,
+        });
+        const auto rejected = prepareSpirvForTarget(source, kSpirv14);
+        assert(!rejected.supported);
+        assert(rejected.rejectionReason.find("1.5 capability") != std::string::npos);
+        assert(prepareSpirvForTarget(source, kSpirv15).supported);
+    }
 }
 
 void invalid_magic_is_rejected() {
@@ -105,7 +139,8 @@ int main() {
     native_16_is_unchanged();
     lowers_16_to_15_only_after_validating_stream();
     spirv14_gets_memory_model_extension();
-    demote_capability_is_rejected_below_16();
+    spirv16_only_features_are_rejected_below_16();
+    spirv15_promoted_features_need_an_explicit_14_extension_path();
     invalid_magic_is_rejected();
     return 0;
 }

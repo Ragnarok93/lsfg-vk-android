@@ -23,13 +23,86 @@ constexpr uint32_t kOpExtInstImport = 11u;
 constexpr uint32_t kOpMemoryModel = 14u;
 constexpr uint32_t kOpCapability = 17u;
 constexpr uint32_t kOpFunction = 54u;
+constexpr uint32_t kOpTerminateInvocation = 4416u;
+constexpr uint32_t kOpSDot = 4450u;
+constexpr uint32_t kOpUDot = 4451u;
+constexpr uint32_t kOpSUDot = 4452u;
+constexpr uint32_t kOpSDotAccSat = 4453u;
+constexpr uint32_t kOpUDotAccSat = 4454u;
+constexpr uint32_t kOpSUDotAccSat = 4455u;
+constexpr uint32_t kOpDemoteToHelperInvocation = 5380u;
 
+constexpr uint32_t kCapStorageBuffer8BitAccess = 4448u;
+constexpr uint32_t kCapUniformAndStorageBuffer8BitAccess = 4449u;
+constexpr uint32_t kCapStoragePushConstant8 = 4450u;
+constexpr uint32_t kCapShaderNonUniform = 5301u;
+constexpr uint32_t kCapRuntimeDescriptorArray = 5302u;
+constexpr uint32_t kCapInputAttachmentArrayDynamicIndexing = 5303u;
+constexpr uint32_t kCapUniformTexelBufferArrayDynamicIndexing = 5304u;
+constexpr uint32_t kCapStorageTexelBufferArrayDynamicIndexing = 5305u;
+constexpr uint32_t kCapUniformBufferArrayNonUniformIndexing = 5306u;
+constexpr uint32_t kCapSampledImageArrayNonUniformIndexing = 5307u;
+constexpr uint32_t kCapStorageBufferArrayNonUniformIndexing = 5308u;
+constexpr uint32_t kCapStorageImageArrayNonUniformIndexing = 5309u;
+constexpr uint32_t kCapInputAttachmentArrayNonUniformIndexing = 5310u;
+constexpr uint32_t kCapUniformTexelBufferArrayNonUniformIndexing = 5311u;
+constexpr uint32_t kCapStorageTexelBufferArrayNonUniformIndexing = 5312u;
 constexpr uint32_t kCapVulkanMemoryModel = 5345u;
 constexpr uint32_t kCapVulkanMemoryModelDeviceScope = 5346u;
+constexpr uint32_t kCapPhysicalStorageBufferAddresses = 5347u;
 constexpr uint32_t kCapDemoteToHelperInvocation = 5379u;
+constexpr uint32_t kCapDotProductInputAll = 6016u;
+constexpr uint32_t kCapDotProductInput4x8Bit = 6017u;
+constexpr uint32_t kCapDotProductInput4x8BitPacked = 6018u;
+constexpr uint32_t kCapDotProduct = 6019u;
 
 bool validTarget(uint32_t target) {
     return target == kSpirv14 || target == kSpirv15 || target == kSpirv16;
+}
+
+bool isSpirv16OnlyCapability(uint32_t capability) {
+    return capability == kCapDemoteToHelperInvocation
+        || (capability >= kCapDotProductInputAll && capability <= kCapDotProduct);
+}
+
+bool isSpirv15PromotedCapabilityWithoutCompatPath(uint32_t capability) {
+    switch (capability) {
+    case kCapStorageBuffer8BitAccess:
+    case kCapUniformAndStorageBuffer8BitAccess:
+    case kCapStoragePushConstant8:
+    case kCapShaderNonUniform:
+    case kCapRuntimeDescriptorArray:
+    case kCapInputAttachmentArrayDynamicIndexing:
+    case kCapUniformTexelBufferArrayDynamicIndexing:
+    case kCapStorageTexelBufferArrayDynamicIndexing:
+    case kCapUniformBufferArrayNonUniformIndexing:
+    case kCapSampledImageArrayNonUniformIndexing:
+    case kCapStorageBufferArrayNonUniformIndexing:
+    case kCapStorageImageArrayNonUniformIndexing:
+    case kCapInputAttachmentArrayNonUniformIndexing:
+    case kCapUniformTexelBufferArrayNonUniformIndexing:
+    case kCapStorageTexelBufferArrayNonUniformIndexing:
+    case kCapPhysicalStorageBufferAddresses:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool isSpirv16OnlyOpcode(uint32_t opcode) {
+    return opcode == kOpTerminateInvocation
+        || opcode == kOpDemoteToHelperInvocation
+        || (opcode >= kOpSDot && opcode <= kOpSUDotAccSat);
+}
+
+bool isNonSemanticImport(const std::vector<uint32_t>& words, size_t offset, uint32_t count) {
+    if (count < 3)
+        return false;
+    const auto* value = reinterpret_cast<const char*>(&words[offset + 2]);
+    const size_t bytes = static_cast<size_t>(count - 2) * sizeof(uint32_t);
+    constexpr char prefix[] = "NonSemantic.";
+    return bytes >= sizeof(prefix) - 1
+        && std::strncmp(value, prefix, sizeof(prefix) - 1) == 0;
 }
 
 std::vector<uint32_t> bytesToWords(const std::vector<uint8_t>& bytes) {
@@ -126,14 +199,29 @@ SpirvCompatibilityResult prepareSpirvForTarget(
                 needsMemoryModelExtension = true;
             }
             if (targetVersion < kSpirv16
-                    && capability == kCapDemoteToHelperInvocation) {
+                    && isSpirv16OnlyCapability(capability)) {
                 result.rejectionReason =
-                    "SPIR-V module requires DemoteToHelperInvocation on an unaudited compatibility path";
+                    "SPIR-V module uses a SPIR-V 1.6-only capability without an audited compatibility path";
+                return result;
+            }
+            if (targetVersion < kSpirv15
+                    && isSpirv15PromotedCapabilityWithoutCompatPath(capability)) {
+                result.rejectionReason =
+                    "SPIR-V module uses a SPIR-V 1.5 capability whose extension path is not enabled";
                 return result;
             }
             insertAt = offset + count;
         } else if (opcode == kOpExtension) {
             insertAt = offset + count;
+        } else if (targetVersion < kSpirv16 && isSpirv16OnlyOpcode(opcode)) {
+            result.rejectionReason =
+                "SPIR-V module uses a SPIR-V 1.6-only instruction without an audited compatibility path";
+            return result;
+        } else if (targetVersion < kSpirv16 && opcode == kOpExtInstImport
+                && isNonSemanticImport(words, offset, count)) {
+            result.rejectionReason =
+                "SPIR-V module imports non-semantic instructions on an unaudited compatibility path";
+            return result;
         }
 
         offset += count;
