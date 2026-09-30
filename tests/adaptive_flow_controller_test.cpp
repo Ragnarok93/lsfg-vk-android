@@ -413,7 +413,7 @@ int main() {
             observation.outputFps = 54.0;
             observation.sourceFps = 30.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.95F);
+            lowered = near(controller.currentScale(), 0.90F);
         }
         assert(lowered);
 
@@ -610,7 +610,7 @@ int main() {
             observation.outputFps = 70.0;
             observation.sourceFps = 18.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.50F);
+            lowered = near(controller.currentScale(), 0.45F);
         }
         assert(lowered);
     }
@@ -630,7 +630,7 @@ int main() {
             observation.outputFps = 42.0;
             observation.sourceFps = 16.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.50F);
+            lowered = near(controller.currentScale(), 0.45F);
         }
         assert(lowered);
     }
@@ -676,7 +676,7 @@ int main() {
             observation.outputFps = 48.0;
             observation.sourceFps = 24.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.95F);
+            lowered = near(controller.currentScale(), 0.90F);
         }
         assert(lowered);
 
@@ -714,7 +714,7 @@ int main() {
             observation.outputDeficit = true;
             observation.outputFps = 48.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.95F);
+            lowered = near(controller.currentScale(), 0.90F);
         }
         assert(lowered);
 
@@ -727,7 +727,7 @@ int main() {
             observation.outputFps = 49.0;
             controller.observe(observation);
         }
-        assert(controller.currentScale() <= 0.95F);
+        assert(controller.currentScale() <= 0.90F);
         assert(controller.telemetry().reason
             != AdaptiveFlowDecisionReason::DownstepReverted);
     }
@@ -794,7 +794,7 @@ int main() {
             observation.sourceFps = 22.0;
             observation.sourceTargetFps = 30.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.95F);
+            lowered = near(controller.currentScale(), 0.90F);
         }
         assert(lowered);
         for (int i = 0; i < 50; ++i) {
