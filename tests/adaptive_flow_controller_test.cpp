@@ -255,7 +255,7 @@ int main() {
         // predicted to fit comfortably, the lower state's raw utilization
         // ratio must not strand quality indefinitely.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        for (int i = 0; i < 12; ++i)
+        for (int i = 0; i < 5; ++i)
             controller.observe(sample(16.2, 5.0));
         assert(near(controller.currentScale(), 0.95F));
 
@@ -268,7 +268,7 @@ int main() {
         // If a higher state is predicted to consume too much of the budget,
         // hold the lower state despite otherwise healthy current timings.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        for (int i = 0; i < 12; ++i)
+        for (int i = 0; i < 5; ++i)
             controller.observe(sample(16.2, 6.0));
         assert(near(controller.currentScale(), 0.95F));
         for (int i = 0; i < 60; ++i)
@@ -281,11 +281,11 @@ int main() {
         // recovery evidence in one call. This matters for Adaptive Flow paired
         // with Fixed LSFG, where no Adaptive-LSFG discontinuity event exists.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        for (int i = 0; i < 12; ++i)
+        for (int i = 0; i < 5; ++i)
             controller.observe(sample(16.2, 5.0));
         assert(near(controller.currentScale(), 0.95F));
 
-        for (int i = 0; i < 20; ++i)
+        for (int i = 0; i < 10; ++i)
             controller.observe(sample(8.0, 2.0));
         auto resumed = sample(8.0, 2.0);
         resumed.elapsed = 10s;
@@ -441,7 +441,7 @@ int main() {
     {
         // A compute-limited downstep that relieves LSFG pressure is retained.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        for (int i = 0; i < 12; ++i)
+        for (int i = 0; i < 5; ++i)
             controller.observe(sample(16.2, 5.0));
         assert(near(controller.currentScale(), 0.95F));
         bool confirmed = false;
@@ -639,7 +639,7 @@ int main() {
         // clear the in-flight downstep evaluation even when the transition
         // sample itself has no valid GPU timing.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        for (int i = 0; i < 12; ++i)
+        for (int i = 0; i < 5; ++i)
             controller.observe(sample(16.2, 5.0));
         assert(near(controller.currentScale(), 0.95F));
 
