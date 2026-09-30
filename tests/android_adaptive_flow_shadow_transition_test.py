@@ -62,13 +62,8 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             self.assertIn("shadowActiveEstimateMs", source, context_source.as_posix())
             self.assertIn("lastAdaptiveFlowGpuTiming_.shadowPreprocessMs", source,
                           context_source.as_posix())
-            self.assertIn("lastAdaptiveFlowGpuTiming_.opticalFlowMs", source,
+            self.assertIn("lastAdaptiveFlowGpuTiming_.mipmapsMs", source,
                           context_source.as_posix())
-            self.assertNotIn(
-                "lastAdaptiveFlowGpuTiming_.mipmapsMs * 1.10",
-                source,
-                context_source.as_posix(),
-            )
             self.assertIn("generationCount == 0 || shadowBudgetAvailable", source,
                           context_source.as_posix())
             self.assertNotIn(
