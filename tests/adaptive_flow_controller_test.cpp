@@ -177,9 +177,21 @@ int main() {
         }
         assert(lowered);
 
-        // Keep the target missed long enough to commit the downstep rather
-        // than letting the recovery path merely revert an unproven probe.
-        for (int i = 0; i < 4; ++i) {
+        // Model the real backend handoff and post-handoff settle barrier.
+        // This prevents stale target-pressure evidence from scheduling a second
+        // downstep before the first probe has been evaluated.
+        for (int i = 0; i < 3; ++i) {
+            auto transition = sample(12.0, 3.0, 50.0);
+            transition.flowTransition = true;
+            controller.observe(transition);
+        }
+        for (int i = 0; i < 3; ++i)
+            controller.observe(sample(12.0, 3.0, 50.0));
+
+        // Keep the target missed only until the existing 0.90 probe is
+        // committed as beneficial, then switch to clean recovery evidence.
+        bool benefitConfirmed = false;
+        for (int i = 0; i < 6 && !benefitConfirmed; ++i) {
             auto observation = sample(12.0, 3.0, 50.0);
             observation.outputCadenceValid = true;
             observation.outputTargeted = true;
@@ -188,7 +200,10 @@ int main() {
             observation.outputFps = 44.0;
             observation.sourceFps = 18.0;
             controller.observe(observation);
+            benefitConfirmed = controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
         }
+        assert(benefitConfirmed);
         assert(near(controller.currentScale(), 0.90F));
 
         bool recovered = false;
