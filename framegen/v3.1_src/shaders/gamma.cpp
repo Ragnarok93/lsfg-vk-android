@@ -11,6 +11,7 @@
 #include <utility>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 using namespace LSFG_3_1::Shaders;
 
@@ -129,69 +130,62 @@ Gamma::Gamma(Vulkan& vk, std::array<std::array<Core::Image, 4>, 3> inImgs1,
     }
 }
 
-void Gamma::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
-        uint64_t pass_idx, size_t activeGenerationCount) {
-    auto& pass = this->passesByGenerationCount.at(activeGenerationCount).at(pass_idx);
+void Gamma::PushStepBarriers(Utils::BarrierBuilder& barriers,
+        uint64_t frameCount, size_t step) {
+    switch (step) {
+    case 0:
+        barriers.addW2R(this->inImgs1.at((frameCount + 2) % 3))
+            .addW2R(this->inImgs1.at(frameCount % 3))
+            .addW2R(this->optImg)
+            .addR2W(this->tempImgs1.at(0))
+            .addR2W(this->tempImgs1.at(1))
+            .addR2W(this->tempImgs1.at(2));
+        break;
+    case 1:
+        barriers.addW2R(this->tempImgs1.at(0))
+            .addW2R(this->tempImgs1.at(1))
+            .addW2R(this->tempImgs1.at(2))
+            .addR2W(this->tempImgs2);
+        break;
+    case 2:
+        barriers.addW2R(this->tempImgs2).addR2W(this->tempImgs1);
+        break;
+    case 3:
+        barriers.addW2R(this->tempImgs1).addR2W(this->tempImgs2);
+        break;
+    case 4:
+        barriers.addW2R(this->tempImgs2)
+            .addW2R(this->optImg)
+            .addW2R(this->inImg2)
+            .addR2W(this->outImg);
+        break;
+    default:
+        throw std::out_of_range("Gamma step");
+    }
+}
 
-    // first shader
+void Gamma::DispatchStep(const Core::CommandBuffer& buf, uint64_t frameCount,
+        uint64_t pass_idx, size_t activeGenerationCount, size_t step) {
+    auto& pass = this->passesByGenerationCount.at(activeGenerationCount).at(pass_idx);
     const auto extent = this->tempImgs1.at(0).getExtent();
     const uint32_t threadsX = (extent.width + 7) >> 3;
     const uint32_t threadsY = (extent.height + 7) >> 3;
 
-    Utils::BarrierBuilder(buf)
-        .addW2R(this->inImgs1.at((frameCount + 2) % 3))
-        .addW2R(this->inImgs1.at(frameCount % 3))
-        .addW2R(this->optImg)
-        .addR2W(this->tempImgs1.at(0))
-        .addR2W(this->tempImgs1.at(1))
-        .addR2W(this->tempImgs1.at(2))
-        .build();
-
-    this->pipelines.at(0).bind(buf);
-    pass.firstDescriptorSet.at(frameCount % 3).bind(buf, this->pipelines.at(0));
+    this->pipelines.at(step).bind(buf);
+    if (step == 0) {
+        pass.firstDescriptorSet.at(frameCount % 3).bind(buf, this->pipelines.at(step));
+    } else {
+        pass.descriptorSets.at(step - 1).bind(buf, this->pipelines.at(step));
+    }
     buf.dispatch(threadsX, threadsY, 1);
+}
 
-    // second shader
-    Utils::BarrierBuilder(buf)
-        .addW2R(this->tempImgs1.at(0))
-        .addW2R(this->tempImgs1.at(1))
-        .addW2R(this->tempImgs1.at(2))
-        .addR2W(this->tempImgs2)
-        .build();
-
-    this->pipelines.at(1).bind(buf);
-    pass.descriptorSets.at(0).bind(buf, this->pipelines.at(1));
-    buf.dispatch(threadsX, threadsY, 1);
-
-    // third shader
-    Utils::BarrierBuilder(buf)
-        .addW2R(this->tempImgs2)
-        .addR2W(this->tempImgs1)
-        .build();
-
-    this->pipelines.at(2).bind(buf);
-    pass.descriptorSets.at(1).bind(buf, this->pipelines.at(2));
-    buf.dispatch(threadsX, threadsY, 1);
-
-    // fourth shader
-    Utils::BarrierBuilder(buf)
-        .addW2R(this->tempImgs1)
-        .addR2W(this->tempImgs2)
-        .build();
-
-    this->pipelines.at(3).bind(buf);
-    pass.descriptorSets.at(2).bind(buf, this->pipelines.at(3));
-    buf.dispatch(threadsX, threadsY, 1);
-
-    // fifth shader
-    Utils::BarrierBuilder(buf)
-        .addW2R(this->tempImgs2)
-        .addW2R(this->optImg)
-        .addW2R(this->inImg2)
-        .addR2W(this->outImg)
-        .build();
-
-    this->pipelines.at(4).bind(buf);
-    pass.descriptorSets.at(3).bind(buf, this->pipelines.at(4));
-    buf.dispatch(threadsX, threadsY, 1);
+void Gamma::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
+        uint64_t pass_idx, size_t activeGenerationCount) {
+    for (size_t step = 0; step < StageCount; ++step) {
+        Utils::BarrierBuilder barriers(buf);
+        this->PushStepBarriers(barriers, frameCount, step);
+        barriers.build();
+        this->DispatchStep(buf, frameCount, pass_idx, activeGenerationCount, step);
+    }
 }
