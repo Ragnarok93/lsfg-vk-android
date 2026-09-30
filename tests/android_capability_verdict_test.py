@@ -48,5 +48,13 @@ class CapabilityVerdictTest(unittest.TestCase):
         )
 
 
+    def test_shader_and_pipeline_failures_keep_module_name(self) -> None:
+        source = (ROOT / "framegen/src/pool/shaderpool.cpp").read_text(encoding="utf-8")
+        self.assertIn("Shader module creation failed for ", source)
+        self.assertIn("Compute pipeline creation failed for ", source)
+        self.assertIn("+ name +", source)
+
+
+
 if __name__ == "__main__":
     unittest.main()

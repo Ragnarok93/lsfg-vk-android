@@ -35,10 +35,17 @@ Core::ShaderModule ShaderPool::getShader(
             + compatible.rejectionReason);
     }
 
-    // create the shader module from the validated device-compatible payload.
-    Core::ShaderModule shader(device, compatible.code, types);
-    shaders[name] = shader;
-    return shader;
+    // Create the shader module from the validated device-compatible payload.
+    // Preserve the module name in any driver failure so Android diagnostics can
+    // identify the exact shader that is incompatible with a restrictive ICD.
+    try {
+        Core::ShaderModule shader(device, compatible.code, types);
+        shaders[name] = shader;
+        return shader;
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            "Shader module creation failed for " + name + ": " + e.what());
+    }
 }
 
 Core::Pipeline ShaderPool::getPipeline(
@@ -50,8 +57,13 @@ Core::Pipeline ShaderPool::getPipeline(
     // grab the shader module
     auto shader = this->getShader(device, name, {});
 
-    // create the pipeline
-    Core::Pipeline pipeline(device, shader);
-    pipelines[name] = pipeline;
-    return pipeline;
+    // Preserve the shader/pipeline name when vkCreateComputePipelines fails.
+    try {
+        Core::Pipeline pipeline(device, shader);
+        pipelines[name] = pipeline;
+        return pipeline;
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            "Compute pipeline creation failed for " + name + ": " + e.what());
+    }
 }
