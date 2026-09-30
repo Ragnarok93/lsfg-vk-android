@@ -3808,6 +3808,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->adaptiveFlowController_.telemetry().stateCount,
                 static_cast<double>(this->adaptiveFlowRequestedScale_),
                 this->adaptiveFlowTransitionPending_ ? 1 : 0,
+                this->adaptiveFlowOutputTargetValid_ ? 1 : 0,
                 this->adaptiveFlowWarmupRemaining_,
                 this->adaptiveFlowTimingValid_ ? 1 : 0,
                 this->lsfgOutputCadenceTracker_.snapshot().targetSatisfiedConfirmed ? 1 : 0,
