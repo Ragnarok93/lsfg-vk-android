@@ -24,29 +24,28 @@ constexpr double kRecoveryPredictedRatio = 0.82;
 constexpr double kMinimumFlowBudgetRatio = 0.10;
 constexpr double kMinimumPredictedReliefRatio = 0.025;
 constexpr double kMinimumGlobalPressureLsfgBudgetRatio = 0.40;
-constexpr double kDownConfirmSeconds = 0.20;
-constexpr double kGlobalDownConfirmSeconds = 0.10;
-// Target/source pressure is user-visible. Keep the full confirmation /
-// evaluation / cooldown loop at least twice as responsive as the prior tune.
-constexpr double kOutputDownConfirmSeconds = 0.075;
-constexpr double kUpConfirmSeconds = 0.75;
+constexpr double kDownConfirmSeconds = 0.40;
+constexpr double kGlobalDownConfirmSeconds = 0.20;
+// Target/source pressure is user-visible; keep this loop comfortably faster
+// than the previous confirmation/evaluation/cooldown chain.
+constexpr double kOutputDownConfirmSeconds = 0.15;
+constexpr double kUpConfirmSeconds = 1.75;
 constexpr double kGlobalGpuPressurePercent = 96.0;
 constexpr double kGlobalGpuRecoveryPercent = 88.0;
-constexpr double kTransitionCooldownSeconds = 0.20;
-constexpr double kOutputTransitionCooldownSeconds = 0.10;
-// The backend's three-frame graph/history handoff is unchanged. This short
-// post-handoff dwell only rejects stale evidence; it must not dominate the
-// controller's response time.
-constexpr double kFlowTransitionSettleSeconds = 0.12;
-constexpr double kSchedulerTransitionHoldSeconds = 0.25;
-constexpr double kDownstepEvaluationSeconds = 0.15;
-constexpr double kOutputDownstepEvaluationSeconds = 0.075;
-constexpr double kDownstepNoBenefitHoldSeconds = 0.75;
+constexpr double kTransitionCooldownSeconds = 0.50;
+constexpr double kOutputTransitionCooldownSeconds = 0.25;
+// The backend's three-frame graph/history handoff is unchanged. This dwell
+// only prevents stale pre-transition evidence from leaking past it.
+constexpr double kFlowTransitionSettleSeconds = 0.25;
+constexpr double kSchedulerTransitionHoldSeconds = 0.50;
+constexpr double kDownstepEvaluationSeconds = 0.30;
+constexpr double kOutputDownstepEvaluationSeconds = 0.15;
+constexpr double kDownstepNoBenefitHoldSeconds = 2.0;
 constexpr double kSourceTargetSatisfiedRatio = 0.98;
 constexpr double kExploratorySourceDropRatio = 0.97;
 constexpr double kMaterialPressureRatioRelief = 0.05;
 constexpr double kMaterialOutputGainRatio = 1.02;
-constexpr double kMaterialSourceGainRatio = 1.01;
+constexpr double kMaterialSourceGainRatio = 1.03;
 constexpr double kMaterialFlowReliefRatio = 0.88;
 constexpr double kMaterialTotalReliefRatio = 0.95;
 constexpr double kMaterialWsiReliefRatio = 0.75;
@@ -376,9 +375,14 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         // missed. Reverting solely because one short, noisy cadence window did
         // not improve enough caused adjacent-state oscillation without ever
         // recovering the requested rate.
+        const bool directOutputTargetMiss =
+            !fixedMultiplierMode
+            && observation.outputCadenceValid
+            && observation.outputTargeted
+            && !observation.outputTargetSatisfied;
         const bool targetPressureRemains =
             (downstepOutputDriven_
-                && outputPressure
+                && directOutputTargetMiss
                 && !downstepBaselineWsiPressure_)
             || (downstepSourceDriven_ && sourcePressure);
 
