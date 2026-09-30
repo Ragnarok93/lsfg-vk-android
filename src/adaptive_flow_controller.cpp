@@ -615,7 +615,12 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             && globalRecoveryHeadroom
             && thermalRecoveryHeadroom) {
         const double currentScale = static_cast<double>(presetStates[index]);
-        const double higherScale = static_cast<double>(presetStates[index - 1]);
+        // Recover two .05 states per confirmed headroom decision when possible.
+        // Predict the full two-state cost before committing so faster quality
+        // recovery never trades cadence for fewer graph/history handoffs.
+        const std::size_t recoveryStepCount = std::min<std::size_t>(2U, index);
+        const std::size_t recoveryIndex = index - recoveryStepCount;
+        const double higherScale = static_cast<double>(presetStates[recoveryIndex]);
         const double addedFlowMs = observation.flowMs
             * ((higherScale * higherScale) / (currentScale * currentScale) - 1.0);
         const double predictedTotalMs = observation.totalLsfgMs + addedFlowMs;
@@ -629,7 +634,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
 
         headroomSeconds_ += evidenceSeconds;
         if (headroomSeconds_ >= kUpConfirmSeconds) {
-            telemetry_.stateIndex--;
+            telemetry_.stateIndex = recoveryIndex;
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
             telemetry_.changed = true;
             telemetry_.reason = AdaptiveFlowDecisionReason::SustainedHeadroom;

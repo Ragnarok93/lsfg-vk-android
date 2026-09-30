@@ -431,7 +431,11 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
                         ? this->lastAdaptiveFlowGpuTiming_.shadowPreprocessMs * 1.10
                         : std::max(
                             0.0,
-                            this->lastAdaptiveFlowGpuTiming_.mipmapsMs * 1.10))
+                            // Before the first direct shadow measurement, use
+                            // the measured preprocess-through-Beta envelope.
+                            // It safely covers Mipmaps+Alpha and avoids admitting
+                            // a transition from a mipmaps-only underestimate.
+                            this->lastAdaptiveFlowGpuTiming_.opticalFlowMs * 1.10))
                     : 0.0;
             const double shadowActiveEstimateMs =
                 adaptiveFlowBatch.predictedTotalLsfgMs > 0.0
