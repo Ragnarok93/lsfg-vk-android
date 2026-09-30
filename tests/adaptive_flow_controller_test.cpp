@@ -298,7 +298,7 @@ int main() {
         // Flow Scale even when the current cycle is history-only. The retained
         // generated-work timing supplies the scale-sensitive relief estimate.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 3; ++i) {
             controller.observe(sample(
                 8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false));
@@ -320,7 +320,7 @@ int main() {
         // cycle from pretending generation is cheap while avoiding permanent
         // quality pinning once Adaptive no longer needs synthetic frames.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 3; ++i) {
             controller.observe(sample(
                 8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false));
@@ -339,7 +339,7 @@ int main() {
         // Retained history timing alone is insufficient when current global
         // headroom is unavailable. Do not upscale from stale timing blindly.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 3; ++i) {
             controller.observe(sample(
                 8.0, 5.0, 16.666, false, false,
                 99.0, true, true, false, false));
