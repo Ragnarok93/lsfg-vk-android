@@ -704,10 +704,15 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         backendDiagnostics = conf.performance
             ? LSFG_3_1P::getBackendDiagnostics()
             : LSFG_3_1::getBackendDiagnostics();
+        this->framegenSupportDecision_ = backendDiagnostics.supportDecision;
         ahbTransportMode = backendDiagnostics.ahbTransportMode;
-        if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported)
-            throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
-                "Exact game/framegen ICD has no supported AHB image transport for LSFG format");
+        if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported) {
+            const std::string reason =
+                this->framegenSupportDecision_.rejectionReason.empty()
+                    ? "Exact game/framegen ICD has no supported AHB image transport for LSFG format"
+                    : this->framegenSupportDecision_.rejectionReason;
+            throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED, reason);
+        }
 
         const uint64_t contextCreateEpoch =
             framegenContextCreateEpoch.fetch_add(1, std::memory_order_relaxed) + 1;

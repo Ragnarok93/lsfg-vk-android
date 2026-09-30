@@ -62,7 +62,21 @@ struct AndroidFrameSyncFds {
     bool hostWaitFallback{false};
 };
 
+struct FramegenSupportDecision {
+    bool supported{false};
+    std::string vulkanPath;
+    uint32_t spirvTargetVersion{0};
+    std::string synchronizationPath;
+    AhbTransportMode ahbMode{AhbTransportMode::Unsupported};
+    bool fp16{false};
+    bool nullDescriptor{false};
+    bool externalSyncFd{false};
+    bool externalOpaqueFd{false};
+    std::string rejectionReason;
+};
+
 struct BackendDiagnostics {
+    FramegenSupportDecision supportDecision{};
     uint32_t apiVersion{VK_API_VERSION_1_0};
     uint32_t spirvTargetVersion{0};
     std::string vulkanPath;

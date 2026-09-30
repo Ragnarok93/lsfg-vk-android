@@ -15,6 +15,7 @@
 #include "mini/commandpool.hpp"
 #include "mini/image.hpp"
 #include "mini/semaphore.hpp"
+#include "lsfg_backend.hpp"
 
 #include <array>
 #include <chrono>
@@ -135,6 +136,10 @@ public:
 
 #ifdef __ANDROID__
     void enterSourceOnlyBypass();
+
+    [[nodiscard]] const LSFG::FramegenSupportDecision& framegenSupportDecision() const {
+        return framegenSupportDecision_;
+    }
 
     [[nodiscard]] AdaptiveFlowRuntimeSnapshot adaptiveFlowRuntimeSnapshot() const {
         const auto& telemetry = adaptiveFlowController_.telemetry();
@@ -269,6 +274,7 @@ private:
         SourceCadenceObservation::SourceOnly};
     AdaptiveFlowController adaptiveFlowController_;
     AdaptiveFlowPreset adaptiveFlowPreset_{AdaptiveFlowPreset::Quality};
+    LSFG::FramegenSupportDecision framegenSupportDecision_{};
     bool adaptiveFlowRuntimeAvailable_{false};
     float adaptiveFlowRequestedScale_{1.0F};
     float adaptiveFlowActiveScale_{1.0F};

@@ -365,6 +365,14 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.synchronizationPath =
         synchronizationPathName(decision.synchronizationPath);
     this->diagnostics.capabilitySummary = "supported";
+    this->diagnostics.supportDecision.supported = true;
+    this->diagnostics.supportDecision.vulkanPath =
+        this->diagnostics.vulkanPath;
+    this->diagnostics.supportDecision.spirvTargetVersion =
+        this->diagnostics.spirvTargetVersion;
+    this->diagnostics.supportDecision.synchronizationPath =
+        this->diagnostics.synchronizationPath;
+    this->diagnostics.supportDecision.fp16 = caps.shaderFloat16;
     this->diagnostics.driverVersion = properties.driverVersion;
     this->diagnostics.driverId = hasDriverProperties
         ? driverProperties.driverID
@@ -399,6 +407,13 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.ahbTransferOutput = transferOutput;
     this->diagnostics.ahbTransportMode = LSFG::selectAhbTransportMode(
         sampledInput, transferInput, storageOutput, transferOutput);
+    this->diagnostics.supportDecision.ahbMode =
+        this->diagnostics.ahbTransportMode;
+    if (this->diagnostics.ahbTransportMode == LSFG::AhbTransportMode::Unsupported) {
+        this->diagnostics.supportDecision.supported = false;
+        this->diagnostics.supportDecision.rejectionReason =
+            "no supported directional AHardwareBuffer transport for LSFG format";
+    }
     const auto opaqueFdSemaphoreProbe = probeExternalSemaphoreSupport(
         physicalDevice, availableExtensions,
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
@@ -411,10 +426,17 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT, syncFdSemaphoreProbe);
     this->diagnostics.externalSemaphoreOpaqueFd = opaqueFdSemaphoreProbe.supported;
     this->diagnostics.externalSemaphoreSyncFd = syncFdSemaphoreProbe.supported;
+    this->diagnostics.supportDecision.externalOpaqueFd =
+        opaqueFdSemaphoreProbe.supported;
+    this->diagnostics.supportDecision.externalSyncFd =
+        syncFdSemaphoreProbe.supported;
 #else
     this->diagnostics.ahbTransportMode = LSFG::AhbTransportMode::DirectStorage;
     this->diagnostics.externalSemaphoreOpaqueFd = true;
     this->diagnostics.externalSemaphoreSyncFd = false;
+    this->diagnostics.supportDecision.ahbMode =
+        LSFG::AhbTransportMode::DirectStorage;
+    this->diagnostics.supportDecision.externalOpaqueFd = true;
 #endif
 
     std::cerr << "lsfg-vk: backend driver=\"" << this->diagnostics.driverName
@@ -584,6 +606,7 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->computeFamilyIdx = *computeFamilyIdx;
     this->physicalDevice = physicalDevice;
     this->nullDescriptorSupported = enableNullDescriptor;
+    this->diagnostics.supportDecision.nullDescriptor = enableNullDescriptor;
     this->device = std::shared_ptr<VkDevice>(
         new VkDevice(handle), [](VkDevice* device) {
             if (device != nullptr) {

@@ -517,10 +517,17 @@ namespace {
     }
 
 #ifdef __ANDROID__
+    std::string statsSafeValue(std::string value) {
+        std::replace(value.begin(), value.end(), '\n', ' ');
+        std::replace(value.begin(), value.end(), '\r', ' ');
+        return value;
+    }
+
     void publishRuntimeState(const std::string& configFile, const char* state,
             bool active, bool generationReady, bool resident, bool sourceOnly,
             bool generationInitialized, bool generatedPresented, bool degraded, int multiplier,
-            bool performance, bool adaptive, uint32_t targetFps) {
+            bool performance, bool adaptive, uint32_t targetFps,
+            const LSFG::FramegenSupportDecision* support = nullptr) {
         if (configFile.empty())
             return;
         std::lock_guard fileLock(runtimeStatsFileMutex);
@@ -550,7 +557,31 @@ namespace {
                 << "multiplier=" << multiplier << '\n'
                 << "adaptive=" << (adaptive ? 1 : 0) << '\n'
                 << "target_fps=" << targetFps << '\n'
-                << "performance=" << (performance ? 1 : 0) << '\n';
+                << "performance=" << (performance ? 1 : 0) << '\n'
+                << "framegen_support_known=" << (support != nullptr ? 1 : 0) << '\n'
+                << "framegen_supported="
+                << (support != nullptr && support->supported ? 1 : 0) << '\n'
+                << "framegen_vulkan_path="
+                << (support != nullptr ? support->vulkanPath : "") << '\n'
+                << "framegen_spirv_target=0x" << std::hex
+                << (support != nullptr ? support->spirvTargetVersion : 0u)
+                << std::dec << '\n'
+                << "framegen_sync_path="
+                << (support != nullptr ? support->synchronizationPath : "") << '\n'
+                << "framegen_ahb_mode="
+                << (support != nullptr
+                    ? LSFG::ahbTransportModeName(support->ahbMode) : "unknown") << '\n'
+                << "framegen_fp16="
+                << (support != nullptr && support->fp16 ? 1 : 0) << '\n'
+                << "framegen_null_descriptor="
+                << (support != nullptr && support->nullDescriptor ? 1 : 0) << '\n'
+                << "framegen_external_sync_fd="
+                << (support != nullptr && support->externalSyncFd ? 1 : 0) << '\n'
+                << "framegen_external_opaque_fd="
+                << (support != nullptr && support->externalOpaqueFd ? 1 : 0) << '\n'
+                << "framegen_rejection_reason="
+                << (support != nullptr
+                    ? statsSafeValue(support->rejectionReason) : "") << '\n';
             out.close();
             if (!out)
                 throw std::runtime_error("failed to flush temporary stats file");
@@ -579,7 +610,8 @@ namespace {
             double outputFps, double sourceFps, double generatedFps,
             const RuntimeOutputStats& stats, int multiplier, bool performance,
             bool adaptive, uint32_t targetFps,
-            const AdaptiveFlowRuntimeSnapshot& adaptiveFlow) {
+            const AdaptiveFlowRuntimeSnapshot& adaptiveFlow,
+            const LSFG::FramegenSupportDecision& support) {
         if (configFile.empty())
             return;
         std::lock_guard fileLock(runtimeStatsFileMutex);
@@ -611,6 +643,19 @@ namespace {
                 << "adaptive=" << (adaptive ? 1 : 0) << '\n'
                 << "target_fps=" << targetFps << '\n'
                 << "performance=" << (performance ? 1 : 0) << '\n'
+                << "framegen_support_known=1\n"
+                << "framegen_supported=" << (support.supported ? 1 : 0) << '\n'
+                << "framegen_vulkan_path=" << support.vulkanPath << '\n'
+                << "framegen_spirv_target=0x" << std::hex
+                << support.spirvTargetVersion << std::dec << '\n'
+                << "framegen_sync_path=" << support.synchronizationPath << '\n'
+                << "framegen_ahb_mode=" << LSFG::ahbTransportModeName(support.ahbMode) << '\n'
+                << "framegen_fp16=" << (support.fp16 ? 1 : 0) << '\n'
+                << "framegen_null_descriptor=" << (support.nullDescriptor ? 1 : 0) << '\n'
+                << "framegen_external_sync_fd=" << (support.externalSyncFd ? 1 : 0) << '\n'
+                << "framegen_external_opaque_fd=" << (support.externalOpaqueFd ? 1 : 0) << '\n'
+                << "framegen_rejection_reason="
+                << statsSafeValue(support.rejectionReason) << '\n'
                 << "adaptive_flow_enabled=" << (adaptiveFlow.enabled ? 1 : 0) << '\n'
                 << "adaptive_flow_preset=" << adaptiveFlow.preset << '\n'
                 << "adaptive_flow_target=" << adaptiveFlow.targetScale << '\n'
@@ -732,7 +777,7 @@ namespace {
             generationActive, generationActive, true, !generationActive, true,
             generatedPresented, false,
             outputFps, sourceFps, generatedFps, stats, multiplier, performance,
-            adaptive, targetFps, adaptiveFlow);
+            adaptive, targetFps, adaptiveFlow, context.framegenSupportDecision());
 
         stats.windowStart = now;
         stats.windowSourceFrames = 0;
@@ -1081,6 +1126,7 @@ namespace {
                 swapchainImages, createInfo.presentMode);
             if (pCreateInfo->oldSwapchain)
                 retireSwapchainState(pCreateInfo->oldSwapchain);
+            const auto supportDecision = state->context->framegenSupportDecision();
             publishSwapchainState(*pSwapchain, std::move(state));
             std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 #ifdef __ANDROID__
@@ -1090,7 +1136,7 @@ namespace {
                 generationActive, generationActive, true, !generationActive, true,
                 false, false,
                 static_cast<int>(activeConf.multiplier), activeConf.performance,
-                activeConf.adaptiveFramegen, activeConf.fpsLimit);
+                activeConf.adaptiveFramegen, activeConf.fpsLimit, &supportDecision);
 #endif
 
             std::cerr << "lsfg-vk: Swapchain context " <<
@@ -1135,10 +1181,14 @@ namespace {
                         + std::string(e.what()));
                 }
 #ifdef __ANDROID__
+                const LSFG::FramegenSupportDecision failureDecision{
+                    .supported = false,
+                    .rejectionReason = e.what(),
+                };
                 publishRuntimeState(activeConf.config_file, "degraded",
                     false, false, false, false, false, false, true,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
-                    activeConf.adaptiveFramegen, activeConf.fpsLimit);
+                    activeConf.adaptiveFramegen, activeConf.fpsLimit, &failureDecision);
 #endif
                 std::cerr << "lsfg-vk: init stage=swapchain-fallback-pass-through"
                              " reason=ls-context-failed\n";
