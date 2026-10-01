@@ -82,6 +82,13 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
                 source,
                 context_source.as_posix(),
             )
+            self.assertIn(
+                "this->pendingFlowGraphIndex_.has_value() ? 1U : 0U",
+                source,
+                context_source.as_posix(),
+            )
+            self.assertIn("handoff_cycles=1", source,
+                          context_source.as_posix())
 
             # The switch stays on the existing queue/submission path.
             self.assertNotIn("vkDeviceWaitIdle", source, context_source.as_posix())
