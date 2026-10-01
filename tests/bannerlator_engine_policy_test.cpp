@@ -72,6 +72,43 @@ static void testPresentModeSelectionAndReuse() {
     assert(legacyMode != mailbox);
 }
 
+static void testAdaptiveFlowEnableSeedsFixedScale() {
+    auto previous = flowIdentity();
+    previous.adaptiveFlow = false;
+    auto next = previous;
+    next.adaptiveFlow = true;
+    next.preset = "auto";
+
+    const auto seed = lsfg::handoff::selectEnableScale(
+        previous, next, 0.50F);
+    assert(seed && std::fabs(*seed - 0.50F) < 0.0001F);
+
+    // The seed is valid only for the same running FG workload. It must never
+    // leak across a target/multiplier/model/extent change.
+    auto changed = next;
+    changed.targetFps = 90;
+    assert(!lsfg::handoff::selectEnableScale(previous, changed, 0.50F));
+    changed = next;
+    changed.multiplier = 3;
+    assert(!lsfg::handoff::selectEnableScale(previous, changed, 0.50F));
+    changed = next;
+    changed.performance = !previous.performance;
+    assert(!lsfg::handoff::selectEnableScale(previous, changed, 0.50F));
+    changed = next;
+    changed.width++;
+    assert(!lsfg::handoff::selectEnableScale(previous, changed, 0.50F));
+
+    assert(!lsfg::handoff::selectEnableScale(
+        previous, next, std::numeric_limits<float>::quiet_NaN()));
+    assert(!lsfg::handoff::selectEnableScale(previous, next, 0.20F));
+    assert(!lsfg::handoff::selectEnableScale(previous, next, 1.05F));
+
+    // This migration applies only to Off -> On. Existing Adaptive Flow
+    // contexts continue to use the stricter stable-state handoff contract.
+    previous.adaptiveFlow = true;
+    assert(!lsfg::handoff::selectEnableScale(previous, next, 0.50F));
+}
+
 static void testStableAdaptiveFlowHandoff() {
     auto previous = flowIdentity();
     auto next = flowIdentity();
@@ -192,5 +229,6 @@ static void testStableAdaptiveFlowHandoff() {
 
 int main() {
     testPresentModeSelectionAndReuse();
+    testAdaptiveFlowEnableSeedsFixedScale();
     testStableAdaptiveFlowHandoff();
 }
