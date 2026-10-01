@@ -7,6 +7,29 @@
 using namespace std::chrono_literals;
 
 int main() {
+
+    {
+        // A hard Adaptive-FG scene/cadence discontinuity on the protected
+        // generation-first path must refresh both private source slots before
+        // interpolation resumes, then limit the first resumed batch to one
+        // synthetic frame. Ordinary/generic paths remain unguarded.
+        AdaptiveSceneTransitionGuard guard;
+        guard.arm(true);
+        assert(guard.sourceOnlyRemaining() == 2);
+        assert(guard.limitGenerated(3) == 0);
+        guard.consumeSourceOnly();
+        assert(guard.sourceOnlyRemaining() == 1);
+        assert(guard.limitGenerated(3) == 0);
+        guard.consumeSourceOnly();
+        assert(guard.sourceOnlyRemaining() == 0);
+        assert(guard.limitGenerated(3) == 1);
+        assert(guard.limitGenerated(3) == 3);
+
+        guard.arm(false);
+        assert(guard.sourceOnlyRemaining() == 0);
+        assert(guard.limitGenerated(3) == 3);
+    }
+
     {
         // Source deadlines advance once per real source observation. Querying
         // synthetic positions cannot advance or re-phase the protected source
