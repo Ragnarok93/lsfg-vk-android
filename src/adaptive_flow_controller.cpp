@@ -798,6 +798,22 @@ std::span<const float> AdaptiveFlowController::statesForPreset(AdaptiveFlowPrese
     return states(preset);
 }
 
+std::optional<float> AdaptiveFlowController::conservativeSeedScale(
+        AdaptiveFlowPreset preset, float scale) {
+    if (!std::isfinite(scale))
+        return std::nullopt;
+
+    const auto presetStates = states(preset);
+    constexpr float kScaleEpsilon = 0.0005F;
+    for (const float candidate : presetStates) {
+        if (candidate <= scale + kScaleEpsilon)
+            return candidate;
+    }
+    // The configured fixed scale may sit below a preset's quality floor.
+    // In that case the preset floor is the least expensive legal state.
+    return presetStates.back();
+}
+
 const char* AdaptiveFlowController::presetName(AdaptiveFlowPreset preset) {
     switch (preset) {
     case AdaptiveFlowPreset::Quality: return "quality";
