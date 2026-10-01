@@ -54,6 +54,11 @@ namespace LSFG_3_1P::Shaders {
         ///
         void Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount);
 
+        /// Seed all three temporal output slots from one coherent source frame.
+        /// Used only for Adaptive Flow graph handoff so the pending graph can
+        /// become immediately usable without a multi-frame shadow warmup.
+        void SeedHistory(const Core::CommandBuffer& buf, uint64_t frameCount);
+
         /// Get the output images
         [[nodiscard]] const auto& getOutImages() const { return this->outImgs; }
 
