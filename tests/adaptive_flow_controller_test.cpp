@@ -303,6 +303,24 @@ int main() {
         for (int i = 0; i < 100; ++i)
             controller.observe(healthy);
         assert(near(controller.currentScale(), 0.50F));
+
+        // The rejected quality state's retry hold must not suppress emergency
+        // downscaling. If real pressure appears, Flow still needs to move lower.
+        bool pressureLowered = false;
+        for (int i = 0; i < 8 && !pressureLowered; ++i) {
+            auto pressure = sample(34.0, 10.0, 33.333);
+            pressure.adaptiveFramegenMode = true;
+            pressure.scheduledGenerationDensity = 1.0;
+            pressure.sourceFps = 30.0;
+            pressure.outputCadenceValid = true;
+            pressure.outputTargeted = true;
+            pressure.outputTargetSatisfied = false;
+            pressure.outputDeficit = true;
+            pressure.outputFps = 50.0;
+            controller.observe(pressure);
+            pressureLowered = controller.currentScale() < 0.50F;
+        }
+        assert(pressureLowered);
     }
 
     {
