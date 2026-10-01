@@ -3042,7 +3042,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "source_exploration=%d source_reference_fps=%.3f fixed_multiplier_mode=%d "
                 "target_fps=%u output_target_valid=%d multiplier=%zu adaptive=%d "
                 "predicted_next_total_ms=%.3f flow_ms=%.3f lsfg_ms=%.3f "
-                "budget_ms=%.3f generation_count=%zu generated_work=%d retained_timing=%d "
+                "budget_ms=%.3f generation_count=%zu adaptive_density=%.3f generated_work=%d retained_timing=%d "
                 "gpu=%.1f pressure_valid=%d output_fps=%.3f output_target_fps=%.3f fixed_base=%d output_deficit=%d "
                 "output_satisfied=%d compute_pressure=%d wsi_pressure=%d wsi_loss_rate=%.3f",
                 static_cast<unsigned long long>(this->runtimeSessionId_),
@@ -3074,6 +3074,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 observation.totalLsfgMs,
                 observation.frameBudgetMs,
                 observation.generationCount,
+                observation.scheduledGenerationDensity,
                 observation.generatedWorkSample ? 1 : 0,
                 observation.retainedGeneratedTimingSample ? 1 : 0,
                 observation.globalGpuUsagePercent,
