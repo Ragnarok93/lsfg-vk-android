@@ -72,6 +72,22 @@ static void testPresentModeSelectionAndReuse() {
     assert(legacyMode != mailbox);
 }
 
+static void testAdaptiveFlowStartupSeparatesBackendAndControllerSeed() {
+    const auto plan = lsfg::handoff::planAdaptiveStartup(1.00F, 0.50F);
+    assert(std::fabs(plan.backendInitialScale - 1.00F) < 0.0001F);
+    assert(plan.postCreateScale.has_value());
+    assert(std::fabs(*plan.postCreateScale - 0.50F) < 0.0001F);
+
+    const auto targetPlan = lsfg::handoff::planAdaptiveStartup(1.00F, 1.00F);
+    assert(std::fabs(targetPlan.backendInitialScale - 1.00F) < 0.0001F);
+    assert(!targetPlan.postCreateScale.has_value());
+
+    const auto invalidSeed = lsfg::handoff::planAdaptiveStartup(
+        0.80F, std::numeric_limits<float>::quiet_NaN());
+    assert(std::fabs(invalidSeed.backendInitialScale - 0.80F) < 0.0001F);
+    assert(!invalidSeed.postCreateScale.has_value());
+}
+
 static void testAdaptiveFlowEnableSeedsFixedScale() {
     auto previous = flowIdentity();
     previous.adaptiveFlow = false;
@@ -240,6 +256,7 @@ static void testStableAdaptiveFlowHandoff() {
 
 int main() {
     testPresentModeSelectionAndReuse();
+    testAdaptiveFlowStartupSeparatesBackendAndControllerSeed();
     testAdaptiveFlowEnableSeedsFixedScale();
     testStableAdaptiveFlowHandoff();
 }
