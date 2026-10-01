@@ -88,6 +88,17 @@ static void testAdaptiveFlowStartupSeparatesBackendAndControllerSeed() {
     assert(!invalidSeed.postCreateScale.has_value());
 }
 
+static void testAdaptiveFlowStartupSeedSuppressesOnlyActiveHandoff() {
+    using lsfg::handoff::startupSeedHistoryOnly;
+
+    assert(startupSeedHistoryOnly(true, true, true, 1));
+    assert(!startupSeedHistoryOnly(true, true, false, 0));
+    assert(!startupSeedHistoryOnly(true, true, false, 1));
+    assert(!startupSeedHistoryOnly(true, true, true, 0));
+    assert(!startupSeedHistoryOnly(true, false, true, 1));
+    assert(!startupSeedHistoryOnly(false, true, true, 1));
+}
+
 static void testAdaptiveFlowEnableSeedsFixedScale() {
     auto previous = flowIdentity();
     previous.adaptiveFlow = false;
@@ -257,6 +268,7 @@ static void testStableAdaptiveFlowHandoff() {
 int main() {
     testPresentModeSelectionAndReuse();
     testAdaptiveFlowStartupSeparatesBackendAndControllerSeed();
+    testAdaptiveFlowStartupSeedSuppressesOnlyActiveHandoff();
     testAdaptiveFlowEnableSeedsFixedScale();
     testStableAdaptiveFlowHandoff();
 }
