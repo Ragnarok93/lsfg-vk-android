@@ -137,6 +137,31 @@ void Alpha::DispatchStage(const Core::CommandBuffer& buf, uint64_t frameCount, s
     buf.dispatch(threadsX, threadsY, 1);
 }
 
+void Alpha::SeedHistory(
+        const Core::CommandBuffer& buf, uint64_t frameCount) {
+    // Stages 0..2 are independent of the temporal slot. Run them once, then
+    // write the same coherent current-frame result into all three stage-3
+    // history slots. Beta therefore never reads uninitialized temporal images
+    // during a Flow graph handoff.
+    for (size_t stage = 0; stage + 1 < StageCount; ++stage) {
+        Utils::BarrierBuilder barriers(buf);
+        this->PushBarriers(barriers, frameCount, stage);
+        barriers.build();
+        this->BindStagePipeline(buf, stage);
+        this->DispatchStage(buf, frameCount, stage);
+    }
+
+    for (size_t history = 0; history < 3; ++history) {
+        Utils::BarrierBuilder barriers(buf);
+        this->PushBarriers(
+            barriers, frameCount + history, StageCount - 1);
+        barriers.build();
+        this->BindStagePipeline(buf, StageCount - 1);
+        this->DispatchStage(
+            buf, frameCount + history, StageCount - 1);
+    }
+}
+
 void Alpha::Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount) {
     for (size_t stage = 0; stage < StageCount; ++stage) {
         Utils::BarrierBuilder barriers(buf);
