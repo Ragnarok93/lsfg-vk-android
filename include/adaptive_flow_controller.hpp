@@ -194,6 +194,7 @@ private:
     std::size_t recoveryPacingPreviousIndex_{};
     double recoveryPacingEvaluationStartedSeconds_{};
     double recoveryPacingRegressionSeconds_{};
+    double recoveryPacingRetryBlockedUntilSeconds_{};
     double recoveryPacingBaselineSourceFps_{};
     double recoveryPacingBaselineDensity_{};
 
