@@ -33,6 +33,32 @@ constexpr unsigned kIntegerDensityAcquireSamples = 4;
 constexpr unsigned kIntegerDensityReleaseSamples = 8;
 } // namespace
 
+void AdaptiveSceneTransitionGuard::arm(bool enabled) {
+    sourceOnlyRemaining_ = enabled ? kProtectedSourceReprimeFrames : 0;
+    firstGeneratedBatchPending_ = enabled;
+}
+
+void AdaptiveSceneTransitionGuard::reset() {
+    sourceOnlyRemaining_ = 0;
+    firstGeneratedBatchPending_ = false;
+}
+
+void AdaptiveSceneTransitionGuard::consumeSourceOnly() {
+    if (sourceOnlyRemaining_ > 0)
+        --sourceOnlyRemaining_;
+}
+
+std::size_t AdaptiveSceneTransitionGuard::limitGenerated(
+        std::size_t planned) {
+    if (sourceOnlyRemaining_ > 0)
+        return 0;
+    if (planned == 0 || !firstGeneratedBatchPending_)
+        return planned;
+
+    firstGeneratedBatchPending_ = false;
+    return std::min<std::size_t>(planned, 1);
+}
+
 SourceTimelineSample SourceProtectedTimeline::observe(
         uint64_t sourceArrivalTimeNs,
         std::chrono::nanoseconds sourceInterval,
