@@ -2491,12 +2491,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         ? this->adaptiveScheduler_.plan(
             sourceInterval, adaptiveFlowTransitionActiveAtCycleStart)
         : requestedFixedGeneratedFrameCount;
-    size_t generatedFrameCount =
-        conf.adaptiveFramegen && generationFirstAdreno
-            ? this->adaptiveSourceHealthGuard_.limit(plannedGeneratedFrameCount)
-            : requestedFixedGeneratedFrameCount;
-    if (conf.adaptiveFramegen && !generationFirstAdreno)
-        generatedFrameCount = plannedGeneratedFrameCount;
+    size_t generatedFrameCount = conf.adaptiveFramegen
+        ? plannedGeneratedFrameCount
+        : requestedFixedGeneratedFrameCount;
+    if (conf.adaptiveFramegen && generationFirstAdreno) {
+        generatedFrameCount = this->adaptiveSourceHealthGuard_.limit(
+            plannedGeneratedFrameCount);
+    }
     size_t interpolationGenerationCount = generatedFrameCount;
     const bool adaptiveFlowStartupSeedCycle =
         lsfg::handoff::startupSeedHistoryOnly(
