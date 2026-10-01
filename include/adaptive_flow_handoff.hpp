@@ -40,6 +40,28 @@ struct Identity {
         && oldState.preset == newState.preset;
 }
 
+[[nodiscard]] inline std::optional<float> selectEnableScale(
+        const Identity& oldState, const Identity& newState,
+        float configuredScale) noexcept {
+    if (!oldState.enabled || !newState.enabled
+            || oldState.adaptiveFlow || !newState.adaptiveFlow
+            || oldState.targeted != newState.targeted
+            || oldState.adaptiveFramegen != newState.adaptiveFramegen
+            || oldState.performance != newState.performance
+            || oldState.hdr != newState.hdr
+            || oldState.multiplier != newState.multiplier
+            || oldState.targetFps != newState.targetFps
+            || oldState.width != newState.width
+            || oldState.height != newState.height
+            || oldState.dll != newState.dll
+            || !std::isfinite(configuredScale)
+            || configuredScale < 0.25F
+            || configuredScale > 1.0F) {
+        return std::nullopt;
+    }
+    return configuredScale;
+}
+
 [[nodiscard]] inline std::optional<float> selectStableScale(
         bool oldRuntimeEnabled,
         const Identity& oldState,
