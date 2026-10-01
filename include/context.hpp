@@ -278,6 +278,7 @@ private:
     bool runtimeConfigSignatureValid_{false};
 
     AdaptiveFrameScheduler adaptiveScheduler_;
+    AdaptiveSceneTransitionGuard adaptiveSceneTransitionGuard_;
     FixedSourceCadenceTracker fixedSourceCadenceTracker_;
     std::size_t lastDispatchedGeneratedFrameCount_{0};
     // Classifies the previous intercepted source cycle for Flow cadence diagnostics.
