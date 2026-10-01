@@ -119,6 +119,7 @@ struct HostFrameProvenancePacket {
     uint32_t interpolationCount{0};
     uint32_t swapchainImageIndex{0};
     uint64_t runtimeSessionId{0};
+    uint64_t contextEpoch{0};
     uint64_t deliveryId{0};
     uint64_t sourceIndex{0};
     uint64_t batchId{0};
@@ -205,9 +206,10 @@ void publishHostFrameProvenance(const HostFrameProvenancePacket& packet) noexcep
     __android_log_print(
         ANDROID_LOG_VERBOSE,
         "LSFG_FRAME_PROVENANCE",
-        "runtime_session_id=%llu delivery_id=%llu %s swapchain_image=%u "
+        "runtime_session_id=%llu context_epoch=%llu delivery_id=%llu %s swapchain_image=%u "
         "source_index=%llu batch_id=%llu interpolation_index=%u interpolation_count=%u",
         static_cast<unsigned long long>(packet.runtimeSessionId),
+        static_cast<unsigned long long>(packet.contextEpoch),
         static_cast<unsigned long long>(packet.deliveryId),
         packet.kind == static_cast<uint8_t>(HostFrameKind::Generated)
             ? "kind=generated" : "kind=source",
@@ -1884,6 +1886,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 .interpolationCount = interpolationCount,
                 .swapchainImageIndex = swapchainImageIndex,
                 .runtimeSessionId = this->runtimeSessionId_,
+                .contextEpoch = this->framegenContextCreateEpoch_,
                 .deliveryId = deliveryId,
                 .sourceIndex = this->currentSourceTimeline_.sourceIndex,
                 .batchId = this->adaptiveFlowLastObservedBatchId_,
