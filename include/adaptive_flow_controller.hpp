@@ -32,6 +32,9 @@ enum class AdaptiveFlowDecisionReason : uint8_t {
     DownstepReverted,
     InsufficientRecoveryHeadroom,
     SustainedHeadroom,
+    EvaluatingRecoveryPacing,
+    RecoveryPacingConfirmed,
+    RecoveryPacingReverted,
 };
 
 struct AdaptiveFlowObservation {
@@ -57,6 +60,11 @@ struct AdaptiveFlowObservation {
     double sourceFps{};
     /// Clean source cadence target used by Fixed multiplier mode.
     double sourceTargetFps{};
+    /// True when Adaptive Frame Generation owns generation density.
+    bool adaptiveFramegenMode{false};
+    /// Generated frames requested per source frame by the Adaptive FG scheduler.
+    /// Used only to detect pacing regressions after a Flow quality upstep.
+    double scheduledGenerationDensity{};
     /// True whenever Fixed multiplier mode is active, even before a clean
     /// source reference has been established.
     bool fixedMultiplierMode{false};
@@ -175,6 +183,15 @@ private:
     bool downstepBaselineComputePressure_{false};
     bool downstepBaselineWsiPressure_{false};
     bool downstepBaselineGlobalPressure_{false};
+
+    // Adaptive-FG quality recovery is a measured probe. If a higher Flow state
+    // materially lowers source cadence and forces the scheduler to increase
+    // generated/source density, revert to the previously stable Flow state.
+    bool recoveryPacingEvaluationActive_{false};
+    std::size_t recoveryPacingPreviousIndex_{};
+    double recoveryPacingEvaluationStartedSeconds_{};
+    double recoveryPacingBaselineSourceFps_{};
+    double recoveryPacingBaselineDensity_{};
 
     // When Fixed mode starts without a trustworthy source-only baseline,
     // lower Flow experimentally and retain only steps that measurably recover
