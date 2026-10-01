@@ -325,6 +325,10 @@ private:
     double adaptiveFlowGlobalSourceFps_{0.0};
     double adaptiveFlowGlobalFrameTimeP95Ms_{0.0};
     double adaptiveFlowGlobalSlowFrameRatio_{0.0};
+    // Previous generated cycle's protected private-device completion wait.
+    // The next source interval includes this blocking work, so pairing them
+    // gives Adaptive Flow a direct measure of self-induced source pressure.
+    double adaptiveFlowPreviousSourceBlockingMs_{0.0};
     bool adaptiveFlowGeneratedTimingValid_{false};
     double adaptiveFlowRetainedMipmapsMs_{0.0};
     double adaptiveFlowRetainedWorkMs_{0.0};
