@@ -240,10 +240,9 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             "            : pNext;",
             generated,
         )
-        self.assertIn(
-            "res = Layer::ovkQueuePresentKHR(generatedPresentQueue, &presentInfo);",
-            generated,
-        )
+        self.assertIn("presentWithHostProvenance(", generated)
+        self.assertIn("generatedPresentQueue, &presentInfo", generated)
+        self.assertIn("HostFrameKind::Generated", generated)
 
 
     def test_adreno_startup_and_reentry_warmup_match_september_18(self) -> None:
@@ -314,8 +313,11 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             "            generatedFrameCount == 0 ? pNext : nullptr;",
             adreno,
         )
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, &presentInfo)", adreno)
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, &finalPresentInfo)", adreno)
+        self.assertIn("presentWithHostProvenance(", adreno)
+        self.assertIn("queue, &presentInfo", adreno)
+        self.assertIn("queue, &finalPresentInfo", adreno)
+        self.assertIn("HostFrameKind::Generated", adreno)
+        self.assertIn("HostFrameKind::Source", adreno)
 
     def test_adreno_execution_island_is_reached_before_modern_runtime_plumbing(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
