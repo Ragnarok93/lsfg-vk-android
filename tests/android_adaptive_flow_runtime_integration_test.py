@@ -20,8 +20,11 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("adaptive-flow-fallback mode=fixed-target", source)
         self.assertIn("adaptiveFlowRuntimeAvailable_", source)
         self.assertIn("!this->adaptiveFlowRuntimeAvailable_", source)
-        self.assertIn("1.0F / initialFlowScale", source)
+        self.assertIn("1.0F / backendInitialFlowScale", source)
         self.assertIn("float initialFlowScale = conf.flowScale", source)
+        self.assertIn("float backendInitialFlowScale = conf.flowScale", source)
+        self.assertIn("planAdaptiveStartup", source)
+        self.assertIn("adaptive-flow-startup-seed", source)
 
     def test_completed_gpu_timing_drives_controller_without_new_wait(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
