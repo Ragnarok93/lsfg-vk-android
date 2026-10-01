@@ -25,6 +25,14 @@ class AndroidHostDisplayProvenanceTest(unittest.TestCase):
         self.assertIn('kind=generated', source)
         self.assertIn('kind=source', source)
 
+    def test_provenance_carries_context_epoch_across_swapchain_recreation(self) -> None:
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("contextEpoch", source)
+        self.assertIn("context_epoch=", source)
+        self.assertIn("framegenContextCreateEpoch_", header)
+        self.assertIn(".contextEpoch = this->framegenContextCreateEpoch_", source)
+
     def test_bridge_is_nonblocking_and_does_not_use_files_per_frame(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("publishHostFrameProvenance")
