@@ -2350,11 +2350,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             false, SourceHistoryInvalidationReason::TimelineDiscontinuity);
         if (generationFirstAdreno) {
             this->adaptiveSceneTransitionGuard_.arm(true);
-            this->sourceHistoryWarmupRemaining_ = std::max(
-                this->sourceHistoryWarmupRemaining_,
-                this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining());
-            this->requiresSourceHistoryWarmup_ =
-                this->sourceHistoryWarmupRemaining_ > 0;
+            // Scene-transition recovery is not ordinary lifecycle warmup.
+            // Drive it through two real zero-generation framegen history
+            // cycles so resetTemporalHistory reaches the private backend and
+            // both source slots are reprised before interpolation resumes.
+            this->sourceHistoryWarmupRemaining_ = 0;
+            this->requiresSourceHistoryWarmup_ = false;
             std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reprime"
                       << " action=arm"
                       << " source_only_cycles="
@@ -2383,11 +2384,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 true, SourceHistoryInvalidationReason::TimelineDiscontinuity);
             if (generationFirstAdreno) {
                 this->adaptiveSceneTransitionGuard_.arm(true);
-                this->sourceHistoryWarmupRemaining_ = std::max(
-                    this->sourceHistoryWarmupRemaining_,
-                    this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining());
-                this->requiresSourceHistoryWarmup_ =
-                    this->sourceHistoryWarmupRemaining_ > 0;
+                // Scene-transition recovery is not ordinary lifecycle warmup.
+                // Drive it through two real zero-generation framegen history
+                // cycles so resetTemporalHistory reaches the private backend and
+                // both source slots are reprised before interpolation resumes.
+                this->sourceHistoryWarmupRemaining_ = 0;
+                this->requiresSourceHistoryWarmup_ = false;
                 std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reprime"
                           << " action=arm"
                           << " source_only_cycles="
@@ -4500,6 +4502,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 throw LSFG::vulkan_error(
                     sourceResult,
                     "Failed September 18 Adreno zero-generation source present");
+            }
+            if (conf.adaptiveFramegen
+                    && this->adaptiveSceneTransitionGuard_.sourceOnlyRequired()) {
+                this->adaptiveSceneTransitionGuard_.consumeSourceOnly();
+                std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reprime"
+                          << " action=consume"
+                          << " source_only_remaining="
+                          << this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()
+                          << "\n";
             }
             return finishSourcePresent(
                 sourceResult, "pre-copy-adreno-364178af-zero");
