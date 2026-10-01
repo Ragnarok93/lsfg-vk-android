@@ -402,9 +402,12 @@ RuntimePressureSample readRuntimePressure(
                 sample.thermalStatus = thermal;
                 sample.thermalStatusValid = true;
             }
-        } else if (key == "source_fps" || key == "output_fps") {
+        } else if (key == "source_fps") {
             sample.sourceFps = parsed;
             sawSource = true;
+        } else if (key == "output_fps") {
+            // Parsed for forward-compatible record validation only. Output
+            // cadence must never overwrite the source-rate pressure sample.
         } else if (key == "frame_time_p95_ms") {
             sample.frameTimeP95Ms = parsed;
             sawFrameTime = true;
@@ -2893,6 +2896,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .wsiLossRate = presentationCapacity.wsiRejectionRatio,
             .sourceFps = observationSourceFps,
             .sourceTargetFps = fixedMultiplierBaseSourceFps,
+            .adaptiveFramegenMode = conf.adaptiveFramegen,
+            .scheduledGenerationDensity =
+                adaptiveTelemetry.scheduledGenerationDensity,
             .fixedMultiplierMode =
                 !conf.adaptiveFramegen && conf.multiplier > 1,
             .outputFps = outputCadence.outputFps,
@@ -2974,6 +2980,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " lsfg_ms=" << observation.totalLsfgMs
                       << " budget_ms=" << observation.frameBudgetMs
                       << " generation_count=" << observation.generationCount
+                      << " adaptive_density="
+                      << observation.scheduledGenerationDensity
                       << " generated_work_sample="
                       << (observation.generatedWorkSample ? 1 : 0)
                       << " retained_timing_sample="
