@@ -935,7 +935,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         end = source.index("if (historyOnly)", start)
         recovery = source[start:end]
 
-        self.assertIn("Layer::ovkQueuePresentKHR", recovery)
+        self.assertIn("presentWithHostProvenance", recovery)
+        self.assertIn("Layer::ovkQueuePresentKHR", source[source.index("presentWithHostProvenance"):start])
         self.assertIn("VK_ERROR_OUT_OF_DATE_KHR", recovery)
         self.assertIn("pre-copy-syncfd-fail-open-recreate", recovery)
         self.assertIn("kSourceHistoryWarmupFrames", recovery)
@@ -1055,7 +1056,8 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         generated = source[generated_start:generated_end]
 
         self.assertIn("ovkAcquireNextImageKHR", generated)
-        self.assertIn("ovkQueuePresentKHR", generated)
+        self.assertIn("presentWithHostProvenance", generated)
+        self.assertIn("ovkQueuePresentKHR", source[source.index("presentWithHostProvenance"):generated_start])
         self.assertIn("this->conservativeCrossDeviceSync_", generated)
         self.assertNotIn("clock_nanosleep", generated)
         self.assertNotIn("sleep_for", generated)
