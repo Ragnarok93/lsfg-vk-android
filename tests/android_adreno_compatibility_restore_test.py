@@ -48,7 +48,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         warmup = source.split("if (conservativeSourceOnlyWarmup)", 1)[1].split(
             "if (historyOnly)", 1
         )[0]
-        self.assertIn("Layer::ovkQueuePresentKHR", helper)
+        self.assertIn("presentWithHostProvenance", helper)
         self.assertIn("presentCompatibilitySourceOnly", warmup)
         self.assertNotIn("presentContextWithCount", warmup)
         self.assertNotIn("presentContextWithCountExportSyncFd", warmup)
@@ -179,7 +179,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         stop = adreno.index("metrics.windowGeneratedCompleted", start)
         timeout = adreno[start:stop]
 
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo)", timeout)
+        self.assertIn("presentWithHostProvenance", timeout)
         self.assertIn("VK_ERROR_OUT_OF_DATE_KHR", timeout)
         self.assertIn("pre-copy-adreno-364178af-timeout", timeout)
         self.assertNotIn("conservativePendingBatchComplete", timeout)
@@ -352,7 +352,7 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
         )
         bypass = source[bypass_start:private_copy]
 
-        self.assertIn("Layer::ovkQueuePresentKHR", bypass)
+        self.assertIn("presentWithHostProvenance", bypass)
         self.assertIn("previousSourceCopySignalValid_ = false", bypass)
         self.assertIn("kConservativeSourceReprimeFrames - 1", bypass)
         self.assertNotIn("copySwapchainToExternalAhb", bypass)
