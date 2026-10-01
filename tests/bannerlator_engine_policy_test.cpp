@@ -103,8 +103,19 @@ static void testAdaptiveFlowEnableSeedsFixedScale() {
     assert(!lsfg::handoff::selectEnableScale(previous, next, 0.20F));
     assert(!lsfg::handoff::selectEnableScale(previous, next, 1.05F));
 
-    // This migration applies only to Off -> On. Existing Adaptive Flow
-    // contexts continue to use the stricter stable-state handoff contract.
+    // This migration applies only to Adaptive-FG Off -> On. Fixed
+    // Multiplier already has stable Adaptive Flow behavior and must keep its
+    // existing startup/controller policy.
+    auto fixedPrevious = flowIdentity();
+    fixedPrevious.adaptiveFlow = false;
+    fixedPrevious.adaptiveFramegen = false;
+    auto fixedNext = fixedPrevious;
+    fixedNext.adaptiveFlow = true;
+    assert(!lsfg::handoff::selectEnableScale(
+        fixedPrevious, fixedNext, 0.50F));
+
+    // Existing Adaptive Flow contexts continue to use the stricter stable-state
+    // handoff contract.
     previous.adaptiveFlow = true;
     assert(!lsfg::handoff::selectEnableScale(previous, next, 0.50F));
 }
