@@ -40,6 +40,30 @@ struct Identity {
         && oldState.preset == newState.preset;
 }
 
+struct StartupPlan {
+    float backendInitialScale{1.0F};
+    std::optional<float> postCreateScale;
+};
+
+[[nodiscard]] inline StartupPlan planAdaptiveStartup(
+        float presetTargetScale, float requestedSeedScale) noexcept {
+    StartupPlan plan{};
+    if (!std::isfinite(presetTargetScale)
+            || presetTargetScale < 0.25F
+            || presetTargetScale > 1.0F) {
+        return plan;
+    }
+
+    plan.backendInitialScale = presetTargetScale;
+    if (std::isfinite(requestedSeedScale)
+            && requestedSeedScale >= 0.25F
+            && requestedSeedScale <= presetTargetScale
+            && std::fabs(requestedSeedScale - presetTargetScale) > 0.0005F) {
+        plan.postCreateScale = requestedSeedScale;
+    }
+    return plan;
+}
+
 [[nodiscard]] inline std::optional<float> selectEnableScale(
         const Identity& oldState, const Identity& newState,
         float configuredScale) noexcept {
