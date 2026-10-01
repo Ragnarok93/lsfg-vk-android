@@ -2646,13 +2646,22 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             && !sourceHistoryWarmupActive
             && generatedFrameCount > 0) {
         const size_t plannedBeforeReacquireCap = generatedFrameCount;
+        const uint32_t reacquireRemainingBefore =
+            this->adaptiveSceneTransitionGuard_.generatedReacquireRemaining();
+        const size_t reacquireCapBefore =
+            this->adaptiveSceneTransitionGuard_.generatedReacquireCap();
         generatedFrameCount =
             this->adaptiveSceneTransitionGuard_.limitGenerated(
                 generatedFrameCount);
-        if (generatedFrameCount < plannedBeforeReacquireCap) {
+        if (reacquireRemainingBefore > 0
+                || generatedFrameCount < plannedBeforeReacquireCap) {
             std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reacquire"
                       << " planned=" << plannedBeforeReacquireCap
                       << " admitted=" << generatedFrameCount
+                      << " cap=" << reacquireCapBefore
+                      << " generated_reacquire_remaining="
+                      << this->adaptiveSceneTransitionGuard_
+                            .generatedReacquireRemaining()
                       << " source_only_remaining="
                       << this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()
                       << "\n";
