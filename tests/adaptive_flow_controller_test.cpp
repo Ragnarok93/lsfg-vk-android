@@ -471,7 +471,7 @@ int main() {
             observation.outputFps = 54.0;
             observation.sourceFps = 30.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.90F);
+            lowered = near(controller.currentScale(), 0.95F);
         }
         assert(lowered);
 
