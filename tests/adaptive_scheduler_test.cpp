@@ -22,7 +22,14 @@ int main() {
         assert(guard.limitGenerated(3) == 0);
         guard.consumeSourceOnly();
         assert(guard.sourceOnlyRemaining() == 0);
-        assert(guard.limitGenerated(3) == 1);
+
+        // Reacquisition must not jump directly from two source-only history
+        // cycles into a 3-synthetic batch. Hold a short one-frame ramp, then
+        // a two-frame ramp, before returning to unrestricted Adaptive output.
+        for (int i = 0; i < 6; ++i)
+            assert(guard.limitGenerated(3) == 1);
+        for (int i = 0; i < 6; ++i)
+            assert(guard.limitGenerated(3) == 2);
         assert(guard.limitGenerated(3) == 3);
 
         guard.arm(false);
