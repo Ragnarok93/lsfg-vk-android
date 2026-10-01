@@ -19,6 +19,17 @@ BACKENDS = (
     ),
 )
 
+ALPHA_BACKENDS = (
+    (
+        ROOT / "framegen/v3.1_include/v3_1/shaders/alpha.hpp",
+        ROOT / "framegen/v3.1_src/shaders/alpha.cpp",
+    ),
+    (
+        ROOT / "framegen/v3.1p_include/v3_1p/shaders/alpha.hpp",
+        ROOT / "framegen/v3.1p_src/shaders/alpha.cpp",
+    ),
+)
+
 
 class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
     def test_public_android_api_exposes_prebuilt_scale_context_and_state(self) -> None:
@@ -42,64 +53,51 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             self.assertIn("createContextFromAHB(", header, public_header.as_posix())
             self.assertIn("createContextFromAHB(", source, backend_source.as_posix())
 
-    def test_context_keeps_three_frame_shadow_warmup_without_device_idle(self) -> None:
+    def test_context_uses_single_pass_seeded_history_handoff(self) -> None:
         for _, context_header, context_source, _ in BACKENDS:
             header = context_header.read_text(encoding="utf-8")
             source = context_source.read_text(encoding="utf-8")
 
-            self.assertIn("kAdaptiveFlowHistoryFrames = 3", header, context_header.as_posix())
             self.assertIn("adaptiveFlowGraphs_", header, context_header.as_posix())
             self.assertIn("pendingFlowGraphIndex_", header, context_header.as_posix())
-            self.assertIn("pendingFlowWarmupFrames_", header, context_header.as_posix())
-
-            self.assertIn("dispatchAdaptiveFlowPreprocess", source, context_source.as_posix())
-            self.assertIn("pendingFlowWarmupFrames_ + 1 < kAdaptiveFlowHistoryFrames", source,
-                          context_source.as_posix())
-            self.assertIn("data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool", source,
-                          context_source.as_posix())
-            self.assertIn("shadowBudgetAvailable", source, context_source.as_posix())
-            self.assertIn("shadowPreprocessEstimateMs", source, context_source.as_posix())
-            self.assertIn("shadowActiveEstimateMs", source, context_source.as_posix())
-            self.assertIn("lastAdaptiveFlowGpuTiming_.shadowPreprocessMs", source,
-                          context_source.as_posix())
-            self.assertIn("lastAdaptiveFlowGpuTiming_.opticalFlowMs", source,
-                          context_source.as_posix())
-            self.assertNotIn(
-                "lastAdaptiveFlowGpuTiming_.mipmapsMs * 1.10",
-                source,
-                context_source.as_posix(),
-            )
-            self.assertIn("generationCount == 0 || shadowBudgetAvailable", source,
-                          context_source.as_posix())
-            self.assertNotIn(
-                "|| adaptiveFlowBatch.preserveOutputDuringTransition",
-                source,
-                context_source.as_posix(),
-            )
-            self.assertIn("data.cmdBuffer1, pendingGraph", source,
+            self.assertIn("dispatchAdaptiveFlowSeedHistory", header,
+                          context_header.as_posix())
+            self.assertIn("dispatchAdaptiveFlowSeedHistory", source,
                           context_source.as_posix())
             self.assertIn("generationGraphIndex = pendingIndex", source,
                           context_source.as_posix())
-            self.assertIn("commitAdaptiveFlowTransition", source, context_source.as_posix())
-            self.assertIn("adaptiveFlowTimingQueryPool", header, context_header.as_posix())
-            self.assertIn("Core::DescriptorPool descriptorPool", header,
-                          context_header.as_posix())
-            self.assertIn("savedDescriptorPool_(vk.descriptorPool)", source,
+            self.assertIn("adaptiveFlowCommitAfterSubmit = true", source,
                           context_source.as_posix())
-            self.assertIn("vk_.descriptorPool = descriptorPool", source,
-                          context_source.as_posix())
-            self.assertIn("graph.descriptorPool = Core::DescriptorPool(vk.device)", source,
-                          context_source.as_posix())
-            self.assertIn("descriptor_pool_mode=per-state", source,
-                          context_source.as_posix())
-            self.assertIn("recordAdaptiveFlowGpuTiming", source, context_source.as_posix())
-            self.assertIn("transitionActive = renderData.adaptiveFlowTransitionCycle", source,
-                          context_source.as_posix())
-            self.assertIn("timingPool->write(buffer.handle(), 1)", source,
+            self.assertIn("pendingGraph.beta->Dispatch", source,
                           context_source.as_posix())
 
-            # The transition is recorded in the existing command/submission path.
+            # A pressure-relief handoff may not depend on spare headroom and
+            # may not run active+pending preprocess in the same source cycle.
+            self.assertNotIn("shadowBudgetAvailable", source,
+                             context_source.as_posix())
+            self.assertNotIn("adaptive-flow-shadow-deferred", source,
+                             context_source.as_posix())
+            self.assertNotIn(
+                "pendingFlowWarmupFrames_ + 1 < kAdaptiveFlowHistoryFrames",
+                source,
+                context_source.as_posix(),
+            )
+
+            # The switch stays on the existing queue/submission path.
             self.assertNotIn("vkDeviceWaitIdle", source, context_source.as_posix())
+
+        for alpha_header, alpha_source in ALPHA_BACKENDS:
+            header = alpha_header.read_text(encoding="utf-8")
+            source = alpha_source.read_text(encoding="utf-8")
+            self.assertIn("SeedHistory", header, alpha_header.as_posix())
+            self.assertIn("void Alpha::SeedHistory", source, alpha_source.as_posix())
+            self.assertIn("for (size_t history = 0; history < 3; ++history)", source,
+                          alpha_source.as_posix())
+            self.assertIn(
+                "DispatchStage(buf, frameCount + history, StageCount - 1)",
+                source,
+                alpha_source.as_posix(),
+            )
 
     def test_gpu_timing_is_available_for_fixed_and_adaptive_flow(self) -> None:
         for _, context_header, context_source, _ in BACKENDS:
@@ -150,31 +148,20 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
                 context_source.as_posix(),
             )
 
-    def test_pending_transition_preserves_generated_output_without_forcing_shadow_work(self) -> None:
+    def test_pending_transition_commits_in_one_seeded_cycle(self) -> None:
         for _, _, context_source, _ in BACKENDS:
             source = context_source.read_text(encoding="utf-8")
             self.assertIn("requestFlowScale", source, context_source.as_posix())
-            self.assertIn("pendingFlowWarmupFrames_ = 0", source, context_source.as_posix())
-            self.assertIn("pendingFlowGraphIndex_.reset()", source, context_source.as_posix())
             self.assertIn("requestedFlowScale_", source, context_source.as_posix())
-            condition_start = source.index(
-                "if (this->pendingFlowWarmupFrames_ + 1 <"
-            )
-            condition_end = source.index(
-                "if (generationCount > 0)\n                    activeGraph.beta->Dispatch",
-                condition_start,
-            )
-            transition_condition = source[condition_start:condition_end]
-            self.assertIn(
-                "generationCount == 0 || shadowBudgetAvailable",
-                transition_condition,
-                context_source.as_posix(),
-            )
-            self.assertNotIn(
-                "preserveOutputDuringTransition",
-                transition_condition,
-                context_source.as_posix(),
-            )
+            self.assertIn("dispatchAdaptiveFlowSeedHistory", source,
+                          context_source.as_posix())
+            self.assertIn("generationGraphIndex = pendingIndex", source,
+                          context_source.as_posix())
+            self.assertIn("commitAdaptiveFlowTransition", source,
+                          context_source.as_posix())
+            self.assertNotIn("shadowBudgetAvailable", source,
+                             context_source.as_posix())
+
 
 
 if __name__ == "__main__":
