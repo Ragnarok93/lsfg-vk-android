@@ -763,23 +763,26 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         adaptiveFlowScales.assign(presetStates.begin(), presetStates.end());
         initialFlowScale = adaptiveFlowScales.front();
 
-        // Start from the last known/configured Flow cost, never blindly from
-        // the preset ceiling. On a cold launch the persisted fixed Flow scale
-        // is our only known-good pacing state; on a compatible recreation the
-        // settled Adaptive Flow state takes precedence. Snap downward to the
-        // closest legal preset state so startup cannot be more expensive than
-        // the known-good scale unless the preset floor itself requires it.
-        const float seedSourceScale =
-            adaptiveFlowScaleSeed.value_or(conf.flowScale);
-        const auto conservativeSeed =
-            AdaptiveFlowController::conservativeSeedScale(
-                this->adaptiveFlowPreset_, seedSourceScale);
-        if (conservativeSeed.has_value()) {
+        // Preserve an already-settled Adaptive Flow state across compatible
+        // recreations on both scheduler modes. Only Adaptive Frame Generation
+        // cold starts use the persisted fixed Flow scale as a conservative
+        // starting point; Fixed Multiplier keeps its established preset-target
+        // startup behavior.
+        if (adaptiveFlowScaleSeed.has_value()) {
             flowScaleSeedApplied = this->adaptiveFlowController_.seedCurrentScale(
-                *conservativeSeed);
-            if (flowScaleSeedApplied)
-                initialFlowScale = this->adaptiveFlowController_.currentScale();
+                *adaptiveFlowScaleSeed);
+        } else if (conf.adaptiveFramegen) {
+            const auto conservativeSeed =
+                AdaptiveFlowController::conservativeSeedScale(
+                    this->adaptiveFlowPreset_, conf.flowScale);
+            if (conservativeSeed.has_value()) {
+                flowScaleSeedApplied =
+                    this->adaptiveFlowController_.seedCurrentScale(
+                        *conservativeSeed);
+            }
         }
+        if (flowScaleSeedApplied)
+            initialFlowScale = this->adaptiveFlowController_.currentScale();
         this->adaptiveFlowRequestedScale_ = initialFlowScale;
         this->adaptiveFlowActiveScale_ = initialFlowScale;
         std::cerr << "lsfg-vk: adaptive-flow-controller enabled=1"
@@ -790,7 +793,9 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                   << " states=" << presetStates.size()
                   << " initial_scale=" << initialFlowScale
                   << " seed_source="
-                  << (adaptiveFlowScaleSeed.has_value() ? "handoff" : "configured")
+                  << (adaptiveFlowScaleSeed.has_value()
+                        ? "handoff"
+                        : (conf.adaptiveFramegen ? "configured" : "preset-target"))
                   << " handoff=" << (flowScaleSeedApplied ? "applied" : "target")
                   << '\n';
     }
