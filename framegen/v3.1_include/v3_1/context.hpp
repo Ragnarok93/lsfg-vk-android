@@ -174,6 +174,9 @@ namespace LSFG_3_1 {
         void dispatchAdaptiveFlowPreprocess(
             const Core::CommandBuffer& buffer, FlowGraphRef graph,
             Core::TimestampQueryPool* timingPool = nullptr);
+        void dispatchAdaptiveFlowSeedHistory(
+            const Core::CommandBuffer& buffer, FlowGraphRef graph,
+            Core::TimestampQueryPool* timingPool = nullptr);
         void recordAdaptiveFlowGpuTiming(Vulkan& vk, RenderData& renderData);
         void commitAdaptiveFlowTransition(size_t index);
 #endif
