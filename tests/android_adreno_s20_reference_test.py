@@ -82,7 +82,7 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             "size_t plannedGeneratedFrameCount = conf.adaptiveFramegen"
         )
         planning_end = source.index(
-            "size_t generatedFrameCount = plannedGeneratedFrameCount",
+            "size_t generatedFrameCount = conf.adaptiveFramegen",
             planning_start,
         )
         fixed_planning = source[planning_start:planning_end]
