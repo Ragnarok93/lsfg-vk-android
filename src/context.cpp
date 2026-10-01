@@ -6292,6 +6292,29 @@ void LsContext::advanceAdaptiveFlowTimingEpoch() {
 void LsContext::resetAdaptiveSourceEpoch(
         bool resetScheduler,
         SourceHistoryInvalidationReason reason) {
+    const float activeFlowScaleBeforeReset = this->adaptiveFlowActiveScale_;
+    const bool preserveActiveFlowScale =
+        this->conservativeCrossDeviceSync_
+        && this->adaptiveFlowRuntimeAvailable_
+        && std::isfinite(activeFlowScaleBeforeReset)
+        && (reason == SourceHistoryInvalidationReason::TimelineDiscontinuity
+            || reason == SourceHistoryInvalidationReason::SuspendResume);
+
+    if (preserveActiveFlowScale
+            && this->adaptiveFlowTransitionPending_
+            && this->lsfgCtxId) {
+        // A scene break invalidates the cadence evidence behind an in-flight
+        // Flow decision. Cancel the pending graph request back to the graph
+        // that was actually active before resetting the outer controller.
+        const auto resetConf = Config::snapshot();
+        if (resetConf.performance)
+            LSFG_3_1P::requestContextFlowScale(
+                *this->lsfgCtxId, activeFlowScaleBeforeReset);
+        else
+            LSFG_3_1::requestContextFlowScale(
+                *this->lsfgCtxId, activeFlowScaleBeforeReset);
+    }
+
     if (this->conservativeCrossDeviceSync_)
     // Any source-timeline epoch change invalidates synthetic pixels produced
     // against the previous cadence/history. Keep the private-device batch
@@ -6336,6 +6359,17 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->runtimeMetrics.lastSourcePresent = {};
 
     this->adaptiveFlowController_.reset();
+    if (preserveActiveFlowScale) {
+        const bool flowScaleRestored =
+            this->adaptiveFlowController_.seedCurrentScale(
+                activeFlowScaleBeforeReset);
+        std::cerr << "lsfg-vk: runtime stage=adaptive-flow-temporal-reset"
+                  << " preserve_active_scale=1"
+                  << " active_before=" << activeFlowScaleBeforeReset
+                  << " restored=" << (flowScaleRestored ? 1 : 0)
+                  << " reason=" << sourceHistoryInvalidationReasonName(reason)
+                  << "\n";
+    }
     this->adaptiveFlowNextPressureRead_ = {};
     this->adaptiveFlowGlobalPressureValid_ = false;
     this->adaptiveFlowGlobalGpuUsagePercent_ = 0.0;
@@ -6353,8 +6387,7 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->adaptiveFlowWsiPressure_ = false;
     this->adaptiveFlowRequestedScale_ =
         this->adaptiveFlowController_.currentScale();
-    this->adaptiveFlowActiveScale_ =
-        this->adaptiveFlowController_.currentScale();
+    this->adaptiveFlowActiveScale_ = adaptiveFlowController_.currentScale();
     this->adaptiveFlowWarmupRemaining_ = 0;
     this->adaptiveFlowTransitionPending_ = false;
     this->adaptiveFlowCadenceHandoffPending_ = false;
