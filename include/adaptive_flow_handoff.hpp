@@ -45,6 +45,7 @@ struct Identity {
         float configuredScale) noexcept {
     if (!oldState.enabled || !newState.enabled
             || oldState.adaptiveFlow || !newState.adaptiveFlow
+            || !newState.adaptiveFramegen
             || oldState.targeted != newState.targeted
             || oldState.adaptiveFramegen != newState.adaptiveFramegen
             || oldState.performance != newState.performance
