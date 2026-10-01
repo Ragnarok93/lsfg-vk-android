@@ -262,16 +262,38 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
         self.assertIn("action=reset-temporal-epoch", discontinuity)
 
-    def test_source_only_bypass_clears_adaptive_source_blocking_feedback(self) -> None:
-        """Resident Off/source-only cannot leak a prior generated wait into re-enable cadence."""
-        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("void LsContext::enterSourceOnlyBypass()")
-        end = source.index("#endif", start)
-        bypass = source[start:end]
+    def test_adreno_completion_wait_is_not_recycled_as_adaptive_pressure(self) -> None:
+        """Regression: generation-first host completion is execution policy, not a Flow/scheduler actuator.
 
-        self.assertIn("adaptiveFlowPreviousSourceBlockingMs_ = 0.0", bypass)
-        self.assertIn("adaptiveScheduler_.reset()", bypass)
-        self.assertIn("sourceTimeline_.reset()", bypass)
+        Feeding the previous LSFG completion wait back into the next source
+        interval created a self-reinforcing loop on Adreno: apparent source
+        cadence fell, Adaptive FG requested more synthetics, completion waits
+        grew, and Adaptive Flow oscillated downward. Preserve the previously
+        stable controller/scheduler behavior and keep the wait as telemetry only.
+        """
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        controller_header = (
+            ROOT / "include/adaptive_flow_controller.hpp"
+        ).read_text(encoding="utf-8")
+        controller = (
+            ROOT / "src/adaptive_flow_controller.cpp"
+        ).read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertNotIn("adaptiveFlowPreviousSourceBlockingMs_", header)
+        self.assertNotIn("AdaptiveSourceBlockingPressure", controller_header)
+        self.assertNotIn("sourceBlockingPressure", controller_header)
+        self.assertNotIn("adaptiveSourceBlockingPressure", controller)
+        self.assertNotIn("adaptiveSourceCadenceHeldForBlocking", source)
+        self.assertNotIn("adaptiveSourceBlockingRatioAtCycleStart", source)
+        self.assertNotIn("source_cadence_held_for_blocking", source)
+
+        # Flow transitions may temporarily preserve cadence, but completion-wait
+        # feedback must not become a second scheduler hold condition.
+        self.assertIn(
+            "adaptiveScheduler_.plan(\n            sourceInterval, adaptiveFlowTransitionActiveAtCycleStart)",
+            source,
+        )
 
     def test_present_hook_debounces_fs_and_reuses_wait_storage(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
