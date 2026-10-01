@@ -291,6 +291,10 @@ private:
     float adaptiveFlowActiveScale_{1.0F};
     uint32_t adaptiveFlowWarmupRemaining_{0};
     bool adaptiveFlowTransitionPending_{false};
+    // When Adaptive Flow cold-starts from a known fixed Flow scale, the
+    // backend is created at the preset's primary graph and then performs one
+    // seeded zero-generation handoff to the requested starting graph.
+    bool adaptiveFlowStartupSeedPending_{false};
     // Skip the first post-commit cadence sample: its interval belongs to the
     // final transition cycle even though the backend state has committed.
     bool adaptiveFlowCadenceHandoffPending_{false};
