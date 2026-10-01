@@ -482,6 +482,105 @@ namespace {
 
     std::unordered_map<VkSwapchainKHR, std::shared_ptr<SwapchainState>> swapchains;
 
+#ifdef __ANDROID__
+    struct DetachedAdaptiveFlowHandoff {
+        VkDevice device{VK_NULL_HANDLE};
+        VkSurfaceKHR surface{VK_NULL_HANDLE};
+        VkExtent2D extent{};
+        Config::Configuration config{};
+        AdaptiveFlowRuntimeSnapshot flow{};
+        std::chrono::steady_clock::time_point capturedAt{};
+    };
+
+    std::mutex detachedAdaptiveFlowHandoffMutex;
+    std::optional<DetachedAdaptiveFlowHandoff> detachedAdaptiveFlowHandoff;
+    constexpr auto kDetachedAdaptiveFlowHandoffLifetime =
+        std::chrono::seconds(3);
+
+    lsfg::handoff::Identity adaptiveFlowIdentity(
+            const Config::Configuration& conf, VkExtent2D extent) {
+        return lsfg::handoff::Identity{
+            .enabled = conf.enable,
+            .targeted = conf.targeted,
+            .adaptiveFramegen = conf.adaptiveFramegen,
+            .adaptiveFlow = conf.adaptiveFlowScale,
+            .performance = conf.performance,
+            .hdr = conf.hdr,
+            .multiplier = conf.multiplier,
+            .targetFps = conf.fpsLimit,
+            .width = extent.width,
+            .height = extent.height,
+            .dll = conf.dll,
+            .preset = conf.adaptiveFlowPreset,
+        };
+    }
+
+    void stashDetachedAdaptiveFlowHandoff(
+            const std::shared_ptr<SwapchainState>& state) {
+        if (!state || !state->context || state->surface == VK_NULL_HANDLE)
+            return;
+
+        DetachedAdaptiveFlowHandoff handoff{
+            .device = state->device,
+            .surface = state->surface,
+            .extent = state->extent,
+            .config = state->config,
+            .flow = state->context->adaptiveFlowRuntimeSnapshot(),
+            .capturedAt = std::chrono::steady_clock::now(),
+        };
+        {
+            std::lock_guard lock(detachedAdaptiveFlowHandoffMutex);
+            detachedAdaptiveFlowHandoff = handoff;
+        }
+        std::cerr << "lsfg-vk: runtime stage=adaptive-flow-detached-handoff"
+                  << " action=stash"
+                  << " enabled=" << (handoff.flow.enabled ? 1 : 0)
+                  << " requested_scale=" << handoff.flow.requestedScale
+                  << " active_scale=" << handoff.flow.activeScale
+                  << " transition_pending="
+                  << (handoff.flow.transitionPending ? 1 : 0)
+                  << " warmup_remaining=" << handoff.flow.warmupRemaining
+                  << "\n";
+    }
+
+    std::optional<DetachedAdaptiveFlowHandoff>
+    takeDetachedAdaptiveFlowHandoff(
+            VkDevice device, VkSurfaceKHR surface) {
+        std::lock_guard lock(detachedAdaptiveFlowHandoffMutex);
+        if (!detachedAdaptiveFlowHandoff.has_value())
+            return std::nullopt;
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto age = now - detachedAdaptiveFlowHandoff->capturedAt;
+        if (age > kDetachedAdaptiveFlowHandoffLifetime) {
+            detachedAdaptiveFlowHandoff.reset();
+            return std::nullopt;
+        }
+        if (detachedAdaptiveFlowHandoff->device != device
+                || detachedAdaptiveFlowHandoff->surface != surface) {
+            return std::nullopt;
+        }
+
+        auto handoff = std::move(detachedAdaptiveFlowHandoff);
+        detachedAdaptiveFlowHandoff.reset();
+        std::cerr << "lsfg-vk: runtime stage=adaptive-flow-detached-handoff"
+                  << " action=take"
+                  << " oldSwapchainNull=1"
+                  << " age_ms="
+                  << std::chrono::duration<double, std::milli>(age).count()
+                  << "\n";
+        return handoff;
+    }
+
+    void clearDetachedAdaptiveFlowHandoff(VkDevice device) {
+        std::lock_guard lock(detachedAdaptiveFlowHandoffMutex);
+        if (detachedAdaptiveFlowHandoff.has_value()
+                && detachedAdaptiveFlowHandoff->device == device) {
+            detachedAdaptiveFlowHandoff.reset();
+        }
+    }
+#endif
+
     std::shared_ptr<DeviceInfo> findDeviceInfo(VkDevice device) {
         std::lock_guard lock(hookStateMutex);
         const auto it = deviceToInfo.find(device);
@@ -534,6 +633,9 @@ namespace {
         }
 
         std::lock_guard presentLock(state->presentMutex);
+#ifdef __ANDROID__
+        stashDetachedAdaptiveFlowHandoff(state);
+#endif
         Layer::ovkDestroySwapchainKHR(device, swapchain, pAllocator);
         state->context.reset();
     }
@@ -562,6 +664,9 @@ namespace {
             std::lock_guard presentLock(state->presentMutex);
             state->context.reset();
         }
+#ifdef __ANDROID__
+        clearDetachedAdaptiveFlowHandoff(device);
+#endif
         Layer::ovkDestroyDevice(device, pAllocator);
     }
 
@@ -936,6 +1041,36 @@ namespace {
         }
     }
 
+    void refreshConfigBeforeSwapchainCreate() noexcept {
+        const auto current = Config::snapshot();
+        if (current.config_file.empty() || !configurationFileChanged(current))
+            return;
+
+        const std::string configFile = current.config_file.string();
+        std::error_code ec;
+        if (!std::filesystem::exists(current.config_file, ec) || ec)
+            return;
+
+        try {
+            Config::updateConfig(configFile);
+            Config::setActive(Config::getConfig(Utils::getProcessName()));
+            const auto refreshed = Config::snapshot();
+            std::cerr
+                << "lsfg-vk: runtime stage=config-refresh-before-swapchain-create"
+                << " multiplier=" << refreshed.multiplier
+                << " adaptive=" << (refreshed.adaptiveFramegen ? 1 : 0)
+                << " targetFps=" << refreshed.fpsLimit
+                << " adaptiveFlow=" << (refreshed.adaptiveFlowScale ? 1 : 0)
+                << " presentMode=" << refreshed.e_present
+                << "\n";
+        } catch (const std::exception& e) {
+            Utils::logLimitN(
+                "swapConfigRefresh", 5,
+                "Failed to refresh LSFG configuration before swapchain create; "
+                "preserving active configuration:\n- " + std::string(e.what()));
+        }
+    }
+
     VkResult myvkCreateSwapchainKHR(
             VkDevice device,
             const VkSwapchainCreateInfoKHR* pCreateInfo,
@@ -953,10 +1088,18 @@ namespace {
             return Layer::ovkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
         }
         Utils::resetLimitN("swapMap");
+        refreshConfigBeforeSwapchainCreate();
         const auto activeConf = Config::snapshot();
         auto oldSwapchainState = pCreateInfo->oldSwapchain != VK_NULL_HANDLE
             ? findSwapchainState(pCreateInfo->oldSwapchain)
             : nullptr;
+#ifdef __ANDROID__
+        auto detachedAdaptiveFlow = pCreateInfo->oldSwapchain == VK_NULL_HANDLE
+            ? takeDetachedAdaptiveFlowHandoff(device, pCreateInfo->surface)
+            : std::nullopt;
+#else
+        const bool detachedAdaptiveFlow = false;
+#endif
         Config::Configuration oldSwapchainConfig = activeConf;
         VkPresentModeKHR oldConfiguredPresentMode = activeConf.e_present;
         VkExtent2D oldSwapchainExtent = pCreateInfo->imageExtent;
@@ -971,27 +1114,10 @@ namespace {
                     && oldSwapchainState->context != nullptr) {
                 const auto oldFlow = oldSwapchainState->context
                     ->adaptiveFlowRuntimeSnapshot();
-                const auto identityFor = [](const Config::Configuration& conf,
-                        VkExtent2D extent) {
-                    return lsfg::handoff::Identity{
-                        .enabled = conf.enable,
-                        .targeted = conf.targeted,
-                        .adaptiveFramegen = conf.adaptiveFramegen,
-                        .adaptiveFlow = conf.adaptiveFlowScale,
-                        .performance = conf.performance,
-                        .hdr = conf.hdr,
-                        .multiplier = conf.multiplier,
-                        .targetFps = conf.fpsLimit,
-                        .width = extent.width,
-                        .height = extent.height,
-                        .dll = conf.dll,
-                        .preset = conf.adaptiveFlowPreset,
-                    };
-                };
                 const auto oldIdentity =
-                    identityFor(oldSwapchainConfig, oldSwapchainExtent);
+                    adaptiveFlowIdentity(oldSwapchainConfig, oldSwapchainExtent);
                 const auto newIdentity =
-                    identityFor(activeConf, pCreateInfo->imageExtent);
+                    adaptiveFlowIdentity(activeConf, pCreateInfo->imageExtent);
                 adaptiveFlowScaleSeed = lsfg::handoff::selectStableScale(
                     oldFlow.enabled,
                     oldIdentity,
@@ -1017,6 +1143,44 @@ namespace {
             }
 #endif
         }
+#ifdef __ANDROID__
+        else if (detachedAdaptiveFlow.has_value()) {
+            const auto oldIdentity = adaptiveFlowIdentity(
+                detachedAdaptiveFlow->config, detachedAdaptiveFlow->extent);
+            const auto newIdentity = adaptiveFlowIdentity(
+                activeConf, pCreateInfo->imageExtent);
+            adaptiveFlowScaleSeed = lsfg::handoff::selectStableScale(
+                detachedAdaptiveFlow->flow.enabled,
+                oldIdentity,
+                newIdentity,
+                detachedAdaptiveFlow->flow.requestedScale,
+                detachedAdaptiveFlow->flow.activeScale,
+                detachedAdaptiveFlow->flow.transitionPending,
+                detachedAdaptiveFlow->flow.warmupRemaining);
+            if (!adaptiveFlowScaleSeed.has_value()) {
+                adaptiveFlowScaleSeed = lsfg::handoff::selectEnableScale(
+                    oldIdentity, newIdentity,
+                    detachedAdaptiveFlow->config.flowScale);
+            }
+            std::cerr << "lsfg-vk: runtime stage=adaptive-flow-handoff"
+                      << " source=detached-null-old-swapchain"
+                      << " runtime_enabled="
+                      << (detachedAdaptiveFlow->flow.enabled ? 1 : 0)
+                      << " identity_compatible="
+                      << (lsfg::handoff::compatible(oldIdentity, newIdentity) ? 1 : 0)
+                      << " transition_pending="
+                      << (detachedAdaptiveFlow->flow.transitionPending ? 1 : 0)
+                      << " warmup_remaining="
+                      << detachedAdaptiveFlow->flow.warmupRemaining
+                      << " requested_scale="
+                      << detachedAdaptiveFlow->flow.requestedScale
+                      << " active_scale="
+                      << detachedAdaptiveFlow->flow.activeScale
+                      << " seed_selected="
+                      << (adaptiveFlowScaleSeed ? 1 : 0)
+                      << "\n";
+        }
+#endif
 
         const auto createPassThrough = [&](const char* reason) -> VkResult {
             const auto res = Layer::ovkCreateSwapchainKHR(
@@ -1245,7 +1409,15 @@ namespace {
             state->config = activeConf;
             state->present = createInfo.presentMode;
             state->configuredPresent = configuredPresentMode;
-            const auto contextCreationReason = pCreateInfo->oldSwapchain
+            const bool detachedLifecycleRecreate =
+#ifdef __ANDROID__
+                detachedAdaptiveFlow.has_value();
+#else
+                false;
+#endif
+            const auto contextCreationReason =
+                (pCreateInfo->oldSwapchain != VK_NULL_HANDLE
+                    || detachedLifecycleRecreate)
                 ? FramegenContextCreationReason::SwapchainRecreate
                 : FramegenContextCreationReason::SwapchainCreate;
             state->context = std::make_shared<LsContext>(
