@@ -48,19 +48,35 @@ public:
 
     void consumeSourceOnly();
 
-    /// Apply only after history reprime is complete. The first resumed
-    /// interpolation batch is capped at one synthetic frame; later steady-state
-    /// batches pass through unchanged.
+    /// Apply only after history reprime is complete. Reacquire generated
+    /// load in two bounded stages so one contaminated post-cut interval cannot
+    /// jump directly from source-only recovery into a 3-synthetic batch.
     [[nodiscard]] std::size_t limitGenerated(std::size_t planned);
 
+    [[nodiscard]] uint32_t generatedReacquireRemaining() const {
+        return generatedReacquireRemaining_;
+    }
+
+    [[nodiscard]] std::size_t generatedReacquireCap() const {
+        if (sourceOnlyRemaining_ > 0)
+            return 0;
+        if (generatedReacquireRemaining_ > kReacquireCapTwoBatches)
+            return 1;
+        if (generatedReacquireRemaining_ > 0)
+            return 2;
+        return std::numeric_limits<std::size_t>::max();
+    }
+
     [[nodiscard]] bool firstGeneratedBatchCapped() const {
-        return firstGeneratedBatchPending_;
+        return generatedReacquireRemaining_ > 0;
     }
 
 private:
     static constexpr uint32_t kProtectedSourceReprimeFrames = 2;
+    static constexpr uint32_t kReacquireCapOneBatches = 6;
+    static constexpr uint32_t kReacquireCapTwoBatches = 6;
     uint32_t sourceOnlyRemaining_{0};
-    bool firstGeneratedBatchPending_{false};
+    uint32_t generatedReacquireRemaining_{0};
 };
 
 struct SourceTimelineSample {
