@@ -78,7 +78,7 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         bypass_start = source.index("if (conservativePreCopySourceBypass)")
         bypass_end = source.index("// Android path: AHardwareBuffer exchange", bypass_start)
         bypass = source[bypass_start:bypass_end]
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo)", bypass)
+        self.assertIn("presentWithHostProvenance", bypass)\n        self.assertIn("queue, &bypassPresentInfo", bypass)
         self.assertNotIn("waitContext(", bypass)
 
     def test_deferred_wsi_rejection_trains_adreno_presentation_capacity(self) -> None:
@@ -129,7 +129,7 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("deferredAdrenoPassIndex_", deferred)
         self.assertIn("releasePresentWaitRetirements(imageIdx)", deferred)
         self.assertIn("copyExternalAhbToSwapchain", deferred)
-        self.assertIn("Layer::ovkQueuePresentKHR(queue, &deferredPresentInfo)", deferred)
+        self.assertIn("presentWithHostProvenance", deferred)\n        self.assertIn("queue, &deferredPresentInfo", deferred)
         self.assertIn("postCopyCompletionFences", header)
         self.assertIn("postCopyCompletionFenceSubmitted", header)
         self.assertIn("*deferredPass.postCopyCompletionFences.at(i)", deferred)
@@ -176,7 +176,7 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("if (this->pendingSourceValid_)", boundary)
         self.assertIn("pendingSourceImage_", boundary)
         self.assertIn("pendingSourceReady_.handle()", boundary)
-        self.assertIn("Layer::ovkQueuePresentKHR", boundary)
+        self.assertIn("presentWithHostProvenance", boundary)
 
         queue_start = source.index("runtime stage=adreno-deferred-batch-queued")
         queue_end = source.index(
@@ -188,7 +188,7 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("pendingSourceReady_ = pass.preCopySemaphores.at(0)", queued)
         self.assertIn('"pre-copy-adreno-deferred-buffered"', queued)
         self.assertNotIn(
-            "Layer::ovkQueuePresentKHR(queue, &deferredSourcePresentInfo)",
+            "presentWithHostProvenance(\\n                queue, &deferredSourcePresentInfo",
             queued,
         )
 
