@@ -2799,6 +2799,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && !conservativeHistoryGap;
 
     this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
+    const double adaptiveFlowSourceBlockingMs =
+        this->adaptiveFlowPreviousSourceBlockingMs_;
 
     const auto updateAdaptiveFlowGovernor = [&]() {
         const bool adaptiveFlowTransitionActive =
@@ -3011,6 +3013,18 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 : adaptiveFlowBatchBudgetMs);
         const bool observationBudgetValid =
             observationBudgetMs > 0.0 && std::isfinite(observationBudgetMs);
+        constexpr double kAdaptiveSourceBlockingPressureRatio = 0.70;
+        const double sourceBlockingRatio =
+            generationFirstAdreno
+            && sourceIntervalMs > 0.0
+            && std::isfinite(sourceIntervalMs)
+            && adaptiveFlowSourceBlockingMs > 0.0
+            && std::isfinite(adaptiveFlowSourceBlockingMs)
+            ? adaptiveFlowSourceBlockingMs / sourceIntervalMs
+            : 0.0;
+        const bool sourceBlockingPressure =
+            conf.adaptiveFramegen
+            && sourceBlockingRatio >= kAdaptiveSourceBlockingPressureRatio;
 
         AdaptiveFlowObservation observation{
             .elapsed = sourceInterval,
@@ -3029,6 +3043,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .adaptiveFramegenMode = conf.adaptiveFramegen,
             .scheduledGenerationDensity =
                 adaptiveTelemetry.scheduledGenerationDensity,
+            .sourceBlockingRatio = sourceBlockingRatio,
+            .sourceBlockingPressure = sourceBlockingPressure,
             .fixedMultiplierMode =
                 !conf.adaptiveFramegen && conf.multiplier > 1,
             .outputFps = outputCadence.outputFps,
@@ -4473,6 +4489,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->requiresSourceHistoryWarmup_ = false;
             this->lastGeneratedFrameCount_ = 0;
             updateAdaptiveFlowGovernor();
+            this->adaptiveFlowPreviousSourceBlockingMs_ = 0.0;
 
             const VkSemaphore sourceReady =
                 pass.preCopySemaphores.at(0).handle();
@@ -4517,6 +4534,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowAdaptiveZeroGenerationCycles++;
             metrics.totalAdaptiveZeroGenerationCycles++;
             updateAdaptiveFlowGovernor();
+            this->adaptiveFlowPreviousSourceBlockingMs_ = 0.0;
 
             const VkSemaphore sourceReady =
                 pass.preCopySemaphores.at(0).handle();
@@ -4646,6 +4664,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.windowGeneratedCompleted += generatedFrameCount;
         metrics.totalGeneratedCompleted += generatedFrameCount;
         updateAdaptiveFlowGovernor();
+        this->adaptiveFlowPreviousSourceBlockingMs_ =
+            framegenBlockingCompletionMs;
 
         // 364178af acquires each synthetic image with a bounded blocking timeout,
         // then presents every admitted synthetic on the application's queue.
@@ -6391,6 +6411,7 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->adaptiveFlowGlobalSourceFps_ = 0.0;
     this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
     this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
+    this->adaptiveFlowPreviousSourceBlockingMs_ = 0.0;
     this->adaptiveFlowLastObservedComputeDrops_ =
         this->runtimeMetrics.totalAdmissionRejects
         + this->runtimeMetrics.totalGeneratedDeadlineDrops;
