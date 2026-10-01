@@ -48,6 +48,40 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         self.assertNotIn("compat-adaptive-history-copy", source)
         self.assertIn("presentContextWithCount(", history_block)
 
+    def test_protected_adreno_scene_reprime_consumes_both_guard_slots(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        island_start = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        island_end = source.index("// END ADRENO_364178AF_EXECUTION", island_start)
+        island = source[island_start:island_end]
+        warmup_start = island.index("if (sourceHistoryWarmupActive)")
+        generated_start = island.index(
+            "this->lastDispatchedGeneratedFrameCount_ = generatedFrameCount;",
+            warmup_start,
+        )
+        warmup = island[warmup_start:generated_start]
+
+        self.assertIn(
+            "adaptiveSceneTransitionGuard_.consumeSourceOnly()",
+            warmup,
+            "Protected Adreno scene reprime must consume one guard slot on each warmup cycle",
+        )
+        self.assertIn(
+            "--this->sourceHistoryWarmupRemaining_",
+            warmup,
+            "Scene reprime must advance one protected source cycle at a time",
+        )
+        self.assertNotIn(
+            "this->sourceHistoryWarmupRemaining_ = 0;",
+            warmup,
+            "Clearing history warmup in one shot leaves the independent scene guard permanently armed",
+        )
+        self.assertIn(
+            "this->adaptiveSceneTransitionGuard_.sourceOnlyRequired()",
+            warmup,
+        )
+
+
     def test_framegen_zero_generation_refreshes_temporal_preprocessing(self) -> None:
         backend_sources = (
             ROOT / "framegen/v3.1_src/context.cpp",
