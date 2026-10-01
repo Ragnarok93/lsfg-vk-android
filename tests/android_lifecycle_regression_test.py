@@ -23,8 +23,10 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
         self.assertIn("const bool recreatingExistingSwapchain", hooks)
-        self.assertIn("createInfo.presentMode = recreatingExistingSwapchain", hooks)
-        self.assertIn("? pCreateInfo->presentMode", hooks)
+        self.assertIn("oldConfiguredPresentMode = oldSwapchainState->configuredPresent", hooks)
+        self.assertIn("lsfg::wsi::modeRequestForCreate(", hooks)
+        self.assertIn("oldConfiguredPresentMode,", hooks)
+        self.assertIn("createInfo.presentMode = choosePresentMode(", hooks)
         self.assertIn("stage=swapchain-blit-check-begin", hooks)
         self.assertIn("stage=swapchain-blit-check-ready", hooks)
         self.assertIn("stage=swapchain-downstream-create-begin", hooks)

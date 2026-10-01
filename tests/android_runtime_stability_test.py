@@ -12,6 +12,13 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         source = (ROOT / "src/mini/commandpool.cpp").read_text(encoding="utf-8")
         self.assertIn("VK_COMMAND_POOL_CREATE_TRANSIENT_BIT", source)
 
+    def test_present_mode_selector_is_declared_before_early_runtime_helpers(self) -> None:
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        declaration = source.index("VkPresentModeKHR choosePresentMode(")
+        early_call = source.index("resolveConfiguredPhysicalPresentMode(")
+
+        self.assertLess(declaration, early_call)
+
     def test_per_frame_handle_owners_use_single_allocation(self) -> None:
         semaphore = (ROOT / "src/mini/semaphore.cpp").read_text(encoding="utf-8")
         command_buffer = (ROOT / "src/mini/commandbuffer.cpp").read_text(encoding="utf-8")
@@ -659,7 +666,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         """Fixed -> Adaptive is a temporal backend-context boundary."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper_end = source.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = source[helper_start:helper_end]
 
         self.assertIn("framegenModeChanged", helper)
@@ -679,7 +686,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         """Adaptive -> Fixed uses the same symmetric context-boundary rule."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper_end = source.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = source[helper_start:helper_end]
 
         self.assertIn(
@@ -701,7 +708,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("if (recreateSwapchain)", source)
 
         helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper_end = source.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = source[helper_start:helper_end]
         self.assertIn("adaptiveFramegen", helper)
         self.assertNotIn("fpsLimit", helper)
@@ -712,7 +719,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         """The repair is limited to the mode bit, not scheduler/timeline diagnostics."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper_end = source.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = source[helper_start:helper_end]
 
         self.assertNotIn("adaptiveScheduler", helper)
@@ -733,10 +740,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         end = source.index("auto res = Layer::ovkCreateSwapchainKHR", start)
         hot_recreate = source[start:end]
 
-        self.assertIn(
-            "recreatingExistingSwapchain\n            ? pCreateInfo->presentMode",
-            hot_recreate,
-        )
+        self.assertIn("lsfg::wsi::modeRequestForCreate(", hot_recreate)
+        self.assertIn("oldConfiguredPresentMode,", hot_recreate)
+        self.assertIn("configuredPresentMode,", hot_recreate)
+        self.assertIn("createInfo.presentMode = choosePresentMode(", hot_recreate)
         self.assertNotIn("? VK_PRESENT_MODE_FIFO_KHR", hot_recreate)
         self.assertNotIn(": VK_PRESENT_MODE_FIFO_KHR", hot_recreate)
 
@@ -747,10 +754,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         end = source.index("auto res = Layer::ovkCreateSwapchainKHR", start)
         hot_recreate = source[start:end]
 
-        self.assertIn(
-            "recreatingExistingSwapchain\n            ? pCreateInfo->presentMode",
-            hot_recreate,
-        )
+        self.assertIn("lsfg::wsi::modeRequestForCreate(", hot_recreate)
+        self.assertIn("oldConfiguredPresentMode,", hot_recreate)
+        self.assertIn("configuredPresentMode,", hot_recreate)
+        self.assertIn("createInfo.presentMode = choosePresentMode(", hot_recreate)
         self.assertNotIn("? VK_PRESENT_MODE_MAILBOX_KHR", hot_recreate)
         self.assertNotIn(": VK_PRESENT_MODE_MAILBOX_KHR", hot_recreate)
 
@@ -784,6 +791,17 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn('" config_revision="', context)
         self.assertIn("bool runtimeConfigSignatureValid_{false}", header)
 
+    def test_adaptive_flow_handoff_is_reviewable_in_runtime_telemetry(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("runtime stage=adaptive-flow-handoff", hooks)
+        self.assertIn("identity_compatible=", hooks)
+        self.assertIn("transition_pending=", hooks)
+        self.assertIn("warmup_remaining=", hooks)
+        self.assertIn("seed_selected=", hooks)
+        self.assertIn("event=context-scale-seed applied=%d", context)
+
     def test_mode_transition_requests_exactly_one_hot_recreation(self) -> None:
         """One mode transition produces one OUT_OF_DATE recreation request, not a loop."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
@@ -802,7 +820,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
         helper_start = hooks.index("bool requiresSwapchainRecreation")
-        helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
+        helper_end = hooks.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = hooks[helper_start:helper_end]
         self.assertNotIn("generationActivityChanged", helper)
         self.assertIn("return framegenModeChanged", helper)
@@ -829,7 +847,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
 
         helper_start = hooks.index("bool requiresSwapchainRecreation")
-        helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
+        helper_end = hooks.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = hooks[helper_start:helper_end]
         self.assertNotIn("generationActivityChanged", helper)
         self.assertIn("const bool residentTarget = previous.targeted && next.targeted", helper)

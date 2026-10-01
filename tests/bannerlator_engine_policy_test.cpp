@@ -34,6 +34,8 @@ static void testPresentModeSelectionAndReuse() {
     assert(modeRequestForCreate(false, fifo, mailbox, fifo) == mailbox);
     assert(modeRequestForCreate(true, fifo, mailbox, fifo) == mailbox);
     assert(modeRequestForCreate(true, fifo, fifo, mailbox) == mailbox);
+    assert(modeRequestForCreate(true, mailbox, mailbox, fifo) == fifo);
+    assert(modeRequestForCreate(true, fifo, fifo, immediate) == immediate);
 
     assert(applyResidentFifoBackend(fifo, true, fifo, fifo, mailbox, true) == mailbox);
     assert(applyResidentFifoBackend(fifo, true, fifo, fifo, mailbox, false) == fifo);
@@ -106,9 +108,39 @@ static void testStableAdaptiveFlowHandoff() {
         true, previous, next, 0.85F, 0.85F, false, 1));
     assert(!lsfg::handoff::selectStableScale(
         true, previous, next, 0.80F, 0.85F, false, 0));
+    assert(lsfg::handoff::selectStableScale(
+        true, previous, next, 0.8504F, 0.85F, false, 0));
+    assert(!lsfg::handoff::selectStableScale(
+        true, previous, next, 0.8506F, 0.85F, false, 0));
     assert(!lsfg::handoff::selectStableScale(
         true, previous, next, std::numeric_limits<float>::quiet_NaN(),
         0.85F, false, 0));
+    assert(!lsfg::handoff::selectStableScale(
+        true, previous, next, 0.85F,
+        std::numeric_limits<float>::infinity(), false, 0));
+    assert(!lsfg::handoff::selectStableScale(
+        true, previous, next, 0.85F,
+        -std::numeric_limits<float>::infinity(), false, 0));
+
+    const auto assertIncompatible = [&](auto mutate) {
+        auto incompatible = next;
+        mutate(incompatible);
+        assert(!lsfg::handoff::compatible(previous, incompatible));
+        assert(!lsfg::handoff::selectStableScale(
+            true, previous, incompatible, 0.85F, 0.85F, false, 0));
+    };
+    assertIncompatible([](auto& identity) { identity.enabled = false; });
+    assertIncompatible([](auto& identity) { identity.targeted = false; });
+    assertIncompatible([](auto& identity) { identity.adaptiveFramegen = false; });
+    assertIncompatible([](auto& identity) { identity.adaptiveFlow = false; });
+    assertIncompatible([](auto& identity) { identity.performance = true; });
+    assertIncompatible([](auto& identity) { identity.hdr = true; });
+    assertIncompatible([](auto& identity) { identity.multiplier++; });
+    assertIncompatible([](auto& identity) { identity.targetFps++; });
+    assertIncompatible([](auto& identity) { identity.width++; });
+    assertIncompatible([](auto& identity) { identity.height++; });
+    assertIncompatible([](auto& identity) { identity.dll = "Other.dll"; });
+    assertIncompatible([](auto& identity) { identity.preset = "balanced"; });
 
     // Old context recreation cold-started at the preset target.
     AdaptiveFlowController legacyContext;
@@ -134,6 +166,28 @@ static void testStableAdaptiveFlowHandoff() {
     rebuiltController.configure(true, AdaptiveFlowPreset::Balanced);
     assert(std::fabs(rebuiltController.currentScale() - 0.80F) < 0.0001F);
     assert(!rebuiltController.seedCurrentScale(learnedScale));
+
+    for (const auto preset : {AdaptiveFlowPreset::Quality,
+            AdaptiveFlowPreset::Balanced, AdaptiveFlowPreset::Low}) {
+        const auto states = AdaptiveFlowController::statesForPreset(preset);
+        for (std::size_t index = 0; index < states.size(); ++index) {
+            AdaptiveFlowController seeded;
+            seeded.configure(true, preset);
+            assert(seeded.seedCurrentScale(states[index]));
+            assert(seeded.telemetry().stateIndex == index);
+            assert(std::fabs(seeded.currentScale() - states[index]) < 0.0001F);
+        }
+    }
+
+    AdaptiveFlowController invalidSeedController;
+    invalidSeedController.configure(true, AdaptiveFlowPreset::Quality);
+    assert(!invalidSeedController.seedCurrentScale(0.846F));
+    assert(!invalidSeedController.seedCurrentScale(
+        std::numeric_limits<float>::quiet_NaN()));
+    assert(!invalidSeedController.seedCurrentScale(
+        std::numeric_limits<float>::infinity()));
+    assert(invalidSeedController.telemetry().stateIndex == 0);
+    assert(std::fabs(invalidSeedController.currentScale() - 1.0F) < 0.0001F);
 }
 
 int main() {

@@ -56,6 +56,12 @@ namespace {
     constexpr size_t kAndroidResidentMaxMultiplier = 4;
     std::atomic<uint64_t> nextSwapchainGeneration{1};
 
+    VkPresentModeKHR choosePresentMode(
+            VkPhysicalDevice physicalDevice,
+            VkSurfaceKHR surface,
+            VkPresentModeKHR gamePresentMode,
+            VkPresentModeKHR configuredPresentMode);
+
     size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 #ifdef __ANDROID__
         if (conf.targeted)
@@ -436,12 +442,6 @@ namespace {
         }
         return VK_SUCCESS;
     }
-
-    VkPresentModeKHR choosePresentMode(
-            VkPhysicalDevice physicalDevice,
-            VkSurfaceKHR surface,
-            VkPresentModeKHR gamePresentMode,
-            VkPresentModeKHR configuredPresentMode);
 
     void myvkDestroyDevice(VkDevice device,
             const VkAllocationCallbacks* pAllocator) noexcept;
@@ -988,14 +988,28 @@ namespace {
                         .preset = conf.adaptiveFlowPreset,
                     };
                 };
+                const auto oldIdentity =
+                    identityFor(oldSwapchainConfig, oldSwapchainExtent);
+                const auto newIdentity =
+                    identityFor(activeConf, pCreateInfo->imageExtent);
                 adaptiveFlowScaleSeed = lsfg::handoff::selectStableScale(
                     oldFlow.enabled,
-                    identityFor(oldSwapchainConfig, oldSwapchainExtent),
-                    identityFor(activeConf, pCreateInfo->imageExtent),
+                    oldIdentity,
+                    newIdentity,
                     oldFlow.requestedScale,
                     oldFlow.activeScale,
                     oldFlow.transitionPending,
                     oldFlow.warmupRemaining);
+                std::cerr << "lsfg-vk: runtime stage=adaptive-flow-handoff"
+                          << " runtime_enabled=" << (oldFlow.enabled ? 1 : 0)
+                          << " identity_compatible="
+                          << (lsfg::handoff::compatible(oldIdentity, newIdentity) ? 1 : 0)
+                          << " transition_pending=" << (oldFlow.transitionPending ? 1 : 0)
+                          << " warmup_remaining=" << oldFlow.warmupRemaining
+                          << " requested_scale=" << oldFlow.requestedScale
+                          << " active_scale=" << oldFlow.activeScale
+                          << " seed_selected=" << (adaptiveFlowScaleSeed ? 1 : 0)
+                          << "\n";
             }
 #endif
         }
