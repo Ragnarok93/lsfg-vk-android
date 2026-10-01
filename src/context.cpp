@@ -762,9 +762,21 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             AdaptiveFlowController::statesForPreset(this->adaptiveFlowPreset_);
         adaptiveFlowScales.assign(presetStates.begin(), presetStates.end());
         initialFlowScale = adaptiveFlowScales.front();
-        if (adaptiveFlowScaleSeed.has_value()) {
+
+        // Start from the last known/configured Flow cost, never blindly from
+        // the preset ceiling. On a cold launch the persisted fixed Flow scale
+        // is our only known-good pacing state; on a compatible recreation the
+        // settled Adaptive Flow state takes precedence. Snap downward to the
+        // closest legal preset state so startup cannot be more expensive than
+        // the known-good scale unless the preset floor itself requires it.
+        const float seedSourceScale =
+            adaptiveFlowScaleSeed.value_or(conf.flowScale);
+        const auto conservativeSeed =
+            AdaptiveFlowController::conservativeSeedScale(
+                this->adaptiveFlowPreset_, seedSourceScale);
+        if (conservativeSeed.has_value()) {
             flowScaleSeedApplied = this->adaptiveFlowController_.seedCurrentScale(
-                *adaptiveFlowScaleSeed);
+                *conservativeSeed);
             if (flowScaleSeedApplied)
                 initialFlowScale = this->adaptiveFlowController_.currentScale();
         }
@@ -777,6 +789,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                   << " minimum=" << presetStates.back()
                   << " states=" << presetStates.size()
                   << " initial_scale=" << initialFlowScale
+                  << " seed_source="
+                  << (adaptiveFlowScaleSeed.has_value() ? "handoff" : "configured")
                   << " handoff=" << (flowScaleSeedApplied ? "applied" : "target")
                   << '\n';
     }
