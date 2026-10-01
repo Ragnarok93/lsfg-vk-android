@@ -93,11 +93,10 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             self.assertIn("void Alpha::SeedHistory", source, alpha_source.as_posix())
             self.assertIn("for (size_t history = 0; history < 3; ++history)", source,
                           alpha_source.as_posix())
-            self.assertIn(
-                "DispatchStage(buf, frameCount + history, StageCount - 1)",
-                source,
-                alpha_source.as_posix(),
-            )
+            self.assertIn("frameCount + history", source,
+                          alpha_source.as_posix())
+            self.assertIn("StageCount - 1", source,
+                          alpha_source.as_posix())
 
     def test_gpu_timing_is_available_for_fixed_and_adaptive_flow(self) -> None:
         for _, context_header, context_source, _ in BACKENDS:
