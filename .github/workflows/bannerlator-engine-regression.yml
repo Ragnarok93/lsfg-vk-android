@@ -51,3 +51,6 @@ jobs:
 
       - name: Validate Adaptive Flow runtime pressure telemetry
         run: python3 tests/adaptive_flow_runtime_pressure_test.py
+
+      - name: Validate Android runtime stability contracts
+        run: python3 tests/android_runtime_stability_test.py
