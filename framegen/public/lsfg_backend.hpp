@@ -39,6 +39,10 @@ struct AdaptiveFlowBatchMetadata {
     // A bounded prepared-graph handoff may keep generated output flowing while
     // the pending graph receives its three source-history writes.
     bool preserveOutputDuringTransition{false};
+    // Hard scene/cadence discontinuities must overwrite every Alpha temporal
+    // history slot before interpolation resumes, including fixed-flow fallback
+    // contexts that do not own prepared Adaptive Flow graphs.
+    bool resetTemporalHistory{false};
 };
 
 struct AdaptiveFlowGpuTiming {
