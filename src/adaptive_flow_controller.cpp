@@ -45,6 +45,13 @@ constexpr double kSchedulerTransitionHoldSeconds = 0.50;
 constexpr double kDownstepEvaluationSeconds = 0.30;
 constexpr double kOutputDownstepEvaluationSeconds = 0.15;
 constexpr double kDownstepNoBenefitHoldSeconds = 2.0;
+// Adaptive-FG quality upsteps are probes. Preserve source cadence rather than
+// allowing a higher Flow state to force a new generated/source density regime.
+constexpr double kRecoveryPacingEvaluationSeconds = 0.40;
+constexpr double kRecoveryPacingRegressionConfirmSeconds = 0.15;
+constexpr double kRecoveryPacingSourceRetentionRatio = 0.94;
+constexpr double kRecoveryPacingDensityIncreaseTolerance = 0.25;
+constexpr double kRecoveryPacingRevertHoldSeconds = 3.0;
 constexpr double kSourceTargetSatisfiedRatio = 0.98;
 constexpr double kExploratorySourceDropRatio = 0.97;
 constexpr double kMaterialPressureRatioRelief = 0.05;
@@ -87,6 +94,12 @@ void AdaptiveFlowController::configure(bool enabled, AdaptiveFlowPreset preset) 
     downstepOutputDriven_ = false;
     downstepSourceDriven_ = false;
     downstepExploratorySourceDriven_ = false;
+    recoveryPacingEvaluationActive_ = false;
+    recoveryPacingPreviousIndex_ = 0;
+    recoveryPacingEvaluationStartedSeconds_ = 0.0;
+    recoveryPacingRegressionSeconds_ = 0.0;
+    recoveryPacingBaselineSourceFps_ = 0.0;
+    recoveryPacingBaselineDensity_ = 0.0;
     resetFixedExploration();
     resetEvidence();
     selectTargetState();
@@ -146,6 +159,12 @@ void AdaptiveFlowController::reset() {
     downstepOutputDriven_ = false;
     downstepSourceDriven_ = false;
     downstepExploratorySourceDriven_ = false;
+    recoveryPacingEvaluationActive_ = false;
+    recoveryPacingPreviousIndex_ = 0;
+    recoveryPacingEvaluationStartedSeconds_ = 0.0;
+    recoveryPacingRegressionSeconds_ = 0.0;
+    recoveryPacingBaselineSourceFps_ = 0.0;
+    recoveryPacingBaselineDensity_ = 0.0;
     resetFixedExploration();
     resetEvidence();
     selectTargetState();
@@ -196,6 +215,10 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             downstepEvaluationStartedSeconds_ = observedSeconds_;
             downstepBenefitSeen_ = false;
         }
+        if (recoveryPacingEvaluationActive_) {
+            recoveryPacingEvaluationStartedSeconds_ = observedSeconds_;
+            recoveryPacingRegressionSeconds_ = 0.0;
+        }
         if (!observation.flowTransition)
             flowTransitionHoldActive_ = false;
         resetEvidence();
@@ -207,6 +230,10 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         if (downstepEvaluationActive_) {
             downstepEvaluationStartedSeconds_ = observedSeconds_;
             downstepBenefitSeen_ = false;
+        }
+        if (recoveryPacingEvaluationActive_) {
+            recoveryPacingEvaluationStartedSeconds_ = observedSeconds_;
+            recoveryPacingRegressionSeconds_ = 0.0;
         }
         resetEvidence();
         telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
@@ -223,6 +250,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             || !std::isfinite(observation.flowMs)) {
         if (downstepEvaluationActive_)
             downstepEvaluationStartedSeconds_ += evidenceSeconds;
+        if (recoveryPacingEvaluationActive_)
+            recoveryPacingEvaluationStartedSeconds_ += evidenceSeconds;
         resetEvidence();
         telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
         telemetry_.reason = AdaptiveFlowDecisionReason::InvalidTelemetry;
@@ -331,6 +360,61 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         : (fixedExplorationReferenceValid_
             ? fixedExplorationBestSourceFps_
             : 0.0);
+
+    if (recoveryPacingEvaluationActive_) {
+        const bool densitySampleValid =
+            observation.adaptiveFramegenMode
+            && observation.scheduledGenerationDensity >= 0.0
+            && std::isfinite(observation.scheduledGenerationDensity);
+        const bool sourceRegression =
+            sourceSampleValid
+            && recoveryPacingBaselineSourceFps_ > 0.0
+            && observation.sourceFps
+                < recoveryPacingBaselineSourceFps_
+                    * kRecoveryPacingSourceRetentionRatio;
+        const bool densityRegression =
+            densitySampleValid
+            && observation.scheduledGenerationDensity
+                > recoveryPacingBaselineDensity_
+                    + kRecoveryPacingDensityIncreaseTolerance;
+
+        if (sourceRegression && densityRegression)
+            recoveryPacingRegressionSeconds_ += evidenceSeconds;
+        else
+            recoveryPacingRegressionSeconds_ = 0.0;
+
+        if (recoveryPacingRegressionSeconds_
+                >= kRecoveryPacingRegressionConfirmSeconds) {
+            const auto presetStates = states(preset_);
+            telemetry_.stateIndex = std::min(
+                recoveryPacingPreviousIndex_, presetStates.size() - 1);
+            telemetry_.currentScale = presetStates[telemetry_.stateIndex];
+            telemetry_.changed = true;
+            telemetry_.reason =
+                AdaptiveFlowDecisionReason::RecoveryPacingReverted;
+            recoveryPacingEvaluationActive_ = false;
+            recoveryPacingRegressionSeconds_ = 0.0;
+            cooldownUntilSeconds_ =
+                observedSeconds_ + kRecoveryPacingRevertHoldSeconds;
+            resetEvidence();
+            return telemetry_.currentScale;
+        }
+
+        if (observedSeconds_ - recoveryPacingEvaluationStartedSeconds_
+                < kRecoveryPacingEvaluationSeconds) {
+            resetEvidence();
+            telemetry_.reason =
+                AdaptiveFlowDecisionReason::EvaluatingRecoveryPacing;
+            return telemetry_.currentScale;
+        }
+
+        recoveryPacingEvaluationActive_ = false;
+        recoveryPacingRegressionSeconds_ = 0.0;
+        telemetry_.reason =
+            AdaptiveFlowDecisionReason::RecoveryPacingConfirmed;
+        resetEvidence();
+        return telemetry_.currentScale;
+    }
 
     // Scheduler transitions suppress ordinary near-budget noise, but they
     // must not hide a completed generated batch that is already slower than
@@ -677,6 +761,18 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
             telemetry_.changed = true;
             telemetry_.reason = AdaptiveFlowDecisionReason::SustainedHeadroom;
+            if (observation.adaptiveFramegenMode
+                    && sourceSampleValid
+                    && observation.scheduledGenerationDensity >= 0.0
+                    && std::isfinite(observation.scheduledGenerationDensity)) {
+                recoveryPacingEvaluationActive_ = true;
+                recoveryPacingPreviousIndex_ = index;
+                recoveryPacingEvaluationStartedSeconds_ = observedSeconds_;
+                recoveryPacingRegressionSeconds_ = 0.0;
+                recoveryPacingBaselineSourceFps_ = observation.sourceFps;
+                recoveryPacingBaselineDensity_ =
+                    observation.scheduledGenerationDensity;
+            }
             if (fixedMultiplierMode && !sourceTargetValid) {
                 // An upward quality probe must not immediately re-arm the
                 // downward exploratory probe. Re-arm only if source cadence
@@ -733,6 +829,12 @@ const char* AdaptiveFlowController::reasonName(AdaptiveFlowDecisionReason reason
     case AdaptiveFlowDecisionReason::DownstepReverted: return "downstep_reverted_no_benefit";
     case AdaptiveFlowDecisionReason::InsufficientRecoveryHeadroom: return "insufficient_recovery_headroom";
     case AdaptiveFlowDecisionReason::SustainedHeadroom: return "sustained_headroom";
+    case AdaptiveFlowDecisionReason::EvaluatingRecoveryPacing:
+        return "evaluating_recovery_pacing";
+    case AdaptiveFlowDecisionReason::RecoveryPacingConfirmed:
+        return "recovery_pacing_confirmed";
+    case AdaptiveFlowDecisionReason::RecoveryPacingReverted:
+        return "recovery_pacing_reverted";
     }
     return "none";
 }
