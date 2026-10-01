@@ -27,3 +27,15 @@ jobs:
 
       - name: Run policy regression and churn tests
         run: /tmp/bannerlator-engine-policy-test
+
+      - name: Compile and run full Adaptive Flow controller tests
+        run: >-
+          g++ -std=c++20 -Wall -Wextra -Werror -O2
+          -I include
+          tests/adaptive_flow_controller_test.cpp
+          src/adaptive_flow_controller.cpp
+          -o /tmp/adaptive-flow-controller-test
+          && /tmp/adaptive-flow-controller-test
+
+      - name: Validate Adaptive Flow seeded handoff contract
+        run: python3 tests/android_adaptive_flow_shadow_transition_test.py
