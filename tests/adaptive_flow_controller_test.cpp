@@ -126,6 +126,40 @@ int main() {
     }
 
     {
+        // Cold Adaptive Flow contexts must start from the persisted fixed Flow
+        // scale (or the closest no-more-expensive preset state), not blindly
+        // jump to the preset ceiling. This preserves a known-good pacing state
+        // across app relaunches as well as runtime mode toggles.
+        const auto autoSeed =
+            AdaptiveFlowController::conservativeSeedScale(
+                AdaptiveFlowPreset::Auto, 0.52F);
+        assert(autoSeed.has_value() && near(*autoSeed, 0.50F));
+
+        const auto qualityBelowFloor =
+            AdaptiveFlowController::conservativeSeedScale(
+                AdaptiveFlowPreset::Quality, 0.50F);
+        assert(qualityBelowFloor.has_value()
+            && near(*qualityBelowFloor, 0.70F));
+
+        const auto balancedBetweenStates =
+            AdaptiveFlowController::conservativeSeedScale(
+                AdaptiveFlowPreset::Balanced, 0.78F);
+        assert(balancedBetweenStates.has_value()
+            && near(*balancedBetweenStates, 0.75F));
+
+        const auto lowAboveTarget =
+            AdaptiveFlowController::conservativeSeedScale(
+                AdaptiveFlowPreset::Low, 0.80F);
+        assert(lowAboveTarget.has_value() && near(*lowAboveTarget, 0.55F));
+
+        const auto invalid =
+            AdaptiveFlowController::conservativeSeedScale(
+                AdaptiveFlowPreset::Auto,
+                std::numeric_limits<float>::quiet_NaN());
+        assert(!invalid.has_value());
+    }
+
+    {
         // Adaptive always starts at the preset target and still rejects a
         // sub-confirmation pressure burst after the faster control-loop tune.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
