@@ -33,6 +33,30 @@ class AdaptiveFlowRuntimePressureContractTest(unittest.TestCase):
         )
         self.assertIn('" adaptive_density="', source)
 
+    def test_effective_flow_scale_reports_fixed_scale_when_adaptive_flow_is_off(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("effectiveFlowScale", source)
+        self.assertIn("conf.adaptiveFlowScale", source)
+        self.assertIn("conf.flowScale", source)
+        self.assertIn('" flow_mode="', source)
+        self.assertIn('" flow_effective="', source)
+
+    def test_adaptive_source_health_guard_is_adaptive_adreno_only(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("adaptiveSourceHealthGuard_", source)
+        self.assertIn(
+            "conf.adaptiveFramegen && generationFirstAdreno",
+            source,
+        )
+        self.assertIn(
+            "generatedFrameCount = this->adaptiveSourceHealthGuard_.limit(",
+            source,
+        )
+        self.assertIn(
+            ": requestedFixedGeneratedFrameCount;",
+            source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
