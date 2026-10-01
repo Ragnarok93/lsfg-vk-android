@@ -2275,6 +2275,35 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             || this->adaptiveFlowWarmupRemaining_ > 0
             || this->adaptiveFlowCadenceHandoffPending_);
 
+    // On generation-first Adreno, the previous private-device completion wait
+    // executes synchronously inside vkQueuePresentKHR and is therefore embedded
+    // in the next raw source interval. Once LSFG owns most of that interval,
+    // feeding it back into the Adaptive scheduler creates a positive feedback
+    // loop: slower apparent source -> more synthetics -> longer wait -> still
+    // slower apparent source. Hold the last trusted source cadence instead.
+    const double adaptiveFlowSourceBlockingMs =
+        this->adaptiveFlowPreviousSourceBlockingMs_;
+    const double sourceIntervalMsAtCycleStart =
+        sourceInterval.count() > 0
+        ? std::chrono::duration<double, std::milli>(sourceInterval).count()
+        : 0.0;
+    const double adaptiveSourceBlockingRatioAtCycleStart =
+        generationFirstAdreno
+        && sourceIntervalMsAtCycleStart > 0.0
+        && std::isfinite(sourceIntervalMsAtCycleStart)
+        && adaptiveFlowSourceBlockingMs > 0.0
+        && std::isfinite(adaptiveFlowSourceBlockingMs)
+        ? adaptiveFlowSourceBlockingMs / sourceIntervalMsAtCycleStart
+        : 0.0;
+    constexpr double kAdaptiveSourceCadenceHoldBlockingRatio = 0.60;
+    const bool adaptiveSourceCadenceHeldForBlocking =
+        conf.adaptiveFramegen
+        && adaptiveSourceBlockingRatioAtCycleStart
+            >= kAdaptiveSourceCadenceHoldBlockingRatio;
+    const bool preserveAdaptiveSourceCadence =
+        adaptiveFlowTransitionActiveAtCycleStart
+        || adaptiveSourceCadenceHeldForBlocking;
+
     // Capacity feedback is advisory in Adaptive mode on generation-first
     // Adreno. Fixed mode always requests the selected multiplier.
     double capacityIntervalMs = 0.0;
@@ -2315,7 +2344,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             previousSourceCadenceObservation);
     size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(
-            sourceInterval, adaptiveFlowTransitionActiveAtCycleStart)
+            sourceInterval, preserveAdaptiveSourceCadence)
         : requestedFixedGeneratedFrameCount;
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
@@ -2371,7 +2400,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             sourceArrivalTimeNs,
             sourceInterval,
             false,
-            adaptiveFlowTransitionActiveAtCycleStart);
+            preserveAdaptiveSourceCadence);
         if (hadValidSourceTimeline
                 && !this->currentSourceTimeline_.valid
                 && sourceInterval.count() > 0) {
@@ -2799,8 +2828,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && !conservativeHistoryGap;
 
     this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
-    const double adaptiveFlowSourceBlockingMs =
-        this->adaptiveFlowPreviousSourceBlockingMs_;
 
     const auto updateAdaptiveFlowGovernor = [&]() {
         const bool adaptiveFlowTransitionActive =
@@ -3015,13 +3042,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             observationBudgetMs > 0.0 && std::isfinite(observationBudgetMs);
         constexpr double kAdaptiveSourceBlockingPressureRatio = 0.70;
         const double sourceBlockingRatio =
-            generationFirstAdreno
-            && sourceIntervalMs > 0.0
-            && std::isfinite(sourceIntervalMs)
-            && adaptiveFlowSourceBlockingMs > 0.0
-            && std::isfinite(adaptiveFlowSourceBlockingMs)
-            ? adaptiveFlowSourceBlockingMs / sourceIntervalMs
-            : 0.0;
+            adaptiveSourceBlockingRatioAtCycleStart;
         const bool sourceBlockingPressure =
             conf.adaptiveFramegen
             && sourceBlockingRatio >= kAdaptiveSourceBlockingPressureRatio;
@@ -3138,6 +3159,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (flowTelemetry.sourcePressure ? 1 : 0)
                       << " source_exploration="
                       << (flowTelemetry.exploratorySourcePressure ? 1 : 0)
+                      << " adaptive_source_blocking_pressure="
+                      << (flowTelemetry.adaptiveSourceBlockingPressure ? 1 : 0)
+                      << " source_blocking_ratio="
+                      << flowTelemetry.sourceBlockingRatio
+                      << " source_cadence_held_for_blocking="
+                      << (adaptiveSourceCadenceHeldForBlocking ? 1 : 0)
                       << " source_reference_fps="
                       << flowTelemetry.sourceReferenceFps
                       << " fixed_multiplier_mode="
@@ -3946,6 +3973,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->fixedSourceCadenceTracker_.telemetry().intervalRatio
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
+                      << " adaptive_source_cadence_held_for_blocking="
+                      << (adaptiveSourceCadenceHeldForBlocking ? 1 : 0)
+                      << " adaptive_source_blocking_ratio="
+                      << adaptiveSourceBlockingRatioAtCycleStart
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
                       << " adaptive_scheduled_density="
                       << adaptiveTelemetry.scheduledGenerationDensity
@@ -4020,6 +4051,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                               .exploratorySourcePressure
                           ? 1
                           : 0)
+                      << " adaptive_flow_source_blocking_pressure="
+                      << (this->adaptiveFlowController_.telemetry()
+                              .adaptiveSourceBlockingPressure
+                          ? 1
+                          : 0)
+                      << " adaptive_flow_source_blocking_ratio="
+                      << this->adaptiveFlowController_.telemetry().sourceBlockingRatio
+                      << " adaptive_flow_source_cadence_held_for_blocking="
+                      << (adaptiveSourceCadenceHeldForBlocking ? 1 : 0)
                       << " adaptive_flow_source_reference_fps="
                       << this->adaptiveFlowController_.telemetry().sourceReferenceFps
                       << " adaptive_flow_requested=" << this->adaptiveFlowRequestedScale_
