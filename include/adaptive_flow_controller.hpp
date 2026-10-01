@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 /// User-facing quality envelopes for Adaptive Flow Scale.
@@ -145,6 +146,8 @@ public:
     [[nodiscard]] const AdaptiveFlowTelemetry& telemetry() const { return telemetry_; }
 
     static std::span<const float> statesForPreset(AdaptiveFlowPreset preset);
+    static std::optional<float> conservativeSeedScale(
+        AdaptiveFlowPreset preset, float scale);
     static const char* presetName(AdaptiveFlowPreset preset);
     static const char* reasonName(AdaptiveFlowDecisionReason reason);
 
