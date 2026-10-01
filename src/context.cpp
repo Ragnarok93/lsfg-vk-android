@@ -6506,6 +6506,7 @@ void LsContext::enterSourceOnlyBypass() {
     this->adaptiveFlowGlobalSourceFps_ = 0.0;
     this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
     this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
+    this->adaptiveFlowPreviousSourceBlockingMs_ = 0.0;
     this->lastGeneratedFrameCount_ = 0;
     this->sourceHistoryWarmupRemaining_ =
         this->conservativeCrossDeviceSync_ ? 1U : kSourceHistoryWarmupFrames;
