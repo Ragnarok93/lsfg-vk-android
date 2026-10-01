@@ -37,6 +37,15 @@ jobs:
           -o /tmp/adaptive-flow-controller-test
           && /tmp/adaptive-flow-controller-test
 
+      - name: Compile and run Adaptive FG scheduler tests
+        run: >-
+          g++ -std=c++20 -Wall -Wextra -Werror -O2
+          -I include
+          tests/adaptive_scheduler_test.cpp
+          src/adaptive_scheduler.cpp
+          -o /tmp/adaptive-scheduler-test
+          && /tmp/adaptive-scheduler-test
+
       - name: Validate Adaptive Flow seeded handoff contract
         run: python3 tests/android_adaptive_flow_shadow_transition_test.py
 
