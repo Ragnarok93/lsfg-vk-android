@@ -111,9 +111,11 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
         )
         wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn("resetTemporalHistory", backend_header)
+        self.assertIn(".resetTemporalHistory =", wrapper)
+        self.assertIn("conf.adaptiveFramegen", wrapper)
+        self.assertIn("generationFirstAdreno", wrapper)
         self.assertIn(
-            ".resetTemporalHistory = "
-            "this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining() == 2",
+            "adaptiveSceneTransitionGuard_.sourceOnlyRemaining() == 2",
             wrapper,
         )
 
@@ -121,8 +123,12 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             source = context_source.read_text(encoding="utf-8")
             self.assertIn("adaptiveFlowBatch.resetTemporalHistory", source)
             self.assertIn(
-                "dispatchAdaptiveFlowSeedHistory("
-                "\n                data.cmdBuffer1, activeGraph",
+                "dispatchAdaptiveFlowSeedHistory(",
+                source,
+                context_source.as_posix(),
+            )
+            self.assertIn(
+                "data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool",
                 source,
                 context_source.as_posix(),
             )
