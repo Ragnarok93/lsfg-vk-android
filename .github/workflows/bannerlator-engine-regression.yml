@@ -39,3 +39,6 @@ jobs:
 
       - name: Validate Adaptive Flow seeded handoff contract
         run: python3 tests/android_adaptive_flow_shadow_transition_test.py
+
+      - name: Validate Adaptive Flow runtime pressure telemetry
+        run: python3 tests/adaptive_flow_runtime_pressure_test.py
