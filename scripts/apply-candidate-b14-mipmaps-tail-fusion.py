@@ -210,6 +210,36 @@ def patch_android_context(path: Path) -> None:
             '''    setenv("DISABLE_LSFG", "1", 1); // NOLINT
     lsfgInitialize(
         info.identity, format,
+        conf.hdr, 1.0F / backendInitialFlowScale, runtimeMultiplier - 1,
+''',
+            '''    setenv("DISABLE_LSFG", "1", 1); // NOLINT
+    const bool enableCooperativeMipmaps =
+        info.mipmapsSubgroupBroadcastSupported;
+    lsfgInitialize(
+        info.identity, format,
+        conf.hdr, 1.0F / backendInitialFlowScale, runtimeMultiplier - 1,
+''',
+        ),
+        (
+            '''    {
+        ScopedLsfgDisable disableRecursiveInterception;
+        lsfgInitialize(
+            info.identity, format,
+            conf.hdr, 1.0F / backendInitialFlowScale, runtimeMultiplier - 1,
+''',
+            '''    {
+        ScopedLsfgDisable disableRecursiveInterception;
+        const bool enableCooperativeMipmaps =
+            info.mipmapsSubgroupBroadcastSupported;
+        lsfgInitialize(
+            info.identity, format,
+            conf.hdr, 1.0F / backendInitialFlowScale, runtimeMultiplier - 1,
+''',
+        ),
+        (
+            '''    setenv("DISABLE_LSFG", "1", 1); // NOLINT
+    lsfgInitialize(
+        info.identity, format,
         conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
 ''',
             '''    setenv("DISABLE_LSFG", "1", 1); // NOLINT
