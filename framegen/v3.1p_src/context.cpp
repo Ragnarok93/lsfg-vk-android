@@ -415,90 +415,20 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         if (this->pendingFlowGraphIndex_.has_value()) {
             const size_t pendingIndex = *this->pendingFlowGraphIndex_;
             const auto pendingGraph = this->flowGraph(pendingIndex);
-            // A Flow downstep is requested because the active operating point
-            // is already under pressure. Do not automatically double the
-            // preprocess load while generated work is active. The most recent
-            // non-transition preprocess timing is a conservative upper bound
-            // for one shadow update; only spend that work when the batch budget
-            // has explicit headroom. A zero-generation cycle can advance the
-            // pending graph directly without also refreshing the active graph.
-            // A transition must not turn a Flow downstep into extra source
-            // pressure. Budget the pending graph from measured work: a prior
-            // shadow sample is best; before the first sample, mipmaps is a
-            // conservative proxy because it dominates shadow preprocessing.
-            const double shadowPreprocessEstimateMs =
-                this->lastAdaptiveFlowGpuTiming_.valid
-                    ? (this->lastAdaptiveFlowGpuTiming_.shadowPreprocessMs > 0.0
-                        ? this->lastAdaptiveFlowGpuTiming_.shadowPreprocessMs * 1.10
-                        : std::max(
-                            0.0,
-                            // Before the first direct shadow measurement, use
-                            // the measured preprocess-through-Beta envelope.
-                            // It safely covers Mipmaps+Alpha and avoids admitting
-                            // a transition from a mipmaps-only underestimate.
-                            this->lastAdaptiveFlowGpuTiming_.opticalFlowMs * 1.10))
-                    : 0.0;
-            const double shadowActiveEstimateMs =
-                adaptiveFlowBatch.predictedTotalLsfgMs > 0.0
-                    ? adaptiveFlowBatch.predictedTotalLsfgMs
-                    : (this->lastAdaptiveFlowGpuTiming_.valid
-                        ? std::max(
-                            0.0,
-                            this->lastAdaptiveFlowGpuTiming_.totalLsfgMs)
-                        : 0.0);
-            const double shadowHeadroomMs =
-                adaptiveFlowBatch.frameBudgetMs > 0.0
-                    && shadowActiveEstimateMs > 0.0
-                    ? adaptiveFlowBatch.frameBudgetMs - shadowActiveEstimateMs
-                    : 0.0;
-            const bool shadowBudgetAvailable =
-                shadowPreprocessEstimateMs > 0.0
-                && shadowHeadroomMs >= shadowPreprocessEstimateMs;
 
-            if (this->pendingFlowWarmupFrames_ + 1 < kAdaptiveFlowHistoryFrames) {
-                if (generationCount > 0) {
-                    this->dispatchAdaptiveFlowPreprocess(
-                        data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
-                }
-                if (generationCount == 0 || shadowBudgetAvailable) {
-                    Core::TimestampQueryPool* shadowTimingPool = nullptr;
-                    if (generationCount > 0
-                            && data.adaptiveFlowShadowTimingQueryPool.supported()) {
-                        shadowTimingPool = &data.adaptiveFlowShadowTimingQueryPool;
-                        shadowTimingPool->reset(data.cmdBuffer1.handle());
-                        shadowTimingPool->write(data.cmdBuffer1.handle(), 0);
-                    }
-                    this->dispatchAdaptiveFlowPreprocess(
-                        data.cmdBuffer1,
-                        pendingGraph,
-                        generationCount == 0 ? adaptiveFlowTimingPool : shadowTimingPool);
-                    if (shadowTimingPool != nullptr)
-                        shadowTimingPool->write(data.cmdBuffer1.handle(), 2);
-                    adaptiveFlowShadowSubmitted = true;
-                    data.adaptiveFlowShadowSubmitted = generationCount > 0;
-                } else if (generationCount > 0 && (this->frameIdx % 30U) == 0U) {
-                    std::cerr << "lsfg-vk: adaptive-flow-shadow-deferred"
-                              << " active_ms=" << shadowActiveEstimateMs
-                              << " shadow_ms=" << shadowPreprocessEstimateMs
-                              << " budget_ms=" << adaptiveFlowBatch.frameBudgetMs
-                              << " headroom_ms=" << shadowHeadroomMs
-                              << " generated=" << generationCount
-                              << '\n';
-                }
-                if (generationCount > 0)
-                    activeGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
-            } else {
-                // The first two shadow cycles already refreshed two distinct
-                // temporal slots. Writing the current source into the pending
-                // graph refreshes the third; generation can switch immediately
-                // after this submission without a native/source-only gap.
-                this->dispatchAdaptiveFlowPreprocess(
-                    data.cmdBuffer1, pendingGraph, adaptiveFlowTimingPool);
-                if (generationCount > 0)
-                    pendingGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
-                generationGraphIndex = pendingIndex;
-                adaptiveFlowCommitAfterSubmit = true;
-            }
+            // A pending graph must become usable without depending on spare
+            // headroom from the already-overloaded active state. Seed all
+            // three Alpha temporal slots coherently from the current source,
+            // then run this cycle entirely on the pending graph. This costs
+            // one graph preprocess (plus two cheap final Alpha history writes)
+            // instead of active+shadow preprocessing and preserves generated
+            // output without reading uninitialized temporal history.
+            this->dispatchAdaptiveFlowSeedHistory(
+                data.cmdBuffer1, pendingGraph, adaptiveFlowTimingPool);
+            if (generationCount > 0)
+                pendingGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
+            generationGraphIndex = pendingIndex;
+            adaptiveFlowCommitAfterSubmit = true;
         } else {
             this->dispatchAdaptiveFlowPreprocess(
                 data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
@@ -1123,6 +1053,16 @@ void Context::dispatchAdaptiveFlowPreprocess(
         timingPool->write(buffer.handle(), 1);
     for (size_t i = 0; i < 7; ++i)
         graph.alpha->at(6 - i).Dispatch(buffer, this->frameIdx);
+}
+
+void Context::dispatchAdaptiveFlowSeedHistory(
+        const Core::CommandBuffer& buffer, FlowGraphRef graph,
+        Core::TimestampQueryPool* timingPool) {
+    graph.mipmaps->Dispatch(buffer, this->frameIdx);
+    if (timingPool != nullptr)
+        timingPool->write(buffer.handle(), 1);
+    for (size_t i = 0; i < 7; ++i)
+        graph.alpha->at(6 - i).SeedHistory(buffer, this->frameIdx);
 }
 
 void Context::recordAdaptiveFlowGpuTiming(
