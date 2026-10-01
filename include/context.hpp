@@ -267,6 +267,9 @@ private:
 
 #ifdef __ANDROID__
     uint64_t runtimeSessionId_{0};
+    // Monotonic identity for every source/generated present accepted by the
+    // Android WSI. GameNative correlates this with the AHB it actually samples.
+    uint64_t hostDeliveryId_{1};
     uint64_t framegenContextCreateEpoch_{0};
     uint64_t framegenBuildSignatureHash_{0};
     // Adreno source-present count can advance while a private framegen batch

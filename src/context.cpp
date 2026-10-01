@@ -15,6 +15,12 @@
 #include <time.h>
 #include <unistd.h>
 #include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <cerrno>
+#include <cstddef>
+#include <cstring>
+#include <type_traits>
 #endif
 
 #include <vulkan/vulkan_core.h>
@@ -92,6 +98,81 @@ size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 
 #ifdef __ANDROID__
 constexpr uint32_t kConservativeSourceReprimeFrames = 2;
+
+// Versioned, telemetry-only bridge to the GameNative host compositor. The
+// abstract Unix datagram socket is intentionally best-effort and nonblocking:
+// absence/backpressure of a receiver must never alter guest presentation.
+constexpr char LSFG_PROVENANCE_SOCKET[] = "gamenative-lsfg-provenance-v1";
+constexpr uint32_t kHostFrameProvenanceMagic = 0x4c534650U; // "LSFP"
+constexpr uint16_t kHostFrameProvenanceVersion = 1;
+
+enum class HostFrameKind : uint8_t {
+    Source = 0,
+    Generated = 1,
+};
+
+struct HostFrameProvenancePacket {
+    uint32_t magic{kHostFrameProvenanceMagic};
+    uint16_t version{kHostFrameProvenanceVersion};
+    uint8_t kind{0};
+    uint8_t interpolationIndex{0};
+    uint32_t interpolationCount{0};
+    uint32_t swapchainImageIndex{0};
+    uint64_t runtimeSessionId{0};
+    uint64_t deliveryId{0};
+    uint64_t sourceIndex{0};
+    uint64_t batchId{0};
+};
+
+static_assert(std::is_trivially_copyable_v<HostFrameProvenancePacket>);
+
+void publishHostFrameProvenance(const HostFrameProvenancePacket& packet) noexcept {
+    static const int socketFd = []() noexcept {
+        return ::socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    }();
+    if (socketFd < 0)
+        return;
+
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    address.sun_path[0] = '\0';
+    constexpr std::size_t socketNameLength = sizeof(LSFG_PROVENANCE_SOCKET) - 1;
+    static_assert(socketNameLength + 1 <= sizeof(address.sun_path));
+    std::memcpy(address.sun_path + 1, LSFG_PROVENANCE_SOCKET, socketNameLength);
+    const socklen_t addressLength = static_cast<socklen_t>(
+        offsetof(sockaddr_un, sun_path) + 1 + socketNameLength);
+
+    const ssize_t sent = ::sendto(
+        socketFd, &packet, sizeof(packet), MSG_DONTWAIT,
+        reinterpret_cast<const sockaddr*>(&address), addressLength);
+    if (sent != static_cast<ssize_t>(sizeof(packet))) {
+        const int error = errno;
+        if (error != ENOENT && error != ECONNREFUSED
+                && error != EAGAIN && error != EWOULDBLOCK) {
+            Utils::logLimitN(
+                "hostFrameProvenance",
+                5,
+                "GameNative provenance send failed: " + std::to_string(error));
+        }
+        return;
+    }
+
+    __android_log_print(
+        ANDROID_LOG_VERBOSE,
+        "LSFG_FRAME_PROVENANCE",
+        "runtime_session_id=%llu delivery_id=%llu %s swapchain_image=%u "
+        "source_index=%llu batch_id=%llu interpolation_index=%u interpolation_count=%u",
+        static_cast<unsigned long long>(packet.runtimeSessionId),
+        static_cast<unsigned long long>(packet.deliveryId),
+        packet.kind == static_cast<uint8_t>(HostFrameKind::Generated)
+            ? "kind=generated" : "kind=source",
+        packet.swapchainImageIndex,
+        static_cast<unsigned long long>(packet.sourceIndex),
+        static_cast<unsigned long long>(packet.batchId),
+        static_cast<unsigned>(packet.interpolationIndex),
+        packet.interpolationCount);
+}
+
 
 struct FramegenContextBuildConfig {
     bool performance{false};
@@ -1736,6 +1817,35 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     this->releasePresentWaitRetirements(presentIdx);
 
 #ifdef __ANDROID__
+    const auto presentWithHostProvenance = [&](
+            VkQueue presentQueue,
+            const VkPresentInfoKHR* presentInfo,
+            HostFrameKind kind,
+            uint32_t swapchainImageIndex,
+            uint32_t interpolationIndex,
+            uint32_t interpolationCount) -> VkResult {
+        const VkResult result =
+            Layer::ovkQueuePresentKHR(presentQueue, presentInfo);
+        if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
+            uint64_t deliveryId = this->hostDeliveryId_++;
+            if (deliveryId == 0) {
+                deliveryId = 1;
+                this->hostDeliveryId_ = 2;
+            }
+            publishHostFrameProvenance(HostFrameProvenancePacket{
+                .kind = static_cast<uint8_t>(kind),
+                .interpolationIndex = static_cast<uint8_t>(
+                    std::min<uint32_t>(interpolationIndex, 255U)),
+                .interpolationCount = interpolationCount,
+                .swapchainImageIndex = swapchainImageIndex,
+                .runtimeSessionId = this->runtimeSessionId_,
+                .deliveryId = deliveryId,
+                .sourceIndex = this->currentSourceTimeline_.sourceIndex,
+                .batchId = this->adaptiveFlowLastObservedBatchId_,
+            });
+        }
+        return result;
+    };
     const auto deferredBoundaryNow = RuntimeMetrics::Clock::now();
     const bool deferredAdrenoBoundaryDiscontinuity =
         this->deferredAdrenoBatchValid_
@@ -1999,7 +2109,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->runtimeMetrics.windowGeneratedWsiSubmitted++;
                 this->runtimeMetrics.totalGeneratedWsiSubmitted++;
                 const auto deferredPresentResult =
-                    Layer::ovkQueuePresentKHR(queue, &deferredPresentInfo);
+                    presentWithHostProvenance(
+                        queue, &deferredPresentInfo,
+                        HostFrameKind::Generated, imageIdx,
+                        static_cast<uint32_t>(i + 1),
+                        static_cast<uint32_t>(this->deferredAdrenoGeneratedCount_));
                 if (isAdrenoWsiRetirementResult(deferredPresentResult))
                     return deferredPresentResult;
                 if (deferredPresentResult != VK_SUCCESS
@@ -2097,7 +2211,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 pendingSourceImage, this->pendingSourceReady_);
         }
         const auto pendingSourceResult =
-            Layer::ovkQueuePresentKHR(queue, &pendingSourcePresentInfo);
+            presentWithHostProvenance(
+                queue, &pendingSourcePresentInfo,
+                HostFrameKind::Source, pendingSourceImage, 0, 0);
         if (isAdrenoWsiRetirementResult(pendingSourceResult))
             return pendingSourceResult;
         if (pendingSourceResult != VK_SUCCESS
@@ -2142,8 +2258,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pSwapchains = &this->swapchain,
             .pImageIndices = &presentIdx,
         };
-        const auto passthroughResult = Layer::ovkQueuePresentKHR(
-            queue, &passthroughPresentInfo);
+        const auto passthroughResult = presentWithHostProvenance(
+            queue, &passthroughPresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
         if (passthroughResult == VK_SUCCESS
                 || passthroughResult == VK_SUBOPTIMAL_KHR) {
             this->lastGeneratedFrameCount_ = 0;
@@ -4503,7 +4620,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 .pImageIndices = &presentIdx,
             };
             const auto sourceResult =
-                Layer::ovkQueuePresentKHR(queue, &sourcePresentInfo);
+                presentWithHostProvenance(
+            queue, &sourcePresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
             if (sourceResult != VK_SUCCESS
                     && sourceResult != VK_SUBOPTIMAL_KHR) {
                 metrics.windowSourcePresentFailures++;
@@ -4556,7 +4675,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 .pImageIndices = &presentIdx,
             };
             const auto warmupResult =
-                Layer::ovkQueuePresentKHR(queue, &warmupPresentInfo);
+                presentWithHostProvenance(
+            queue, &warmupPresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
             if (warmupResult != VK_SUCCESS
                     && warmupResult != VK_SUBOPTIMAL_KHR) {
                 metrics.windowSourcePresentFailures++;
@@ -4650,7 +4771,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 .pImageIndices = &presentIdx,
             };
             const auto timeoutPresentResult =
-                Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
+                presentWithHostProvenance(
+            queue, &timeoutPresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
             if (timeoutPresentResult != VK_SUCCESS
                     && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
                 metrics.windowSourcePresentFailures++;
@@ -4745,7 +4868,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             };
             metrics.windowGeneratedWsiSubmitted++;
             metrics.totalGeneratedWsiSubmitted++;
-            res = Layer::ovkQueuePresentKHR(queue, &presentInfo);
+            res = presentWithHostProvenance(
+                queue, &presentInfo,
+                HostFrameKind::Generated, imageIdx,
+                static_cast<uint32_t>(i + 1),
+                static_cast<uint32_t>(interpolationGenerationCount));
             if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
                 metrics.windowGeneratedPresentFailures++;
                 metrics.totalGeneratedPresentFailures++;
@@ -4789,7 +4916,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pImageIndices = &presentIdx,
         };
         auto res =
-            Layer::ovkQueuePresentKHR(queue, &finalPresentInfo);
+            presentWithHostProvenance(
+            queue, &finalPresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
             metrics.totalSourcePresentFailures++;
@@ -4899,7 +5028,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .pImageIndices = &presentIdx,
         };
         const auto bypassResult =
-            Layer::ovkQueuePresentKHR(queue, &bypassPresentInfo);
+            presentWithHostProvenance(
+            queue, &bypassPresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
         if (this->conservativeCrossDeviceSync_ && isAdrenoWsiRetirementResult(bypassResult))
             return bypassResult;
         if (bypassResult != VK_SUCCESS
@@ -5199,7 +5330,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         armPassGpuRetirement();
         this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
         const auto failOpenResult =
-            Layer::ovkQueuePresentKHR(queue, &failOpenPresentInfo);
+            presentWithHostProvenance(
+            queue, &failOpenPresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
         if (failOpenResult != VK_SUCCESS
                 && failOpenResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
@@ -5235,7 +5368,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         armPassGpuRetirement();
         this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
         const auto sourceResult =
-            Layer::ovkQueuePresentKHR(queue, &sourcePresentInfo);
+            presentWithHostProvenance(
+            queue, &sourcePresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
         if (this->conservativeCrossDeviceSync_ && isAdrenoWsiRetirementResult(sourceResult))
             return sourceResult;
         if (sourceResult != VK_SUCCESS
@@ -5472,7 +5607,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->retainPresentWait(
                     presentIdx, pass.preCopySemaphores.at(0));
                 const auto timeoutResult =
-                    Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
+                    presentWithHostProvenance(
+            queue, &timeoutPresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
                 if (timeoutResult != VK_SUCCESS
                         && timeoutResult != VK_SUBOPTIMAL_KHR) {
                     metrics.windowSourcePresentFailures++;
@@ -5518,8 +5655,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         };
         armPassGpuRetirement();
         this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
-        const auto adaptiveSourceResult = Layer::ovkQueuePresentKHR(
-            queue, &adaptiveSourcePresentInfo);
+        const auto adaptiveSourceResult = presentWithHostProvenance(
+            queue, &adaptiveSourcePresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
         if (adaptiveSourceResult != VK_SUCCESS
                 && adaptiveSourceResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
@@ -5686,8 +5824,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->retainPresentWait(
                     presentIdx, pass.preCopySemaphores.at(0));
                 const auto deferredSourceResult =
-                    Layer::ovkQueuePresentKHR(
-                        queue, &deferredSourcePresentInfo);
+                    presentWithHostProvenance(
+                        queue, &deferredSourcePresentInfo,
+                        HostFrameKind::Source, presentIdx, 0, 0);
                 if (isAdrenoWsiRetirementResult(deferredSourceResult))
                     return deferredSourceResult;
                 if (deferredSourceResult != VK_SUCCESS
@@ -5862,7 +6001,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         };
         armPassGpuRetirement();
         this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
-        const auto timeoutPresentResult = Layer::ovkQueuePresentKHR(queue, &timeoutPresentInfo);
+        const auto timeoutPresentResult = presentWithHostProvenance(
+            queue, &timeoutPresentInfo,
+            HostFrameKind::Source, presentIdx, 0, 0);
         if (timeoutPresentResult != VK_SUCCESS && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
             metrics.totalSourcePresentFailures++;
@@ -6083,7 +6224,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 imageIdx, pass.prevPostCopySemaphores.at(i - 1));
         metrics.windowGeneratedWsiSubmitted++;
         metrics.totalGeneratedWsiSubmitted++;
-        res = Layer::ovkQueuePresentKHR(generatedPresentQueue, &presentInfo);
+        res = presentWithHostProvenance(
+            generatedPresentQueue, &presentInfo,
+            HostFrameKind::Generated, imageIdx,
+            static_cast<uint32_t>(i + 1),
+            static_cast<uint32_t>(interpolationGenerationCount));
         if (this->conservativeCrossDeviceSync_
                 && isAdrenoWsiRetirementResult(res))
             return res;
@@ -6165,8 +6310,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         queuedGeneratedFrameCount > 0 && useAdrenoSyntheticQueue
             ? generatedPresentQueue
             : queue;
-    auto res = Layer::ovkQueuePresentKHR(
-        finalSourcePresentQueue, &finalPresentInfo);
+    auto res = presentWithHostProvenance(
+        finalSourcePresentQueue, &finalPresentInfo,
+        HostFrameKind::Source, presentIdx, 0, 0);
     if (this->conservativeCrossDeviceSync_
             && isAdrenoWsiRetirementResult(res))
         return res;
