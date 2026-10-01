@@ -103,9 +103,9 @@ int main() {
     }
 
     {
-        // Direct target pressure must move at least twice as fast as the old
-        // one-state controller so recovery does not require a chain of costly
-        // Flow-graph handoffs.
+        // Direct target pressure reacts quickly, but advances only one .05
+        // state per decision so every Flow state is measured before another
+        // graph handoff is requested.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
         bool changed = false;
         for (int i = 0; i < 16 && !changed; ++i) {
@@ -121,8 +121,8 @@ int main() {
             changed = controller.telemetry().changed;
         }
         assert(changed);
-        assert(near(controller.currentScale(), 0.90F));
-        assert(controller.telemetry().stateIndex == 2);
+        assert(near(controller.currentScale(), 0.95F));
+        assert(controller.telemetry().stateIndex == 1);
     }
 
     {
@@ -136,9 +136,8 @@ int main() {
     }
 
     {
-        // A direct missed output target is user-visible pressure. It should
-        // move two discrete Flow states within roughly half a second, reducing
-        // both recovery latency and the number of graph-history handoffs.
+        // A direct missed output target is user-visible pressure. Confirmation
+        // is fast, but a decision may move only one discrete Flow state.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         bool changed = false;
         for (int i = 0; i < 6 && !changed; ++i) {
@@ -153,15 +152,14 @@ int main() {
             changed = controller.telemetry().changed;
         }
         assert(changed);
-        assert(near(controller.currentScale(), 0.90F));
-
+        assert(near(controller.currentScale(), 0.95F));
+        assert(controller.telemetry().stateIndex == 1);
     }
 
     {
-        // Once pressure has cleared and the larger recovery step is predicted
-        // to fit comfortably, one confirmed recovery decision should regain
-        // two .05 Flow states. This both restores quality at least twice as
-        // fast and halves the number of graph/history handoffs needed.
+        // Recovery is also one .05 state per confirmed decision. This prevents
+        // a quality upstep from skipping over a state whose cost has not yet
+        // been measured.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         bool lowered = false;
         for (int i = 0; i < 8 && !lowered; ++i) {
@@ -173,23 +171,16 @@ int main() {
             observation.outputFps = 42.0;
             observation.sourceFps = 16.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.90F);
+            lowered = near(controller.currentScale(), 0.95F);
         }
         assert(lowered);
 
-        // Model the real backend handoff and post-handoff settle barrier.
-        // This prevents stale target-pressure evidence from scheduling a second
-        // downstep before the first probe has been evaluated.
-        for (int i = 0; i < 3; ++i) {
-            auto transition = sample(12.0, 3.0, 50.0);
-            transition.flowTransition = true;
-            controller.observe(transition);
-        }
+        auto transition = sample(12.0, 3.0, 50.0);
+        transition.flowTransition = true;
+        controller.observe(transition);
         for (int i = 0; i < 3; ++i)
             controller.observe(sample(12.0, 3.0, 50.0));
 
-        // Keep the target missed only until the existing 0.90 probe is
-        // committed as beneficial, then switch to clean recovery evidence.
         bool benefitConfirmed = false;
         for (int i = 0; i < 6 && !benefitConfirmed; ++i) {
             auto observation = sample(12.0, 3.0, 50.0);
@@ -204,7 +195,7 @@ int main() {
                 == AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
         }
         assert(benefitConfirmed);
-        assert(near(controller.currentScale(), 0.90F));
+        assert(near(controller.currentScale(), 0.95F));
 
         bool recovered = false;
         for (int i = 0; i < 40 && !recovered; ++i) {
@@ -830,6 +821,91 @@ int main() {
         }
         assert(controller.currentScale() <= 0.90F);
         assert(controller.telemetry().sourceReferenceFps >= 21.9);
+    }
+
+    {
+        // Fixed LSFG can begin generating before a clean source-only baseline
+        // ever exists. After exploratory downscaling finds a useful state and
+        // a subsequent lower probe fails, sustained headroom must still allow
+        // quality recovery without sourceTargetFps.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
+
+        bool firstStep = false;
+        for (int i = 0; i < 12 && !firstStep; ++i) {
+            auto observation = sample(8.0, 5.0, 50.0);
+            observation.fixedMultiplierMode = true;
+            observation.sourceFps = 20.0;
+            controller.observe(observation);
+            firstStep = near(controller.currentScale(), 0.95F);
+        }
+        assert(firstStep);
+
+        auto firstTransition = sample(8.0, 5.0, 50.0);
+        firstTransition.fixedMultiplierMode = true;
+        firstTransition.sourceFps = 22.0;
+        firstTransition.flowTransition = true;
+        controller.observe(firstTransition);
+        for (int i = 0; i < 3; ++i) {
+            auto settle = sample(8.0, 5.0, 50.0);
+            settle.fixedMultiplierMode = true;
+            settle.sourceFps = 22.0;
+            controller.observe(settle);
+        }
+
+        bool firstBenefit = false;
+        for (int i = 0; i < 12 && !firstBenefit; ++i) {
+            auto observation = sample(7.0, 4.0, 50.0);
+            observation.fixedMultiplierMode = true;
+            observation.sourceFps = 22.0;
+            controller.observe(observation);
+            firstBenefit = controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
+        }
+        assert(firstBenefit);
+
+        bool secondStep = false;
+        for (int i = 0; i < 12 && !secondStep; ++i) {
+            auto observation = sample(7.0, 4.0, 50.0);
+            observation.fixedMultiplierMode = true;
+            observation.sourceFps = 22.0;
+            controller.observe(observation);
+            secondStep = near(controller.currentScale(), 0.90F);
+        }
+        assert(secondStep);
+
+        auto secondTransition = sample(7.0, 4.0, 50.0);
+        secondTransition.fixedMultiplierMode = true;
+        secondTransition.sourceFps = 22.0;
+        secondTransition.flowTransition = true;
+        controller.observe(secondTransition);
+        for (int i = 0; i < 3; ++i) {
+            auto settle = sample(7.0, 4.0, 50.0);
+            settle.fixedMultiplierMode = true;
+            settle.sourceFps = 22.0;
+            controller.observe(settle);
+        }
+
+        bool reverted = false;
+        for (int i = 0; i < 16 && !reverted; ++i) {
+            auto observation = sample(7.0, 4.0, 50.0);
+            observation.fixedMultiplierMode = true;
+            observation.sourceFps = 22.1;
+            controller.observe(observation);
+            reverted = controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::DownstepReverted;
+        }
+        assert(reverted);
+        assert(near(controller.currentScale(), 0.95F));
+
+        bool recovered = false;
+        for (int i = 0; i < 80 && !recovered; ++i) {
+            auto observation = sample(5.0, 1.0, 50.0);
+            observation.fixedMultiplierMode = true;
+            observation.sourceFps = 30.0;
+            controller.observe(observation);
+            recovered = near(controller.currentScale(), 1.00F);
+        }
+        assert(recovered);
     }
 
     {
