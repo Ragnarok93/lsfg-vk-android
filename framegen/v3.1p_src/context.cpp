@@ -430,8 +430,13 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
             generationGraphIndex = pendingIndex;
             adaptiveFlowCommitAfterSubmit = true;
         } else {
-            this->dispatchAdaptiveFlowPreprocess(
-                data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
+            if (adaptiveFlowBatch.resetTemporalHistory) {
+                this->dispatchAdaptiveFlowSeedHistory(
+                    data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
+            } else {
+                this->dispatchAdaptiveFlowPreprocess(
+                    data.cmdBuffer1, activeGraph, adaptiveFlowTimingPool);
+            }
             if (generationCount > 0)
                 activeGraph.beta->Dispatch(data.cmdBuffer1, this->frameIdx);
         }
@@ -439,8 +444,14 @@ LSFG::AndroidFrameSyncFds Context::present(Vulkan& vk,
         this->mipmaps.Dispatch(data.cmdBuffer1, this->frameIdx);
         if (adaptiveFlowTimingPool != nullptr)
             adaptiveFlowTimingPool->write(data.cmdBuffer1.handle(), 1);
-        for (size_t i = 0; i < 7; i++)
-            this->alpha.at(6 - i).Dispatch(data.cmdBuffer1, this->frameIdx);
+        for (size_t i = 0; i < 7; i++) {
+            if (adaptiveFlowBatch.resetTemporalHistory)
+                this->alpha.at(6 - i).SeedHistory(
+                    data.cmdBuffer1, this->frameIdx);
+            else
+                this->alpha.at(6 - i).Dispatch(
+                    data.cmdBuffer1, this->frameIdx);
+        }
         if (generationCount > 0)
             this->beta.Dispatch(data.cmdBuffer1, this->frameIdx);
     }
