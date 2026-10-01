@@ -190,6 +190,7 @@ private:
     bool recoveryPacingEvaluationActive_{false};
     std::size_t recoveryPacingPreviousIndex_{};
     double recoveryPacingEvaluationStartedSeconds_{};
+    double recoveryPacingRegressionSeconds_{};
     double recoveryPacingBaselineSourceFps_{};
     double recoveryPacingBaselineDensity_{};
 
