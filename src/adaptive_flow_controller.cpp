@@ -100,6 +100,7 @@ void AdaptiveFlowController::configure(bool enabled, AdaptiveFlowPreset preset) 
     recoveryPacingPreviousIndex_ = 0;
     recoveryPacingEvaluationStartedSeconds_ = 0.0;
     recoveryPacingRegressionSeconds_ = 0.0;
+    recoveryPacingRetryBlockedUntilSeconds_ = 0.0;
     recoveryPacingBaselineSourceFps_ = 0.0;
     recoveryPacingBaselineDensity_ = 0.0;
     resetFixedExploration();
@@ -165,6 +166,7 @@ void AdaptiveFlowController::reset() {
     recoveryPacingPreviousIndex_ = 0;
     recoveryPacingEvaluationStartedSeconds_ = 0.0;
     recoveryPacingRegressionSeconds_ = 0.0;
+    recoveryPacingRetryBlockedUntilSeconds_ = 0.0;
     recoveryPacingBaselineSourceFps_ = 0.0;
     recoveryPacingBaselineDensity_ = 0.0;
     resetFixedExploration();
@@ -396,8 +398,10 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                 AdaptiveFlowDecisionReason::RecoveryPacingReverted;
             recoveryPacingEvaluationActive_ = false;
             recoveryPacingRegressionSeconds_ = 0.0;
-            cooldownUntilSeconds_ =
+            recoveryPacingRetryBlockedUntilSeconds_ =
                 observedSeconds_ + kRecoveryPacingRevertHoldSeconds;
+            cooldownUntilSeconds_ =
+                observedSeconds_ + kTransitionCooldownSeconds;
             resetEvidence();
             return telemetry_.currentScale;
         }
@@ -691,6 +695,15 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     }
 
     pressureSeconds_ = 0.0;
+
+    if (canRaise
+            && observation.adaptiveFramegenMode
+            && observedSeconds_ < recoveryPacingRetryBlockedUntilSeconds_) {
+        headroomSeconds_ = 0.0;
+        telemetry_.reason =
+            AdaptiveFlowDecisionReason::InsufficientRecoveryHeadroom;
+        return telemetry_.currentScale;
+    }
 
     const bool globalRecoveryHeadroom =
         !observation.globalPressureValid
