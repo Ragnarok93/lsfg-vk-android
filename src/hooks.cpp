@@ -3,6 +3,8 @@
 #include "config/config.hpp"
 #include "utils/utils.hpp"
 #include "context.hpp"
+#include "adaptive_flow_handoff.hpp"
+#include "swapchain_policy.hpp"
 #include "layer.hpp"
 
 #include <vulkan/vulkan_core.h>
@@ -21,6 +23,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -112,6 +115,49 @@ namespace {
             || previous.performance != next.performance
             || previous.hdr != next.hdr
             || previous.e_present != next.e_present;
+    }
+
+    bool configurationChangesOnlyPresentMode(
+            const Config::Configuration& previous,
+            const Config::Configuration& next) {
+        return previous.enable == next.enable
+            && previous.targeted == next.targeted
+            && previous.dll == next.dll
+            && previous.multiplier == next.multiplier
+            && previous.flowScale == next.flowScale
+            && previous.adaptiveFlowScale == next.adaptiveFlowScale
+            && previous.adaptiveFlowPreset == next.adaptiveFlowPreset
+            && previous.performance == next.performance
+            && previous.hdr == next.hdr
+            && previous.adaptiveFramegen == next.adaptiveFramegen
+            && previous.fpsLimit == next.fpsLimit
+            && previous.config_file == next.config_file;
+    }
+
+    VkPresentModeKHR resolveConfiguredPhysicalPresentMode(
+            const DeviceInfo& deviceInfo,
+            VkSurfaceKHR surface,
+            VkPresentModeKHR currentEffectiveMode,
+            const Config::Configuration& conf,
+            bool* fifoMailboxBacked) {
+        bool mailboxBacked = false;
+        auto effectiveMode = choosePresentMode(
+            deviceInfo.physicalDevice, surface, currentEffectiveMode, conf.e_present);
+#ifdef __ANDROID__
+        const auto mailboxMode = choosePresentMode(
+            deviceInfo.physicalDevice, surface, currentEffectiveMode,
+            VK_PRESENT_MODE_MAILBOX_KHR);
+        effectiveMode = lsfg::wsi::applyResidentFifoBackend(
+            effectiveMode, conf.targeted, conf.e_present,
+            VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_MAILBOX_KHR,
+            mailboxMode == VK_PRESENT_MODE_MAILBOX_KHR);
+        mailboxBacked = conf.targeted
+            && conf.e_present == VK_PRESENT_MODE_FIFO_KHR
+            && mailboxMode == VK_PRESENT_MODE_MAILBOX_KHR;
+#endif
+        if (fifoMailboxBacked != nullptr)
+            *fifoMailboxBacked = mailboxBacked;
+        return effectiveMode;
     }
 
     bool supportsDeviceExtension(VkPhysicalDevice physicalDevice, const char* extensionName) {
@@ -419,6 +465,9 @@ namespace {
     struct SwapchainState {
         VkDevice device{VK_NULL_HANDLE};
         std::shared_ptr<DeviceInfo> deviceInfo;
+        VkSurfaceKHR surface{VK_NULL_HANDLE};
+        VkExtent2D extent{};
+        Config::Configuration config{};
         VkPresentModeKHR present{VK_PRESENT_MODE_FIFO_KHR};
         VkPresentModeKHR configuredPresent{VK_PRESENT_MODE_FIFO_KHR};
         std::shared_ptr<LsContext> context;
@@ -905,6 +954,51 @@ namespace {
         }
         Utils::resetLimitN("swapMap");
         const auto activeConf = Config::snapshot();
+        auto oldSwapchainState = pCreateInfo->oldSwapchain != VK_NULL_HANDLE
+            ? findSwapchainState(pCreateInfo->oldSwapchain)
+            : nullptr;
+        Config::Configuration oldSwapchainConfig = activeConf;
+        VkPresentModeKHR oldConfiguredPresentMode = activeConf.e_present;
+        VkExtent2D oldSwapchainExtent = pCreateInfo->imageExtent;
+        std::optional<float> adaptiveFlowScaleSeed;
+        if (oldSwapchainState) {
+            std::lock_guard oldStateLock(oldSwapchainState->presentMutex);
+            oldSwapchainConfig = oldSwapchainState->config;
+            oldConfiguredPresentMode = oldSwapchainState->configuredPresent;
+            oldSwapchainExtent = oldSwapchainState->extent;
+#ifdef __ANDROID__
+            if (oldSwapchainState->device == device
+                    && oldSwapchainState->context != nullptr) {
+                const auto oldFlow = oldSwapchainState->context
+                    ->adaptiveFlowRuntimeSnapshot();
+                const auto identityFor = [](const Config::Configuration& conf,
+                        VkExtent2D extent) {
+                    return lsfg::handoff::Identity{
+                        .enabled = conf.enable,
+                        .targeted = conf.targeted,
+                        .adaptiveFramegen = conf.adaptiveFramegen,
+                        .adaptiveFlow = conf.adaptiveFlowScale,
+                        .performance = conf.performance,
+                        .hdr = conf.hdr,
+                        .multiplier = conf.multiplier,
+                        .targetFps = conf.fpsLimit,
+                        .width = extent.width,
+                        .height = extent.height,
+                        .dll = conf.dll,
+                        .preset = conf.adaptiveFlowPreset,
+                    };
+                };
+                adaptiveFlowScaleSeed = lsfg::handoff::selectStableScale(
+                    oldFlow.enabled,
+                    identityFor(oldSwapchainConfig, oldSwapchainExtent),
+                    identityFor(activeConf, pCreateInfo->imageExtent),
+                    oldFlow.requestedScale,
+                    oldFlow.activeScale,
+                    oldFlow.transitionPending,
+                    oldFlow.warmupRemaining);
+            }
+#endif
+        }
 
         const auto createPassThrough = [&](const char* reason) -> VkResult {
             const auto res = Layer::ovkCreateSwapchainKHR(
@@ -916,6 +1010,11 @@ namespace {
                     auto state = std::make_shared<SwapchainState>();
                     state->device = device;
                     state->deviceInfo = deviceInfo;
+                    state->surface = pCreateInfo->surface;
+                    state->extent = pCreateInfo->imageExtent;
+                    state->config = activeConf;
+                    state->present = pCreateInfo->presentMode;
+                    state->configuredPresent = activeConf.e_present;
                     publishSwapchainState(*pSwapchain, std::move(state));
                 } catch (const std::exception& e) {
                     Utils::logLimitN("swapMap", 5,
@@ -978,14 +1077,17 @@ namespace {
         VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;
         const auto configuredPresentMode = activeConf.e_present;
         const bool recreatingExistingSwapchain = pCreateInfo->oldSwapchain != VK_NULL_HANDLE;
-        // Adaptive and Fixed FG share the same WSI contract. Present mode is
-        // resolved before image capacity so strict FIFO can bound queue depth
-        // without changing Mailbox or any other present mode.
-        createInfo.presentMode = recreatingExistingSwapchain
-            ? pCreateInfo->presentMode
-            : choosePresentMode(
-                deviceInfo->physicalDevice, pCreateInfo->surface,
-                pCreateInfo->presentMode, configuredPresentMode);
+        // On an ordinary hot recreation preserve the game's requested mode. If
+        // the wrapper configuration itself changed, apply that new request now.
+        const VkPresentModeKHR configuredModeRequest =
+            lsfg::wsi::modeRequestForCreate(
+                recreatingExistingSwapchain,
+                oldConfiguredPresentMode,
+                configuredPresentMode,
+                pCreateInfo->presentMode);
+        createInfo.presentMode = choosePresentMode(
+            deviceInfo->physicalDevice, pCreateInfo->surface,
+            pCreateInfo->presentMode, configuredModeRequest);
         bool residentFifoMailboxBacked = false;
 #ifdef __ANDROID__
         // Keep the resident Android LSFG swapchain nonblocking across generation
@@ -997,10 +1099,13 @@ namespace {
             const auto mailboxPresentMode = choosePresentMode(
                 deviceInfo->physicalDevice, pCreateInfo->surface,
                 pCreateInfo->presentMode, VK_PRESENT_MODE_MAILBOX_KHR);
-            if (mailboxPresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
-                createInfo.presentMode = mailboxPresentMode;
-                residentFifoMailboxBacked = true;
-            }
+            createInfo.presentMode = lsfg::wsi::applyResidentFifoBackend(
+                createInfo.presentMode, activeConf.targeted,
+                configuredPresentMode, VK_PRESENT_MODE_FIFO_KHR,
+                VK_PRESENT_MODE_MAILBOX_KHR,
+                mailboxPresentMode == VK_PRESENT_MODE_MAILBOX_KHR);
+            residentFifoMailboxBacked =
+                mailboxPresentMode == VK_PRESENT_MODE_MAILBOX_KHR;
             std::cerr << "lsfg-vk: init stage=resident-fifo-backend"
                       << " logicalPresentMode=" << configuredPresentMode
                       << " actualPresentMode=" << createInfo.presentMode
@@ -1117,6 +1222,9 @@ namespace {
             auto state = std::make_shared<SwapchainState>();
             state->device = device;
             state->deviceInfo = deviceInfo;
+            state->surface = pCreateInfo->surface;
+            state->extent = pCreateInfo->imageExtent;
+            state->config = activeConf;
             state->present = createInfo.presentMode;
             state->configuredPresent = configuredPresentMode;
             const auto contextCreationReason = pCreateInfo->oldSwapchain
@@ -1124,7 +1232,8 @@ namespace {
                 : FramegenContextCreationReason::SwapchainCreate;
             state->context = std::make_shared<LsContext>(
                 *deviceInfo, *pSwapchain, pCreateInfo->imageExtent,
-                swapchainImages, createInfo.presentMode, contextCreationReason);
+                swapchainImages, createInfo.presentMode, contextCreationReason,
+                adaptiveFlowScaleSeed);
             if (pCreateInfo->oldSwapchain)
                 retireSwapchainState(pCreateInfo->oldSwapchain);
             const auto supportDecision = state->context->framegenSupportDecision();
@@ -1175,6 +1284,11 @@ namespace {
                     auto state = std::make_shared<SwapchainState>();
                     state->device = device;
                     state->deviceInfo = deviceInfo;
+                    state->surface = pCreateInfo->surface;
+                    state->extent = pCreateInfo->imageExtent;
+                    state->config = activeConf;
+                    state->present = fallbackCreateInfo.presentMode;
+                    state->configuredPresent = activeConf.e_present;
                     publishSwapchainState(*pSwapchain, std::move(state));
                 } catch (const std::exception& e) {
                     Utils::logLimitN("swapMap", 5,
@@ -1243,6 +1357,36 @@ namespace {
                     conf = Config::snapshot();
                     recreateSwapchain = requiresSwapchainRecreation(
                         previousConf, conf);
+                    bool fifoMailboxBacked = false;
+                    if (recreateSwapchain
+                            && previousConf.e_present != conf.e_present
+                            && configurationChangesOnlyPresentMode(
+                                previousConf, conf)
+                            && state->surface != VK_NULL_HANDLE) {
+                        const auto desiredEffectiveMode =
+                            resolveConfiguredPhysicalPresentMode(
+                                *deviceInfo, state->surface, state->present,
+                                conf, &fifoMailboxBacked);
+                        if (!lsfg::wsi::needsPhysicalRecreation(
+                                state->present, desiredEffectiveMode)) {
+                            recreateSwapchain = false;
+                            std::cerr << "lsfg-vk: runtime stage=present-mode-config"
+                                      << " action=reuse-swapchain"
+                                      << " configured=" << conf.e_present
+                                      << " effective=" << state->present
+                                      << " fifo_mailbox_backend="
+                                      << (fifoMailboxBacked ? 1 : 0)
+                                      << " context_rebuild=0\n";
+                        } else {
+                            std::cerr << "lsfg-vk: runtime stage=present-mode-config"
+                                      << " action=recreate-swapchain"
+                                      << " old_effective=" << state->present
+                                      << " new_effective=" << desiredEffectiveMode
+                                      << " fifo_mailbox_backend="
+                                      << (fifoMailboxBacked ? 1 : 0)
+                                      << " context_rebuild=1\n";
+                        }
+                    }
                     const bool framegenModeChanged =
                         previousConf.adaptiveFramegen != conf.adaptiveFramegen;
                     if (framegenModeChanged) {
@@ -1267,6 +1411,8 @@ namespace {
                               << " recreateSwapchain=" << (recreateSwapchain ? 1 : 0)
                               << "\n";
                     if (!recreateSwapchain) {
+                        state->config = conf;
+                        state->configuredPresent = conf.e_present;
 #ifdef __ANDROID__
                         const bool enteringResidentSourceOnly =
                             previousConf.targeted && conf.targeted

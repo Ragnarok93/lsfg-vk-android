@@ -141,6 +141,7 @@ std::string framegenContextBuildSignature(
         << "|adaptive_flow_preset="
         << AdaptiveFlowController::presetName(config.adaptiveFlowPreset)
         << "|flow_states=" << framegenFlowStateValues(config.adaptiveFlowStates)
+        << "|initial_flow_scale=" << config.initialFlowScale
         << "|transport=" << LSFG::ahbTransportModeName(config.ahbTransportMode)
         << "|support=" << (config.supportDecision.supported ? 1 : 0)
         << "|vulkan_path=" << config.vulkanPath
@@ -677,7 +678,8 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
         VkPresentModeKHR presentMode,
-        FramegenContextCreationReason creationReason)
+        FramegenContextCreationReason creationReason,
+        std::optional<float> adaptiveFlowScaleSeed)
         : swapchain(swapchain), swapchainImages(swapchainImages),
           presentWaitRetirements_(swapchainImages.size()),
           extent(extent), presentMode_(presentMode),
@@ -738,6 +740,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->adaptiveFlowPreset_ = adaptiveFlowPresetFromConfig(conf.adaptiveFlowPreset);
     this->adaptiveFlowController_.configure(
         conf.adaptiveFlowScale, this->adaptiveFlowPreset_);
+    bool flowScaleSeedApplied = false;
     // Restore the known-good Android WSI contract first. Display-timing hints
     // were introduced together with the Adaptive FIFO override and are kept
     // dormant until their pacing behavior can be validated independently.
@@ -756,6 +759,12 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             AdaptiveFlowController::statesForPreset(this->adaptiveFlowPreset_);
         adaptiveFlowScales.assign(presetStates.begin(), presetStates.end());
         initialFlowScale = adaptiveFlowScales.front();
+        if (adaptiveFlowScaleSeed.has_value()) {
+            flowScaleSeedApplied = this->adaptiveFlowController_.seedCurrentScale(
+                *adaptiveFlowScaleSeed);
+            if (flowScaleSeedApplied)
+                initialFlowScale = this->adaptiveFlowController_.currentScale();
+        }
         this->adaptiveFlowRequestedScale_ = initialFlowScale;
         this->adaptiveFlowActiveScale_ = initialFlowScale;
         std::cerr << "lsfg-vk: adaptive-flow-controller enabled=1"
@@ -764,8 +773,22 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                   << " target=" << presetStates.front()
                   << " minimum=" << presetStates.back()
                   << " states=" << presetStates.size()
+                  << " initial_scale=" << initialFlowScale
+                  << " handoff=" << (flowScaleSeedApplied ? "applied" : "target")
                   << '\n';
     }
+
+#ifdef __ANDROID__
+    __android_log_print(
+        ANDROID_LOG_INFO, "LSFG_FLOW",
+        "event=context-scale-seed applied=%d adaptive_flow=%d initial_scale=%.3f "
+        "preset=%s context_reason=%s",
+        flowScaleSeedApplied ? 1 : 0,
+        conf.adaptiveFlowScale ? 1 : 0,
+        static_cast<double>(initialFlowScale),
+        AdaptiveFlowController::presetName(this->adaptiveFlowPreset_),
+        framegenContextCreationReasonName(creationReason));
+#endif
 
     LSFG::BackendDiagnostics backendDiagnostics{};
     auto ahbTransportMode = LSFG::AhbTransportMode::Unsupported;

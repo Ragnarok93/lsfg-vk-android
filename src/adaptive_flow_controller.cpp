@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iterator>
 
 namespace {
 constexpr std::array<float, 7> kQualityStates{
@@ -91,6 +92,26 @@ void AdaptiveFlowController::configure(bool enabled, AdaptiveFlowPreset preset) 
     selectTargetState();
     if (!enabled_)
         telemetry_.reason = AdaptiveFlowDecisionReason::Disabled;
+}
+
+bool AdaptiveFlowController::seedCurrentScale(float scale) {
+    if (!enabled_ || !std::isfinite(scale))
+        return false;
+
+    const auto presetStates = states(preset_);
+    const auto state = std::find_if(
+        presetStates.begin(), presetStates.end(),
+        [scale](float candidate) {
+            return std::fabs(candidate - scale) <= 0.0005F;
+        });
+    if (state == presetStates.end())
+        return false;
+
+    reset();
+    telemetry_.stateIndex = static_cast<std::size_t>(
+        std::distance(presetStates.begin(), state));
+    telemetry_.currentScale = *state;
+    return true;
 }
 
 void AdaptiveFlowController::selectTargetState() {

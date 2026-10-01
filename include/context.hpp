@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <unordered_set>
 #include <vector>
 
@@ -120,7 +121,8 @@ public:
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
         VkPresentModeKHR presentMode,
         FramegenContextCreationReason creationReason =
-            FramegenContextCreationReason::SwapchainCreate);
+            FramegenContextCreationReason::SwapchainCreate,
+        std::optional<float> adaptiveFlowScaleSeed = std::nullopt);
 
     ///
     /// Custom present logic.

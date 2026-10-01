@@ -127,6 +127,7 @@ public:
     explicit AdaptiveFlowController(AdaptiveFlowPreset preset);
 
     void configure(bool enabled, AdaptiveFlowPreset preset);
+    [[nodiscard]] bool seedCurrentScale(float scale);
     float observe(const AdaptiveFlowObservation& observation);
     void reset();
 
