@@ -51,7 +51,9 @@ constexpr double kRecoveryPacingEvaluationSeconds = 0.40;
 constexpr double kRecoveryPacingRegressionConfirmSeconds = 0.15;
 constexpr double kRecoveryPacingSourceRetentionRatio = 0.94;
 constexpr double kRecoveryPacingDensityIncreaseTolerance = 0.25;
-constexpr double kRecoveryPacingRevertHoldSeconds = 3.0;
+// A rejected Adaptive-FG quality state is a pacing cliff, not ordinary
+// cooldown noise. Avoid periodic re-probing while the same scene is running.
+constexpr double kRecoveryPacingRevertHoldSeconds = 15.0;
 constexpr double kSourceTargetSatisfiedRatio = 0.98;
 constexpr double kExploratorySourceDropRatio = 0.97;
 constexpr double kMaterialPressureRatioRelief = 0.05;
