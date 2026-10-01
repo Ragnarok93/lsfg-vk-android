@@ -6,7 +6,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AdaptiveFlowShadowTimingTest(unittest.TestCase):
-    def test_shadow_preprocess_has_independent_gpu_timing(self) -> None:
+    def test_seeded_handoff_uses_normal_gpu_timing_without_shadow_overlap(self) -> None:
+        # Keep the public shadow fields for telemetry/backward compatibility,
+        # but the release path must no longer submit or time a second shadow
+        # preprocess alongside generated work.
         public = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(encoding="utf-8")
         for marker in (
             "shadowMipmapsMs",
@@ -21,23 +24,24 @@ class AdaptiveFlowShadowTimingTest(unittest.TestCase):
             ("v3.1p_src", "v3.1p_include", "v3_1p"),
         )
         for backend, include_dir, namespace_dir in variants:
-            source = (ROOT / "framegen" / backend / "context.cpp").read_text(encoding="utf-8")
+            source = (ROOT / "framegen" / backend / "context.cpp").read_text(
+                encoding="utf-8"
+            )
             header = (
                 ROOT / "framegen" / include_dir / namespace_dir / "context.hpp"
             ).read_text(encoding="utf-8")
-            self.assertIn("adaptiveFlowShadowTimingQueryPool", header)
-            self.assertIn("Core::TimestampQueryPool(vk.device, 3)", source)
-            self.assertIn("shadowTimingPool->write(data.cmdBuffer1.handle(), 0)", source)
-            self.assertIn("shadowTimingPool->write(data.cmdBuffer1.handle(), 2)", source)
-            self.assertIn("shadowDurations.size() == 2", source)
-            self.assertIn("shadowMipmapsMs = shadowDurations.at(0)", source)
-            self.assertIn("shadowAlphaMs = shadowDurations.at(1)", source)
 
-            warmup = source.index("if (this->pendingFlowWarmupFrames_ + 1")
-            final_handoff = source.index("} else {", warmup)
-            overlap = source[warmup:final_handoff]
-            self.assertIn("activeGraph.beta->Dispatch", overlap)
-            self.assertNotIn("pendingGraph.beta->Dispatch", overlap)
+            self.assertIn("dispatchAdaptiveFlowSeedHistory", header)
+            self.assertIn("dispatchAdaptiveFlowSeedHistory", source)
+            self.assertIn(
+                "pendingGraph, adaptiveFlowTimingPool",
+                source,
+            )
+            self.assertIn("pendingGraph.beta->Dispatch", source)
+
+            self.assertNotIn("shadowTimingPool->write", source)
+            self.assertNotIn("adaptive-flow-shadow-deferred", source)
+            self.assertNotIn("shadowBudgetAvailable", source)
 
     def test_outer_runtime_reports_shadow_and_context_build_cost(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
