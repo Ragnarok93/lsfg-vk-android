@@ -574,7 +574,11 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                 exploratorySourcePressure && !targetPressure;
             if (downstepExploratorySourceDriven_)
                 fixedExplorationProbePending_ = false;
-            const std::size_t pressureStepCount = fastPressure ? 2U : 1U;
+            // Fast pressure shortens confirmation, but every actuator change
+            // remains one discrete state. Skipping a state makes the benefit
+            // evaluator compare two unmeasured graph changes at once and was
+            // a direct source of Adaptive Flow oscillation.
+            constexpr std::size_t pressureStepCount = 1U;
             telemetry_.stateIndex = std::min(
                 index + pressureStepCount, presetStates.size() - 1);
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
@@ -612,11 +616,26 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         fixedMultiplierMode
         || !observation.outputTargeted
         || observation.outputTargetSatisfied;
+    // Fixed mode commonly starts with generated work already active, so the
+    // clean source-only tracker can legitimately have no baseline. Once the
+    // exploratory hill-climb has settled (no probe pending), treat its best
+    // measured source cadence as the recovery reference. This lets quality
+    // rise again when the scene becomes cheaper without inventing a target.
+    const bool exploratorySourceRecoverySatisfied =
+        fixedMultiplierMode
+        && !sourceTargetValid
+        && fixedExplorationReferenceValid_
+        && !fixedExplorationProbePending_
+        && sourceSampleValid
+        && observation.sourceFps
+            >= fixedExplorationBestSourceFps_
+                * kExploratorySourceDropRatio;
     const bool sourceRecoverySatisfied =
         !fixedMultiplierMode
         || (sourceTargetValid
             && observation.sourceFps >= observation.sourceTargetFps
-                * kSourceTargetSatisfiedRatio);
+                * kSourceTargetSatisfiedRatio)
+        || exploratorySourceRecoverySatisfied;
     const bool retainedHistoryRecoveryEligible =
         !observation.generatedWorkSample
         && observation.globalPressureValid
@@ -636,10 +655,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             && globalRecoveryHeadroom
             && thermalRecoveryHeadroom) {
         const double currentScale = static_cast<double>(presetStates[index]);
-        // Recover two .05 states per confirmed headroom decision when possible.
-        // Predict the full two-state cost before committing so faster quality
-        // recovery never trades cadence for fewer graph/history handoffs.
-        const std::size_t recoveryStepCount = std::min<std::size_t>(2U, index);
+        // Recover one .05 state per confirmed headroom decision. The newly
+        // selected state must produce fresh timing before another upstep.
+        constexpr std::size_t recoveryStepCount = 1U;
         const std::size_t recoveryIndex = index - recoveryStepCount;
         const double higherScale = static_cast<double>(presetStates[recoveryIndex]);
         const double addedFlowMs = observation.flowMs
@@ -659,6 +677,12 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             telemetry_.currentScale = presetStates[telemetry_.stateIndex];
             telemetry_.changed = true;
             telemetry_.reason = AdaptiveFlowDecisionReason::SustainedHeadroom;
+            if (fixedMultiplierMode && !sourceTargetValid) {
+                // An upward quality probe must not immediately re-arm the
+                // downward exploratory probe. Re-arm only if source cadence
+                // actually degrades below the best learned reference.
+                fixedExplorationProbePending_ = false;
+            }
             cooldownUntilSeconds_ = observedSeconds_ + kTransitionCooldownSeconds;
             resetEvidence();
         } else {
