@@ -353,6 +353,8 @@ int main() {
             feedbackLoop.adaptiveFramegenMode = true;
             feedbackLoop.scheduledGenerationDensity = 2.30;
             feedbackLoop.sourceFps = 18.0;
+            feedbackLoop.sourceBlockingRatio = 0.90;
+            feedbackLoop.sourceBlockingPressure = true;
             feedbackLoop.outputCadenceValid = true;
             feedbackLoop.outputTargeted = true;
             feedbackLoop.outputTargetSatisfied = true;
@@ -378,6 +380,8 @@ int main() {
             slowdown.adaptiveFramegenMode = true;
             slowdown.scheduledGenerationDensity = 2.30;
             slowdown.sourceFps = 18.0;
+            slowdown.sourceBlockingRatio = 0.12;
+            slowdown.sourceBlockingPressure = false;
             slowdown.outputCadenceValid = true;
             slowdown.outputTargeted = true;
             slowdown.outputTargetSatisfied = true;
