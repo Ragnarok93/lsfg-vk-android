@@ -1,4 +1,5 @@
 #include "context.hpp"
+#include "adaptive_flow_handoff.hpp"
 #include "android_sync_policy.hpp"
 #include "config/config.hpp"
 #include "common/exception.hpp"
@@ -2318,6 +2319,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         : requestedFixedGeneratedFrameCount;
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
+    const bool adaptiveFlowStartupSeedCycle =
+        conf.adaptiveFramegen && this->adaptiveFlowStartupSeedPending_;
+    if (adaptiveFlowStartupSeedCycle) {
+        // The adaptive backend was deliberately created at the preset's
+        // primary graph. Commit the requested startup seed through the same
+        // coherent zero-generation history handoff used at runtime before any
+        // synthetic frame can sample that graph.
+        generatedFrameCount = 0;
+        interpolationGenerationCount = 0;
+    }
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
     const uint64_t sourceArrivalTimeNs = monotonicNowNs();
@@ -2333,6 +2344,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // overwriting the scheduler telemetry used for this cycle's logs.
         this->resetAdaptiveSourceEpoch(
             false, SourceHistoryInvalidationReason::TimelineDiscontinuity);
+        if (generationFirstAdreno) {
+            this->adaptiveSceneTransitionGuard_.arm(true);
+            this->sourceHistoryWarmupRemaining_ = std::max(
+                this->sourceHistoryWarmupRemaining_,
+                this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining());
+            this->requiresSourceHistoryWarmup_ =
+                this->sourceHistoryWarmupRemaining_ > 0;
+            std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reprime"
+                      << " action=arm"
+                      << " source_only_cycles="
+                      << this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()
+                      << " first_generated_cap=1"
+                      << "\n";
+        }
         this->lsfgOutputCadenceTracker_.configure(
             conf.adaptiveFramegen && conf.fpsLimit > 0,
             conf.adaptiveFramegen ? conf.fpsLimit : 0);
@@ -2352,6 +2377,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // across a suspend or translation-layer discontinuity.
             this->resetAdaptiveSourceEpoch(
                 true, SourceHistoryInvalidationReason::TimelineDiscontinuity);
+            if (generationFirstAdreno) {
+                this->adaptiveSceneTransitionGuard_.arm(true);
+                this->sourceHistoryWarmupRemaining_ = std::max(
+                    this->sourceHistoryWarmupRemaining_,
+                    this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining());
+                this->requiresSourceHistoryWarmup_ =
+                    this->sourceHistoryWarmupRemaining_ > 0;
+                std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reprime"
+                          << " action=arm"
+                          << " source_only_cycles="
+                          << this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()
+                          << " first_generated_cap=1"
+                          << "\n";
+            }
             this->lsfgOutputCadenceTracker_.configure(
                 conf.adaptiveFramegen && conf.fpsLimit > 0,
                 conf.adaptiveFramegen ? conf.fpsLimit : 0);
@@ -2588,6 +2627,28 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated=0"
                       << " dropped=" << retiredOutputDropCount
                       << " host_wait=0"
+                      << "\n";
+        }
+    }
+
+    // On protected Adreno, a hard scene/cadence discontinuity first refreshes
+    // both private source slots through zero-generation history cycles. The
+    // first resumed interpolation batch is deliberately capped at one frame so
+    // the new cadence cannot jump directly from 0 -> 3 synthetics.
+    if (conf.adaptiveFramegen
+            && generationFirstAdreno
+            && !sourceHistoryWarmupActive
+            && generatedFrameCount > 0) {
+        const size_t plannedBeforeReacquireCap = generatedFrameCount;
+        generatedFrameCount =
+            this->adaptiveSceneTransitionGuard_.limitGenerated(
+                generatedFrameCount);
+        if (generatedFrameCount < plannedBeforeReacquireCap) {
+            std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reacquire"
+                      << " planned=" << plannedBeforeReacquireCap
+                      << " admitted=" << generatedFrameCount
+                      << " source_only_remaining="
+                      << this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()
                       << "\n";
         }
     }
@@ -5395,6 +5456,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         metrics.totalAdaptiveZeroGenerationCycles++;
         if (this->sourceHistoryWarmupRemaining_ > 0)
             --this->sourceHistoryWarmupRemaining_;
+        if (this->adaptiveSceneTransitionGuard_.sourceOnlyRequired())
+            this->adaptiveSceneTransitionGuard_.consumeSourceOnly();
+        if (adaptiveFlowStartupSeedCycle)
+            this->adaptiveFlowStartupSeedPending_ = false;
         this->requiresSourceHistoryWarmup_ =
             this->sourceHistoryWarmupRemaining_ > 0;
         this->lastGeneratedFrameCount_ = 0;
@@ -6239,6 +6304,7 @@ void LsContext::resetAdaptiveSourceEpoch(
     if (resetScheduler)
         this->adaptiveScheduler_.reset();
     this->fixedSourceCadenceTracker_.reset();
+    this->adaptiveSceneTransitionGuard_.reset();
     this->advanceAdaptiveFlowTimingEpoch();
     this->deadlineAdmissionPredictor_.reset();
     this->generatedPresentationCapacityTracker_.reset();
@@ -6317,6 +6383,7 @@ void LsContext::enterSourceOnlyBypass() {
     this->fixedSourceCadenceTracker_.reset();
     this->deadlineAdmissionPredictor_.reset();
     this->adaptiveFlowController_.reset();
+    this->adaptiveSceneTransitionGuard_.reset();
     this->sourceTimeline_.reset();
     this->currentSourceTimeline_ = {};
     this->deadlineBatchDecision_ = {};
