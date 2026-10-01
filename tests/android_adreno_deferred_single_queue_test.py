@@ -78,7 +78,8 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         bypass_start = source.index("if (conservativePreCopySourceBypass)")
         bypass_end = source.index("// Android path: AHardwareBuffer exchange", bypass_start)
         bypass = source[bypass_start:bypass_end]
-        self.assertIn("presentWithHostProvenance", bypass)\n        self.assertIn("queue, &bypassPresentInfo", bypass)
+        self.assertIn("presentWithHostProvenance", bypass)
+        self.assertIn("queue, &bypassPresentInfo", bypass)
         self.assertNotIn("waitContext(", bypass)
 
     def test_deferred_wsi_rejection_trains_adreno_presentation_capacity(self) -> None:
@@ -129,7 +130,8 @@ class AndroidAdrenoDeferredSingleQueueTest(unittest.TestCase):
         self.assertIn("deferredAdrenoPassIndex_", deferred)
         self.assertIn("releasePresentWaitRetirements(imageIdx)", deferred)
         self.assertIn("copyExternalAhbToSwapchain", deferred)
-        self.assertIn("presentWithHostProvenance", deferred)\n        self.assertIn("queue, &deferredPresentInfo", deferred)
+        self.assertIn("presentWithHostProvenance", deferred)
+        self.assertIn("queue, &deferredPresentInfo", deferred)
         self.assertIn("postCopyCompletionFences", header)
         self.assertIn("postCopyCompletionFenceSubmitted", header)
         self.assertIn("*deferredPass.postCopyCompletionFences.at(i)", deferred)
