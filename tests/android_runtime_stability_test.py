@@ -201,6 +201,26 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("lsfgOutputCadenceTracker_.reset()", source)
         self.assertIn("sourceTimeline_.reset()", source)
 
+    def test_temporal_discontinuity_preserves_active_adaptive_flow_scale(self) -> None:
+        """Scene/suspend resets must not desynchronize the Flow controller from the backend graph."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        reset_start = source.index("void LsContext::resetAdaptiveSourceEpoch")
+        reset_end = source.index("void LsContext::enterSourceOnlyBypass", reset_start)
+        reset_epoch = source[reset_start:reset_end]
+
+        self.assertIn("activeFlowScaleBeforeReset", reset_epoch)
+        self.assertIn("preserveActiveFlowScale", reset_epoch)
+        self.assertIn("SourceHistoryInvalidationReason::TimelineDiscontinuity", reset_epoch)
+        self.assertIn("SourceHistoryInvalidationReason::SuspendResume", reset_epoch)
+        self.assertIn(
+            "adaptiveFlowController_.seedCurrentScale(activeFlowScaleBeforeReset)",
+            reset_epoch,
+        )
+        self.assertIn(
+            "adaptiveFlowActiveScale_ = adaptiveFlowController_.currentScale()",
+            reset_epoch,
+        )
+
     def test_resident_config_change_resets_temporal_generation_epoch(self) -> None:
         """Hot target/multiplier changes must not generate against pre-menu temporal state."""
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
