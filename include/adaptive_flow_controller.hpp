@@ -28,7 +28,6 @@ enum class AdaptiveFlowDecisionReason : uint8_t {
     SustainedOutputPressure,
     SustainedSourcePressure,
     ExploratorySourcePressure,
-    AdaptiveSourceBlockingPressure,
     EvaluatingDownstep,
     DownstepBenefitConfirmed,
     DownstepReverted,
@@ -67,14 +66,6 @@ struct AdaptiveFlowObservation {
     /// Generated frames requested per source frame by the Adaptive FG scheduler.
     /// Used only to detect pacing regressions after a Flow quality upstep.
     double scheduledGenerationDensity{};
-    /// Fraction of the real/source present interval consumed by LSFG's
-    /// generation-first private-device completion boundary. This is populated
-    /// only when that boundary is source-thread blocking (protected Adreno).
-    double sourceBlockingRatio{};
-    /// True when LSFG itself consumes most of the source interval. Adaptive
-    /// Flow may use this as a source-health actuator even when generated frames
-    /// temporarily keep the aggregate output target satisfied.
-    bool sourceBlockingPressure{false};
     /// True whenever Fixed multiplier mode is active, even before a clean
     /// source reference has been established.
     bool fixedMultiplierMode{false};
@@ -133,8 +124,6 @@ struct AdaptiveFlowTelemetry {
     bool outputPressure{false};
     bool sourcePressure{false};
     bool exploratorySourcePressure{false};
-    bool adaptiveSourceBlockingPressure{false};
-    double sourceBlockingRatio{};
     double sourceReferenceFps{};
 };
 
@@ -184,7 +173,6 @@ private:
     bool downstepOutputDriven_{false};
     bool downstepSourceDriven_{false};
     bool downstepExploratorySourceDriven_{false};
-    bool downstepAdaptiveSourceBlockingDriven_{false};
     std::size_t downstepPreviousIndex_{};
     double downstepEvaluationStartedSeconds_{};
     double downstepBaselinePressureRatio_{};
@@ -194,7 +182,6 @@ private:
     double downstepBaselineOutputFps_{};
     double downstepBaselineWsiLossRate_{};
     double downstepBaselineGlobalGpuPercent_{};
-    double downstepBaselineSourceBlockingRatio_{};
     bool downstepBaselineOutputValid_{false};
     bool downstepBaselineComputePressure_{false};
     bool downstepBaselineWsiPressure_{false};

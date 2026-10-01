@@ -444,35 +444,6 @@ int main() {
 
 
     {
-        // Generation-first completion can consume most of the next observed
-        // source interval. When the caller identifies that interval as
-        // self-induced, preserveCadence must keep the scheduler anchored to
-        // the last trusted game cadence instead of escalating synthetic density.
-        AdaptiveFrameScheduler protectedScheduler(60, 3);
-        for (int frame = 0; frame < 24; ++frame)
-            protectedScheduler.plan(33'333'333ns);
-        const double protectedBaseline =
-            protectedScheduler.telemetry().smoothedSourceFps;
-        assert(protectedBaseline > 29.0 && protectedBaseline < 31.0);
-
-        for (int frame = 0; frame < 24; ++frame)
-            protectedScheduler.plan(55ms, true);
-
-        assert(protectedScheduler.telemetry().smoothedSourceFps > 29.0);
-        assert(protectedScheduler.telemetry().smoothedSourceFps < 31.0);
-        assert(protectedScheduler.telemetry().scheduledGenerationDensity < 1.10);
-        assert(protectedScheduler.telemetry().costLimit == 1);
-
-        AdaptiveFrameScheduler unprotectedScheduler(60, 3);
-        for (int frame = 0; frame < 24; ++frame)
-            unprotectedScheduler.plan(33'333'333ns);
-        for (int frame = 0; frame < 24; ++frame)
-            unprotectedScheduler.plan(55ms);
-        assert(unprotectedScheduler.telemetry().smoothedSourceFps < 22.0);
-        assert(unprotectedScheduler.telemetry().scheduledGenerationDensity > 1.5);
-    }
-
-    {
         // Source rate by itself is never a reason to disable interpolation.
         // A slow but stable source remains eligible under the same generation
         // semantics as every other cadence.

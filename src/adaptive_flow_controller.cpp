@@ -63,7 +63,6 @@ constexpr double kMaterialFlowReliefRatio = 0.88;
 constexpr double kMaterialTotalReliefRatio = 0.95;
 constexpr double kMaterialWsiReliefRatio = 0.75;
 constexpr double kMaterialGlobalGpuReliefPercent = 3.0;
-constexpr double kMaterialSourceBlockingReliefRatio = 0.10;
 
 std::span<const float> states(AdaptiveFlowPreset preset) {
     switch (preset) {
@@ -97,7 +96,6 @@ void AdaptiveFlowController::configure(bool enabled, AdaptiveFlowPreset preset) 
     downstepOutputDriven_ = false;
     downstepSourceDriven_ = false;
     downstepExploratorySourceDriven_ = false;
-    downstepAdaptiveSourceBlockingDriven_ = false;
     recoveryPacingEvaluationActive_ = false;
     recoveryPacingPreviousIndex_ = 0;
     recoveryPacingEvaluationStartedSeconds_ = 0.0;
@@ -164,7 +162,6 @@ void AdaptiveFlowController::reset() {
     downstepOutputDriven_ = false;
     downstepSourceDriven_ = false;
     downstepExploratorySourceDriven_ = false;
-    downstepAdaptiveSourceBlockingDriven_ = false;
     recoveryPacingEvaluationActive_ = false;
     recoveryPacingPreviousIndex_ = 0;
     recoveryPacingEvaluationStartedSeconds_ = 0.0;
@@ -194,8 +191,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     telemetry_.outputPressure = false;
     telemetry_.sourcePressure = false;
     telemetry_.exploratorySourcePressure = false;
-    telemetry_.adaptiveSourceBlockingPressure = false;
-    telemetry_.sourceBlockingRatio = 0.0;
     telemetry_.sourceReferenceFps = 0.0;
     telemetry_.downstepEvaluationActive = downstepEvaluationActive_;
 
@@ -342,11 +337,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         && sourceSampleValid
         && observation.generatedWorkSample
         && observation.generationCount > 0;
-    const bool adaptiveSourceBlockingPressure =
-        observation.adaptiveFramegenMode
-        && observation.sourceBlockingPressure
-        && observation.sourceBlockingRatio > 0.0
-        && std::isfinite(observation.sourceBlockingRatio);
     const bool globalGpuPressure =
         observation.globalPressureValid
         && observation.globalGpuUsagePercent >= kGlobalGpuPressurePercent;
@@ -369,10 +359,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     telemetry_.outputPressure = outputPressure;
     telemetry_.sourcePressure = sourcePressure;
     telemetry_.exploratorySourcePressure = exploratorySourcePressure;
-    telemetry_.adaptiveSourceBlockingPressure =
-        adaptiveSourceBlockingPressure;
-    telemetry_.sourceBlockingRatio =
-        adaptiveSourceBlockingPressure ? observation.sourceBlockingRatio : 0.0;
     telemetry_.sourceReferenceFps = sourceTargetValid
         ? observation.sourceTargetFps
         : (fixedExplorationReferenceValid_
@@ -482,14 +468,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             downstepBaselineSourceFps_ > 0.0
             && observation.sourceFps
                 >= downstepBaselineSourceFps_ * kMaterialSourceGainRatio;
-        const bool sourceBlockingBenefit =
-            downstepBaselineSourceBlockingRatio_ > 0.0
-            && (!observation.sourceBlockingPressure
-                || (observation.sourceBlockingRatio >= 0.0
-                    && std::isfinite(observation.sourceBlockingRatio)
-                    && observation.sourceBlockingRatio
-                        <= downstepBaselineSourceBlockingRatio_
-                            - kMaterialSourceBlockingReliefRatio));
         const bool computeBenefit =
             downstepBaselineComputePressure_
             && observation.generatedWorkSample
@@ -534,13 +512,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             // Missing-baseline probes must recover source cadence. Cheaper GPU
             // work alone is not enough to justify a quality reduction.
             downstepBenefitSeen_ = downstepBenefitSeen_ || sourceBenefit;
-        } else if (downstepAdaptiveSourceBlockingDriven_) {
-            // Aggregate output can remain on target while generation-first
-            // blocking consumes the real-source interval. Retain this quality
-            // reduction only if it measurably frees the source thread or
-            // improves real-source cadence.
-            downstepBenefitSeen_ = downstepBenefitSeen_
-                || sourceBlockingBenefit || sourceBenefit;
         } else {
             downstepBenefitSeen_ = downstepBenefitSeen_
                 || outputBenefit || sourceBenefit || computeBenefit
@@ -550,8 +521,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         const double downstepEvaluationSeconds =
             (downstepOutputDriven_
                 || downstepSourceDriven_
-                || downstepExploratorySourceDriven_
-                || downstepAdaptiveSourceBlockingDriven_)
+                || downstepExploratorySourceDriven_)
                 ? kOutputDownstepEvaluationSeconds
                 : kDownstepEvaluationSeconds;
         if (observedSeconds_ - downstepEvaluationStartedSeconds_
@@ -578,7 +548,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             downstepOutputDriven_ = false;
             downstepSourceDriven_ = false;
             downstepExploratorySourceDriven_ = false;
-            downstepAdaptiveSourceBlockingDriven_ = false;
             telemetry_.reason =
                 AdaptiveFlowDecisionReason::DownstepBenefitConfirmed;
             return telemetry_.currentScale;
@@ -594,7 +563,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         downstepOutputDriven_ = false;
         downstepSourceDriven_ = false;
         downstepExploratorySourceDriven_ = false;
-        downstepAdaptiveSourceBlockingDriven_ = false;
         telemetry_.reason = AdaptiveFlowDecisionReason::DownstepReverted;
         cooldownUntilSeconds_ =
             observedSeconds_ + kDownstepNoBenefitHoldSeconds;
@@ -615,12 +583,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
 
     const bool pressure =
         computePressure || globalPressure || wsiFlowPressure
-        || outputPressure || sourcePressure || exploratorySourcePressure
-        || adaptiveSourceBlockingPressure;
+        || outputPressure || sourcePressure || exploratorySourcePressure;
     const bool targetPressure = outputPressure || sourcePressure;
-    const bool fastPressure =
-        targetPressure || exploratorySourcePressure
-        || adaptiveSourceBlockingPressure;
+    const bool fastPressure = targetPressure || exploratorySourcePressure;
     // Thermal status is never an actuator by itself. It only shortens the
     // confirmation interval after an existing LSFG/source/output pressure
     // signal has already made Flow a legitimate actuator.
@@ -646,10 +611,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         const bool targetDrivenPressure = targetPressure && !computePressure;
         const bool exploratoryDrivenPressure =
             exploratorySourcePressure && !targetPressure && !computePressure;
-        const bool sourceBlockingDrivenPressure =
-            adaptiveSourceBlockingPressure
-            && !targetPressure
-            && !computePressure;
         const bool materiallyUsefulForExploration =
             observation.flowMs >= 1.0 && predictedReliefMs >= 0.25;
         const bool globalOnlyPressure =
@@ -658,8 +619,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             !globalOnlyPressure
             || telemetry_.pressureRatio >= kMinimumGlobalPressureLsfgBudgetRatio;
         if ((!targetDrivenPressure
-                && (((exploratoryDrivenPressure
-                        || sourceBlockingDrivenPressure)
+                && ((exploratoryDrivenPressure
                         && !materiallyUsefulForExploration)
                     || (!fastPressure
                         && (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
@@ -693,8 +653,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             downstepBaselineWsiLossRate_ = observation.wsiLossRate;
             downstepBaselineGlobalGpuPercent_ =
                 observation.globalGpuUsagePercent;
-            downstepBaselineSourceBlockingRatio_ =
-                observation.sourceBlockingRatio;
             downstepBaselineOutputValid_ =
                 observation.outputCadenceValid;
             downstepBaselineComputePressure_ = computePressure;
@@ -704,10 +662,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             downstepSourceDriven_ = sourcePressure;
             downstepExploratorySourceDriven_ =
                 exploratorySourcePressure && !targetPressure;
-            downstepAdaptiveSourceBlockingDriven_ =
-                adaptiveSourceBlockingPressure
-                && !targetPressure
-                && !downstepExploratorySourceDriven_;
             if (downstepExploratorySourceDriven_)
                 fixedExplorationProbePending_ = false;
             // Fast pressure shortens confirmation, but every actuator change
@@ -726,11 +680,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                     ? AdaptiveFlowDecisionReason::SustainedSourcePressure
                     : (downstepExploratorySourceDriven_
                         ? AdaptiveFlowDecisionReason::ExploratorySourcePressure
-                        : (downstepAdaptiveSourceBlockingDriven_
-                            ? AdaptiveFlowDecisionReason::AdaptiveSourceBlockingPressure
-                            : (globalPressure
+                        : (globalPressure
                             ? AdaptiveFlowDecisionReason::SustainedGlobalPressure
-                            : AdaptiveFlowDecisionReason::SustainedPressure))));
+                            : AdaptiveFlowDecisionReason::SustainedPressure)));
             cooldownUntilSeconds_ = observedSeconds_
                 + (fastPressure
                     ? kOutputTransitionCooldownSeconds
@@ -797,7 +749,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             && !actionableOutputDeficit
             && !observation.syntheticDropPressure
             && !recoveryWsiPressure
-            && !adaptiveSourceBlockingPressure
             && outputRecoverySatisfied
             && sourceRecoverySatisfied
             && globalRecoveryHeadroom
@@ -904,8 +855,6 @@ const char* AdaptiveFlowController::reasonName(AdaptiveFlowDecisionReason reason
     case AdaptiveFlowDecisionReason::SustainedOutputPressure: return "sustained_output_pressure";
     case AdaptiveFlowDecisionReason::SustainedSourcePressure: return "sustained_source_pressure";
     case AdaptiveFlowDecisionReason::ExploratorySourcePressure: return "exploratory_source_pressure";
-    case AdaptiveFlowDecisionReason::AdaptiveSourceBlockingPressure:
-        return "adaptive_source_blocking_pressure";
     case AdaptiveFlowDecisionReason::EvaluatingDownstep: return "evaluating_downstep";
     case AdaptiveFlowDecisionReason::DownstepBenefitConfirmed: return "downstep_benefit_confirmed";
     case AdaptiveFlowDecisionReason::DownstepReverted: return "downstep_reverted_no_benefit";
