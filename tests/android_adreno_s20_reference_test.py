@@ -102,6 +102,14 @@ class AndroidAdrenoS20ReferenceContractTest(unittest.TestCase):
             "Deadline/source-protection gates must be disabled on generation-first Adreno.",
         )
 
+    def test_source_only_cycle_clears_previous_blocking_completion_sample(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        finish_start = source.index("const auto finishSourcePresent =")
+        finish_end = source.index("return result;", finish_start)
+        finish = source[finish_start:finish_end]
+        self.assertIn("if (generatedFrameCount == 0)", finish)
+        self.assertIn("lastFramegenBlockingCompletionMs_ = 0.0;", finish)
+
     def test_fixed_mode_tracks_source_pressure_without_governing_generation(self) -> None:
         header = (ROOT / "include/adaptive_scheduler.hpp").read_text(
             encoding="utf-8"
