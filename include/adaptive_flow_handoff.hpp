@@ -64,6 +64,17 @@ struct StartupPlan {
     return plan;
 }
 
+[[nodiscard]] inline bool startupSeedHistoryOnly(
+        bool adaptiveFramegen,
+        bool startupSeedPending,
+        bool transitionPending,
+        std::uint32_t warmupRemaining) noexcept {
+    return adaptiveFramegen
+        && startupSeedPending
+        && transitionPending
+        && warmupRemaining > 0;
+}
+
 [[nodiscard]] inline std::optional<float> selectEnableScale(
         const Identity& oldState, const Identity& newState,
         float configuredScale) noexcept {
