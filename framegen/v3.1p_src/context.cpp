@@ -973,7 +973,8 @@ Context::Context(Vulkan& vk,
               << " added_pipelines=" << addedResources.pipelines
               << " added_shader_modules=" << addedResources.shaderModules
               << " prebuild_ms=" << prebuildMs
-              << " history_frames=" << kAdaptiveFlowHistoryFrames
+              << " history_seed_slots=" << kAdaptiveFlowHistoryFrames
+              << " handoff_cycles=1"
               << '\n';
 }
 
@@ -1161,17 +1162,19 @@ void Context::requestFlowScale(float flowScale) {
     std::cerr << "lsfg-vk: adaptive-flow-handoff requested="
               << this->requestedFlowScale_
               << " active=" << this->adaptiveFlowScales_.at(this->activeFlowGraphIndex_)
-              << " history_frames=" << kAdaptiveFlowHistoryFrames
+              << " history_seed_slots=" << kAdaptiveFlowHistoryFrames
+              << " handoff_cycles=1"
               << '\n';
 }
 
 LSFG::AdaptiveFlowContextState Context::flowScaleState() const {
     if (this->adaptiveFlowScales_.empty())
         return {};
-    const uint32_t remaining = this->pendingFlowGraphIndex_.has_value()
-        ? kAdaptiveFlowHistoryFrames
-            - std::min(this->pendingFlowWarmupFrames_, kAdaptiveFlowHistoryFrames)
-        : 0;
+    // SeedHistory fills all three temporal slots in the next submitted cycle,
+    // so the runtime has one pending handoff cycle rather than a three-cycle
+    // warmup. Keep warmupRemaining aligned with actual actuator latency.
+    const uint32_t remaining =
+        this->pendingFlowGraphIndex_.has_value() ? 1U : 0U;
     return LSFG::AdaptiveFlowContextState{
         .requestedScale = this->requestedFlowScale_,
         .activeScale = this->adaptiveFlowScales_.at(this->activeFlowGraphIndex_),
@@ -1188,7 +1191,8 @@ void Context::commitAdaptiveFlowTransition(size_t index) {
     std::cerr << "lsfg-vk: adaptive-flow-handoff applied="
               << this->adaptiveFlowScales_.at(index)
               << " previous=" << previous
-              << " history_frames=" << kAdaptiveFlowHistoryFrames
+              << " history_seed_slots=" << kAdaptiveFlowHistoryFrames
+              << " handoff_cycles=1"
               << '\n';
 }
 
