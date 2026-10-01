@@ -35,12 +35,14 @@ constexpr unsigned kIntegerDensityReleaseSamples = 8;
 
 void AdaptiveSceneTransitionGuard::arm(bool enabled) {
     sourceOnlyRemaining_ = enabled ? kProtectedSourceReprimeFrames : 0;
-    firstGeneratedBatchPending_ = enabled;
+    generatedReacquireRemaining_ = enabled
+        ? kReacquireCapOneBatches + kReacquireCapTwoBatches
+        : 0;
 }
 
 void AdaptiveSceneTransitionGuard::reset() {
     sourceOnlyRemaining_ = 0;
-    firstGeneratedBatchPending_ = false;
+    generatedReacquireRemaining_ = 0;
 }
 
 void AdaptiveSceneTransitionGuard::consumeSourceOnly() {
@@ -52,11 +54,13 @@ std::size_t AdaptiveSceneTransitionGuard::limitGenerated(
         std::size_t planned) {
     if (sourceOnlyRemaining_ > 0)
         return 0;
-    if (planned == 0 || !firstGeneratedBatchPending_)
+    if (planned == 0 || generatedReacquireRemaining_ == 0)
         return planned;
 
-    firstGeneratedBatchPending_ = false;
-    return std::min<std::size_t>(planned, 1);
+    const std::size_t cap =
+        generatedReacquireRemaining_ > kReacquireCapTwoBatches ? 1 : 2;
+    --generatedReacquireRemaining_;
+    return std::min(planned, cap);
 }
 
 SourceTimelineSample SourceProtectedTimeline::observe(
