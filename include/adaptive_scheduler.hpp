@@ -33,6 +33,36 @@ struct AdaptiveSchedulerTelemetry {
     unsigned densityTransitionEvidence{};
 };
 
+class AdaptiveSceneTransitionGuard {
+public:
+    void arm(bool enabled);
+    void reset();
+
+    [[nodiscard]] bool sourceOnlyRequired() const {
+        return sourceOnlyRemaining_ > 0;
+    }
+
+    [[nodiscard]] uint32_t sourceOnlyRemaining() const {
+        return sourceOnlyRemaining_;
+    }
+
+    void consumeSourceOnly();
+
+    /// Apply only after history reprime is complete. The first resumed
+    /// interpolation batch is capped at one synthetic frame; later steady-state
+    /// batches pass through unchanged.
+    [[nodiscard]] std::size_t limitGenerated(std::size_t planned);
+
+    [[nodiscard]] bool firstGeneratedBatchCapped() const {
+        return firstGeneratedBatchPending_;
+    }
+
+private:
+    static constexpr uint32_t kProtectedSourceReprimeFrames = 2;
+    uint32_t sourceOnlyRemaining_{0};
+    bool firstGeneratedBatchPending_{false};
+};
+
 struct SourceTimelineSample {
     uint64_t sourceIndex{};
     uint64_t intervalNs{};
