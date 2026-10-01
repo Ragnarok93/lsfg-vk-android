@@ -212,14 +212,11 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("preserveActiveFlowScale", reset_epoch)
         self.assertIn("SourceHistoryInvalidationReason::TimelineDiscontinuity", reset_epoch)
         self.assertIn("SourceHistoryInvalidationReason::SuspendResume", reset_epoch)
-        self.assertIn(
-            "adaptiveFlowController_.seedCurrentScale(activeFlowScaleBeforeReset)",
-            reset_epoch,
-        )
-        self.assertIn(
-            "adaptiveFlowActiveScale_ = adaptiveFlowController_.currentScale()",
-            reset_epoch,
-        )
+        self.assertIn("adaptiveFlowController_.seedCurrentScale(", reset_epoch)
+        self.assertIn("activeFlowScaleBeforeReset", reset_epoch)
+        self.assertIn("adaptiveFlowActiveScale_", reset_epoch)
+        self.assertIn("adaptiveFlowController_.currentScale()", reset_epoch)
+        self.assertIn("requestContextFlowScale(", reset_epoch)
 
     def test_resident_config_change_resets_temporal_generation_epoch(self) -> None:
         """Hot target/multiplier changes must not generate against pre-menu temporal state."""
