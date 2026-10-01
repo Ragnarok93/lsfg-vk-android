@@ -1426,7 +1426,9 @@ namespace {
                 adaptiveFlowScaleSeed);
             if (pCreateInfo->oldSwapchain)
                 retireSwapchainState(pCreateInfo->oldSwapchain);
+#ifdef __ANDROID__
             const auto supportDecision = state->context->framegenSupportDecision();
+#endif
             publishSwapchainState(*pSwapchain, std::move(state));
             std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 #ifdef __ANDROID__
