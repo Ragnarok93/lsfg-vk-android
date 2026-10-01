@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AndroidDisplayConfirmationTelemetryTest(unittest.TestCase):
-    def test_xclipse_uses_google_display_timing_as_observability_only(self) -> None:
+    def test_supported_devices_use_display_confirmation_as_observability_only(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
@@ -16,7 +16,12 @@ class AndroidDisplayConfirmationTelemetryTest(unittest.TestCase):
         self.assertIn("generatedDisplayConfirmationEnabled_", header)
         self.assertIn("getPastPresentationTimingGoogle_", header)
         self.assertIn("generatedDisplayPendingIds_", header)
-        self.assertIn("&& !this->conservativeCrossDeviceSync_", source)
+        enable = source[source.index("if (info.androidDisplayTimingSupported"):source.index(
+            "std::cerr << \"lsfg-vk: display-confirmation\"", source.index(
+                "if (info.androidDisplayTimingSupported"
+            )
+        )]
+        self.assertNotIn("&& !this->conservativeCrossDeviceSync_", enable)
         self.assertIn('? "google-display-timing"', source)
         self.assertIn("uint64_t effectiveDesiredTimeNs = 0", source)
 
@@ -43,11 +48,10 @@ class AndroidDisplayConfirmationTelemetryTest(unittest.TestCase):
         self.assertIn("display-timing-confirmed", source)
         self.assertIn("display-timing-pending", source)
 
-    def test_adreno_proven_path_is_not_instrumented_with_present_timing(self) -> None:
+    def test_adaptive_present_timing_remains_dormant(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        enable = source.index("if (info.androidDisplayTimingSupported")
-        block = source[enable:enable + 1800]
-        self.assertIn("&& !this->conservativeCrossDeviceSync_", block)
+        self.assertIn("adaptiveDisplayTimingEnabled_ = false", source)
+        self.assertIn("desiredPresentTime=0", source)
 
 
 if __name__ == "__main__":

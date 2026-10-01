@@ -108,25 +108,24 @@ class AndroidXclipseFifoRegressionTest(unittest.TestCase):
         self.assertNotIn("waitQueueIdle_", generated)
 
 
-    def test_xclipse_fifo_prefers_mailbox_backing_without_touching_adreno(self) -> None:
-        """Xclipse logical FIFO uses the proven nonblocking WSI backend when available."""
-        header = (ROOT / "include/hooks.hpp").read_text(encoding="utf-8")
+    def test_targeted_fifo_resident_swapchain_prefers_mailbox_backing(self) -> None:
+        """Logical FIFO keeps the resident Android LSFG WSI nonblocking across Off/On."""
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
-
-        self.assertIn("bool xclipseDevice{false}", header)
-        self.assertIn("selectFramegenCompatibilityPath", hooks)
 
         active_start = hooks.index("VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;")
         active_end = hooks.index("const size_t residentMultiplier", active_start)
         active = hooks[active_start:active_end]
-        self.assertIn("deviceInfo->xclipseDevice", active)
+
+        self.assertIn("activeConf.targeted", active)
         self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", active)
         self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", active)
-        self.assertIn("xclipseFifoMailboxBacked", active)
+        self.assertIn("residentFifoMailboxBacked", active)
+        self.assertIn("resident-fifo-backend", active)
+        self.assertNotIn("deviceInfo->xclipseDevice", active)
 
-        # Off no longer creates a second source-only swapchain. It bypasses
-        # framegen on the resident swapchain, so the already-working Xclipse
-        # logical-FIFO/mailbox-backed WSI selection remains untouched.
+        # Off must remain a soft resident bypass. The physical WSI backing was
+        # selected at resident swapchain creation, so disabling generation does
+        # not create or retune another swapchain.
         self.assertNotIn("const auto createSourceOnly", hooks)
         self.assertNotIn('return createSourceOnly("generation-off")', hooks)
 
@@ -134,15 +133,15 @@ class AndroidXclipseFifoRegressionTest(unittest.TestCase):
         bypass_end = hooks.index("        try {", bypass_start)
         bypass = hooks[bypass_start:bypass_end]
         self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", bypass)
-        self.assertNotIn("xclipseFifoMailboxBacked", bypass)
-        self.assertNotIn("VK_PRESENT_MODE_MAILBOX_KHR", bypass)
+        self.assertNotIn("state->context->present(", bypass)
+        self.assertNotIn("VK_ERROR_OUT_OF_DATE_KHR", bypass)
 
-        adreno_start = (ROOT / "src/context.cpp").read_text(
-            encoding="utf-8"
-        ).index("// BEGIN ADRENO_364178AF_EXECUTION")
+        # The Adreno September-18 execution island remains a synchronization
+        # contract. This WSI selection lives in swapchain setup, not that path.
         context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        adreno_start = context.index("// BEGIN ADRENO_364178AF_EXECUTION")
         adreno_end = context.index("// END ADRENO_364178AF_EXECUTION", adreno_start)
-        self.assertNotIn("xclipseFifoMailboxBacked", context[adreno_start:adreno_end])
+        self.assertNotIn("residentFifoMailboxBacked", context[adreno_start:adreno_end])
 
 
 if __name__ == "__main__":

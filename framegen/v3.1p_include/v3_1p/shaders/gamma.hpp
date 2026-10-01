@@ -37,8 +37,21 @@ namespace LSFG_3_1P::Shaders {
         Gamma(Vulkan& vk, std::array<std::array<Core::Image, 2>, 3> inImgs1,
             Core::Image inImg2, std::optional<Core::Image> optImg);
 
+        static constexpr size_t StageCount = 5;
+
         ///
-        /// Dispatch the shaderchain.
+        /// Append synchronization for one shader step.
+        ///
+        void PushStepBarriers(Utils::BarrierBuilder& barriers, uint64_t frameCount, size_t step);
+
+        ///
+        /// Dispatch one shader step. The caller must have emitted its barriers.
+        ///
+        void DispatchStep(const Core::CommandBuffer& buf, uint64_t frameCount,
+            uint64_t pass_idx, size_t activeGenerationCount, size_t step);
+
+        ///
+        /// Dispatch the shaderchain using the legacy per-chain ordering.
         ///
         void Dispatch(const Core::CommandBuffer& buf, uint64_t frameCount,
             uint64_t pass_idx, size_t activeGenerationCount);

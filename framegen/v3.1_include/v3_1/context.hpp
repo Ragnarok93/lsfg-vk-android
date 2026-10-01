@@ -118,7 +118,9 @@ namespace LSFG_3_1 {
             Core::Fence preprocessingFence; // reused for zero-generation temporal preprocessing
 #ifdef __ANDROID__
             Core::TimestampQueryPool adaptiveFlowTimingQueryPool;
+            Core::TimestampQueryPool adaptiveFlowShadowTimingQueryPool;
             bool adaptiveFlowTransitionCycle{false};
+            bool adaptiveFlowShadowSubmitted{false};
             LSFG::AdaptiveFlowBatchMetadata adaptiveFlowBatch{};
 #endif
 
@@ -170,6 +172,9 @@ namespace LSFG_3_1 {
             const std::vector<Core::Image>& outImgs);
         [[nodiscard]] FlowGraphRef flowGraph(size_t index);
         void dispatchAdaptiveFlowPreprocess(
+            const Core::CommandBuffer& buffer, FlowGraphRef graph,
+            Core::TimestampQueryPool* timingPool = nullptr);
+        void dispatchAdaptiveFlowSeedHistory(
             const Core::CommandBuffer& buffer, FlowGraphRef graph,
             Core::TimestampQueryPool* timingPool = nullptr);
         void recordAdaptiveFlowGpuTiming(Vulkan& vk, RenderData& renderData);

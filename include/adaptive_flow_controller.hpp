@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 /// User-facing quality envelopes for Adaptive Flow Scale.
@@ -10,22 +11,31 @@ enum class AdaptiveFlowPreset : uint8_t {
     Quality,
     Balanced,
     Low,
+    Auto,
 };
 
 enum class AdaptiveFlowDecisionReason : uint8_t {
     None,
     Disabled,
     InvalidTelemetry,
+    FlowTransition,
+    FlowTransitionSettle,
     SchedulerTransition,
     Cooldown,
     InsufficientFlowContribution,
     SustainedPressure,
     SustainedGlobalPressure,
+    SustainedOutputPressure,
+    SustainedSourcePressure,
+    ExploratorySourcePressure,
     EvaluatingDownstep,
     DownstepBenefitConfirmed,
     DownstepReverted,
     InsufficientRecoveryHeadroom,
     SustainedHeadroom,
+    EvaluatingRecoveryPacing,
+    RecoveryPacingConfirmed,
+    RecoveryPacingReverted,
 };
 
 struct AdaptiveFlowObservation {
@@ -49,14 +59,32 @@ struct AdaptiveFlowObservation {
     bool wsiPresentationPressure{false};
     double wsiLossRate{};
     double sourceFps{};
+    /// Clean source cadence target used by Fixed multiplier mode.
+    double sourceTargetFps{};
+    /// True when Adaptive Frame Generation owns generation density.
+    bool adaptiveFramegenMode{false};
+    /// Generated frames requested per source frame by the Adaptive FG scheduler.
+    /// Used only to detect pacing regressions after a Flow quality upstep.
+    double scheduledGenerationDensity{};
+    /// True whenever Fixed multiplier mode is active, even before a clean
+    /// source reference has been established.
+    bool fixedMultiplierMode{false};
     double outputFps{};
+    /// Required output cadence: Adaptive LSFG target or fixed multiplier base.
+    double outputTargetFps{};
     bool outputCadenceValid{false};
     bool outputTargeted{false};
     bool outputTargetSatisfied{false};
+    /// True when outputTargetFps is source cadence times the fixed multiplier.
+    bool fixedMultiplierBaseTarget{false};
     /// Whole-device GPU utilization sampled out-of-band by GameNative.
     double globalGpuUsagePercent{};
     /// True when the global GPU sample is fresh and trustworthy.
     bool globalPressureValid{false};
+    /// Android thermal status (0..6) sampled out-of-band by GameNative.
+    /// This is advisory and can only accelerate an already-established Flow pressure signal.
+    int thermalStatus{0};
+    bool thermalPressureValid{false};
     /// Whole-output cadence is materially below target or slow-frame pressure is high.
     bool outputDeficit{false};
     /// A synthetic opportunity was rejected/dropped since the previous observation.
@@ -69,6 +97,8 @@ struct AdaptiveFlowObservation {
     bool retainedGeneratedTimingSample{false};
     /// True when Adaptive LSFG has just changed/snap/probed/backed-off/reset.
     bool schedulerTransition{false};
+    /// True while a pending Flow graph is rebuilding temporal history.
+    bool flowTransition{false};
     bool valid{false};
 };
 
@@ -77,6 +107,7 @@ struct AdaptiveFlowTelemetry {
     float minimumScale{1.0F};
     float currentScale{1.0F};
     std::size_t stateIndex{};
+    std::size_t stateCount{};
     bool changed{false};
     AdaptiveFlowDecisionReason reason{AdaptiveFlowDecisionReason::None};
     double pressureRatio{};
@@ -84,10 +115,16 @@ struct AdaptiveFlowTelemetry {
     double estimatedNextTotalMs{};
     double globalGpuUsagePercent{};
     bool globalPressure{false};
+    int thermalStatus{0};
+    bool thermalPressure{false};
     bool computePressure{false};
     bool wsiPressure{false};
     bool downstepEvaluationActive{false};
     bool outputDeficit{false};
+    bool outputPressure{false};
+    bool sourcePressure{false};
+    bool exploratorySourcePressure{false};
+    double sourceReferenceFps{};
 };
 
 /// A quality-seeking governor for Flow Scale. It owns no Vulkan objects and
@@ -99,6 +136,7 @@ public:
     explicit AdaptiveFlowController(AdaptiveFlowPreset preset);
 
     void configure(bool enabled, AdaptiveFlowPreset preset);
+    [[nodiscard]] bool seedCurrentScale(float scale);
     float observe(const AdaptiveFlowObservation& observation);
     void reset();
 
@@ -108,11 +146,14 @@ public:
     [[nodiscard]] const AdaptiveFlowTelemetry& telemetry() const { return telemetry_; }
 
     static std::span<const float> statesForPreset(AdaptiveFlowPreset preset);
+    static std::optional<float> conservativeSeedScale(
+        AdaptiveFlowPreset preset, float scale);
     static const char* presetName(AdaptiveFlowPreset preset);
     static const char* reasonName(AdaptiveFlowDecisionReason reason);
 
 private:
     void resetEvidence();
+    void resetFixedExploration();
     void selectTargetState();
 
     bool enabled_{false};
@@ -122,9 +163,16 @@ private:
     double headroomSeconds_{};
     double cooldownUntilSeconds_{};
     double schedulerHoldUntilSeconds_{};
+    bool flowTransitionHoldActive_{false};
+    double flowTransitionSettleUntilSeconds_{};
 
     bool downstepEvaluationActive_{false};
     bool downstepBenefitSeen_{false};
+    // Direct missed-output pressure uses a shorter control loop, but retains
+    // the same post-change benefit check before another state is selected.
+    bool downstepOutputDriven_{false};
+    bool downstepSourceDriven_{false};
+    bool downstepExploratorySourceDriven_{false};
     std::size_t downstepPreviousIndex_{};
     double downstepEvaluationStartedSeconds_{};
     double downstepBaselinePressureRatio_{};
@@ -138,6 +186,24 @@ private:
     bool downstepBaselineComputePressure_{false};
     bool downstepBaselineWsiPressure_{false};
     bool downstepBaselineGlobalPressure_{false};
+
+    // Adaptive-FG quality recovery is a measured probe. If a higher Flow state
+    // materially lowers source cadence and forces the scheduler to increase
+    // generated/source density, revert to the previously stable Flow state.
+    bool recoveryPacingEvaluationActive_{false};
+    std::size_t recoveryPacingPreviousIndex_{};
+    double recoveryPacingEvaluationStartedSeconds_{};
+    double recoveryPacingRegressionSeconds_{};
+    double recoveryPacingRetryBlockedUntilSeconds_{};
+    double recoveryPacingBaselineSourceFps_{};
+    double recoveryPacingBaselineDensity_{};
+
+    // When Fixed mode starts without a trustworthy source-only baseline,
+    // lower Flow experimentally and retain only steps that measurably recover
+    // source cadence. This reference never becomes the clean fixed target.
+    bool fixedExplorationReferenceValid_{false};
+    bool fixedExplorationProbePending_{false};
+    double fixedExplorationBestSourceFps_{};
 
     AdaptiveFlowTelemetry telemetry_{};
 };

@@ -48,6 +48,61 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
         self.assertNotIn("compat-adaptive-history-copy", source)
         self.assertIn("presentContextWithCount(", history_block)
 
+    def test_protected_adreno_scene_reprime_consumes_both_guard_slots(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        # A hard protected-Adreno scene transition must be recovered through
+        # the real zero-generation framegen history path. Ordinary lifecycle
+        # warmup is a source-only compatibility path and cannot seed both
+        # private LSFG source slots or deliver resetTemporalHistory.
+        arm_token = "this->adaptiveSceneTransitionGuard_.arm(true);"
+        arm_offsets = []
+        search_from = 0
+        while True:
+            offset = source.find(arm_token, search_from)
+            if offset < 0:
+                break
+            arm_offsets.append(offset)
+            search_from = offset + len(arm_token)
+        self.assertEqual(len(arm_offsets), 2)
+        for arm_offset in arm_offsets:
+            arm_end = source.index("this->lsfgOutputCadenceTracker_.configure(", arm_offset)
+            arm_block = source[arm_offset:arm_end]
+            self.assertIn("this->sourceHistoryWarmupRemaining_ = 0;", arm_block)
+            self.assertIn("this->requiresSourceHistoryWarmup_ = false;", arm_block)
+            self.assertNotIn("sourceHistoryWarmupRemaining_ = std::max", arm_block)
+
+        island_start = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
+        island_end = source.index("// END ADRENO_364178AF_EXECUTION", island_start)
+        island = source[island_start:island_end]
+        zero_start = island.index(
+            "if (generatedFrameCount == 0 && !sourceHistoryWarmupActive)"
+        )
+        zero_end = island.index(
+            "// September 18 performs one real-source copy/present warmup",
+            zero_start,
+        )
+        zero_history = island[zero_start:zero_end]
+
+        self.assertIn("presentContextWithCount(", zero_history)
+        self.assertIn(
+            "adaptiveSceneTransitionGuard_.consumeSourceOnly()",
+            zero_history,
+            "Each successful protected zero-history cycle must consume exactly one scene-reprime slot",
+        )
+        self.assertIn("adaptive-scene-reprime", zero_history)
+        self.assertIn("action=consume", zero_history)
+        self.assertIn(
+            "this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()",
+            zero_history,
+        )
+
+        self.assertIn(
+            "this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining() == 2",
+            source,
+            "Only the first scene-reprime history cycle should request the hard temporal reset",
+        )
+
     def test_framegen_zero_generation_refreshes_temporal_preprocessing(self) -> None:
         backend_sources = (
             ROOT / "framegen/v3.1_src/context.cpp",
@@ -69,7 +124,7 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
             self.assertNotIn(stale_early_return, present, source_path.as_posix())
 
             mipmaps = present.index("this->mipmaps.Dispatch")
-            alpha = present.index("this->alpha.at", mipmaps)
+            alpha = present.index("this->alpha.at(6 - i).Dispatch(", mipmaps)
             self.assertIn("if (generationCount > 0)", present, source_path.as_posix())
             beta_guard = present.index("if (generationCount > 0)", alpha)
             beta = present.index("this->beta.Dispatch", beta_guard)

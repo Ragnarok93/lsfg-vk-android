@@ -33,10 +33,41 @@ constexpr unsigned kIntegerDensityAcquireSamples = 4;
 constexpr unsigned kIntegerDensityReleaseSamples = 8;
 } // namespace
 
+void AdaptiveSceneTransitionGuard::arm(bool enabled) {
+    sourceOnlyRemaining_ = enabled ? kProtectedSourceReprimeFrames : 0;
+    generatedReacquireRemaining_ = enabled
+        ? kReacquireCapOneBatches + kReacquireCapTwoBatches
+        : 0;
+}
+
+void AdaptiveSceneTransitionGuard::reset() {
+    sourceOnlyRemaining_ = 0;
+    generatedReacquireRemaining_ = 0;
+}
+
+void AdaptiveSceneTransitionGuard::consumeSourceOnly() {
+    if (sourceOnlyRemaining_ > 0)
+        --sourceOnlyRemaining_;
+}
+
+std::size_t AdaptiveSceneTransitionGuard::limitGenerated(
+        std::size_t planned) {
+    if (sourceOnlyRemaining_ > 0)
+        return 0;
+    if (planned == 0 || generatedReacquireRemaining_ == 0)
+        return planned;
+
+    const std::size_t cap =
+        generatedReacquireRemaining_ > kReacquireCapTwoBatches ? 1 : 2;
+    --generatedReacquireRemaining_;
+    return std::min(planned, cap);
+}
+
 SourceTimelineSample SourceProtectedTimeline::observe(
         uint64_t sourceArrivalTimeNs,
         std::chrono::nanoseconds sourceInterval,
-        bool discontinuity) {
+        bool discontinuity,
+        bool preserveCadence) {
     SourceTimelineSample sample{};
     const auto intervalCount = sourceInterval.count();
     if (sourceArrivalTimeNs == 0 || intervalCount <= 0)
@@ -61,6 +92,22 @@ SourceTimelineSample SourceProtectedTimeline::observe(
             ? std::numeric_limits<uint64_t>::max()
             : base + delta;
     };
+
+    if (preserveCadence && initialized_) {
+        ++sourceIndex_;
+        sample.sourceIndex = sourceIndex_;
+        sample.intervalNs = std::max<uint64_t>(1ULL, predictedIntervalNs_);
+        sample.previousSourceDesiredTimeNs = sourceArrivalTimeNs;
+        sample.sourceDeadlineErrorNs = 0;
+        sourceDesiredTimeNs_ = addSaturated(
+            sourceArrivalTimeNs, sample.intervalNs);
+        sample.sourceDesiredTimeNs = sourceDesiredTimeNs_;
+        sample.valid = true;
+        // Keep the established cadence and only move the phase anchor to the
+        // real source arrival that completed the Flow handoff.
+        lastIntervalNs_ = sample.intervalNs;
+        return sample;
+    }
 
     if (!initialized_) {
         initialized_ = true;
@@ -818,6 +865,10 @@ void LsfgOutputCadenceTracker::clearWindow() {
         snapshot_.targetSatisfiedConfirmed = true;
 }
 
+void LsfgOutputCadenceTracker::beginTransition() {
+    clearWindow();
+}
+
 void LsfgOutputCadenceTracker::rebuildSnapshot(double evidenceSeconds) {
     constexpr double kWindowSeconds = 0.40;
     constexpr double kMinimumCoverageSeconds = 0.25;
@@ -905,170 +956,72 @@ void LsfgOutputCadenceTracker::reset() {
     clearWindow();
 }
 
-std::size_t FixedSourceCadenceGovernor::plan(
+void FixedSourceCadenceTracker::observe(
         std::chrono::nanoseconds sourceInterval,
-        std::size_t requestedGeneratedFrames,
         std::size_t previousDispatchedGeneratedFrames,
         bool generationAllowed,
         SourceCadenceObservation previousObservation) {
-    constexpr double kPressureIntervalRatio = 1.25;
-    constexpr double kStableIntervalRatio = 1.10;
-    constexpr double kPressureConfirmSeconds = 0.12;
-    constexpr double kRecoveryConfirmSeconds = 0.30;
-    constexpr double kBackoffCooldownSeconds = 0.50;
     constexpr double kSourceBaselineAlpha = 0.35;
-    constexpr double kMaxEvidenceSeconds = 0.25;
+    const double intervalSeconds =
+        std::chrono::duration<double>(sourceInterval).count();
+    if (!(intervalSeconds > 0.0) || !std::isfinite(intervalSeconds))
+        return;
 
-    telemetry_.requestedGeneratedFrames = requestedGeneratedFrames;
-    telemetry_.backedOff = false;
-    telemetry_.raised = false;
+    const bool cleanSourceOnly =
+        generationAllowed
+        && previousDispatchedGeneratedFrames == 0
+        && previousObservation == SourceCadenceObservation::SourceOnly;
 
-    const std::size_t previousRequested = requestedGeneratedFrames_;
-    const bool requestRaised =
-        requestedGeneratedFrames > previousRequested;
-    requestedGeneratedFrames_ = requestedGeneratedFrames;
-
-    if (requestedGeneratedFrames == 0) {
-        generationLimit_ = 0;
-        backedOffActive_ = false;
-        pressureSeconds_ = 0.0;
-        recoverySeconds_ = 0.0;
-        cooldownSeconds_ = 0.0;
-        telemetry_.generationLimit = 0;
+    if (!cleanSourceOnly) {
+        // A candidate becomes invalid as soon as history maintenance or
+        // generated work intervenes. This prevents startup/generated cadence
+        // from being mistaken for the clean fixed source reference.
+        if (baselinePriming_) {
+            hasBaseline_ = false;
+            baselinePriming_ = false;
+            baselineIntervalSeconds_ = 0.0;
+        }
         telemetry_.baselineValid = hasBaseline_;
         telemetry_.baselineSourceFps =
             hasBaseline_ && baselineIntervalSeconds_ > 0.0
                 ? 1.0 / baselineIntervalSeconds_
                 : 0.0;
-        return 0;
+        telemetry_.intervalRatio =
+            hasBaseline_ && baselineIntervalSeconds_ > 0.0
+                ? intervalSeconds / baselineIntervalSeconds_
+                : 1.0;
+        return;
     }
 
-    // A newly requested higher Fixed multiplier is explicit user intent.
-    // Start at that requested cost immediately; only subsequent, confirmed
-    // source-cadence degradation may back it off.
-    if (requestRaised) {
-        generationLimit_ = requestedGeneratedFrames;
-        backedOffActive_ = false;
-        pressureSeconds_ = 0.0;
-        recoverySeconds_ = 0.0;
-        cooldownSeconds_ = 0.0;
-    } else if (generationLimit_ > requestedGeneratedFrames) {
-        generationLimit_ = requestedGeneratedFrames;
-        if (generationLimit_ == requestedGeneratedFrames)
-            backedOffActive_ = false;
+    if (!hasBaseline_) {
+        baselineIntervalSeconds_ = intervalSeconds;
+        hasBaseline_ = true;
+        baselinePriming_ = true;
+        telemetry_.baselineValid = false;
+        telemetry_.baselineSourceFps = 0.0;
+        telemetry_.intervalRatio = 1.0;
+        return;
     }
 
-    const double intervalSeconds =
-        std::chrono::duration<double>(sourceInterval).count();
-    const bool intervalValid =
-        intervalSeconds > 0.0 && std::isfinite(intervalSeconds);
-
-    if (intervalValid) {
-        const double evidenceSeconds =
-            std::min(intervalSeconds, kMaxEvidenceSeconds);
-        cooldownSeconds_ = std::max(0.0, cooldownSeconds_ - evidenceSeconds);
-
-        if (!hasBaseline_) {
-            // The first trustworthy source interval is measurement only.
-            // The configured Fixed multiplier has already seeded
-            // generationLimit_, but generation remains blocked until a clean
-            // baseline exists and the caller allows interpolation.
-            baselineIntervalSeconds_ = intervalSeconds;
-            hasBaseline_ = true;
-            pressureSeconds_ = 0.0;
-            recoverySeconds_ = 0.0;
-            telemetry_.intervalRatio = 1.0;
-            telemetry_.baselineValid = true;
-            telemetry_.baselineSourceFps = 1.0 / baselineIntervalSeconds_;
-            telemetry_.generationLimit = generationLimit_;
-            return 0;
-        }
-
-        double intervalRatio =
-            intervalSeconds / baselineIntervalSeconds_;
-        telemetry_.intervalRatio = intervalRatio;
-
-        if (previousDispatchedGeneratedFrames == 0) {
-            pressureSeconds_ = 0.0;
-
-            // Only a genuine source-only observation is allowed to move the
-            // baseline. History maintenance is still LSFG work and generated
-            // cycles must never normalize their own cost into the baseline.
-            if (previousObservation == SourceCadenceObservation::SourceOnly) {
-                baselineIntervalSeconds_ += kSourceBaselineAlpha
-                    * (intervalSeconds - baselineIntervalSeconds_);
-                intervalRatio = intervalSeconds / baselineIntervalSeconds_;
-                telemetry_.intervalRatio = intervalRatio;
-            }
-
-            recoverySeconds_ =
-                intervalRatio <= kStableIntervalRatio
-                    && cooldownSeconds_ <= 0.0
-                ? recoverySeconds_ + evidenceSeconds
-                : 0.0;
-        } else if (intervalRatio >= kPressureIntervalRatio) {
-            pressureSeconds_ += evidenceSeconds;
-            recoverySeconds_ = 0.0;
-            if (pressureSeconds_ >= kPressureConfirmSeconds) {
-                const std::size_t saferLimit =
-                    previousDispatchedGeneratedFrames > 0
-                        ? previousDispatchedGeneratedFrames - 1
-                        : 0;
-                if (saferLimit < generationLimit_) {
-                    generationLimit_ = saferLimit;
-                    backedOffActive_ = true;
-                    telemetry_.backedOff = true;
-                }
-                cooldownSeconds_ = kBackoffCooldownSeconds;
-                pressureSeconds_ = 0.0;
-            }
-        } else {
-            pressureSeconds_ = 0.0;
-            recoverySeconds_ =
-                intervalRatio <= kStableIntervalRatio
-                    && cooldownSeconds_ <= 0.0
-                ? recoverySeconds_ + evidenceSeconds
-                : 0.0;
-        }
-
-        if (generationAllowed
-                && backedOffActive_
-                && generationLimit_ < requestedGeneratedFrames
-                && cooldownSeconds_ <= 0.0
-                && recoverySeconds_ >= kRecoveryConfirmSeconds) {
-            ++generationLimit_;
-            recoverySeconds_ = 0.0;
-            telemetry_.raised = true;
-            if (generationLimit_ >= requestedGeneratedFrames)
-                backedOffActive_ = false;
-        }
+    if (baselinePriming_) {
+        baselineIntervalSeconds_ = intervalSeconds;
+        baselinePriming_ = false;
+    } else {
+        baselineIntervalSeconds_ += kSourceBaselineAlpha
+            * (intervalSeconds - baselineIntervalSeconds_);
     }
 
-    telemetry_.baselineValid = hasBaseline_;
-    telemetry_.baselineSourceFps =
-        hasBaseline_ && baselineIntervalSeconds_ > 0.0
-            ? 1.0 / baselineIntervalSeconds_
-            : 0.0;
-    telemetry_.generationLimit = generationLimit_;
-
-    if (!generationAllowed || !hasBaseline_)
-        return 0;
-    return std::min(generationLimit_, requestedGeneratedFrames);
+    telemetry_.intervalRatio = intervalSeconds / baselineIntervalSeconds_;
+    telemetry_.baselineValid = true;
+    telemetry_.baselineSourceFps = 1.0 / baselineIntervalSeconds_;
 }
 
-void FixedSourceCadenceGovernor::reset() {
+void FixedSourceCadenceTracker::reset() {
     hasBaseline_ = false;
+    baselinePriming_ = false;
     baselineIntervalSeconds_ = 0.0;
-    generationLimit_ = 0;
-    requestedGeneratedFrames_ = 0;
-    backedOffActive_ = false;
-    pressureSeconds_ = 0.0;
-    recoverySeconds_ = 0.0;
-    cooldownSeconds_ = 0.0;
     telemetry_ = {};
-    telemetry_.generationLimit = generationLimit_;
 }
-
 
 AdaptiveFrameScheduler::AdaptiveFrameScheduler(
         uint32_t targetFps, std::size_t maxGeneratedFrames)
@@ -1186,12 +1139,15 @@ double AdaptiveFrameScheduler::stabilizeGenerationDensity(
     return desiredDensity;
 }
 
-std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval) {
+std::size_t AdaptiveFrameScheduler::plan(
+        std::chrono::nanoseconds sourceInterval,
+        bool preserveCadence) {
     telemetry_.sourceRateSnapped = false;
     telemetry_.costRaised = false;
     telemetry_.costBackedOff = false;
     telemetry_.costProbe = false;
     telemetry_.discontinuityReset = false;
+    telemetry_.cadenceHeld = false;
     telemetry_.configWarmStart = false;
     telemetry_.capacityPromoted = false;
     telemetry_.safeGenerationHintValid = safeGenerationHintValid_;
@@ -1216,12 +1172,22 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     if (!(intervalSeconds > 0.0) || !std::isfinite(intervalSeconds))
         return 0;
 
+    // A Flow graph handoff can lengthen one or more present cycles while the
+    // active graph continues producing output. Keep the established source
+    // cadence for scheduling; the real interval remains telemetry evidence.
+    const bool cadenceHeld =
+        preserveCadence
+        && lastTrustedSourceIntervalSeconds_ > 0.0
+        && intervalSeconds < 0.250;
+    telemetry_.cadenceHeld = cadenceHeld;
+
     // Distinguish a suspend/stall from a legitimately slow source by comparing
     // against established cadence rather than an absolute FPS band. The first
     // sample at any source rate is always eligible. After an extreme outlier,
     // consume that one sample as a discontinuity and let the next real interval
     // establish the new cadence without synthetic catch-up debt.
-    if (lastTrustedSourceIntervalSeconds_ > 0.0
+    if (!cadenceHeld
+            && lastTrustedSourceIntervalSeconds_ > 0.0
             && intervalSeconds
                 > lastTrustedSourceIntervalSeconds_ * kDiscontinuityRatio) {
         const bool preserveWarmStart = reconfigureWarmStartPending_;
@@ -1236,8 +1202,13 @@ std::size_t AdaptiveFrameScheduler::plan(std::chrono::nanoseconds sourceInterval
     // cleared by an explicit lifecycle reset(), so config writes observed just
     // after resume can still distinguish a running game from first startup.
     runtimeCadenceEstablished_ = true;
-    observedTimeSeconds_ += intervalSeconds;
-    updateSourceRate(intervalSeconds);
+    observedTimeSeconds_ += cadenceHeld
+        ? lastTrustedSourceIntervalSeconds_
+        : intervalSeconds;
+    if (cadenceHeld)
+        telemetry_.sourceFps = 1.0 / intervalSeconds;
+    else
+        updateSourceRate(intervalSeconds);
     lastTrustedSourceIntervalSeconds_ = smoothedSourceIntervalSeconds_;
 
     const double wantedGenerated = std::clamp(

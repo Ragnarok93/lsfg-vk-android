@@ -225,6 +225,12 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
     const bool hasTimelineExt = hasExtension(availableExtensions,
         VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+    const bool hasSpirv14Ext = hasExtension(availableExtensions,
+        VK_KHR_SPIRV_1_4_EXTENSION_NAME);
+    const bool hasShaderFloatControlsExt = hasExtension(availableExtensions,
+        VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
+    const bool hasVulkanMemoryModelExt = hasExtension(availableExtensions,
+        VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME);
     const bool hasDriverProperties = api12 || hasExtension(availableExtensions,
         VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
 
@@ -265,6 +271,9 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     VkPhysicalDeviceTimelineSemaphoreFeaturesKHR timelineProbe{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR,
     };
+    VkPhysicalDeviceVulkanMemoryModelFeaturesKHR memoryModelProbe{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES_KHR,
+    };
 
     void* featureProbeHead = nullptr;
     if (api13) {
@@ -286,6 +295,10 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
             timelineProbe.pNext = featureProbeHead;
             featureProbeHead = &timelineProbe;
         }
+        if (hasVulkanMemoryModelExt) {
+            memoryModelProbe.pNext = featureProbeHead;
+            featureProbeHead = &memoryModelProbe;
+        }
     }
     VkPhysicalDeviceFeatures2 featuresProbe{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -301,6 +314,20 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
 #else
     caps.androidHardwareBuffer = true;
 #endif
+    caps.spirv14Extension = hasSpirv14Ext;
+    caps.shaderFloatControlsExtension = hasShaderFloatControlsExt;
+    caps.vulkanMemoryModelExtension = hasVulkanMemoryModelExt;
+    caps.vulkanMemoryModel = api12
+        ? features12Probe.vulkanMemoryModel == VK_TRUE
+        : (hasVulkanMemoryModelExt && memoryModelProbe.vulkanMemoryModel == VK_TRUE);
+    caps.vulkanMemoryModelDeviceScope = api12
+        ? features12Probe.vulkanMemoryModelDeviceScope == VK_TRUE
+        : (hasVulkanMemoryModelExt
+            && memoryModelProbe.vulkanMemoryModelDeviceScope == VK_TRUE);
+    caps.shaderStorageImageWriteWithoutFormat =
+        featuresProbe.features.shaderStorageImageWriteWithoutFormat == VK_TRUE;
+    caps.shaderStorageImageExtendedFormats =
+        featuresProbe.features.shaderStorageImageExtendedFormats == VK_TRUE;
     caps.synchronization2Core = api13;
     caps.synchronization2Extension = hasSync2Ext;
     caps.synchronization2Feature = api13
@@ -332,6 +359,20 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
             "LSFG capability check failed: " + decision.rejectionReason);
 
     this->diagnostics.apiVersion = properties.apiVersion;
+    this->diagnostics.spirvTargetVersion =
+        static_cast<uint32_t>(decision.spirvTarget);
+    this->diagnostics.vulkanPath = vulkanPathName(decision.vulkanPath);
+    this->diagnostics.synchronizationPath =
+        synchronizationPathName(decision.synchronizationPath);
+    this->diagnostics.capabilitySummary = "supported";
+    this->diagnostics.supportDecision.supported = true;
+    this->diagnostics.supportDecision.vulkanPath =
+        this->diagnostics.vulkanPath;
+    this->diagnostics.supportDecision.spirvTargetVersion =
+        this->diagnostics.spirvTargetVersion;
+    this->diagnostics.supportDecision.synchronizationPath =
+        this->diagnostics.synchronizationPath;
+    this->diagnostics.supportDecision.fp16 = caps.shaderFloat16;
     this->diagnostics.driverVersion = properties.driverVersion;
     this->diagnostics.driverId = hasDriverProperties
         ? driverProperties.driverID
@@ -366,6 +407,13 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->diagnostics.ahbTransferOutput = transferOutput;
     this->diagnostics.ahbTransportMode = LSFG::selectAhbTransportMode(
         sampledInput, transferInput, storageOutput, transferOutput);
+    this->diagnostics.supportDecision.ahbMode =
+        this->diagnostics.ahbTransportMode;
+    if (this->diagnostics.ahbTransportMode == LSFG::AhbTransportMode::Unsupported) {
+        this->diagnostics.supportDecision.supported = false;
+        this->diagnostics.supportDecision.rejectionReason =
+            "no supported directional AHardwareBuffer transport for LSFG format";
+    }
     const auto opaqueFdSemaphoreProbe = probeExternalSemaphoreSupport(
         physicalDevice, availableExtensions,
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
@@ -378,10 +426,17 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT, syncFdSemaphoreProbe);
     this->diagnostics.externalSemaphoreOpaqueFd = opaqueFdSemaphoreProbe.supported;
     this->diagnostics.externalSemaphoreSyncFd = syncFdSemaphoreProbe.supported;
+    this->diagnostics.supportDecision.externalOpaqueFd =
+        opaqueFdSemaphoreProbe.supported;
+    this->diagnostics.supportDecision.externalSyncFd =
+        syncFdSemaphoreProbe.supported;
 #else
     this->diagnostics.ahbTransportMode = LSFG::AhbTransportMode::DirectStorage;
     this->diagnostics.externalSemaphoreOpaqueFd = true;
     this->diagnostics.externalSemaphoreSyncFd = false;
+    this->diagnostics.supportDecision.ahbMode =
+        LSFG::AhbTransportMode::DirectStorage;
+    this->diagnostics.supportDecision.externalOpaqueFd = true;
 #endif
 
     std::cerr << "lsfg-vk: backend driver=\"" << this->diagnostics.driverName
@@ -391,6 +446,8 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
               << (this->diagnostics.externalSemaphoreOpaqueFd ? 1 : 0)
               << " externalSemaphoreSyncFd="
               << (this->diagnostics.externalSemaphoreSyncFd ? 1 : 0)
+              << " vulkan_path=" << vulkanPathName(decision.vulkanPath)
+              << " spirv_target=" << spirvTargetName(decision.spirvTarget)
               << " sync=" << synchronizationPathName(decision.synchronizationPath) << '\n';
 
     uint32_t familyCount{};
@@ -424,6 +481,11 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         enabledExtensions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
     if (!api12 && caps.shaderFloat16)
         enabledExtensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+    if (decision.vulkanPath == VulkanPath::Vulkan11Extensions) {
+        enabledExtensions.push_back(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
+        enabledExtensions.push_back(VK_KHR_SPIRV_1_4_EXTENSION_NAME);
+        enabledExtensions.push_back(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME);
+    }
 
     const bool hasRobustness2 = hasExtension(availableExtensions,
         VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
@@ -440,6 +502,7 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
             enabledExtensions.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
     }
     const bool enableNullDescriptor = hasRobustness2 && robustnessProbe.nullDescriptor == VK_TRUE;
+    caps.nullDescriptor = enableNullDescriptor;
 
     VkPhysicalDeviceFeatures enabledCore{};
     enabledCore.shaderStorageImageExtendedFormats =
@@ -472,6 +535,14 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR,
         .shaderFloat16 = !api12 && caps.shaderFloat16 ? VK_TRUE : VK_FALSE,
     };
+    VkPhysicalDeviceVulkanMemoryModelFeaturesKHR memoryModelEnable{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES_KHR,
+        .vulkanMemoryModel =
+            decision.vulkanPath == VulkanPath::Vulkan11Extensions ? VK_TRUE : VK_FALSE,
+        .vulkanMemoryModelDeviceScope =
+            decision.vulkanPath == VulkanPath::Vulkan11Extensions
+                && caps.vulkanMemoryModelDeviceScope ? VK_TRUE : VK_FALSE,
+    };
 
     void* enableHead = enableNullDescriptor ? &robustnessEnable : nullptr;
     if (decision.synchronizationPath == SynchronizationPath::Core13Sync2) {
@@ -484,9 +555,15 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     if (api12) {
         features12Enable.pNext = enableHead;
         enableHead = &features12Enable;
-    } else if (caps.shaderFloat16) {
-        float16Enable.pNext = enableHead;
-        enableHead = &float16Enable;
+    } else {
+        if (caps.shaderFloat16) {
+            float16Enable.pNext = enableHead;
+            enableHead = &float16Enable;
+        }
+        if (decision.vulkanPath == VulkanPath::Vulkan11Extensions) {
+            memoryModelEnable.pNext = enableHead;
+            enableHead = &memoryModelEnable;
+        }
     }
 
     VkPhysicalDeviceFeatures2 enabledFeatures2{
@@ -529,6 +606,7 @@ Device::Device(const Instance& instance, const LSFG::DeviceIdentity& requestedId
     this->computeFamilyIdx = *computeFamilyIdx;
     this->physicalDevice = physicalDevice;
     this->nullDescriptorSupported = enableNullDescriptor;
+    this->diagnostics.supportDecision.nullDescriptor = enableNullDescriptor;
     this->device = std::shared_ptr<VkDevice>(
         new VkDevice(handle), [](VkDevice* device) {
             if (device != nullptr) {

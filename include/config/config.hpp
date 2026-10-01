@@ -27,7 +27,7 @@ namespace Config {
         float flowScale{1.0F};
         /// Allow the LSFG runtime to select a bounded Flow Scale state.
         bool adaptiveFlowScale{false};
-        /// quality, balanced, or low. The preset owns the adaptive target/floor.
+        /// quality, balanced, low, or auto. The preset owns the adaptive target/floor.
         std::string adaptiveFlowPreset{"quality"};
         /// Whether performance mode is enabled
         bool performance{false};

@@ -12,6 +12,13 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         source = (ROOT / "src/mini/commandpool.cpp").read_text(encoding="utf-8")
         self.assertIn("VK_COMMAND_POOL_CREATE_TRANSIENT_BIT", source)
 
+    def test_present_mode_selector_is_declared_before_early_runtime_helpers(self) -> None:
+        source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        declaration = source.index("VkPresentModeKHR choosePresentMode(")
+        early_call = source.index("resolveConfiguredPhysicalPresentMode(")
+
+        self.assertLess(declaration, early_call)
+
     def test_per_frame_handle_owners_use_single_allocation(self) -> None:
         semaphore = (ROOT / "src/mini/semaphore.cpp").read_text(encoding="utf-8")
         command_buffer = (ROOT / "src/mini/commandbuffer.cpp").read_text(encoding="utf-8")
@@ -194,6 +201,23 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("lsfgOutputCadenceTracker_.reset()", source)
         self.assertIn("sourceTimeline_.reset()", source)
 
+    def test_temporal_discontinuity_preserves_active_adaptive_flow_scale(self) -> None:
+        """Scene/suspend resets must not desynchronize the Flow controller from the backend graph."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        reset_start = source.index("void LsContext::resetAdaptiveSourceEpoch")
+        reset_end = source.index("void LsContext::enterSourceOnlyBypass", reset_start)
+        reset_epoch = source[reset_start:reset_end]
+
+        self.assertIn("activeFlowScaleBeforeReset", reset_epoch)
+        self.assertIn("preserveActiveFlowScale", reset_epoch)
+        self.assertIn("SourceHistoryInvalidationReason::TimelineDiscontinuity", reset_epoch)
+        self.assertIn("SourceHistoryInvalidationReason::SuspendResume", reset_epoch)
+        self.assertIn("adaptiveFlowController_.seedCurrentScale(", reset_epoch)
+        self.assertIn("activeFlowScaleBeforeReset", reset_epoch)
+        self.assertIn("adaptiveFlowActiveScale_", reset_epoch)
+        self.assertIn("adaptiveFlowController_.currentScale()", reset_epoch)
+        self.assertIn("requestContextFlowScale(", reset_epoch)
+
     def test_resident_config_change_resets_temporal_generation_epoch(self) -> None:
         """Hot target/multiplier changes must not generate against pre-menu temporal state."""
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
@@ -237,6 +261,39 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
             discontinuity,
         )
         self.assertIn("action=reset-temporal-epoch", discontinuity)
+
+    def test_adreno_completion_wait_is_not_recycled_as_adaptive_pressure(self) -> None:
+        """Regression: generation-first host completion is execution policy, not a Flow/scheduler actuator.
+
+        Feeding the previous LSFG completion wait back into the next source
+        interval created a self-reinforcing loop on Adreno: apparent source
+        cadence fell, Adaptive FG requested more synthetics, completion waits
+        grew, and Adaptive Flow oscillated downward. Preserve the previously
+        stable controller/scheduler behavior and keep the wait as telemetry only.
+        """
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        controller_header = (
+            ROOT / "include/adaptive_flow_controller.hpp"
+        ).read_text(encoding="utf-8")
+        controller = (
+            ROOT / "src/adaptive_flow_controller.cpp"
+        ).read_text(encoding="utf-8")
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertNotIn("adaptiveFlowPreviousSourceBlockingMs_", header)
+        self.assertNotIn("AdaptiveSourceBlockingPressure", controller_header)
+        self.assertNotIn("sourceBlockingPressure", controller_header)
+        self.assertNotIn("adaptiveSourceBlockingPressure", controller)
+        self.assertNotIn("adaptiveSourceCadenceHeldForBlocking", source)
+        self.assertNotIn("adaptiveSourceBlockingRatioAtCycleStart", source)
+        self.assertNotIn("source_cadence_held_for_blocking", source)
+
+        # Flow transitions may temporarily preserve cadence, but completion-wait
+        # feedback must not become a second scheduler hold condition.
+        self.assertIn(
+            "adaptiveScheduler_.plan(\n            sourceInterval, adaptiveFlowTransitionActiveAtCycleStart)",
+            source,
+        )
 
     def test_present_hook_debounces_fs_and_reuses_wait_storage(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
@@ -457,14 +514,15 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("FixedSourceCadenceGovernor", scheduler)
-        self.assertIn("fixedSourceCadenceGovernor_", header)
-        self.assertIn("fixedSourceCadenceGovernor_.plan(", source)
+        self.assertIn("FixedSourceCadenceTracker", scheduler)
+        self.assertIn("fixedSourceCadenceTracker_", header)
+        self.assertIn("fixedSourceCadenceTracker_.observe(", source)
         self.assertIn("generationFirstAdreno", source)
         self.assertIn("requestedFixedGeneratedFrameCount", source)
         self.assertNotIn("fixedAdrenoHistoricalGeneration", source)
-        self.assertIn("fixed_generation_limit=", source)
-        self.assertIn("FixedSourceCadenceGovernor::plan", scheduler_source)
+        self.assertIn(": requestedFixedGeneratedFrameCount;", source)
+        self.assertNotIn("fixed_generation_limit=", source)
+        self.assertNotIn("FixedSourceCadenceGovernor", scheduler_source)
         self.assertNotIn("sleep_for", scheduler + scheduler_source)
 
         pacing_start = hooks.index("bool adaptivePresentationPacing")
@@ -494,7 +552,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("delayUntilNextSourceOutput", scheduler_header)
         for token in (
             "adaptiveScheduler_.configure",
-            "adaptiveScheduler_.plan(sourceInterval)",
+            "adaptiveScheduler_.plan(",
             "adaptiveScheduler_.telemetry()",
             "presentContextWithCount",
             "AndroidFrameCycleMode::HistoryOnly",
@@ -658,7 +716,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         """Fixed -> Adaptive is a temporal backend-context boundary."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper_end = source.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = source[helper_start:helper_end]
 
         self.assertIn("framegenModeChanged", helper)
@@ -678,7 +736,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         """Adaptive -> Fixed uses the same symmetric context-boundary rule."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper_end = source.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = source[helper_start:helper_end]
 
         self.assertIn(
@@ -700,7 +758,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn("if (recreateSwapchain)", source)
 
         helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper_end = source.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = source[helper_start:helper_end]
         self.assertIn("adaptiveFramegen", helper)
         self.assertNotIn("fpsLimit", helper)
@@ -711,7 +769,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         """The repair is limited to the mode bit, not scheduler/timeline diagnostics."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         helper_start = source.index("bool requiresSwapchainRecreation")
-        helper_end = source.index("bool supportsDeviceExtension", helper_start)
+        helper_end = source.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = source[helper_start:helper_end]
 
         self.assertNotIn("adaptiveScheduler", helper)
@@ -732,10 +790,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         end = source.index("auto res = Layer::ovkCreateSwapchainKHR", start)
         hot_recreate = source[start:end]
 
-        self.assertIn(
-            "recreatingExistingSwapchain\n            ? pCreateInfo->presentMode",
-            hot_recreate,
-        )
+        self.assertIn("lsfg::wsi::modeRequestForCreate(", hot_recreate)
+        self.assertIn("oldConfiguredPresentMode,", hot_recreate)
+        self.assertIn("configuredPresentMode,", hot_recreate)
+        self.assertIn("createInfo.presentMode = choosePresentMode(", hot_recreate)
         self.assertNotIn("? VK_PRESENT_MODE_FIFO_KHR", hot_recreate)
         self.assertNotIn(": VK_PRESENT_MODE_FIFO_KHR", hot_recreate)
 
@@ -746,10 +804,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         end = source.index("auto res = Layer::ovkCreateSwapchainKHR", start)
         hot_recreate = source[start:end]
 
-        self.assertIn(
-            "recreatingExistingSwapchain\n            ? pCreateInfo->presentMode",
-            hot_recreate,
-        )
+        self.assertIn("lsfg::wsi::modeRequestForCreate(", hot_recreate)
+        self.assertIn("oldConfiguredPresentMode,", hot_recreate)
+        self.assertIn("configuredPresentMode,", hot_recreate)
+        self.assertIn("createInfo.presentMode = choosePresentMode(", hot_recreate)
         self.assertNotIn("? VK_PRESENT_MODE_MAILBOX_KHR", hot_recreate)
         self.assertNotIn(": VK_PRESENT_MODE_MAILBOX_KHR", hot_recreate)
 
@@ -783,6 +841,17 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertIn('" config_revision="', context)
         self.assertIn("bool runtimeConfigSignatureValid_{false}", header)
 
+    def test_adaptive_flow_handoff_is_reviewable_in_runtime_telemetry(self) -> None:
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+        context = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("runtime stage=adaptive-flow-handoff", hooks)
+        self.assertIn("identity_compatible=", hooks)
+        self.assertIn("transition_pending=", hooks)
+        self.assertIn("warmup_remaining=", hooks)
+        self.assertIn("seed_selected=", hooks)
+        self.assertIn("event=context-scale-seed applied=%d", context)
+
     def test_mode_transition_requests_exactly_one_hot_recreation(self) -> None:
         """One mode transition produces one OUT_OF_DATE recreation request, not a loop."""
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
@@ -801,7 +870,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
         helper_start = hooks.index("bool requiresSwapchainRecreation")
-        helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
+        helper_end = hooks.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = hooks[helper_start:helper_end]
         self.assertNotIn("generationActivityChanged", helper)
         self.assertIn("return framegenModeChanged", helper)
@@ -828,7 +897,7 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         config = (ROOT / "src/config/config.cpp").read_text(encoding="utf-8")
 
         helper_start = hooks.index("bool requiresSwapchainRecreation")
-        helper_end = hooks.index("bool supportsDeviceExtension", helper_start)
+        helper_end = hooks.index("bool configurationChangesOnlyPresentMode", helper_start)
         helper = hooks[helper_start:helper_end]
         self.assertNotIn("generationActivityChanged", helper)
         self.assertIn("const bool residentTarget = previous.targeted && next.targeted", helper)
@@ -853,8 +922,10 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         # The target remains loader/context-resident for immediate hot re-enable.
         self.assertIn(".targeted = true", config)
 
-        # Do not weaken the newly working Xclipse FIFO implementation.
-        self.assertIn("xclipseFifoMailboxBacked", hooks)
+        # Preserve the proven logical-FIFO/MAILBOX implementation and extend
+        # that physical WSI backing to every targeted Android resident layer.
+        self.assertIn("residentFifoMailboxBacked", hooks)
+        self.assertIn("activeConf.targeted", hooks)
         self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
         self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
 
@@ -909,16 +980,36 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         self.assertNotIn("fifoBoundedCompletion", completion_policy)
         self.assertNotIn("VK_PRESENT_MODE_FIFO_KHR", completion_policy)
 
-    def test_fifo_async_completion_does_not_train_deadline_predictor_from_host_wait(self) -> None:
-        """FIFO must not turn a presentation-mode choice into blocking-completion evidence for Adaptive admission."""
+    def test_fifo_async_completion_only_trains_predictor_after_host_wait_fallback(self) -> None:
+        """A valid async FIFO dependency chain is never trained from a host wait."""
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        start = source.index("bool framegenReady = true;", source.index("bool requireHostCompletionWait"))
+        policy_start = source.index("bool requireHostCompletionWait")
+        start = source.index("bool framegenReady = true;", policy_start)
         end = source.index("updateAdaptiveFlowGovernor();", start)
+        host_wait_policy = source[policy_start:start]
         completion = source[start:end]
 
+        # A valid exported async dependency starts with host waiting disabled.
+        # Host completion may train admission only after that dependency path
+        # actually falls back to a measured blocking wait.
+        self.assertIn(
+            "bool requireHostCompletionWait =\n"
+            "        !this->asyncFramegenCompletionEnabled_",
+            host_wait_policy,
+        )
+        self.assertIn("framegenSync.gpuDependenciesExported", host_wait_policy)
+        self.assertNotIn("VK_PRESENT_MODE_FIFO_KHR", host_wait_policy)
         self.assertNotIn("fifoBoundedCompletion", completion)
-        self.assertNotIn("observeBlockingCompletion", completion)
         self.assertNotIn('runtime stage=fifo-bounded-completion', completion)
+
+        observation_start = completion.index(
+            "if (requireHostCompletionWait && framegenReady"
+        )
+        observation_end = completion.index("if (!framegenReady)", observation_start)
+        observation = completion[observation_start:observation_end]
+        self.assertIn("generatedFrameCount > 0", observation)
+        self.assertIn("framegenBlockingCompletionMs > 0.0", observation)
+        self.assertIn("observeBlockingCompletion", observation)
 
     def test_fifo_admitted_batch_is_not_amputated_by_post_dispatch_deadline(self) -> None:
         """Once FIFO work is admitted and dispatched, wall-clock slot expiry must not delete it."""

@@ -20,6 +20,7 @@ struct AdaptiveSchedulerTelemetry {
     bool costBackedOff{false};
     bool costProbe{false};
     bool discontinuityReset{false};
+    bool cadenceHeld{false};
     bool configWarmStart{false};
     bool capacityPromoted{false};
     bool safeGenerationHintValid{false};
@@ -30,6 +31,52 @@ struct AdaptiveSchedulerTelemetry {
     bool integerDensityLocked{false};
     std::size_t lockedGeneratedFrames{};
     unsigned densityTransitionEvidence{};
+};
+
+class AdaptiveSceneTransitionGuard {
+public:
+    void arm(bool enabled);
+    void reset();
+
+    [[nodiscard]] bool sourceOnlyRequired() const {
+        return sourceOnlyRemaining_ > 0;
+    }
+
+    [[nodiscard]] uint32_t sourceOnlyRemaining() const {
+        return sourceOnlyRemaining_;
+    }
+
+    void consumeSourceOnly();
+
+    /// Apply only after history reprime is complete. Reacquire generated
+    /// load in two bounded stages so one contaminated post-cut interval cannot
+    /// jump directly from source-only recovery into a 3-synthetic batch.
+    [[nodiscard]] std::size_t limitGenerated(std::size_t planned);
+
+    [[nodiscard]] uint32_t generatedReacquireRemaining() const {
+        return generatedReacquireRemaining_;
+    }
+
+    [[nodiscard]] std::size_t generatedReacquireCap() const {
+        if (sourceOnlyRemaining_ > 0)
+            return 0;
+        if (generatedReacquireRemaining_ > kReacquireCapTwoBatches)
+            return 1;
+        if (generatedReacquireRemaining_ > 0)
+            return 2;
+        return std::numeric_limits<std::size_t>::max();
+    }
+
+    [[nodiscard]] bool firstGeneratedBatchCapped() const {
+        return generatedReacquireRemaining_ > 0;
+    }
+
+private:
+    static constexpr uint32_t kProtectedSourceReprimeFrames = 2;
+    static constexpr uint32_t kReacquireCapOneBatches = 6;
+    static constexpr uint32_t kReacquireCapTwoBatches = 6;
+    uint32_t sourceOnlyRemaining_{0};
+    uint32_t generatedReacquireRemaining_{0};
 };
 
 struct SourceTimelineSample {
@@ -52,7 +99,8 @@ public:
     SourceTimelineSample observe(
         uint64_t sourceArrivalTimeNs,
         std::chrono::nanoseconds sourceInterval,
-        bool discontinuity = false);
+        bool discontinuity = false,
+        bool preserveCadence = false);
 
     [[nodiscard]] uint64_t syntheticDesiredTimeNs(
         const SourceTimelineSample& sample, double interpolationFraction) const;
@@ -171,25 +219,15 @@ private:
 struct FixedSourceCadenceTelemetry {
     double baselineSourceFps{};
     double intervalRatio{1.0};
-    std::size_t requestedGeneratedFrames{};
-    std::size_t generationLimit{};
-    bool backedOff{false};
-    bool raised{false};
     bool baselineValid{false};
 };
 
-/// Protects real/source cadence in Fixed frame-generation mode.
-///
-/// This governor never paces source frames and never changes interpolation
-/// positions. The user-selected multiplier is a ceiling: synthetic cost begins
-/// conservatively, rises one level at a time after stable cadence, and backs
-/// off when the preceding generated load materially stretches source intervals
-/// relative to a baseline learned without generated-frame work.
-class FixedSourceCadenceGovernor {
+/// Observes a clean source cadence for Fixed-mode Adaptive Flow pressure.
+/// It cannot select, delay, or suppress generated frames.
+class FixedSourceCadenceTracker {
 public:
-    std::size_t plan(
+    void observe(
         std::chrono::nanoseconds sourceInterval,
-        std::size_t requestedGeneratedFrames,
         std::size_t previousDispatchedGeneratedFrames,
         bool generationAllowed,
         SourceCadenceObservation previousObservation =
@@ -203,13 +241,11 @@ public:
 
 private:
     bool hasBaseline_{false};
+    // Require two consecutive eligible source-only intervals before trusting
+    // the baseline. History-maintenance/generated startup intervals are never
+    // clean baseline evidence.
+    bool baselinePriming_{false};
     double baselineIntervalSeconds_{};
-    std::size_t generationLimit_{0};
-    std::size_t requestedGeneratedFrames_{0};
-    bool backedOffActive_{false};
-    double pressureSeconds_{};
-    double recoverySeconds_{};
-    double cooldownSeconds_{};
     FixedSourceCadenceTelemetry telemetry_{};
 };
 
@@ -323,6 +359,8 @@ public:
         std::chrono::nanoseconds elapsed,
         std::size_t sourceFrames,
         std::size_t generatedFrames);
+    /// Clear rolling cadence evidence when Flow graph history is being rebuilt.
+    void beginTransition();
     void reset();
 
     [[nodiscard]] const LsfgOutputCadenceSnapshot& snapshot() const {
@@ -364,7 +402,9 @@ public:
     /// Observe a real/source frame interval and return the number of generated
     /// frames for this source cycle. This is an output planner only: it never
     /// sleeps and never modifies source pacing.
-    std::size_t plan(std::chrono::nanoseconds sourceInterval);
+    std::size_t plan(
+        std::chrono::nanoseconds sourceInterval,
+        bool preserveCadence = false);
 
     /// Supply a predictor-derived capacity hint for the next generation level.
     /// Invalid hints disable the early-promotion path without affecting the

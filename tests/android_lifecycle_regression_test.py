@@ -23,12 +23,44 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
         self.assertIn("const bool recreatingExistingSwapchain", hooks)
-        self.assertIn("createInfo.presentMode = recreatingExistingSwapchain", hooks)
-        self.assertIn("? pCreateInfo->presentMode", hooks)
+        self.assertIn("oldConfiguredPresentMode = oldSwapchainState->configuredPresent", hooks)
+        self.assertIn("lsfg::wsi::modeRequestForCreate(", hooks)
+        self.assertIn("oldConfiguredPresentMode,", hooks)
+        self.assertIn("createInfo.presentMode = choosePresentMode(", hooks)
         self.assertIn("stage=swapchain-blit-check-begin", hooks)
         self.assertIn("stage=swapchain-blit-check-ready", hooks)
         self.assertIn("stage=swapchain-downstream-create-begin", hooks)
         self.assertIn("stage=swapchain-downstream-create-return", hooks)
+
+    def test_null_old_swapchain_recreate_preserves_flow_and_refreshes_config(self) -> None:
+        """Android destroy/create churn must not cold-start Flow or rebuild stale config twice."""
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("DetachedAdaptiveFlowHandoff", hooks)
+        self.assertIn("stashDetachedAdaptiveFlowHandoff", hooks)
+        self.assertIn("takeDetachedAdaptiveFlowHandoff", hooks)
+        self.assertIn("refreshConfigBeforeSwapchainCreate", hooks)
+
+        # Capture the stable controller state before context destruction.
+        destroy = hooks.index("void destroySwapchainStateAfterDownstreamDestroy")
+        destroy_end = hooks.index("void myvkDestroyDevice", destroy)
+        destroy_block = hooks[destroy:destroy_end]
+        self.assertLess(
+            destroy_block.index("stashDetachedAdaptiveFlowHandoff"),
+            destroy_block.index("state->context.reset()"),
+        )
+
+        # Consume the pending handoff even when the application recreates with
+        # oldSwapchain == VK_NULL_HANDLE, and refresh conf.toml before choosing
+        # the new context identity.
+        create = hooks.index("VkResult myvkCreateSwapchainKHR")
+        create_block = hooks[create:create + 9000]
+        self.assertLess(
+            create_block.index("refreshConfigBeforeSwapchainCreate"),
+            create_block.index("const auto activeConf = Config::snapshot()"),
+        )
+        self.assertIn("takeDetachedAdaptiveFlowHandoff", create_block)
+        self.assertIn("pCreateInfo->oldSwapchain == VK_NULL_HANDLE", create_block)
 
     def test_runtime_state_immediately_reports_generation_readiness(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
@@ -71,9 +103,10 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         self.assertIn("recordSuccessfulOutputCycle(*state, *state->context", bypass)
         self.assertNotIn("state->context->present(", bypass)
 
-        # Xclipse FIFO remains the active-swapchain policy: logical FIFO may be
-        # backed by MAILBOX while generation is enabled, and Off does not mutate it.
-        self.assertIn("xclipseFifoMailboxBacked", hooks)
+        # Logical FIFO is physically MAILBOX-backed for targeted Android LSFG,
+        # so Off keeps the same nonblocking resident WSI instead of retuning it.
+        self.assertIn("residentFifoMailboxBacked", hooks)
+        self.assertIn("activeConf.targeted", hooks)
         self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
         self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
 

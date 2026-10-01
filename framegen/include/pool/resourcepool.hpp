@@ -6,7 +6,9 @@
 
 #include "vulkan/vulkan_core.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 
 namespace LSFG::Pool {
@@ -26,8 +28,26 @@ namespace LSFG::Pool {
         ///
         /// @throws std::runtime_error if the resource pool cannot be created.
         ///
-        ResourcePool(bool isHdr, float flowScale)
-            : isHdr(isHdr), flowScale(flowScale) {}
+        using SamplerCache = std::unordered_map<uint64_t, Core::Sampler>;
+
+        ResourcePool(bool isHdr, float flowScale,
+            std::shared_ptr<SamplerCache> sharedSamplers = {})
+            : samplers(sharedSamplers
+                ? std::move(sharedSamplers)
+                : std::make_shared<SamplerCache>()),
+              isHdr(isHdr), flowScale(flowScale) {}
+
+        [[nodiscard]] std::shared_ptr<SamplerCache> sharedSamplerCache() const {
+            return samplers;
+        }
+
+        [[nodiscard]] size_t samplerCount() const {
+            return samplers ? samplers->size() : 0;
+        }
+
+        [[nodiscard]] size_t bufferCount() const {
+            return buffers.size();
+        }
 
         ///
         /// Retrieve a buffer with given parameters or create it.
@@ -61,7 +81,7 @@ namespace LSFG::Pool {
 
     private:
         std::unordered_map<uint64_t, Core::Buffer> buffers;
-        std::unordered_map<uint64_t, Core::Sampler> samplers;
+        std::shared_ptr<SamplerCache> samplers{std::make_shared<SamplerCache>()};
         bool isHdr{};
         float flowScale{};
     };

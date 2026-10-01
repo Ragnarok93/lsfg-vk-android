@@ -1,4 +1,5 @@
 #include "context.hpp"
+#include "adaptive_flow_handoff.hpp"
 #include "android_sync_policy.hpp"
 #include "config/config.hpp"
 #include "common/exception.hpp"
@@ -39,10 +40,16 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <sstream>
 
 namespace {
 
 std::mutex lsfgDisableEnvMutex;
+std::mutex framegenContextBuildLogMutex;
+std::string lastFramegenContextBuildSignature;
+std::chrono::steady_clock::time_point lastFramegenContextBuildTime{};
+uint64_t lastFramegenContextBuildEpoch{0};
+std::atomic<uint64_t> framegenContextCreateEpoch{0};
 
 class ScopedLsfgDisable {
 public:
@@ -85,6 +92,77 @@ size_t residentCapacityMultiplier(const Config::Configuration& conf) {
 
 #ifdef __ANDROID__
 constexpr uint32_t kConservativeSourceReprimeFrames = 2;
+
+struct FramegenContextBuildConfig {
+    bool performance{false};
+    size_t generationCapacity{0};
+    VkExtent2D extent{};
+    VkFormat format{VK_FORMAT_UNDEFINED};
+    LSFG::AhbTransportMode ahbTransportMode{LSFG::AhbTransportMode::Unsupported};
+    bool adaptiveFlowEnabled{false};
+    AdaptiveFlowPreset adaptiveFlowPreset{AdaptiveFlowPreset::Quality};
+    std::vector<float> adaptiveFlowStates;
+    float initialFlowScale{1.0F};
+    bool hdr{false};
+    LSFG::FramegenSupportDecision supportDecision{};
+    std::string vulkanPath;
+    std::string synchronizationPath;
+    uint32_t spirvTargetVersion{0};
+};
+
+const char* framegenContextCreationReasonName(
+        FramegenContextCreationReason reason) noexcept {
+    switch (reason) {
+        case FramegenContextCreationReason::SwapchainCreate:
+            return "swapchain-create";
+        case FramegenContextCreationReason::SwapchainRecreate:
+            return "swapchain-recreate";
+    }
+    return "unknown";
+}
+
+std::string framegenFlowStateValues(const std::vector<float>& states) {
+    std::ostringstream out;
+    for (size_t i = 0; i < states.size(); ++i) {
+        if (i != 0) out << ',';
+        out << states.at(i);
+    }
+    return out.str();
+}
+
+std::string framegenContextBuildSignature(
+        const FramegenContextBuildConfig& config) {
+    std::ostringstream out;
+    out << config.extent.width << 'x' << config.extent.height
+        << "|format=" << static_cast<uint32_t>(config.format)
+        << "|generation_capacity=" << config.generationCapacity
+        << "|model=" << (config.performance ? "performance" : "quality")
+        << "|hdr=" << (config.hdr ? 1 : 0)
+        << "|adaptive_flow=" << (config.adaptiveFlowEnabled ? 1 : 0)
+        << "|adaptive_flow_preset="
+        << AdaptiveFlowController::presetName(config.adaptiveFlowPreset)
+        << "|flow_states=" << framegenFlowStateValues(config.adaptiveFlowStates)
+        << "|initial_flow_scale=" << config.initialFlowScale
+        << "|transport=" << LSFG::ahbTransportModeName(config.ahbTransportMode)
+        << "|support=" << (config.supportDecision.supported ? 1 : 0)
+        << "|vulkan_path=" << config.vulkanPath
+        << "|sync=" << config.synchronizationPath
+        << "|shader_target=0x" << std::hex << config.spirvTargetVersion << std::dec
+        << "|fp16=" << (config.supportDecision.fp16 ? 1 : 0)
+        << "|null_descriptor=" << (config.supportDecision.nullDescriptor ? 1 : 0)
+        << "|external_sync_fd=" << (config.supportDecision.externalSyncFd ? 1 : 0)
+        << "|external_opaque_fd=" << (config.supportDecision.externalOpaqueFd ? 1 : 0);
+    return out.str();
+}
+
+uint64_t stableDiagnosticHash(std::string_view text) noexcept {
+    uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char ch : text) {
+        hash ^= static_cast<uint64_t>(ch);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
 
 const char* sourceHistoryInvalidationReasonName(
         SourceHistoryInvalidationReason reason) noexcept {
@@ -215,6 +293,8 @@ AdaptiveFlowPreset adaptiveFlowPresetFromConfig(const std::string& preset) {
         return AdaptiveFlowPreset::Balanced;
     if (preset == "low")
         return AdaptiveFlowPreset::Low;
+    if (preset == "auto")
+        return AdaptiveFlowPreset::Auto;
     return AdaptiveFlowPreset::Quality;
 }
 
@@ -251,7 +331,9 @@ double adaptiveFlowFrameBudgetMs(
 struct RuntimePressureSample {
     bool valid{false};
     double gpuUsagePercent{0.0};
-    double outputFps{0.0};
+    bool thermalStatusValid{false};
+    int thermalStatus{0};
+    double sourceFps{0.0};
     double frameTimeP95Ms{0.0};
     double slowFrameRatio{0.0};
 };
@@ -279,7 +361,7 @@ RuntimePressureSample readRuntimePressure(
 
     bool sawTimestamp = false;
     bool sawGpu = false;
-    bool sawOutput = false;
+    bool sawSource = false;
     bool sawFrameTime = false;
     bool sawSlowRatio = false;
     std::string line;
@@ -292,6 +374,8 @@ RuntimePressureSample readRuntimePressure(
         const bool knownKey =
             key == "timestamp_ms"
             || key == "gpu_usage_percent"
+            || key == "thermal_status"
+            || key == "source_fps"
             || key == "output_fps"
             || key == "frame_time_p95_ms"
             || key == "slow_frame_ratio";
@@ -313,9 +397,18 @@ RuntimePressureSample readRuntimePressure(
         } else if (key == "gpu_usage_percent") {
             sample.gpuUsagePercent = parsed;
             sawGpu = true;
+        } else if (key == "thermal_status") {
+            const int thermal = static_cast<int>(parsed);
+            if (parsed == static_cast<double>(thermal) && thermal >= 0 && thermal <= 6) {
+                sample.thermalStatus = thermal;
+                sample.thermalStatusValid = true;
+            }
+        } else if (key == "source_fps") {
+            sample.sourceFps = parsed;
+            sawSource = true;
         } else if (key == "output_fps") {
-            sample.outputFps = parsed;
-            sawOutput = true;
+            // Parsed for forward-compatible record validation only. Output
+            // cadence must never overwrite the source-rate pressure sample.
         } else if (key == "frame_time_p95_ms") {
             sample.frameTimeP95Ms = parsed;
             sawFrameTime = true;
@@ -331,12 +424,12 @@ RuntimePressureSample readRuntimePressure(
     sample.valid =
         sawTimestamp
         && sawGpu
-        && sawOutput
+        && sawSource
         && sawFrameTime
         && sawSlowRatio
         && sample.gpuUsagePercent >= 0.0
         && sample.gpuUsagePercent <= 100.0
-        && sample.outputFps >= 0.0
+        && sample.sourceFps >= 0.0
         && sample.frameTimeP95Ms >= 0.0
         && sample.slowFrameRatio >= 0.0
         && sample.slowFrameRatio <= 1.0;
@@ -588,7 +681,9 @@ void submitAndWaitForAhbHandoff(VkDevice device, Mini::CommandBuffer& commandBuf
 
 LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         VkExtent2D extent, const std::vector<VkImage>& swapchainImages,
-        VkPresentModeKHR presentMode)
+        VkPresentModeKHR presentMode,
+        FramegenContextCreationReason creationReason,
+        std::optional<float> adaptiveFlowScaleSeed)
         : swapchain(swapchain), swapchainImages(swapchainImages),
           presentWaitRetirements_(swapchainImages.size()),
           extent(extent), presentMode_(presentMode),
@@ -649,6 +744,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
     this->adaptiveFlowPreset_ = adaptiveFlowPresetFromConfig(conf.adaptiveFlowPreset);
     this->adaptiveFlowController_.configure(
         conf.adaptiveFlowScale, this->adaptiveFlowPreset_);
+    bool flowScaleSeedApplied = false;
     // Restore the known-good Android WSI contract first. Display-timing hints
     // were introduced together with the Adaptive FIFO override and are kept
     // dormant until their pacing behavior can be validated independently.
@@ -662,21 +758,67 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     std::vector<float> adaptiveFlowScales;
     float initialFlowScale = conf.flowScale;
+    float backendInitialFlowScale = conf.flowScale;
+    std::optional<float> postCreateFlowScale;
     if (conf.adaptiveFlowScale) {
         const auto presetStates =
             AdaptiveFlowController::statesForPreset(this->adaptiveFlowPreset_);
         adaptiveFlowScales.assign(presetStates.begin(), presetStates.end());
-        initialFlowScale = adaptiveFlowScales.front();
+        backendInitialFlowScale = adaptiveFlowScales.front();
+        initialFlowScale = backendInitialFlowScale;
+
+        // Preserve an already-settled Adaptive Flow state across compatible
+        // recreations on both scheduler modes. Only Adaptive Frame Generation
+        // cold starts use the persisted fixed Flow scale as a conservative
+        // starting point; Fixed Multiplier keeps its established preset-target
+        // startup behavior.
+        if (adaptiveFlowScaleSeed.has_value()) {
+            flowScaleSeedApplied = this->adaptiveFlowController_.seedCurrentScale(
+                *adaptiveFlowScaleSeed);
+        } else if (conf.adaptiveFramegen) {
+            const auto conservativeSeed =
+                AdaptiveFlowController::conservativeSeedScale(
+                    this->adaptiveFlowPreset_, conf.flowScale);
+            if (conservativeSeed.has_value()) {
+                flowScaleSeedApplied =
+                    this->adaptiveFlowController_.seedCurrentScale(
+                        *conservativeSeed);
+            }
+        }
+        if (flowScaleSeedApplied)
+            initialFlowScale = this->adaptiveFlowController_.currentScale();
+        const auto startupPlan = lsfg::handoff::planAdaptiveStartup(
+            backendInitialFlowScale, initialFlowScale);
+        backendInitialFlowScale = startupPlan.backendInitialScale;
+        postCreateFlowScale = startupPlan.postCreateScale;
         this->adaptiveFlowRequestedScale_ = initialFlowScale;
-        this->adaptiveFlowActiveScale_ = initialFlowScale;
+        this->adaptiveFlowActiveScale_ = backendInitialFlowScale;
         std::cerr << "lsfg-vk: adaptive-flow-controller enabled=1"
                   << " preset="
                   << AdaptiveFlowController::presetName(this->adaptiveFlowPreset_)
                   << " target=" << presetStates.front()
                   << " minimum=" << presetStates.back()
                   << " states=" << presetStates.size()
+                  << " initial_scale=" << initialFlowScale
+                  << " seed_source="
+                  << (adaptiveFlowScaleSeed.has_value()
+                        ? "handoff"
+                        : (conf.adaptiveFramegen ? "configured" : "preset-target"))
+                  << " handoff=" << (flowScaleSeedApplied ? "applied" : "target")
                   << '\n';
     }
+
+#ifdef __ANDROID__
+    __android_log_print(
+        ANDROID_LOG_INFO, "LSFG_FLOW",
+        "event=context-scale-seed applied=%d adaptive_flow=%d initial_scale=%.3f "
+        "preset=%s context_reason=%s",
+        flowScaleSeedApplied ? 1 : 0,
+        conf.adaptiveFlowScale ? 1 : 0,
+        static_cast<double>(initialFlowScale),
+        AdaptiveFlowController::presetName(this->adaptiveFlowPreset_),
+        framegenContextCreationReasonName(creationReason));
+#endif
 
     LSFG::BackendDiagnostics backendDiagnostics{};
     auto ahbTransportMode = LSFG::AhbTransportMode::Unsupported;
@@ -685,7 +827,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         ScopedLsfgDisable disableRecursiveInterception;
         lsfgInitialize(
             info.identity, format,
-            conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
+            conf.hdr, 1.0F / backendInitialFlowScale, runtimeMultiplier - 1,
             [](const std::string& name) {
                 auto dxbc = Extract::getShader(name);
                 auto spirv = Extract::translateShader(dxbc);
@@ -696,69 +838,266 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         backendDiagnostics = conf.performance
             ? LSFG_3_1P::getBackendDiagnostics()
             : LSFG_3_1::getBackendDiagnostics();
+        this->framegenSupportDecision_ = backendDiagnostics.supportDecision;
         ahbTransportMode = backendDiagnostics.ahbTransportMode;
-        if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported)
-            throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED,
-                "Exact game/framegen ICD has no supported AHB image transport for LSFG format");
+        if (ahbTransportMode == LSFG::AhbTransportMode::Unsupported) {
+            const std::string reason =
+                this->framegenSupportDecision_.rejectionReason.empty()
+                    ? "Exact game/framegen ICD has no supported AHB image transport for LSFG format"
+                    : this->framegenSupportDecision_.rejectionReason;
+            throw LSFG::vulkan_error(VK_ERROR_FORMAT_NOT_SUPPORTED, reason);
+        }
+
+        const FramegenContextBuildConfig buildConfig{
+            .performance = conf.performance,
+            .generationCapacity = runtimeMultiplier - 1,
+            .extent = extent,
+            .format = format,
+            .ahbTransportMode = ahbTransportMode,
+            .adaptiveFlowEnabled = conf.adaptiveFlowScale,
+            .adaptiveFlowPreset = this->adaptiveFlowPreset_,
+            .adaptiveFlowStates = adaptiveFlowScales.empty()
+                ? std::vector<float>{initialFlowScale}
+                : adaptiveFlowScales,
+            .initialFlowScale = backendInitialFlowScale,
+            .hdr = conf.hdr,
+            .supportDecision = backendDiagnostics.supportDecision,
+            .vulkanPath = backendDiagnostics.vulkanPath,
+            .synchronizationPath = backendDiagnostics.synchronizationPath,
+            .spirvTargetVersion = backendDiagnostics.spirvTargetVersion,
+        };
+        const std::string buildSignature =
+            framegenContextBuildSignature(buildConfig);
+        const uint64_t buildSignatureHash = stableDiagnosticHash(buildSignature);
+        const uint64_t contextCreateEpoch =
+            framegenContextCreateEpoch.fetch_add(1, std::memory_order_relaxed) + 1;
+        this->framegenContextCreateEpoch_ = contextCreateEpoch;
+        this->framegenBuildSignatureHash_ = buildSignatureHash;
+
+        const auto buildNow = std::chrono::steady_clock::now();
+        bool duplicateEffectiveBuild = false;
+        double rebuildIntervalMs = -1.0;
+        uint64_t previousContextEpoch = 0;
+        {
+            const std::scoped_lock buildLogLock(framegenContextBuildLogMutex);
+            if (lastFramegenContextBuildTime.time_since_epoch().count() != 0) {
+                rebuildIntervalMs = std::chrono::duration<double, std::milli>(
+                    buildNow - lastFramegenContextBuildTime).count();
+            }
+            previousContextEpoch = lastFramegenContextBuildEpoch;
+            duplicateEffectiveBuild =
+                buildSignature == lastFramegenContextBuildSignature
+                && lastFramegenContextBuildTime.time_since_epoch().count() != 0
+                && buildNow - lastFramegenContextBuildTime
+                    < std::chrono::seconds(2);
+            lastFramegenContextBuildSignature = buildSignature;
+            lastFramegenContextBuildTime = buildNow;
+            lastFramegenContextBuildEpoch = contextCreateEpoch;
+        }
+        const std::string flowStateValues =
+            framegenFlowStateValues(buildConfig.adaptiveFlowStates);
+        const char* creationReasonName =
+            framegenContextCreationReasonName(creationReason);
+
+        std::cerr << "lsfg-vk: framegen-context-create"
+                  << " epoch=" << contextCreateEpoch
+                  << " reason=" << creationReasonName
+                  << " immutable_config=1"
+                  << " duplicate_effective=" << (duplicateEffectiveBuild ? 1 : 0)
+                  << " rebuild_interval_ms=" << rebuildIntervalMs
+                  << " build_signature_hash=" << buildSignatureHash
+                  << " extent=" << buildConfig.extent.width << 'x'
+                  << buildConfig.extent.height
+                  << " format=" << static_cast<uint32_t>(buildConfig.format)
+                  << " generation_capacity=" << buildConfig.generationCapacity
+                  << " model=" << (buildConfig.performance ? "performance" : "quality")
+                  << " hdr=" << (buildConfig.hdr ? 1 : 0)
+                  << " adaptive_flow=" << (buildConfig.adaptiveFlowEnabled ? 1 : 0)
+                  << " adaptive_flow_preset="
+                  << AdaptiveFlowController::presetName(buildConfig.adaptiveFlowPreset)
+                  << " flow_states=" << buildConfig.adaptiveFlowStates.size()
+                  << " flow_state_values=" << flowStateValues
+                  << " transport=" << LSFG::ahbTransportModeName(buildConfig.ahbTransportMode)
+                  << " support=" << (buildConfig.supportDecision.supported ? 1 : 0)
+                  << " vulkan_path=" << buildConfig.vulkanPath
+                  << " sync_path=" << buildConfig.synchronizationPath
+                  << " shader_target=0x" << std::hex
+                  << buildConfig.spirvTargetVersion << std::dec
+                  << " fp16=" << (buildConfig.supportDecision.fp16 ? 1 : 0)
+                  << " null_descriptor="
+                  << (buildConfig.supportDecision.nullDescriptor ? 1 : 0)
+                  << " external_sync_fd="
+                  << (buildConfig.supportDecision.externalSyncFd ? 1 : 0)
+                  << " external_opaque_fd="
+                  << (buildConfig.supportDecision.externalOpaqueFd ? 1 : 0)
+                  << '\n';
+        __android_log_print(
+            ANDROID_LOG_INFO, "LSFG_CONTEXT",
+            "event=create epoch=%llu reason=%s immutable_config=1 duplicate_effective=%d "
+            "rebuild_interval_ms=%.3f build_signature_hash=%llu extent=%ux%u format=%u "
+            "generation_capacity=%zu model=%s hdr=%d adaptive_flow=%d "
+            "adaptive_flow_preset=%s flow_states=%zu flow_state_values=%s transport=%s "
+            "support=%d vulkan_path=%s sync_path=%s shader_target=0x%x fp16=%d "
+            "null_descriptor=%d external_sync_fd=%d external_opaque_fd=%d",
+            static_cast<unsigned long long>(contextCreateEpoch),
+            creationReasonName,
+            duplicateEffectiveBuild ? 1 : 0,
+            rebuildIntervalMs,
+            static_cast<unsigned long long>(buildSignatureHash),
+            buildConfig.extent.width,
+            buildConfig.extent.height,
+            static_cast<unsigned>(buildConfig.format),
+            buildConfig.generationCapacity,
+            buildConfig.performance ? "performance" : "quality",
+            buildConfig.hdr ? 1 : 0,
+            buildConfig.adaptiveFlowEnabled ? 1 : 0,
+            AdaptiveFlowController::presetName(buildConfig.adaptiveFlowPreset),
+            buildConfig.adaptiveFlowStates.size(),
+            flowStateValues.c_str(),
+            LSFG::ahbTransportModeName(buildConfig.ahbTransportMode),
+            buildConfig.supportDecision.supported ? 1 : 0,
+            buildConfig.vulkanPath.c_str(),
+            buildConfig.synchronizationPath.c_str(),
+            buildConfig.spirvTargetVersion,
+            buildConfig.supportDecision.fp16 ? 1 : 0,
+            buildConfig.supportDecision.nullDescriptor ? 1 : 0,
+            buildConfig.supportDecision.externalSyncFd ? 1 : 0,
+            buildConfig.supportDecision.externalOpaqueFd ? 1 : 0);
+        if (duplicateEffectiveBuild) {
+            std::cerr << "lsfg-vk: framegen-context-rebuild-warning"
+                      << " epoch=" << contextCreateEpoch
+                      << " previous_epoch=" << previousContextEpoch
+                      << " effective_config_unchanged=1"
+                      << " rebuild_interval_ms=" << rebuildIntervalMs
+                      << " swapchain_specific_rebuild=1"
+                      << '\n';
+            __android_log_print(
+                ANDROID_LOG_WARN, "LSFG_CONTEXT",
+                "event=rapid-rebuild epoch=%llu previous_epoch=%llu "
+                "effective_config_unchanged=1 rebuild_interval_ms=%.3f "
+                "swapchain_specific_rebuild=1 build_signature_hash=%llu",
+                static_cast<unsigned long long>(contextCreateEpoch),
+                static_cast<unsigned long long>(previousContextEpoch),
+                rebuildIntervalMs,
+                static_cast<unsigned long long>(buildSignatureHash));
+        }
+
+        const auto contextBuildStarted = std::chrono::steady_clock::now();
 
         // Android path: use AHardwareBuffer-backed images for sharing with framegen.
         // The game VkDevice and framegen VkDevice explicitly transfer EXTERNAL
         // ownership around every shared-image access, so this path is valid on
         // stock Android ICDs as well as wrapper/custom drivers.
         this->frame_0 = Mini::Image(info.device, info.physicalDevice,
-            extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-            ahbTransportMode, LSFG::AhbImageRole::Input);
+            buildConfig.extent, buildConfig.format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+            buildConfig.ahbTransportMode, LSFG::AhbImageRole::Input);
         this->frame_1 = Mini::Image(info.device, info.physicalDevice,
-            extent, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-            ahbTransportMode, LSFG::AhbImageRole::Input);
+            buildConfig.extent, buildConfig.format, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+            buildConfig.ahbTransportMode, LSFG::AhbImageRole::Input);
 
-        for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
+        for (size_t i = 0; i < static_cast<size_t>(buildConfig.generationCapacity); ++i)
             this->out_n.emplace_back(info.device, info.physicalDevice,
-                extent, format,
+                buildConfig.extent, buildConfig.format,
                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-                ahbTransportMode, LSFG::AhbImageRole::Output);
+                buildConfig.ahbTransportMode, LSFG::AhbImageRole::Output);
 
         // Create framegen context using AHB sharing
         std::vector<AHardwareBuffer*> outAhbs;
-        outAhbs.reserve(runtimeMultiplier - 1);
-        for (size_t i = 0; i < static_cast<size_t>(runtimeMultiplier - 1); ++i)
+        outAhbs.reserve(buildConfig.generationCapacity);
+        for (size_t i = 0; i < static_cast<size_t>(buildConfig.generationCapacity); ++i)
             outAhbs.push_back(this->out_n.at(i).getAhb());
 
-        if (conf.adaptiveFlowScale) {
+        if (buildConfig.adaptiveFlowEnabled) {
             try {
-                if (conf.performance)
+                if (buildConfig.performance)
                     ctxId = LSFG_3_1P::createAdaptiveContextFromAHB(
                         this->frame_0.getAhb(), this->frame_1.getAhb(),
-                        outAhbs, extent, format, adaptiveFlowScales);
+                        outAhbs, buildConfig.extent, buildConfig.format, buildConfig.adaptiveFlowStates);
                 else
                     ctxId = LSFG_3_1::createAdaptiveContextFromAHB(
                         this->frame_0.getAhb(), this->frame_1.getAhb(),
-                        outAhbs, extent, format, adaptiveFlowScales);
+                        outAhbs, buildConfig.extent, buildConfig.format, buildConfig.adaptiveFlowStates);
+                if (postCreateFlowScale.has_value()) {
+                    if (buildConfig.performance)
+                        LSFG_3_1P::requestContextFlowScale(
+                            ctxId, *postCreateFlowScale);
+                    else
+                        LSFG_3_1::requestContextFlowScale(
+                            ctxId, *postCreateFlowScale);
+
+                    const LSFG::AdaptiveFlowContextState startupState =
+                        buildConfig.performance
+                            ? LSFG_3_1P::getContextFlowScaleState(ctxId)
+                            : LSFG_3_1::getContextFlowScaleState(ctxId);
+                    this->adaptiveFlowRequestedScale_ =
+                        startupState.requestedScale;
+                    this->adaptiveFlowActiveScale_ =
+                        startupState.activeScale;
+                    this->adaptiveFlowWarmupRemaining_ =
+                        startupState.warmupRemaining;
+                    this->adaptiveFlowTransitionPending_ =
+                        startupState.transitionPending;
+                    this->adaptiveFlowStartupSeedPending_ =
+                        startupState.transitionPending;
+                    this->adaptiveFlowCadenceHandoffPending_ =
+                        startupState.transitionPending;
+                    std::cerr
+                        << "lsfg-vk: adaptive-flow-startup-seed"
+                        << " backend_initial=" << backendInitialFlowScale
+                        << " requested=" << *postCreateFlowScale
+                        << " active=" << startupState.activeScale
+                        << " transition="
+                        << (startupState.transitionPending ? 1 : 0)
+                        << " warmup_remaining="
+                        << startupState.warmupRemaining
+                        << '\n';
+                }
                 this->adaptiveFlowRuntimeAvailable_ = true;
             } catch (const std::exception& e) {
                 std::cerr << "lsfg-vk: adaptive-flow-fallback mode=fixed-target"
-                          << " target=" << initialFlowScale
+                          << " target=" << backendInitialFlowScale
                           << " reason=" << e.what() << '\n';
                 this->adaptiveFlowController_.configure(
                     false, this->adaptiveFlowPreset_);
-                if (conf.performance)
+                if (buildConfig.performance)
                     ctxId = LSFG_3_1P::createContextFromAHB(
                         this->frame_0.getAhb(), this->frame_1.getAhb(),
-                        outAhbs, extent, format);
+                        outAhbs, buildConfig.extent, buildConfig.format);
                 else
                     ctxId = LSFG_3_1::createContextFromAHB(
                         this->frame_0.getAhb(), this->frame_1.getAhb(),
-                        outAhbs, extent, format);
+                        outAhbs, buildConfig.extent, buildConfig.format);
             }
-        } else if (conf.performance) {
+        } else if (buildConfig.performance) {
             ctxId = LSFG_3_1P::createContextFromAHB(
                 this->frame_0.getAhb(), this->frame_1.getAhb(),
-                outAhbs, extent, format);
+                outAhbs, buildConfig.extent, buildConfig.format);
         } else {
             ctxId = LSFG_3_1::createContextFromAHB(
                 this->frame_0.getAhb(), this->frame_1.getAhb(),
-                outAhbs, extent, format);
+                outAhbs, buildConfig.extent, buildConfig.format);
         }
+
+        const double contextBuildMs =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - contextBuildStarted).count();
+        std::cerr << "lsfg-vk: framegen-context-ready"
+                  << " epoch=" << contextCreateEpoch
+                  << " build_signature_hash=" << buildSignatureHash
+                  << " context_id=" << ctxId
+                  << " context_build_ms=" << contextBuildMs
+                  << " adaptive_flow_runtime="
+                  << (this->adaptiveFlowRuntimeAvailable_ ? 1 : 0)
+                  << '\n';
+        __android_log_print(
+            ANDROID_LOG_INFO, "LSFG_CONTEXT",
+            "event=ready epoch=%llu build_signature_hash=%llu context_id=%d "
+            "context_build_ms=%.3f adaptive_flow_runtime=%d",
+            static_cast<unsigned long long>(contextCreateEpoch),
+            static_cast<unsigned long long>(buildSignatureHash),
+            ctxId,
+            contextBuildMs,
+            this->adaptiveFlowRuntimeAvailable_ ? 1 : 0);
 
         this->lsfgCtxId = std::shared_ptr<int32_t>(
             new int32_t(ctxId),
@@ -831,12 +1170,10 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood;
 
     // Presentation-engine confirmation is telemetry-only. VK_GOOGLE_display_timing
-    // was already enabled opportunistically at device creation; on Xclipse/generic
-    // paths resolve its asynchronous history query and leave desiredPresentTime=0
-    // so this cannot change present cadence. Keep the device-proven Adreno path
-    // completely untouched.
-    if (info.androidDisplayTimingSupported
-            && !this->conservativeCrossDeviceSync_) {
+    // was already enabled opportunistically at device creation; resolve its
+    // asynchronous history query on every supported Android path and leave
+    // desiredPresentTime=0 so confirmation cannot change present cadence.
+    if (info.androidDisplayTimingSupported) {
         this->getPastPresentationTimingGoogle_ =
             reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
                 Layer::ovkGetDeviceProcAddr(
@@ -965,7 +1302,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     : "native-current")
               << " fixed_generation="
               << (this->conservativeCrossDeviceSync_
-                    ? "requested-ceiling"
+                    ? "requested-count"
                     : "native-current")
               << " behavior_changed=" << (this->compatibilityPath_ == AndroidSyncPolicy::FramegenCompatibilityPath::AdrenoLatestKnownGood ? 1 : 0)
               << '\n';
@@ -1858,6 +2195,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // One-shot context identity marker. Mode-boundary recreation should
         // produce a new backend context id and a new runtime config revision.
         std::cerr << "lsfg-vk: runtime stage=framegen-context-epoch"
+                  << " context_epoch=" << this->framegenContextCreateEpoch_
+                  << " build_signature_hash=" << this->framegenBuildSignatureHash_
                   << " context_id="
                   << (this->lsfgCtxId ? *this->lsfgCtxId : -1)
                   << " config_revision=" << this->configRevision_
@@ -1930,9 +2269,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             : (this->lastDispatchedGeneratedFrameCount_ > 0
                 ? SourceCadenceObservation::Generated
                 : SourceCadenceObservation::SourceOnly);
+    const bool adaptiveFlowTransitionActiveAtCycleStart =
+        conf.adaptiveFlowScale
+        && (this->adaptiveFlowTransitionPending_
+            || this->adaptiveFlowWarmupRemaining_ > 0
+            || this->adaptiveFlowCadenceHandoffPending_);
 
-    // Capacity feedback remains advisory. On generation-first Adreno it is
-    // diagnostics only; configured target demand stays authoritative.
+    // Capacity feedback is advisory in Adaptive mode on generation-first
+    // Adreno. Fixed mode always requests the selected multiplier.
     double capacityIntervalMs = 0.0;
     if (conf.adaptiveFramegen && this->currentSourceTimeline_.valid
             && this->currentSourceTimeline_.intervalNs > 0) {
@@ -1962,22 +2306,33 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         safeGenerationHintValid);
 
     if (conf.adaptiveFramegen)
-        this->fixedSourceCadenceGovernor_.reset();
-    const size_t governedFixedGeneratedFrameCount = conf.adaptiveFramegen
-        ? 0
-        : this->fixedSourceCadenceGovernor_.plan(
+        this->fixedSourceCadenceTracker_.reset();
+    else
+        this->fixedSourceCadenceTracker_.observe(
             sourceInterval,
-            requestedFixedGeneratedFrameCount,
             this->lastDispatchedGeneratedFrameCount_,
             !this->requiresSourceHistoryWarmup_,
             previousSourceCadenceObservation);
     size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
-        ? this->adaptiveScheduler_.plan(sourceInterval)
-        : (generationFirstAdreno
-            ? requestedFixedGeneratedFrameCount
-            : governedFixedGeneratedFrameCount);
+        ? this->adaptiveScheduler_.plan(
+            sourceInterval, adaptiveFlowTransitionActiveAtCycleStart)
+        : requestedFixedGeneratedFrameCount;
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
+    const bool adaptiveFlowStartupSeedCycle =
+        lsfg::handoff::startupSeedHistoryOnly(
+            conf.adaptiveFramegen,
+            this->adaptiveFlowStartupSeedPending_,
+            this->adaptiveFlowTransitionPending_,
+            this->adaptiveFlowWarmupRemaining_);
+    if (adaptiveFlowStartupSeedCycle) {
+        // The adaptive backend was deliberately created at the preset's
+        // primary graph. Commit the requested startup seed through the same
+        // coherent zero-generation history handoff used at runtime before any
+        // synthetic frame can sample that graph.
+        generatedFrameCount = 0;
+        interpolationGenerationCount = 0;
+    }
     const auto& adaptiveTelemetry = this->adaptiveScheduler_.telemetry();
 
     const uint64_t sourceArrivalTimeNs = monotonicNowNs();
@@ -1993,13 +2348,31 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // overwriting the scheduler telemetry used for this cycle's logs.
         this->resetAdaptiveSourceEpoch(
             false, SourceHistoryInvalidationReason::TimelineDiscontinuity);
+        if (generationFirstAdreno) {
+            this->adaptiveSceneTransitionGuard_.arm(true);
+            // Scene-transition recovery is not ordinary lifecycle warmup.
+            // Drive it through two real zero-generation framegen history
+            // cycles so resetTemporalHistory reaches the private backend and
+            // both source slots are reprised before interpolation resumes.
+            this->sourceHistoryWarmupRemaining_ = 0;
+            this->requiresSourceHistoryWarmup_ = false;
+            std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reprime"
+                      << " action=arm"
+                      << " source_only_cycles="
+                      << this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()
+                      << " first_generated_cap=1"
+                      << "\n";
+        }
         this->lsfgOutputCadenceTracker_.configure(
             conf.adaptiveFramegen && conf.fpsLimit > 0,
             conf.adaptiveFramegen ? conf.fpsLimit : 0);
     } else {
         const bool hadValidSourceTimeline = this->currentSourceTimeline_.valid;
         this->currentSourceTimeline_ = this->sourceTimeline_.observe(
-            sourceArrivalTimeNs, sourceInterval, false);
+            sourceArrivalTimeNs,
+            sourceInterval,
+            false,
+            adaptiveFlowTransitionActiveAtCycleStart);
         if (hadValidSourceTimeline
                 && !this->currentSourceTimeline_.valid
                 && sourceInterval.count() > 0) {
@@ -2009,6 +2382,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // across a suspend or translation-layer discontinuity.
             this->resetAdaptiveSourceEpoch(
                 true, SourceHistoryInvalidationReason::TimelineDiscontinuity);
+            if (generationFirstAdreno) {
+                this->adaptiveSceneTransitionGuard_.arm(true);
+                // Scene-transition recovery is not ordinary lifecycle warmup.
+                // Drive it through two real zero-generation framegen history
+                // cycles so resetTemporalHistory reaches the private backend and
+                // both source slots are reprised before interpolation resumes.
+                this->sourceHistoryWarmupRemaining_ = 0;
+                this->requiresSourceHistoryWarmup_ = false;
+                std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reprime"
+                          << " action=arm"
+                          << " source_only_cycles="
+                          << this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()
+                          << " first_generated_cap=1"
+                          << "\n";
+            }
             this->lsfgOutputCadenceTracker_.configure(
                 conf.adaptiveFramegen && conf.fpsLimit > 0,
                 conf.adaptiveFramegen ? conf.fpsLimit : 0);
@@ -2159,6 +2547,23 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    const bool adaptiveFlowTransitionWarmupActive =
+        conf.adaptiveFlowScale
+        && this->adaptiveFlowTransitionPending_
+        && this->adaptiveFlowWarmupRemaining_ > 0;
+    if (adaptiveFlowTransitionWarmupActive) {
+        // The pending graph now receives its bounded history writes through
+        // the backend shadow path. Keep the already-admitted generated batch
+        // flowing during the handoff so the transition does not create a
+        // source-only presentation hole.
+        std::cerr << "lsfg-vk: adaptive-flow-transition-warmup"
+                  << " generated=" << generatedFrameCount
+                  << " output_preserved=" << (generatedFrameCount > 0 ? 1 : 0)
+                  << " warmup_remaining="
+                  << this->adaptiveFlowWarmupRemaining_
+                  << "\n";
+    }
+
     const auto& outputCadenceForPresentation =
         this->lsfgOutputCadenceTracker_.snapshot();
     const bool presentationOutputDeficit =
@@ -2232,6 +2637,37 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    // On protected Adreno, a hard scene/cadence discontinuity first refreshes
+    // both private source slots through zero-generation history cycles. The
+    // first resumed interpolation batch is deliberately capped at one frame so
+    // the new cadence cannot jump directly from 0 -> 3 synthetics.
+    if (conf.adaptiveFramegen
+            && generationFirstAdreno
+            && !sourceHistoryWarmupActive
+            && generatedFrameCount > 0) {
+        const size_t plannedBeforeReacquireCap = generatedFrameCount;
+        const uint32_t reacquireRemainingBefore =
+            this->adaptiveSceneTransitionGuard_.generatedReacquireRemaining();
+        const size_t reacquireCapBefore =
+            this->adaptiveSceneTransitionGuard_.generatedReacquireCap();
+        generatedFrameCount =
+            this->adaptiveSceneTransitionGuard_.limitGenerated(
+                generatedFrameCount);
+        if (reacquireRemainingBefore > 0
+                || generatedFrameCount < plannedBeforeReacquireCap) {
+            std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reacquire"
+                      << " planned=" << plannedBeforeReacquireCap
+                      << " admitted=" << generatedFrameCount
+                      << " cap=" << reacquireCapBefore
+                      << " generated_reacquire_remaining="
+                      << this->adaptiveSceneTransitionGuard_
+                            .generatedReacquireRemaining()
+                      << " source_only_remaining="
+                      << this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()
+                      << "\n";
+        }
+    }
+
     // Admission and presentation-cap limiting are complete before any framegen
     // dispatch. Re-space the surviving batch evenly across the protected source
     // interval; rejected opportunities are consumed and never become catch-up debt.
@@ -2295,6 +2731,12 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->deadlineBatchDecision_.valid
                     ? this->deadlineBatchDecision_.predictedTotalLsfgMs
                     : 0.0,
+            .preserveOutputDuringTransition =
+                adaptiveFlowTransitionWarmupActive && generatedFrameCount > 0,
+            .resetTemporalHistory =
+                conf.adaptiveFramegen
+                && generationFirstAdreno
+                && this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining() == 2,
         };
     };
     if (this->currentSourceTimeline_.valid) {
@@ -2344,10 +2786,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && generatedFrameCount == 0
         && (conservativeFractionalHistoryGap
             || conservativeZeroDemandHistoryGap);
-    // Fixed generation rejection is still a history-maintenance
-    // cycle. Whether the governor planned zero work or deadline admission
-    // reduced planned work to zero, keep the source pair coherent instead of
-    // reclassifying the cycle as a true source-only bypass.
+    // A Fixed zero-generation cycle still needs history maintenance when
+    // output retirement prevents dispatch. Keep the source pair coherent.
     const bool conservativeFixedHistoryGap =
         this->conservativeCrossDeviceSync_
         && !conf.adaptiveFramegen
@@ -2372,6 +2812,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
 
     const auto updateAdaptiveFlowGovernor = [&]() {
+        const bool adaptiveFlowTransitionActive =
+            conf.adaptiveFlowScale
+            && (this->adaptiveFlowTransitionPending_
+                || this->adaptiveFlowWarmupRemaining_ > 0
+                || this->adaptiveFlowCadenceHandoffPending_
+                || std::fabs(
+                    this->adaptiveFlowRequestedScale_
+                    - this->adaptiveFlowActiveScale_) > 0.0005F);
         const LSFG::AdaptiveFlowGpuTiming timing = conf.performance
             ? LSFG_3_1P::getContextGpuTiming(*this->lsfgCtxId)
             : LSFG_3_1::getContextGpuTiming(*this->lsfgCtxId);
@@ -2389,11 +2837,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                           << " mipmaps_ms=" << timing.mipmapsMs
                           << " flow_end_ms=" << timing.opticalFlowMs
                           << " frame_interpolation_end_ms=" << timing.totalLsfgMs
+                          << " shadow_preprocess_submitted="
+                          << (timing.shadowPreprocessSubmitted ? 1 : 0)
+                          << " shadow_mipmaps_ms=" << timing.shadowMipmapsMs
+                          << " shadow_alpha_ms=" << timing.shadowAlphaMs
+                          << " shadow_preprocess_ms=" << timing.shadowPreprocessMs
                           << " generation_count=" << timing.generationCount
                           << '\n';
             }
         }
-        const bool timingUsable = timingFresh && !timing.transitionActive;
+        const bool timingUsable =
+            timingFresh
+            && !timing.transitionActive
+            && !adaptiveFlowTransitionActive;
         const bool generatedWorkSample =
             timingUsable && timing.generationCount > 0;
 
@@ -2434,8 +2890,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->adaptiveFlowGlobalPressureValid_ = pressure.valid;
             this->adaptiveFlowGlobalGpuUsagePercent_ =
                 pressure.valid ? pressure.gpuUsagePercent : 0.0;
-            this->adaptiveFlowGlobalOutputFps_ =
-                pressure.valid ? pressure.outputFps : 0.0;
+            this->adaptiveFlowThermalPressureValid_ =
+                pressure.valid && pressure.thermalStatusValid;
+            this->adaptiveFlowThermalStatus_ =
+                this->adaptiveFlowThermalPressureValid_
+                    ? pressure.thermalStatus : 0;
+            this->adaptiveFlowGlobalSourceFps_ =
+                pressure.valid ? pressure.sourceFps : 0.0;
             this->adaptiveFlowGlobalFrameTimeP95Ms_ =
                 pressure.valid ? pressure.frameTimeP95Ms : 0.0;
             this->adaptiveFlowGlobalSlowFrameRatio_ =
@@ -2452,11 +2913,70 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
         const auto& outputCadence =
             this->lsfgOutputCadenceTracker_.snapshot();
-        const bool outputDeficit =
+        const bool outputCadenceValidForControl =
+            outputCadence.valid && !adaptiveFlowTransitionActive;
+        const bool adaptiveOutputTargeted =
             conf.adaptiveFramegen
             && conf.fpsLimit > 0
-            && outputCadence.valid
-            && outputCadence.deficitConfirmed;
+            && outputCadenceValidForControl;
+        const bool adaptiveOutputDeficit =
+            adaptiveOutputTargeted && outputCadence.deficitConfirmed;
+        constexpr double kFixedMultiplierOutputTolerance = 0.98;
+        const auto& fixedCadenceTelemetry =
+            this->fixedSourceCadenceTracker_.telemetry();
+        // Keep fixed-multiplier pressure anchored to the clean source cadence.
+        // Using the currently degraded source rate would make the target
+        // self-ratchet downward and hide the source-FPS failure from Flow.
+        const double fixedMultiplierBaseSourceFps =
+            !conf.adaptiveFramegen
+            && fixedCadenceTelemetry.baselineValid
+            && fixedCadenceTelemetry.baselineSourceFps > 0.0
+            ? fixedCadenceTelemetry.baselineSourceFps
+            : 0.0;
+        const double observedSourceFps =
+            sourceIntervalMs > 0.0
+            && sourceIntervalMs < kAdaptiveFlowCadenceDiscontinuityMs
+            && std::isfinite(sourceIntervalMs)
+            ? 1000.0 / sourceIntervalMs
+            : 0.0;
+        const double observationSourceFps = conf.adaptiveFramegen
+            ? adaptiveTelemetry.smoothedSourceFps
+            : observedSourceFps;
+        const double fixedMultiplierOutputTargetFps =
+            !conf.adaptiveFramegen
+            && conf.multiplier > 1
+            && fixedMultiplierBaseSourceFps > 0.0
+            ? fixedMultiplierBaseSourceFps
+                * static_cast<double>(conf.multiplier)
+            : 0.0;
+        const bool fixedMultiplierOutputTargeted =
+            outputCadenceValidForControl && fixedMultiplierOutputTargetFps > 0.0;
+        const bool fixedMultiplierOutputSatisfied =
+            fixedMultiplierOutputTargeted
+            && outputCadence.outputFps
+                >= fixedMultiplierOutputTargetFps
+                    * kFixedMultiplierOutputTolerance;
+        const bool fixedMultiplierOutputDeficit =
+            fixedMultiplierOutputTargeted && !fixedMultiplierOutputSatisfied;
+        const bool outputTargetValid =
+            adaptiveOutputTargeted || fixedMultiplierOutputTargeted;
+        const bool outputTargeted = outputTargetValid;
+        const bool outputTargetSatisfied = outputTargetValid
+            && (adaptiveOutputTargeted
+                ? outputCadence.targetSatisfiedConfirmed
+                : fixedMultiplierOutputSatisfied);
+        const double outputTargetFps = adaptiveOutputTargeted
+            ? static_cast<double>(conf.fpsLimit)
+            : fixedMultiplierOutputTargetFps;
+        const bool outputDeficit =
+            adaptiveOutputDeficit || fixedMultiplierOutputDeficit;
+
+        this->adaptiveFlowOutputTargetValid_ = outputTargetValid;
+        this->adaptiveFlowOutputTargeted_ = outputTargeted;
+        this->adaptiveFlowOutputTargetFps_ = outputTargetFps;
+        this->adaptiveFlowOutputTargetSatisfied_ = outputTargetSatisfied;
+        this->adaptiveFlowFixedTargeted_ = fixedMultiplierOutputTargeted;
+        this->adaptiveFlowFixedTargetSatisfied_ = fixedMultiplierOutputSatisfied;
 
         // Keep compute/deadline pressure and downstream WSI pressure separate.
         // A WSI rejection never trains the deadline predictor and only becomes
@@ -2479,7 +2999,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const bool wsiPresentationPressure =
             newWsiDropPressure || presentationCapacity.pressure;
         const bool retainedTimingUsable =
-            this->adaptiveFlowGeneratedTimingValid_
+            !adaptiveFlowTransitionActive
+            && this->adaptiveFlowGeneratedTimingValid_
             && this->adaptiveFlowRetainedGenerationCount_ > 0;
         const double observationMipmapsMs = generatedWorkSample
             ? timing.mipmapsMs : this->adaptiveFlowRetainedMipmapsMs_;
@@ -2514,23 +3035,31 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .computeDeadlinePressure = computeDropPressure,
             .wsiPresentationPressure = wsiPresentationPressure,
             .wsiLossRate = presentationCapacity.wsiRejectionRatio,
-            .sourceFps = adaptiveTelemetry.smoothedSourceFps,
+            .sourceFps = observationSourceFps,
+            .sourceTargetFps = fixedMultiplierBaseSourceFps,
+            .adaptiveFramegenMode = conf.adaptiveFramegen,
+            .scheduledGenerationDensity =
+                adaptiveTelemetry.scheduledGenerationDensity,
+            .fixedMultiplierMode =
+                !conf.adaptiveFramegen && conf.multiplier > 1,
             .outputFps = outputCadence.outputFps,
+            .outputTargetFps = outputTargetFps,
             .outputCadenceValid = outputCadence.valid,
-            .outputTargeted = outputCadence.targeted,
-            .outputTargetSatisfied =
-                outputCadence.targetSatisfiedConfirmed,
+            .outputTargeted = outputTargeted,
+            .outputTargetSatisfied = outputTargetSatisfied,
+            .fixedMultiplierBaseTarget = fixedMultiplierOutputTargeted,
             .globalGpuUsagePercent =
                 this->adaptiveFlowGlobalGpuUsagePercent_,
-            .globalPressureValid =
-                !this->conservativeCrossDeviceSync_
-                && this->adaptiveFlowGlobalPressureValid_,
+            .globalPressureValid = this->adaptiveFlowGlobalPressureValid_,
+            .thermalStatus = this->adaptiveFlowThermalStatus_,
+            .thermalPressureValid = this->adaptiveFlowThermalPressureValid_,
             .outputDeficit = outputDeficit,
             .syntheticDropPressure = false,
             .generatedWorkSample = generatedWorkSample,
             .retainedGeneratedTimingSample =
                 !generatedWorkSample && retainedTimingUsable,
             .schedulerTransition = schedulerTransition,
+            .flowTransition = adaptiveFlowTransitionActive,
             .valid = observationBudgetValid
                 && sourceInterval.count() > 0
                 && retainedTimingUsable
@@ -2558,6 +3087,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // Cost measurements are scale-specific. Never admit a new batch
             // using an estimate learned at the previous Flow Scale.
             this->deadlineAdmissionPredictor_.reset();
+            // A Flow-scale transition invalidates rolling output evidence too:
+            // its bounded history-only cycles are not an output deficit.
+            this->lsfgOutputCadenceTracker_.beginTransition();
+            this->adaptiveFlowCadenceHandoffPending_ = true;
             if (conf.performance)
                 LSFG_3_1P::requestContextFlowScale(
                     *this->lsfgCtxId, selectedScale);
@@ -2568,8 +3101,19 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::cerr << "lsfg-vk: adaptive-flow-decision"
                       << " runtime_session_id=" << this->runtimeSessionId_
                       << " config_revision=" << this->configRevision_
+                      << " preset="
+                      << AdaptiveFlowController::presetName(this->adaptiveFlowPreset_)
+                      << " target=" << flowTelemetry.targetScale
+                      << " minimum=" << flowTelemetry.minimumScale
+                      << " state_index=" << flowTelemetry.stateIndex
+                      << " state_count=" << flowTelemetry.stateCount
                       << " previous=" << previousScale
                       << " requested=" << selectedScale
+                      << " active=" << this->adaptiveFlowActiveScale_
+                      << " transition="
+                      << (this->adaptiveFlowTransitionPending_ ? 1 : 0)
+                      << " warmup_remaining=" << this->adaptiveFlowWarmupRemaining_
+                      << " timing_valid=" << (retainedTimingUsable ? 1 : 0)
                       << " reason="
                       << AdaptiveFlowController::reasonName(flowTelemetry.reason)
                       << " mipmaps_ms=" << observation.mipmapsMs
@@ -2577,15 +3121,46 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " lsfg_ms=" << observation.totalLsfgMs
                       << " budget_ms=" << observation.frameBudgetMs
                       << " generation_count=" << observation.generationCount
+                      << " adaptive_density="
+                      << observation.scheduledGenerationDensity
                       << " generated_work_sample="
                       << (observation.generatedWorkSample ? 1 : 0)
                       << " retained_timing_sample="
                       << (observation.retainedGeneratedTimingSample ? 1 : 0)
+                      << " source_fps=" << observation.sourceFps
+                      << " source_target_fps=" << observation.sourceTargetFps
+                      << " source_pressure="
+                      << (flowTelemetry.sourcePressure ? 1 : 0)
+                      << " source_exploration="
+                      << (flowTelemetry.exploratorySourcePressure ? 1 : 0)
+                      << " source_reference_fps="
+                      << flowTelemetry.sourceReferenceFps
+                      << " fixed_multiplier_mode="
+                      << (observation.fixedMultiplierMode ? 1 : 0)
+                      << " target_fps=" << conf.fpsLimit
+                      << " output_target_valid=" << (outputTargetValid ? 1 : 0)
+                      << " output_targeted=" << (outputTargeted ? 1 : 0)
+                      << " output_target_fps=" << outputTargetFps
+                      << " output_target_satisfied="
+                      << (outputTargetSatisfied ? 1 : 0)
+                      << " output_deficit=" << (outputDeficit ? 1 : 0)
+                      << " multiplier=" << conf.multiplier
+                      << " adaptive=" << (conf.adaptiveFramegen ? 1 : 0)
+                      << " predicted_next_total_ms="
+                      << flowTelemetry.estimatedNextTotalMs
                       << " global_gpu_percent="
                       << observation.globalGpuUsagePercent
                       << " global_pressure_valid="
                       << (observation.globalPressureValid ? 1 : 0)
+                      << " thermal_status=" << observation.thermalStatus
+                      << " thermal_valid="
+                      << (observation.thermalPressureValid ? 1 : 0)
+                      << " thermal_pressure="
+                      << (flowTelemetry.thermalPressure ? 1 : 0)
                       << " output_fps=" << observation.outputFps
+                      << " output_target_fps=" << observation.outputTargetFps
+                      << " fixed_multiplier_base_target="
+                      << (observation.fixedMultiplierBaseTarget ? 1 : 0)
                       << " output_deficit="
                       << (observation.outputDeficit ? 1 : 0)
                       << " output_satisfied="
@@ -2601,29 +3176,77 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 ANDROID_LOG_INFO,
                 "LSFG_FLOW",
                 "runtime_session_id=%llu config_revision=%llu "
-                "previous=%.3f requested=%.3f reason=%s flow_ms=%.3f lsfg_ms=%.3f "
-                "budget_ms=%.3f generation_count=%zu generated_work=%d retained_timing=%d "
-                "gpu=%.1f pressure_valid=%d output_fps=%.3f output_deficit=%d "
+                "preset=%s target=%.3f minimum=%.3f state_index=%zu state_count=%zu "
+                "previous=%.3f requested=%.3f active=%.3f transition=%d "
+                "warmup_remaining=%u timing_valid=%d reason=%s "
+                "source_fps=%.3f source_target_fps=%.3f source_pressure=%d "
+                "source_exploration=%d source_reference_fps=%.3f fixed_multiplier_mode=%d "
+                "target_fps=%u output_target_valid=%d multiplier=%zu adaptive=%d "
+                "predicted_next_total_ms=%.3f flow_ms=%.3f lsfg_ms=%.3f "
+                "budget_ms=%.3f generation_count=%zu adaptive_density=%.3f generated_work=%d retained_timing=%d "
+                "gpu=%.1f pressure_valid=%d output_fps=%.3f output_target_fps=%.3f fixed_base=%d output_deficit=%d "
                 "output_satisfied=%d compute_pressure=%d wsi_pressure=%d wsi_loss_rate=%.3f",
                 static_cast<unsigned long long>(this->runtimeSessionId_),
                 static_cast<unsigned long long>(this->configRevision_),
+                AdaptiveFlowController::presetName(this->adaptiveFlowPreset_),
+                static_cast<double>(flowTelemetry.targetScale),
+                static_cast<double>(flowTelemetry.minimumScale),
+                flowTelemetry.stateIndex,
+                flowTelemetry.stateCount,
                 static_cast<double>(previousScale),
                 static_cast<double>(selectedScale),
+                static_cast<double>(this->adaptiveFlowActiveScale_),
+                this->adaptiveFlowTransitionPending_ ? 1 : 0,
+                this->adaptiveFlowWarmupRemaining_,
+                retainedTimingUsable ? 1 : 0,
                 AdaptiveFlowController::reasonName(flowTelemetry.reason),
+                observation.sourceFps,
+                observation.sourceTargetFps,
+                flowTelemetry.sourcePressure ? 1 : 0,
+                flowTelemetry.exploratorySourcePressure ? 1 : 0,
+                flowTelemetry.sourceReferenceFps,
+                observation.fixedMultiplierMode ? 1 : 0,
+                conf.fpsLimit,
+                outputTargetValid ? 1 : 0,
+                conf.multiplier,
+                conf.adaptiveFramegen ? 1 : 0,
+                flowTelemetry.estimatedNextTotalMs,
                 observation.flowMs,
                 observation.totalLsfgMs,
                 observation.frameBudgetMs,
                 observation.generationCount,
+                observation.scheduledGenerationDensity,
                 observation.generatedWorkSample ? 1 : 0,
                 observation.retainedGeneratedTimingSample ? 1 : 0,
                 observation.globalGpuUsagePercent,
                 observation.globalPressureValid ? 1 : 0,
                 observation.outputFps,
+                observation.outputTargetFps,
+                observation.fixedMultiplierBaseTarget ? 1 : 0,
                 observation.outputDeficit ? 1 : 0,
                 observation.outputTargetSatisfied ? 1 : 0,
                 flowTelemetry.computePressure ? 1 : 0,
                 flowTelemetry.wsiPressure ? 1 : 0,
                 observation.wsiLossRate);
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_FLOW",
+                "context_epoch=%llu build_signature_hash=%llu "
+                "flow_mipmaps_ms=%.3f flow_optical_ms=%.3f flow_lsfg_ms=%.3f "
+                "flow_generation_count=%zu flow_output_target_fps=%.3f "
+                "flow_output_targeted=%d thermal_status=%d thermal_valid=%d "
+                "thermal_pressure=%d",
+                static_cast<unsigned long long>(this->framegenContextCreateEpoch_),
+                static_cast<unsigned long long>(this->framegenBuildSignatureHash_),
+                observation.mipmapsMs,
+                observation.flowMs,
+                observation.totalLsfgMs,
+                observation.generationCount,
+                observation.outputTargetFps,
+                outputTargeted ? 1 : 0,
+                observation.thermalStatus,
+                observation.thermalPressureValid ? 1 : 0,
+                flowTelemetry.thermalPressure ? 1 : 0);
 #endif
         }
 
@@ -2634,6 +3257,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->adaptiveFlowActiveScale_ = state.activeScale;
         this->adaptiveFlowWarmupRemaining_ = state.warmupRemaining;
         this->adaptiveFlowTransitionPending_ = state.transitionPending;
+        if (this->adaptiveFlowStartupSeedPending_
+                && !state.transitionPending
+                && state.warmupRemaining == 0) {
+            this->adaptiveFlowStartupSeedPending_ = false;
+            std::cerr << "lsfg-vk: adaptive-flow-startup-seed-complete"
+                      << " active=" << state.activeScale
+                      << " requested=" << state.requestedScale
+                      << "\n";
+        }
         this->adaptiveFlowTimingValid_ = retainedTimingUsable;
         this->adaptiveFlowMipmapsMs_ =
             retainedTimingUsable ? observationMipmapsMs : 0.0;
@@ -2997,6 +3629,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowHistoryPreprocessHostWaitMs = 0.0;
             metrics.windowDispatchMs = 0.0;
             metrics.windowWaitIdleMs = 0.0;
+            metrics.windowFramegenCompletionWaitMs = 0.0;
             metrics.windowGeneratedPresentMs = 0.0;
             metrics.windowSourceIntervalMs = 0.0;
             metrics.windowSourceIntervalMaxMs = 0.0;
@@ -3018,16 +3651,29 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         // the previous completed one-second metrics window. A pause while this
         // present call is in flight clears stale evidence rather than creating
         // a false output deficit.
+        const bool adaptiveFlowTransitionBackendActiveForCadence =
+            conf.adaptiveFlowScale
+            && (adaptiveFlowTransitionWarmupActive
+                || this->adaptiveFlowTransitionPending_
+                || this->adaptiveFlowWarmupRemaining_ > 0);
+        const bool adaptiveFlowTransitionActiveForCadence =
+            adaptiveFlowTransitionBackendActiveForCadence
+            || this->adaptiveFlowCadenceHandoffPending_;
         if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
             this->lsfgOutputCadenceTracker_.observe(
                 std::chrono::milliseconds(250), 0, 0);
-        } else if (sourceInterval.count() > 0) {
+        } else if (sourceInterval.count() > 0
+                && !adaptiveFlowTransitionActiveForCadence) {
             const size_t cadenceGeneratedFrames =
                 this->deferredAdrenoCompletionEnabled_
                     ? deferredDeliveredGeneratedFrameCount
                     : this->lastGeneratedFrameCount_;
             this->lsfgOutputCadenceTracker_.observe(
                 sourceInterval, 1, cadenceGeneratedFrames);
+        }
+        if (this->adaptiveFlowCadenceHandoffPending_
+                && !adaptiveFlowTransitionBackendActiveForCadence) {
+            this->adaptiveFlowCadenceHandoffPending_ = false;
         }
 
         const double elapsedSeconds = std::chrono::duration<double>(
@@ -3135,6 +3781,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 : 0.0;
             const double dispatchAvgMs = sourceCount > 0.0 ? metrics.windowDispatchMs / sourceCount : 0.0;
             const double waitIdleAvgMs = sourceCount > 0.0 ? metrics.windowWaitIdleMs / sourceCount : 0.0;
+            const double framegenCompletionWaitAvgMs = sourceCount > 0.0
+                ? metrics.windowFramegenCompletionWaitMs / sourceCount : 0.0;
             const double generatedPresentAvgMs = generatedCount > 0.0
                 ? metrics.windowGeneratedPresentMs / generatedCount : 0.0;
             const double sourceIntervalAvgMs = metrics.windowSourceIntervals > 0
@@ -3232,6 +3880,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << metrics.totalHistoryHostCompletions
                       << " framegen_dispatch_avg_ms=" << dispatchAvgMs
                       << " framegen_wait_avg_ms=" << waitIdleAvgMs
+                      << " framegen_completion_wait_avg_ms="
+                      << framegenCompletionWaitAvgMs
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
                       << " source_interval_avg_ms=" << sourceIntervalAvgMs
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
@@ -3286,15 +3936,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " fixed_requested_generated="
                       << requestedFixedGeneratedFrameCount
                       << " fixed_source_baseline_fps="
-                      << this->fixedSourceCadenceGovernor_.telemetry().baselineSourceFps
+                      << this->fixedSourceCadenceTracker_.telemetry().baselineSourceFps
                       << " fixed_source_interval_ratio="
-                      << this->fixedSourceCadenceGovernor_.telemetry().intervalRatio
-                      << " fixed_generation_limit="
-                      << this->fixedSourceCadenceGovernor_.telemetry().generationLimit
-                      << " fixed_source_backoff="
-                      << (this->fixedSourceCadenceGovernor_.telemetry().backedOff ? 1 : 0)
-                      << " fixed_source_raise="
-                      << (this->fixedSourceCadenceGovernor_.telemetry().raised ? 1 : 0)
+                      << this->fixedSourceCadenceTracker_.telemetry().intervalRatio
                       << " adaptive_source_fps=" << adaptiveTelemetry.sourceFps
                       << " adaptive_smoothed_source_fps=" << adaptiveTelemetry.smoothedSourceFps
                       << " adaptive_wanted_generated=" << adaptiveTelemetry.wantedGeneratedFrames
@@ -3334,6 +3978,45 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << this->adaptiveFlowController_.telemetry().targetScale
                       << " adaptive_flow_minimum="
                       << this->adaptiveFlowController_.telemetry().minimumScale
+                      << " adaptive_flow_state_index="
+                      << this->adaptiveFlowController_.telemetry().stateIndex
+                      << " adaptive_flow_state_count="
+                      << this->adaptiveFlowController_.telemetry().stateCount
+                      << " adaptive_flow_predicted_next_total_ms="
+                      << this->adaptiveFlowController_.telemetry().estimatedNextTotalMs
+                      << " adaptive_flow_target_fps=" << conf.fpsLimit
+                      << " adaptive_flow_multiplier=" << conf.multiplier
+                      << " adaptive_flow_adaptive_framegen="
+                      << (conf.adaptiveFramegen ? 1 : 0)
+                      << " adaptive_flow_output_target_valid="
+                       << (this->adaptiveFlowOutputTargetValid_ ? 1 : 0)
+                       << " adaptive_flow_output_targeted="
+                      << (this->adaptiveFlowOutputTargeted_ ? 1 : 0)
+                      << " adaptive_flow_output_target_fps="
+                      << this->adaptiveFlowOutputTargetFps_
+                      << " adaptive_flow_output_target_satisfied="
+                      << (this->adaptiveFlowOutputTargetSatisfied_ ? 1 : 0)
+                      << " adaptive_flow_fixed_targeted="
+                      << (this->adaptiveFlowFixedTargeted_ ? 1 : 0)
+                      << " adaptive_flow_fixed_target_satisfied="
+                      << (this->adaptiveFlowFixedTargetSatisfied_ ? 1 : 0)
+                      << " adaptive_flow_source_target_fps="
+                      << (this->fixedSourceCadenceTracker_.telemetry().baselineValid
+                          ? this->fixedSourceCadenceTracker_.telemetry()
+                                .baselineSourceFps
+                          : 0.0)
+                      << " adaptive_flow_source_pressure="
+                      << (this->adaptiveFlowController_.telemetry()
+                              .sourcePressure
+                          ? 1
+                          : 0)
+                      << " adaptive_flow_source_exploration="
+                      << (this->adaptiveFlowController_.telemetry()
+                              .exploratorySourcePressure
+                          ? 1
+                          : 0)
+                      << " adaptive_flow_source_reference_fps="
+                      << this->adaptiveFlowController_.telemetry().sourceReferenceFps
                       << " adaptive_flow_requested=" << this->adaptiveFlowRequestedScale_
                       << " adaptive_flow_active=" << this->adaptiveFlowActiveScale_
                       << " adaptive_flow_transition="
@@ -3352,8 +4035,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << (this->adaptiveFlowGlobalPressureValid_ ? 1 : 0)
                       << " adaptive_flow_global_gpu_percent="
                       << this->adaptiveFlowGlobalGpuUsagePercent_
-                      << " adaptive_flow_global_output_fps="
-                      << this->adaptiveFlowGlobalOutputFps_
+                      << " adaptive_flow_global_source_fps="
+                      << this->adaptiveFlowGlobalSourceFps_
                       << " adaptive_flow_lsfg_output_valid="
                       << (this->lsfgOutputCadenceTracker_.snapshot().valid ? 1 : 0)
                       << " adaptive_flow_lsfg_output_fps="
@@ -3419,14 +4102,22 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "late=%llu admission=%llu deadline=%llu wsi=%llu cap_drop=%llu "
                 "presentation_cap=%zu presentation_duty=%.3f wsi_reject_ratio=%.3f "
                 "cycle_avg_ms=%.3f cycle_max_ms=%.3f handoff_ms=%.3f dispatch_ms=%.3f "
-                "wait_ms=%.3f source_interval_ms=%.3f source_interval_max_ms=%.3f "
+                "wait_ms=%.3f framegen_completion_wait_ms=%.3f "
+                "source_interval_ms=%.3f source_interval_max_ms=%.3f "
                 "deadline_error_ms=%.3f rebases=%llu "
                 "deadline_semantics=%s compute_ready_budget_ms=%.3f "
                 "presentation_slot_budget_ms=%.3f planned=%zu admitted=%zu "
                 "pred_total_ms=%.3f reserve_ms=%.3f effective_budget_ms=%.3f "
                 "wanted=%.3f cost_limit=%zu final_generated=%zu history_only=%llu "
                 "flow_active=%.3f flow_gpu=%.1f flow_output_fps=%.3f "
-                "flow_deficit=%d flow_reason=%s multiplier=%zu adaptive=%d target=%u",
+                "flow_deficit=%d flow_reason=%s multiplier=%zu adaptive=%d target=%u "
+                "flow_preset=%s flow_target=%.3f flow_minimum=%.3f "
+                "flow_state_index=%zu flow_state_count=%zu "
+                "flow_requested=%.3f flow_transition=%d flow_target_valid=%d "
+                 "flow_warmup_remaining=%u "
+                "flow_timing_valid=%d flow_target_satisfied=%d "
+                "flow_predicted_next_total_ms=%.3f flow_source_fps=%.3f "
+                "flow_budget_ms=%.3f",
                 static_cast<unsigned long long>(this->runtimeSessionId_),
                 static_cast<unsigned long long>(this->configRevision_),
                 sourceFps,
@@ -3446,6 +4137,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 handoffAvgMs,
                 dispatchAvgMs,
                 waitIdleAvgMs,
+                framegenCompletionWaitAvgMs,
                 sourceIntervalAvgMs,
                 metrics.windowSourceIntervalMaxMs,
                 sourceDeadlineErrorAvgMs,
@@ -3469,7 +4161,44 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 AdaptiveFlowController::reasonName(this->adaptiveFlowReason_),
                 conf.multiplier,
                 conf.adaptiveFramegen ? 1 : 0,
-                conf.fpsLimit);
+                conf.fpsLimit,
+                AdaptiveFlowController::presetName(this->adaptiveFlowPreset_),
+                static_cast<double>(this->adaptiveFlowController_.telemetry().targetScale),
+                static_cast<double>(this->adaptiveFlowController_.telemetry().minimumScale),
+                this->adaptiveFlowController_.telemetry().stateIndex,
+                this->adaptiveFlowController_.telemetry().stateCount,
+                static_cast<double>(this->adaptiveFlowRequestedScale_),
+                this->adaptiveFlowTransitionPending_ ? 1 : 0,
+                this->adaptiveFlowOutputTargetValid_ ? 1 : 0,
+                this->adaptiveFlowWarmupRemaining_,
+                this->adaptiveFlowTimingValid_ ? 1 : 0,
+                this->lsfgOutputCadenceTracker_.snapshot().targetSatisfiedConfirmed ? 1 : 0,
+                this->adaptiveFlowController_.telemetry().estimatedNextTotalMs,
+                adaptiveTelemetry.smoothedSourceFps,
+                this->adaptiveFlowBudgetMs_);
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LSFG_METRICS",
+                "context_epoch=%llu build_signature_hash=%llu "
+                "flow_mipmaps_ms=%.3f flow_optical_ms=%.3f flow_lsfg_ms=%.3f "
+                "flow_generation_count=%zu flow_output_target_fps=%.3f "
+                "flow_output_targeted=%d flow_fixed_targeted=%d "
+                "flow_fixed_target_satisfied=%d thermal_status=%d thermal_valid=%d "
+                "thermal_pressure=%d flow_global_gpu_percent=%.1f",
+                static_cast<unsigned long long>(this->framegenContextCreateEpoch_),
+                static_cast<unsigned long long>(this->framegenBuildSignatureHash_),
+                this->adaptiveFlowMipmapsMs_,
+                this->adaptiveFlowWorkMs_,
+                this->adaptiveFlowTotalLsfgMs_,
+                this->adaptiveFlowGenerationCount_,
+                this->adaptiveFlowOutputTargetFps_,
+                this->adaptiveFlowOutputTargeted_ ? 1 : 0,
+                this->adaptiveFlowFixedTargeted_ ? 1 : 0,
+                this->adaptiveFlowFixedTargetSatisfied_ ? 1 : 0,
+                this->adaptiveFlowThermalStatus_,
+                this->adaptiveFlowThermalPressureValid_ ? 1 : 0,
+                this->adaptiveFlowController_.telemetry().thermalPressure ? 1 : 0,
+                this->adaptiveFlowGlobalGpuUsagePercent_);
             __android_log_print(
                 ANDROID_LOG_INFO,
                 "LSFG_METRICS",
@@ -3554,6 +4283,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             metrics.windowHistoryPreprocessHostWaitMs = 0.0;
             metrics.windowDispatchMs = 0.0;
             metrics.windowWaitIdleMs = 0.0;
+            metrics.windowFramegenCompletionWaitMs = 0.0;
             metrics.windowGeneratedPresentMs = 0.0;
             metrics.windowSourceIntervalMs = 0.0;
             metrics.windowSourceIntervalMaxMs = 0.0;
@@ -3711,8 +4441,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adreno_execution=sep18-built\n";
         }
 
-        // The newer governors may create a zero-generation Fixed or Adaptive
-        // cadence gap. Execute it through the same September 18 zero-count
+        // Adaptive scheduling or Fixed output retirement may create a
+        // zero-generation cadence gap. Execute it through the September 18
         // private preprocessing route: source handoff is already host-complete,
         // and the backend's preprocessingFence wait completes before return.
         if (generatedFrameCount == 0 && !sourceHistoryWarmupActive) {
@@ -3781,6 +4511,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 throw LSFG::vulkan_error(
                     sourceResult,
                     "Failed September 18 Adreno zero-generation source present");
+            }
+            if (conf.adaptiveFramegen
+                    && this->adaptiveSceneTransitionGuard_.sourceOnlyRequired()) {
+                this->adaptiveSceneTransitionGuard_.consumeSourceOnly();
+                std::cerr << "lsfg-vk: runtime stage=adaptive-scene-reprime"
+                          << " action=consume"
+                          << " source_only_remaining="
+                          << this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()
+                          << "\n";
             }
             return finishSourcePresent(
                 sourceResult, "pre-copy-adreno-364178af-zero");
@@ -3888,6 +4627,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - waitIdleStart).count();
         metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
+        metrics.windowFramegenCompletionWaitMs += framegenBlockingCompletionMs;
         if (framegenReady && generatedFrameCount > 0) {
             // This is the cost that actually blocks the matching source present
             // on protected Adreno. GPU timestamps omit queue residency and were
@@ -4746,11 +5486,17 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             }
         }
 
+        if (conf.adaptiveFramegen && !generationFirstAdreno)
+            this->deadlineAdmissionPredictor_.observeSourceOnlyRecovery();
         updateAdaptiveFlowGovernor();
         metrics.windowAdaptiveZeroGenerationCycles++;
         metrics.totalAdaptiveZeroGenerationCycles++;
         if (this->sourceHistoryWarmupRemaining_ > 0)
             --this->sourceHistoryWarmupRemaining_;
+        if (this->adaptiveSceneTransitionGuard_.sourceOnlyRequired())
+            this->adaptiveSceneTransitionGuard_.consumeSourceOnly();
+        if (adaptiveFlowStartupSeedCycle)
+            this->adaptiveFlowStartupSeedPending_ = false;
         this->requiresSourceHistoryWarmup_ =
             this->sourceHistoryWarmupRemaining_ > 0;
         this->lastGeneratedFrameCount_ = 0;
@@ -5086,6 +5832,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             std::chrono::duration<double, std::milli>(
                 RuntimeMetrics::Clock::now() - waitIdleStart).count();
         metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
+        metrics.windowFramegenCompletionWaitMs += framegenBlockingCompletionMs;
+    }
+    if (requireHostCompletionWait && framegenReady
+            && generatedFrameCount > 0
+            && framegenBlockingCompletionMs > 0.0) {
+        this->deadlineAdmissionPredictor_.observeBlockingCompletion(
+            generatedFrameCount, framegenBlockingCompletionMs);
     }
     if (requireHostCompletionWait && framegenReady) {
         metrics.windowGeneratedCompleted += generatedFrameCount;
@@ -5572,6 +6325,29 @@ void LsContext::advanceAdaptiveFlowTimingEpoch() {
 void LsContext::resetAdaptiveSourceEpoch(
         bool resetScheduler,
         SourceHistoryInvalidationReason reason) {
+    const float activeFlowScaleBeforeReset = this->adaptiveFlowActiveScale_;
+    const bool preserveActiveFlowScale =
+        this->conservativeCrossDeviceSync_
+        && this->adaptiveFlowRuntimeAvailable_
+        && std::isfinite(activeFlowScaleBeforeReset)
+        && (reason == SourceHistoryInvalidationReason::TimelineDiscontinuity
+            || reason == SourceHistoryInvalidationReason::SuspendResume);
+
+    if (preserveActiveFlowScale
+            && this->adaptiveFlowTransitionPending_
+            && this->lsfgCtxId) {
+        // A scene break invalidates the cadence evidence behind an in-flight
+        // Flow decision. Cancel the pending graph request back to the graph
+        // that was actually active before resetting the outer controller.
+        const auto resetConf = Config::snapshot();
+        if (resetConf.performance)
+            LSFG_3_1P::requestContextFlowScale(
+                *this->lsfgCtxId, activeFlowScaleBeforeReset);
+        else
+            LSFG_3_1::requestContextFlowScale(
+                *this->lsfgCtxId, activeFlowScaleBeforeReset);
+    }
+
     if (this->conservativeCrossDeviceSync_)
     // Any source-timeline epoch change invalidates synthetic pixels produced
     // against the previous cadence/history. Keep the private-device batch
@@ -5587,7 +6363,8 @@ void LsContext::resetAdaptiveSourceEpoch(
 
     if (resetScheduler)
         this->adaptiveScheduler_.reset();
-    this->fixedSourceCadenceGovernor_.reset();
+    this->fixedSourceCadenceTracker_.reset();
+    this->adaptiveSceneTransitionGuard_.reset();
     this->advanceAdaptiveFlowTimingEpoch();
     this->deadlineAdmissionPredictor_.reset();
     this->generatedPresentationCapacityTracker_.reset();
@@ -5615,10 +6392,23 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->runtimeMetrics.lastSourcePresent = {};
 
     this->adaptiveFlowController_.reset();
+    if (preserveActiveFlowScale) {
+        const bool flowScaleRestored =
+            this->adaptiveFlowController_.seedCurrentScale(
+                activeFlowScaleBeforeReset);
+        std::cerr << "lsfg-vk: runtime stage=adaptive-flow-temporal-reset"
+                  << " preserve_active_scale=1"
+                  << " active_before=" << activeFlowScaleBeforeReset
+                  << " restored=" << (flowScaleRestored ? 1 : 0)
+                  << " reason=" << sourceHistoryInvalidationReasonName(reason)
+                  << "\n";
+    }
     this->adaptiveFlowNextPressureRead_ = {};
     this->adaptiveFlowGlobalPressureValid_ = false;
     this->adaptiveFlowGlobalGpuUsagePercent_ = 0.0;
-    this->adaptiveFlowGlobalOutputFps_ = 0.0;
+    this->adaptiveFlowThermalPressureValid_ = false;
+    this->adaptiveFlowThermalStatus_ = 0;
+    this->adaptiveFlowGlobalSourceFps_ = 0.0;
     this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
     this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
     this->adaptiveFlowLastObservedComputeDrops_ =
@@ -5630,10 +6420,16 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->adaptiveFlowWsiPressure_ = false;
     this->adaptiveFlowRequestedScale_ =
         this->adaptiveFlowController_.currentScale();
-    this->adaptiveFlowActiveScale_ =
-        this->adaptiveFlowController_.currentScale();
+    this->adaptiveFlowActiveScale_ = adaptiveFlowController_.currentScale();
     this->adaptiveFlowWarmupRemaining_ = 0;
     this->adaptiveFlowTransitionPending_ = false;
+    this->adaptiveFlowCadenceHandoffPending_ = false;
+    this->adaptiveFlowOutputTargetValid_ = false;
+    this->adaptiveFlowOutputTargeted_ = false;
+    this->adaptiveFlowOutputTargetFps_ = 0.0;
+    this->adaptiveFlowOutputTargetSatisfied_ = false;
+    this->adaptiveFlowFixedTargeted_ = false;
+    this->adaptiveFlowFixedTargetSatisfied_ = false;
     this->adaptiveFlowReason_ =
         this->adaptiveFlowController_.telemetry().reason;
 }
@@ -5654,16 +6450,19 @@ void LsContext::enterSourceOnlyBypass() {
 
     this->advanceAdaptiveFlowTimingEpoch();
     this->adaptiveScheduler_.reset();
-    this->fixedSourceCadenceGovernor_.reset();
+    this->fixedSourceCadenceTracker_.reset();
     this->deadlineAdmissionPredictor_.reset();
     this->adaptiveFlowController_.reset();
+    this->adaptiveSceneTransitionGuard_.reset();
     this->sourceTimeline_.reset();
     this->currentSourceTimeline_ = {};
     this->deadlineBatchDecision_ = {};
     this->adaptiveFlowNextPressureRead_ = {};
     this->adaptiveFlowGlobalPressureValid_ = false;
     this->adaptiveFlowGlobalGpuUsagePercent_ = 0.0;
-    this->adaptiveFlowGlobalOutputFps_ = 0.0;
+    this->adaptiveFlowThermalPressureValid_ = false;
+    this->adaptiveFlowThermalStatus_ = 0;
+    this->adaptiveFlowGlobalSourceFps_ = 0.0;
     this->adaptiveFlowGlobalFrameTimeP95Ms_ = 0.0;
     this->adaptiveFlowGlobalSlowFrameRatio_ = 0.0;
     this->lastGeneratedFrameCount_ = 0;
@@ -5694,6 +6493,13 @@ void LsContext::enterSourceOnlyBypass() {
         this->adaptiveFlowController_.currentScale();
     this->adaptiveFlowWarmupRemaining_ = 0;
     this->adaptiveFlowTransitionPending_ = false;
+    this->adaptiveFlowCadenceHandoffPending_ = false;
+    this->adaptiveFlowOutputTargetValid_ = false;
+    this->adaptiveFlowOutputTargeted_ = false;
+    this->adaptiveFlowOutputTargetFps_ = 0.0;
+    this->adaptiveFlowOutputTargetSatisfied_ = false;
+    this->adaptiveFlowFixedTargeted_ = false;
+    this->adaptiveFlowFixedTargetSatisfied_ = false;
     this->adaptiveFlowReason_ = adaptiveFlowController_.telemetry().reason;
     this->runtimeMetrics.hasLastSourcePresent = false;
     this->runtimeMetrics.lastSourcePresent = {};

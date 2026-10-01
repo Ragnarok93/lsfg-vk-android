@@ -63,12 +63,14 @@ Core::Sampler ResourcePool::getSampler(
     hash |= static_cast<uint64_t>(compare) << 8;
     hash |= static_cast<uint64_t>(isWhite) << 16;
 
-    auto it = samplers.find(hash);
-    if (it != samplers.end())
+    auto& cache = *samplers;
+    auto it = cache.find(hash);
+    if (it != cache.end())
         return it->second;
 
-    // create the sampler
+    // Samplers are immutable and Flow Scale independent, so prepared
+    // Adaptive Flow graphs can safely share this device-local cache.
     Core::Sampler sampler(device, type, compare, isWhite);
-    samplers[hash] = sampler;
+    cache[hash] = sampler;
     return sampler;
 }

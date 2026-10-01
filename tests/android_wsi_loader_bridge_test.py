@@ -214,11 +214,14 @@ class AndroidWsiLoaderBridgeContractTest(unittest.TestCase):
         self.assertIn("Layer::ovkQueuePresentKHR(queue, pPresentInfo)", bypass)
         self.assertNotIn("state->context->present(", bypass)
 
-        # The logical FIFO policy and Xclipse mailbox-backed active WSI path are
-        # protected from this Off-path repair.
-        self.assertIn("xclipseFifoMailboxBacked", hooks)
+        # The logical FIFO policy now uses the same mailbox-backed resident
+        # WSI on targeted Android LSFG generally, so Off stays on that physical
+        # swapchain without a WSI transition.
+        self.assertIn("residentFifoMailboxBacked", hooks)
+        self.assertIn("activeConf.targeted", hooks)
         self.assertIn("configuredPresentMode == VK_PRESENT_MODE_FIFO_KHR", hooks)
         self.assertIn("VK_PRESENT_MODE_MAILBOX_KHR", hooks)
+        self.assertIn("runtime stage=resident-source-only-enter", hooks)
 
         reload_pos = hooks.index("init stage=config-reloaded multiplier=")
         context_lookup_pos = hooks.index("if (!state->context)")

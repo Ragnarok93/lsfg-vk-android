@@ -4,6 +4,7 @@
 #include "core/image.hpp"
 #include "core/device.hpp"
 #include "common/exception.hpp"
+#include "core/resource_stats.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -161,6 +162,7 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     owners.handles.view = viewHandle;
     if (res != VK_SUCCESS || viewHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create image view");
+    recordImageConstruction(static_cast<uint64_t>(memReqs.size));
 
     owners.layout = std::make_shared<VkImageLayout>(VK_IMAGE_LAYOUT_UNDEFINED);
     owners.image = std::shared_ptr<VkImage>(new VkImage(imageHandle),
@@ -283,6 +285,7 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     owners.handles.view = viewHandle;
     if (res != VK_SUCCESS || viewHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create image view");
+    recordImageConstruction(static_cast<uint64_t>(memReqs.size));
 
     owners.layout = std::make_shared<VkImageLayout>(VK_IMAGE_LAYOUT_UNDEFINED);
     owners.image = std::shared_ptr<VkImage>(new VkImage(imageHandle),
@@ -437,6 +440,7 @@ Image::Image(const Core::Device& device, VkExtent2D extent, VkFormat format,
     owners.handles.view = viewHandleAhb;
     if (res != VK_SUCCESS || viewHandleAhb == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Failed to create AHB image view");
+    recordImageConstruction(static_cast<uint64_t>(ahbProps.allocationSize));
 
     // Construct all owners off-object first. If any allocation throws, the
     // bundle releases view, image, and memory in Vulkan dependency order.

@@ -11,6 +11,7 @@
 #include "core/sampler.hpp"
 #include "core/buffer.hpp"
 #include "common/exception.hpp"
+#include "core/resource_stats.hpp"
 
 #include <memory>
 #include <cstdint>
@@ -31,6 +32,7 @@ DescriptorSet::DescriptorSet(const Core::Device& device,
     auto res = vkAllocateDescriptorSets(device.handle(), &desc, &descriptorSetHandle);
     if (res != VK_SUCCESS || descriptorSetHandle == VK_NULL_HANDLE)
         throw LSFG::vulkan_error(res, "Unable to allocate descriptor set");
+    recordDescriptorSetConstruction();
 
     /// store set in shared ptr
     this->descriptorSet = std::shared_ptr<VkDescriptorSet>(

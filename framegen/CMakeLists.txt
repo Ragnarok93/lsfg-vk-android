@@ -53,6 +53,15 @@ if(BUILD_TESTING)
     target_include_directories(lsfg-capabilities-test PRIVATE include)
     target_link_libraries(lsfg-capabilities-test PRIVATE volk)
     add_test(NAME lsfg-capabilities COMMAND lsfg-capabilities-test)
+
+    add_executable(lsfg-spirv-compat-test
+        tests/spirv_compat_test.cpp
+        src/core/spirv_compat.cpp)
+    set_target_properties(lsfg-spirv-compat-test PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON)
+    target_include_directories(lsfg-spirv-compat-test PRIVATE include)
+    add_test(NAME lsfg-spirv-compat COMMAND lsfg-spirv-compat-test)
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

@@ -30,8 +30,10 @@ namespace LSFG::Pool {
         ///
         /// @throws std::runtime_error if the shader pool cannot be created.
         ///
-        ShaderPool(const std::function<std::vector<uint8_t>(const std::string&)>& source)
-            : source(source) {}
+        ShaderPool(
+            const std::function<std::vector<uint8_t>(const std::string&)>& source,
+            uint32_t spirvTargetVersion = 0x00010600u)
+            : source(source), spirvTargetVersion(spirvTargetVersion) {}
 
         ///
         /// Retrieve a shader module by name or create it.
@@ -56,8 +58,12 @@ namespace LSFG::Pool {
         ///
         Core::Pipeline getPipeline(
             const Core::Device& device, const std::string& name);
+
+        [[nodiscard]] size_t shaderCount() const { return shaders.size(); }
+        [[nodiscard]] size_t pipelineCount() const { return pipelines.size(); }
     private:
         std::function<std::vector<uint8_t>(const std::string&)> source;
+        uint32_t spirvTargetVersion{0x00010600u};
         std::unordered_map<std::string, Core::ShaderModule> shaders;
         std::unordered_map<std::string, Core::Pipeline> pipelines;
     };

@@ -36,18 +36,29 @@ struct AdaptiveFlowBatchMetadata {
     uint64_t batchId{0};
     double frameBudgetMs{0.0};
     double predictedTotalLsfgMs{0.0};
+    // A bounded prepared-graph handoff may keep generated output flowing while
+    // the pending graph receives its three source-history writes.
+    bool preserveOutputDuringTransition{false};
+    // Hard scene/cadence discontinuities must overwrite every Alpha temporal
+    // history slot before interpolation resumes, including fixed-flow fallback
+    // contexts that do not own prepared Adaptive Flow graphs.
+    bool resetTemporalHistory{false};
 };
 
 struct AdaptiveFlowGpuTiming {
     double mipmapsMs{0.0};
     double opticalFlowMs{0.0};
     double totalLsfgMs{0.0};
+    double shadowMipmapsMs{0.0};
+    double shadowAlphaMs{0.0};
+    double shadowPreprocessMs{0.0};
     size_t generationCount{0};
     uint64_t sessionEpoch{0};
     uint64_t batchId{0};
     double frameBudgetMs{0.0};
     double predictedTotalLsfgMs{0.0};
     bool transitionActive{false};
+    bool shadowPreprocessSubmitted{false};
     bool valid{false};
 };
 
@@ -59,8 +70,26 @@ struct AndroidFrameSyncFds {
     bool hostWaitFallback{false};
 };
 
+struct FramegenSupportDecision {
+    bool supported{false};
+    std::string vulkanPath;
+    uint32_t spirvTargetVersion{0};
+    std::string synchronizationPath;
+    AhbTransportMode ahbMode{AhbTransportMode::Unsupported};
+    bool fp16{false};
+    bool nullDescriptor{false};
+    bool externalSyncFd{false};
+    bool externalOpaqueFd{false};
+    std::string rejectionReason;
+};
+
 struct BackendDiagnostics {
+    FramegenSupportDecision supportDecision{};
     uint32_t apiVersion{VK_API_VERSION_1_0};
+    uint32_t spirvTargetVersion{0};
+    std::string vulkanPath;
+    std::string synchronizationPath;
+    std::string capabilitySummary;
     uint32_t driverVersion{0};
     VkDriverId driverId{static_cast<VkDriverId>(0)};
     std::string driverName;
