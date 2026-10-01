@@ -216,6 +216,55 @@ int main() {
     }
 
     {
+        // Adaptive-FG quality recovery is a probe, not permission to sacrifice
+        // source cadence. If one higher Flow state turns a stable 30+30 -> 60
+        // regime into ~20 source + ~40 generated -> 60, revert immediately:
+        // average output FPS alone does not make that presentation cadence safe.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
+        assert(controller.seedCurrentScale(0.50F));
+
+        auto healthy = sample(8.0, 2.0, 33.333);
+        healthy.adaptiveFramegenMode = true;
+        healthy.scheduledGenerationDensity = 1.0;
+        healthy.sourceFps = 30.0;
+        healthy.outputCadenceValid = true;
+        healthy.outputTargeted = true;
+        healthy.outputTargetSatisfied = true;
+        healthy.outputFps = 60.0;
+
+        bool raised = false;
+        for (int i = 0; i < 30 && !raised; ++i) {
+            controller.observe(healthy);
+            raised = near(controller.currentScale(), 0.55F);
+        }
+        assert(raised);
+
+        auto transition = healthy;
+        transition.flowTransition = true;
+        controller.observe(transition);
+        for (int i = 0; i < 4; ++i)
+            controller.observe(healthy);
+
+        bool reverted = false;
+        for (int i = 0; i < 12 && !reverted; ++i) {
+            auto degraded = sample(14.0, 3.0, 50.0);
+            degraded.adaptiveFramegenMode = true;
+            degraded.scheduledGenerationDensity = 2.0;
+            degraded.sourceFps = 20.0;
+            degraded.outputCadenceValid = true;
+            degraded.outputTargeted = true;
+            degraded.outputTargetSatisfied = true;
+            degraded.outputFps = 60.0;
+            controller.observe(degraded);
+            reverted = controller.telemetry().reason
+                == AdaptiveFlowDecisionReason::RecoveryPacingReverted;
+        }
+
+        assert(reverted);
+        assert(near(controller.currentScale(), 0.50F));
+    }
+
+    {
         // Sustained pressure with a material scale-sensitive contribution lowers
         // one state, then observes a cooldown instead of cascading immediately.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
