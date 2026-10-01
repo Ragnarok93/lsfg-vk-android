@@ -105,6 +105,33 @@ class AndroidAdaptiveFlowShadowTransitionContractTest(unittest.TestCase):
             self.assertIn("StageCount - 1", source,
                           alpha_source.as_posix())
 
+    def test_scene_discontinuity_can_reseed_active_temporal_history(self) -> None:
+        backend_header = (ROOT / "framegen/public/lsfg_backend.hpp").read_text(
+            encoding="utf-8"
+        )
+        wrapper = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        self.assertIn("resetTemporalHistory", backend_header)
+        self.assertIn(
+            ".resetTemporalHistory = "
+            "this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining() == 2",
+            wrapper,
+        )
+
+        for _, _, context_source, _ in BACKENDS:
+            source = context_source.read_text(encoding="utf-8")
+            self.assertIn("adaptiveFlowBatch.resetTemporalHistory", source)
+            self.assertIn(
+                "dispatchAdaptiveFlowSeedHistory("
+                "\n                data.cmdBuffer1, activeGraph",
+                source,
+                context_source.as_posix(),
+            )
+            self.assertIn(
+                "this->alpha.at(6 - i).SeedHistory",
+                source,
+                context_source.as_posix(),
+            )
+
     def test_gpu_timing_is_available_for_fixed_and_adaptive_flow(self) -> None:
         for _, context_header, context_source, _ in BACKENDS:
             header = context_header.read_text(encoding="utf-8")
