@@ -301,7 +301,7 @@ class AndroidCandidateB14MipmapsTailFusionTest(unittest.TestCase):
         ScopedLsfgDisable disableRecursiveInterception;
         lsfgInitialize(
             info.identity, format,
-            conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
+            conf.hdr, 1.0F / backendInitialFlowScale, runtimeMultiplier - 1,
             [](const std::string& name) {
                 auto dxbc = Extract::getShader(name);
                 auto spirv = Extract::translateShader(dxbc, name);
