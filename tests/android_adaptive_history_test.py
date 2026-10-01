@@ -51,36 +51,57 @@ class AndroidAdaptiveHistoryContractTest(unittest.TestCase):
     def test_protected_adreno_scene_reprime_consumes_both_guard_slots(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
+        # A hard protected-Adreno scene transition must be recovered through
+        # the real zero-generation framegen history path. Ordinary lifecycle
+        # warmup is a source-only compatibility path and cannot seed both
+        # private LSFG source slots or deliver resetTemporalHistory.
+        arm_token = "this->adaptiveSceneTransitionGuard_.arm(true);"
+        arm_offsets = []
+        search_from = 0
+        while True:
+            offset = source.find(arm_token, search_from)
+            if offset < 0:
+                break
+            arm_offsets.append(offset)
+            search_from = offset + len(arm_token)
+        self.assertEqual(len(arm_offsets), 2)
+        for arm_offset in arm_offsets:
+            arm_end = source.index("this->lsfgOutputCadenceTracker_.configure(", arm_offset)
+            arm_block = source[arm_offset:arm_end]
+            self.assertIn("this->sourceHistoryWarmupRemaining_ = 0;", arm_block)
+            self.assertIn("this->requiresSourceHistoryWarmup_ = false;", arm_block)
+            self.assertNotIn("sourceHistoryWarmupRemaining_ = std::max", arm_block)
+
         island_start = source.index("// BEGIN ADRENO_364178AF_EXECUTION")
         island_end = source.index("// END ADRENO_364178AF_EXECUTION", island_start)
         island = source[island_start:island_end]
-        warmup_start = island.index("if (sourceHistoryWarmupActive)")
-        generated_start = island.index(
-            "this->lastDispatchedGeneratedFrameCount_ = generatedFrameCount;",
-            warmup_start,
+        zero_start = island.index(
+            "if (generatedFrameCount == 0 && !sourceHistoryWarmupActive)"
         )
-        warmup = island[warmup_start:generated_start]
+        zero_end = island.index(
+            "// September 18 performs one real-source copy/present warmup",
+            zero_start,
+        )
+        zero_history = island[zero_start:zero_end]
 
+        self.assertIn("presentContextWithCount(", zero_history)
         self.assertIn(
             "adaptiveSceneTransitionGuard_.consumeSourceOnly()",
-            warmup,
-            "Protected Adreno scene reprime must consume one guard slot on each warmup cycle",
+            zero_history,
+            "Each successful protected zero-history cycle must consume exactly one scene-reprime slot",
         )
+        self.assertIn("adaptive-scene-reprime", zero_history)
+        self.assertIn("action=consume", zero_history)
         self.assertIn(
-            "--this->sourceHistoryWarmupRemaining_",
-            warmup,
-            "Scene reprime must advance one protected source cycle at a time",
-        )
-        self.assertNotIn(
-            "this->sourceHistoryWarmupRemaining_ = 0;",
-            warmup,
-            "Clearing history warmup in one shot leaves the independent scene guard permanently armed",
-        )
-        self.assertIn(
-            "this->adaptiveSceneTransitionGuard_.sourceOnlyRequired()",
-            warmup,
+            "this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining()",
+            zero_history,
         )
 
+        self.assertIn(
+            "this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining() == 2",
+            source,
+            "Only the first scene-reprime history cycle should request the hard temporal reset",
+        )
 
     def test_framegen_zero_generation_refreshes_temporal_preprocessing(self) -> None:
         backend_sources = (
