@@ -2320,7 +2320,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     size_t generatedFrameCount = plannedGeneratedFrameCount;
     size_t interpolationGenerationCount = plannedGeneratedFrameCount;
     const bool adaptiveFlowStartupSeedCycle =
-        conf.adaptiveFramegen && this->adaptiveFlowStartupSeedPending_;
+        lsfg::handoff::startupSeedHistoryOnly(
+            conf.adaptiveFramegen,
+            this->adaptiveFlowStartupSeedPending_,
+            this->adaptiveFlowTransitionPending_,
+            this->adaptiveFlowWarmupRemaining_);
     if (adaptiveFlowStartupSeedCycle) {
         // The adaptive backend was deliberately created at the preset's
         // primary graph. Commit the requested startup seed through the same
@@ -3242,6 +3246,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->adaptiveFlowActiveScale_ = state.activeScale;
         this->adaptiveFlowWarmupRemaining_ = state.warmupRemaining;
         this->adaptiveFlowTransitionPending_ = state.transitionPending;
+        if (this->adaptiveFlowStartupSeedPending_
+                && !state.transitionPending
+                && state.warmupRemaining == 0) {
+            this->adaptiveFlowStartupSeedPending_ = false;
+            std::cerr << "lsfg-vk: adaptive-flow-startup-seed-complete"
+                      << " active=" << state.activeScale
+                      << " requested=" << state.requestedScale
+                      << "\n";
+        }
         this->adaptiveFlowTimingValid_ = retainedTimingUsable;
         this->adaptiveFlowMipmapsMs_ =
             retainedTimingUsable ? observationMipmapsMs : 0.0;
