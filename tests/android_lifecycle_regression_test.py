@@ -32,6 +32,36 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         self.assertIn("stage=swapchain-downstream-create-begin", hooks)
         self.assertIn("stage=swapchain-downstream-create-return", hooks)
 
+    def test_null_old_swapchain_recreate_preserves_flow_and_refreshes_config(self) -> None:
+        """Android destroy/create churn must not cold-start Flow or rebuild stale config twice."""
+        hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("DetachedAdaptiveFlowHandoff", hooks)
+        self.assertIn("stashDetachedAdaptiveFlowHandoff", hooks)
+        self.assertIn("takeDetachedAdaptiveFlowHandoff", hooks)
+        self.assertIn("refreshConfigBeforeSwapchainCreate", hooks)
+
+        # Capture the stable controller state before context destruction.
+        destroy = hooks.index("void destroySwapchainStateAfterDownstreamDestroy")
+        destroy_end = hooks.index("void myvkDestroyDevice", destroy)
+        destroy_block = hooks[destroy:destroy_end]
+        self.assertLess(
+            destroy_block.index("stashDetachedAdaptiveFlowHandoff"),
+            destroy_block.index("state->context.reset()"),
+        )
+
+        # Consume the pending handoff even when the application recreates with
+        # oldSwapchain == VK_NULL_HANDLE, and refresh conf.toml before choosing
+        # the new context identity.
+        create = hooks.index("VkResult myvkCreateSwapchainKHR")
+        create_block = hooks[create:create + 9000]
+        self.assertLess(
+            create_block.index("refreshConfigBeforeSwapchainCreate"),
+            create_block.index("const auto activeConf = Config::snapshot()"),
+        )
+        self.assertIn("takeDetachedAdaptiveFlowHandoff", create_block)
+        self.assertIn("pCreateInfo->oldSwapchain == VK_NULL_HANDLE", create_block)
+
     def test_runtime_state_immediately_reports_generation_readiness(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
 
