@@ -2718,6 +2718,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     : 0.0,
             .preserveOutputDuringTransition =
                 adaptiveFlowTransitionWarmupActive && generatedFrameCount > 0,
+            .resetTemporalHistory =
+                conf.adaptiveFramegen
+                && generationFirstAdreno
+                && this->adaptiveSceneTransitionGuard_.sourceOnlyRemaining() == 2,
         };
     };
     if (this->currentSourceTimeline_.valid) {
