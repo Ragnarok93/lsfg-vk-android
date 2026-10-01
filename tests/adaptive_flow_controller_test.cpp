@@ -296,6 +296,13 @@ int main() {
 
         assert(reverted);
         assert(near(controller.currentScale(), 0.50F));
+
+        // Do not immediately retry the same damaging quality probe. Repeated
+        // 0.50 -> 0.55 -> 0.50 cycles would themselves become a periodic
+        // pacing fault even though each individual rollback is correct.
+        for (int i = 0; i < 100; ++i)
+            controller.observe(healthy);
+        assert(near(controller.currentScale(), 0.50F));
     }
 
     {
