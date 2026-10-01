@@ -1000,6 +1000,10 @@ namespace {
                     oldFlow.activeScale,
                     oldFlow.transitionPending,
                     oldFlow.warmupRemaining);
+                if (!adaptiveFlowScaleSeed.has_value()) {
+                    adaptiveFlowScaleSeed = lsfg::handoff::selectEnableScale(
+                        oldIdentity, newIdentity, oldSwapchainConfig.flowScale);
+                }
                 std::cerr << "lsfg-vk: runtime stage=adaptive-flow-handoff"
                           << " runtime_enabled=" << (oldFlow.enabled ? 1 : 0)
                           << " identity_compatible="
