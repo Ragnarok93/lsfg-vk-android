@@ -757,11 +757,14 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
 
     std::vector<float> adaptiveFlowScales;
     float initialFlowScale = conf.flowScale;
+    float backendInitialFlowScale = conf.flowScale;
+    std::optional<float> postCreateFlowScale;
     if (conf.adaptiveFlowScale) {
         const auto presetStates =
             AdaptiveFlowController::statesForPreset(this->adaptiveFlowPreset_);
         adaptiveFlowScales.assign(presetStates.begin(), presetStates.end());
-        initialFlowScale = adaptiveFlowScales.front();
+        backendInitialFlowScale = adaptiveFlowScales.front();
+        initialFlowScale = backendInitialFlowScale;
 
         // Preserve an already-settled Adaptive Flow state across compatible
         // recreations on both scheduler modes. Only Adaptive Frame Generation
@@ -783,8 +786,12 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         }
         if (flowScaleSeedApplied)
             initialFlowScale = this->adaptiveFlowController_.currentScale();
+        const auto startupPlan = lsfg::handoff::planAdaptiveStartup(
+            backendInitialFlowScale, initialFlowScale);
+        backendInitialFlowScale = startupPlan.backendInitialScale;
+        postCreateFlowScale = startupPlan.postCreateScale;
         this->adaptiveFlowRequestedScale_ = initialFlowScale;
-        this->adaptiveFlowActiveScale_ = initialFlowScale;
+        this->adaptiveFlowActiveScale_ = backendInitialFlowScale;
         std::cerr << "lsfg-vk: adaptive-flow-controller enabled=1"
                   << " preset="
                   << AdaptiveFlowController::presetName(this->adaptiveFlowPreset_)
@@ -819,7 +826,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         ScopedLsfgDisable disableRecursiveInterception;
         lsfgInitialize(
             info.identity, format,
-            conf.hdr, 1.0F / initialFlowScale, runtimeMultiplier - 1,
+            conf.hdr, 1.0F / backendInitialFlowScale, runtimeMultiplier - 1,
             [](const std::string& name) {
                 auto dxbc = Extract::getShader(name);
                 auto spirv = Extract::translateShader(dxbc);
@@ -851,7 +858,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             .adaptiveFlowStates = adaptiveFlowScales.empty()
                 ? std::vector<float>{initialFlowScale}
                 : adaptiveFlowScales,
-            .initialFlowScale = initialFlowScale,
+            .initialFlowScale = backendInitialFlowScale,
             .hdr = conf.hdr,
             .supportDecision = backendDiagnostics.supportDecision,
             .vulkanPath = backendDiagnostics.vulkanPath,
@@ -1009,10 +1016,45 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                     ctxId = LSFG_3_1::createAdaptiveContextFromAHB(
                         this->frame_0.getAhb(), this->frame_1.getAhb(),
                         outAhbs, buildConfig.extent, buildConfig.format, buildConfig.adaptiveFlowStates);
+                if (postCreateFlowScale.has_value()) {
+                    if (buildConfig.performance)
+                        LSFG_3_1P::requestContextFlowScale(
+                            ctxId, *postCreateFlowScale);
+                    else
+                        LSFG_3_1::requestContextFlowScale(
+                            ctxId, *postCreateFlowScale);
+
+                    const LSFG::AdaptiveFlowContextState startupState =
+                        buildConfig.performance
+                            ? LSFG_3_1P::getContextFlowScaleState(ctxId)
+                            : LSFG_3_1::getContextFlowScaleState(ctxId);
+                    this->adaptiveFlowRequestedScale_ =
+                        startupState.requestedScale;
+                    this->adaptiveFlowActiveScale_ =
+                        startupState.activeScale;
+                    this->adaptiveFlowWarmupRemaining_ =
+                        startupState.warmupRemaining;
+                    this->adaptiveFlowTransitionPending_ =
+                        startupState.transitionPending;
+                    this->adaptiveFlowStartupSeedPending_ =
+                        startupState.transitionPending;
+                    this->adaptiveFlowCadenceHandoffPending_ =
+                        startupState.transitionPending;
+                    std::cerr
+                        << "lsfg-vk: adaptive-flow-startup-seed"
+                        << " backend_initial=" << backendInitialFlowScale
+                        << " requested=" << *postCreateFlowScale
+                        << " active=" << startupState.activeScale
+                        << " transition="
+                        << (startupState.transitionPending ? 1 : 0)
+                        << " warmup_remaining="
+                        << startupState.warmupRemaining
+                        << '\n';
+                }
                 this->adaptiveFlowRuntimeAvailable_ = true;
             } catch (const std::exception& e) {
                 std::cerr << "lsfg-vk: adaptive-flow-fallback mode=fixed-target"
-                          << " target=" << initialFlowScale
+                          << " target=" << backendInitialFlowScale
                           << " reason=" << e.what() << '\n';
                 this->adaptiveFlowController_.configure(
                     false, this->adaptiveFlowPreset_);
