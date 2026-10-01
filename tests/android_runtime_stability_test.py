@@ -262,6 +262,17 @@ class AndroidRuntimeStabilityContractTest(unittest.TestCase):
         )
         self.assertIn("action=reset-temporal-epoch", discontinuity)
 
+    def test_source_only_bypass_clears_adaptive_source_blocking_feedback(self) -> None:
+        """Resident Off/source-only cannot leak a prior generated wait into re-enable cadence."""
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("void LsContext::enterSourceOnlyBypass()")
+        end = source.index("#endif", start)
+        bypass = source[start:end]
+
+        self.assertIn("adaptiveFlowPreviousSourceBlockingMs_ = 0.0", bypass)
+        self.assertIn("adaptiveScheduler_.reset()", bypass)
+        self.assertIn("sourceTimeline_.reset()", bypass)
+
     def test_present_hook_debounces_fs_and_reuses_wait_storage(self) -> None:
         source = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
         self.assertIn("Clock::time_point nextConfigPoll", source)
