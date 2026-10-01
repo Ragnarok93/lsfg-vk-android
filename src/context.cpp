@@ -133,28 +133,73 @@ void publishHostFrameProvenance(const HostFrameProvenancePacket& packet) noexcep
     if (socketFd < 0)
         return;
 
+    static const std::string configuredSocketPath = []() {
+        const char* value = getenv("LSFG_PROVENANCE_SOCKET_PATH");
+        return value != nullptr ? std::string(value) : std::string();
+    }();
+    static std::atomic<bool> successLogged{false};
+    static std::atomic<unsigned> failureLogs{0};
+
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
-    address.sun_path[0] = '\0';
-    constexpr std::size_t socketNameLength = sizeof(LSFG_PROVENANCE_SOCKET) - 1;
-    static_assert(socketNameLength + 1 <= sizeof(address.sun_path));
-    std::memcpy(address.sun_path + 1, LSFG_PROVENANCE_SOCKET, socketNameLength);
-    const socklen_t addressLength = static_cast<socklen_t>(
-        offsetof(sockaddr_un, sun_path) + 1 + socketNameLength);
+    socklen_t addressLength = 0;
+    const bool filesystemSocket = !configuredSocketPath.empty();
+    if (filesystemSocket) {
+        if (configuredSocketPath.size() >= sizeof(address.sun_path)) {
+            if (failureLogs.fetch_add(1, std::memory_order_relaxed) < 5) {
+                __android_log_print(
+                    ANDROID_LOG_WARN, "LSFG_FRAME_PROVENANCE",
+                    "provenance-socket-send-failed reason=path-too-long length=%zu",
+                    configuredSocketPath.size());
+            }
+            return;
+        }
+        std::memcpy(
+            address.sun_path,
+            configuredSocketPath.c_str(),
+            configuredSocketPath.size() + 1);
+        addressLength = static_cast<socklen_t>(
+            offsetof(sockaddr_un, sun_path)
+            + configuredSocketPath.size() + 1);
+    } else {
+        address.sun_path[0] = '\0';
+        constexpr std::size_t socketNameLength =
+            sizeof(LSFG_PROVENANCE_SOCKET) - 1;
+        static_assert(socketNameLength + 1 <= sizeof(address.sun_path));
+        std::memcpy(
+            address.sun_path + 1,
+            LSFG_PROVENANCE_SOCKET,
+            socketNameLength);
+        addressLength = static_cast<socklen_t>(
+            offsetof(sockaddr_un, sun_path) + 1 + socketNameLength);
+    }
 
     const ssize_t sent = ::sendto(
         socketFd, &packet, sizeof(packet), MSG_DONTWAIT,
         reinterpret_cast<const sockaddr*>(&address), addressLength);
     if (sent != static_cast<ssize_t>(sizeof(packet))) {
         const int error = errno;
-        if (error != ENOENT && error != ECONNREFUSED
-                && error != EAGAIN && error != EWOULDBLOCK) {
-            Utils::logLimitN(
-                "hostFrameProvenance",
-                5,
-                "GameNative provenance send failed: " + std::to_string(error));
+        if (failureLogs.fetch_add(1, std::memory_order_relaxed) < 5) {
+            __android_log_print(
+                ANDROID_LOG_WARN,
+                "LSFG_FRAME_PROVENANCE",
+                "provenance-socket-send-failed errno=%d mode=%s path=%s",
+                error,
+                filesystemSocket ? "filesystem" : "abstract",
+                filesystemSocket ? configuredSocketPath.c_str()
+                                 : LSFG_PROVENANCE_SOCKET);
         }
         return;
+    }
+
+    if (!successLogged.exchange(true, std::memory_order_relaxed)) {
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            "LSFG_FRAME_PROVENANCE",
+            "provenance-socket-send-ok mode=%s path=%s",
+            filesystemSocket ? "filesystem" : "abstract",
+            filesystemSocket ? configuredSocketPath.c_str()
+                             : LSFG_PROVENANCE_SOCKET);
     }
 
     __android_log_print(
@@ -2430,12 +2475,29 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->lastDispatchedGeneratedFrameCount_,
             !this->requiresSourceHistoryWarmup_,
             previousSourceCadenceObservation);
+
+    if (conf.adaptiveFramegen && generationFirstAdreno) {
+        this->adaptiveSourceHealthGuard_.configure(maxAdaptiveGeneratedFrames);
+        this->adaptiveSourceHealthGuard_.observe(
+            sourceInterval,
+            this->lastDispatchedGeneratedFrameCount_,
+            this->lastFramegenBlockingCompletionMs_,
+            !this->requiresSourceHistoryWarmup_);
+    } else {
+        this->adaptiveSourceHealthGuard_.reset();
+    }
+
     size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(
             sourceInterval, adaptiveFlowTransitionActiveAtCycleStart)
         : requestedFixedGeneratedFrameCount;
-    size_t generatedFrameCount = plannedGeneratedFrameCount;
-    size_t interpolationGenerationCount = plannedGeneratedFrameCount;
+    size_t generatedFrameCount =
+        conf.adaptiveFramegen && generationFirstAdreno
+            ? this->adaptiveSourceHealthGuard_.limit(plannedGeneratedFrameCount)
+            : requestedFixedGeneratedFrameCount;
+    if (conf.adaptiveFramegen && !generationFirstAdreno)
+        generatedFrameCount = plannedGeneratedFrameCount;
+    size_t interpolationGenerationCount = generatedFrameCount;
     const bool adaptiveFlowStartupSeedCycle =
         lsfg::handoff::startupSeedHistoryOnly(
             conf.adaptiveFramegen,
@@ -3917,6 +3979,13 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     : 0.0;
             const auto& presentationTelemetry =
                 this->generatedPresentationCapacityTracker_.telemetry();
+            const auto& sourceHealthTelemetry =
+                this->adaptiveSourceHealthGuard_.telemetry();
+            const double effectiveFlowScale = conf.adaptiveFlowScale
+                ? static_cast<double>(this->adaptiveFlowActiveScale_)
+                : static_cast<double>(conf.flowScale);
+            const char* flowMode =
+                conf.adaptiveFlowScale ? "adaptive" : "fixed";
 
             std::cerr << "lsfg-vk: metrics"
                       << " runtime_session_id=" << this->runtimeSessionId_
@@ -4068,7 +4137,20 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " adaptive_density_transition_evidence="
                       << adaptiveTelemetry.densityTransitionEvidence
                       << " adaptive_cost_limit=" << adaptiveTelemetry.costLimit
-                      << " adaptive_final_generated=" << adaptiveTelemetry.generatedFrames
+                      << " adaptive_final_generated=" << generatedFrameCount
+                      << " adaptive_source_health_cap=" << sourceHealthTelemetry.generationCap
+                      << " adaptive_source_health_pressure="
+                      << (sourceHealthTelemetry.pressure ? 1 : 0)
+                      << " adaptive_source_health_completion_ratio="
+                      << sourceHealthTelemetry.completionRatio
+                      << " adaptive_source_health_interval_ratio="
+                      << sourceHealthTelemetry.sourceIntervalRatio
+                      << " adaptive_source_health_baseline_fps="
+                      << sourceHealthTelemetry.baselineSourceFps
+                      << " adaptive_source_health_pressure_evidence="
+                      << sourceHealthTelemetry.pressureEvidence
+                      << " adaptive_source_health_recovery_evidence="
+                      << sourceHealthTelemetry.recoveryEvidence
                       << " adaptive_fractional_phase=" << adaptiveTelemetry.fractionalPhase
                       << " adaptive_synthetic_opportunities="
                       << adaptiveTelemetry.syntheticOpportunitiesCreated
@@ -4134,6 +4216,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                           : 0)
                       << " adaptive_flow_source_reference_fps="
                       << this->adaptiveFlowController_.telemetry().sourceReferenceFps
+                      << " flow_mode=" << flowMode
+                      << " flow_effective=" << effectiveFlowScale
                       << " adaptive_flow_requested=" << this->adaptiveFlowRequestedScale_
                       << " adaptive_flow_active=" << this->adaptiveFlowActiveScale_
                       << " adaptive_flow_transition="
@@ -4226,6 +4310,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "presentation_slot_budget_ms=%.3f planned=%zu admitted=%zu "
                 "pred_total_ms=%.3f reserve_ms=%.3f effective_budget_ms=%.3f "
                 "wanted=%.3f cost_limit=%zu final_generated=%zu history_only=%llu "
+                "adaptive_source_health_cap=%zu adaptive_source_health_pressure=%d "
+                "adaptive_source_health_completion_ratio=%.3f "
+                "adaptive_source_health_interval_ratio=%.3f "
+                "adaptive_source_health_baseline_fps=%.3f "
+                "flow_mode=%s flow_effective=%.3f "
                 "flow_active=%.3f flow_gpu=%.1f flow_output_fps=%.3f "
                 "flow_deficit=%d flow_reason=%s multiplier=%zu adaptive=%d target=%u "
                 "flow_preset=%s flow_target=%.3f flow_minimum=%.3f "
@@ -4269,9 +4358,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->deadlineBatchDecision_.effectiveUsableBudgetMs,
                 adaptiveTelemetry.wantedGeneratedFrames,
                 adaptiveTelemetry.costLimit,
-                adaptiveTelemetry.generatedFrames,
+                generatedFrameCount,
                 static_cast<unsigned long long>(metrics.windowAdaptiveZeroGenerationCycles),
-                static_cast<double>(this->adaptiveFlowActiveScale_),
+                sourceHealthTelemetry.generationCap,
+                sourceHealthTelemetry.pressure ? 1 : 0,
+                sourceHealthTelemetry.completionRatio,
+                sourceHealthTelemetry.sourceIntervalRatio,
+                sourceHealthTelemetry.baselineSourceFps,
+                flowMode,
+                effectiveFlowScale,
+                effectiveFlowScale,
                 this->adaptiveFlowGlobalGpuUsagePercent_,
                 this->lsfgOutputCadenceTracker_.snapshot().outputFps,
                 this->adaptiveFlowController_.telemetry().outputDeficit ? 1 : 0,
@@ -4749,6 +4845,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 RuntimeMetrics::Clock::now() - waitIdleStart).count();
         metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
         metrics.windowFramegenCompletionWaitMs += framegenBlockingCompletionMs;
+        this->lastFramegenBlockingCompletionMs_ =
+            framegenReady && generatedFrameCount > 0
+                ? framegenBlockingCompletionMs
+                : 0.0;
         if (framegenReady && generatedFrameCount > 0) {
             // This is the cost that actually blocks the matching source present
             // on protected Adreno. GPU timestamps omit queue residency and were
@@ -6510,6 +6610,8 @@ void LsContext::resetAdaptiveSourceEpoch(
     if (resetScheduler)
         this->adaptiveScheduler_.reset();
     this->fixedSourceCadenceTracker_.reset();
+    this->adaptiveSourceHealthGuard_.reset();
+    this->lastFramegenBlockingCompletionMs_ = 0.0;
     this->adaptiveSceneTransitionGuard_.reset();
     this->advanceAdaptiveFlowTimingEpoch();
     this->deadlineAdmissionPredictor_.reset();
@@ -6597,6 +6699,8 @@ void LsContext::enterSourceOnlyBypass() {
     this->advanceAdaptiveFlowTimingEpoch();
     this->adaptiveScheduler_.reset();
     this->fixedSourceCadenceTracker_.reset();
+    this->adaptiveSourceHealthGuard_.reset();
+    this->lastFramegenBlockingCompletionMs_ = 0.0;
     this->deadlineAdmissionPredictor_.reset();
     this->adaptiveFlowController_.reset();
     this->adaptiveSceneTransitionGuard_.reset();
