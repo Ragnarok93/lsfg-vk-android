@@ -3737,6 +3737,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pollGeneratedDisplayConfirmations();
         metrics.windowSourceFrames++;
         metrics.totalSourceFrames++;
+        // A source-only cycle is the recovery boundary for the adaptive
+        // source-health guard. Never carry the previous generated batch's
+        // blocking completion cost into the next source-only observation.
+        if (generatedFrameCount == 0)
+            this->lastFramegenBlockingCompletionMs_ = 0.0;
         if (firstPresentDiagnostic) {
             std::cerr << "lsfg-vk: runtime stage=present-sync-ready generatedSignals="
                       << generatedFrameCount << " sourceWait=" << sourceWait << "\n";
