@@ -135,6 +135,8 @@ void Config::updateConfig(const std::string& file) {
             .hdr = toml::find_or(gameTable, "hdr_mode", false),
             .adaptiveFramegen = toml::find_or(gameTable, "adaptive_framegen", false),
             .fpsLimit = toml::find_or(gameTable, "fps_limit", 0U),
+            .frameQueueEnabled = toml::find_or(gameTable, "frame_queue_enabled", false),
+            .frameQueueTarget = toml::find_or(gameTable, "frame_queue_target", 0U),
             .e_present = into_present(toml::find_or(gameTable, "experimental_present_mode", "")),
             .config_file = file,
             .timestamp = global.timestamp
@@ -150,6 +152,8 @@ void Config::updateConfig(const std::string& file) {
             throw std::runtime_error("Adaptive Flow preset must be quality, balanced, low, or auto");
         if (game.adaptiveFramegen && game.fpsLimit == 0)
             throw std::runtime_error("Adaptive frame generation requires a positive fps_limit");
+        if (game.frameQueueTarget > 2)
+            throw std::runtime_error("Frame queue target must be between 0 and 2");
         games[exe] = std::move(game);
     }
 
@@ -191,6 +195,12 @@ Configuration Config::getConfig(const std::pair<std::string, std::string>& name)
         if (adaptive) conf.adaptiveFramegen = std::string(adaptive) == "1";
         const char* fpsLimit = std::getenv("LSFG_FPS_LIMIT");
         if (fpsLimit) conf.fpsLimit = std::stoul(fpsLimit);
+        const char* frameQueueEnabled = std::getenv("LSFG_FRAME_QUEUE_ENABLED");
+        if (frameQueueEnabled) conf.frameQueueEnabled = std::string(frameQueueEnabled) == "1";
+        const char* frameQueueTarget = std::getenv("LSFG_FRAME_QUEUE_TARGET");
+        if (frameQueueTarget) conf.frameQueueTarget = std::stoul(frameQueueTarget);
+        if (conf.frameQueueTarget > 2)
+            throw std::runtime_error("Frame queue target must be between 0 and 2");
         const char* e_present = std::getenv("LSFG_EXPERIMENTAL_PRESENT_MODE");
         if (e_present) conf.e_present = into_present(std::string(e_present));
 

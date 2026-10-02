@@ -38,6 +38,12 @@ namespace Config {
         /// Final output FPS ceiling used by adaptive frame generation.
         uint32_t fpsLimit{0};
 
+        /// GameNative final-present buffering preference. The Vulkan layer only
+        /// carries this metadata for diagnostics; it must never alter generation,
+        /// swapchain ownership, or synchronization policy.
+        bool frameQueueEnabled{false};
+        uint32_t frameQueueTarget{0};
+
         /// Experimental flag for overriding the synchronization method.
         VkPresentModeKHR e_present;
 

@@ -1038,6 +1038,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
                   << buildConfig.extent.height
                   << " format=" << static_cast<uint32_t>(buildConfig.format)
                   << " generation_capacity=" << buildConfig.generationCapacity
+                  << " frame_queue_enabled=" << (conf.frameQueueEnabled ? 1 : 0)
+                  << " frame_queue_target=" << conf.frameQueueTarget
                   << " model=" << (buildConfig.performance ? "performance" : "quality")
                   << " hdr=" << (buildConfig.hdr ? 1 : 0)
                   << " adaptive_flow=" << (buildConfig.adaptiveFlowEnabled ? 1 : 0)
@@ -1063,7 +1065,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             ANDROID_LOG_INFO, "LSFG_CONTEXT",
             "event=create epoch=%llu reason=%s immutable_config=1 duplicate_effective=%d "
             "rebuild_interval_ms=%.3f build_signature_hash=%llu extent=%ux%u format=%u "
-            "generation_capacity=%zu model=%s hdr=%d adaptive_flow=%d "
+            "generation_capacity=%zu frame_queue_enabled=%d frame_queue_target=%u "
+            "model=%s hdr=%d adaptive_flow=%d "
             "adaptive_flow_preset=%s flow_states=%zu flow_state_values=%s transport=%s "
             "support=%d vulkan_path=%s sync_path=%s shader_target=0x%x fp16=%d "
             "null_descriptor=%d external_sync_fd=%d external_opaque_fd=%d",
@@ -1076,6 +1079,8 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             buildConfig.extent.height,
             static_cast<unsigned>(buildConfig.format),
             buildConfig.generationCapacity,
+            conf.frameQueueEnabled ? 1 : 0,
+            conf.frameQueueTarget,
             buildConfig.performance ? "performance" : "quality",
             buildConfig.hdr ? 1 : 0,
             buildConfig.adaptiveFlowEnabled ? 1 : 0,
