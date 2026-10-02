@@ -1062,50 +1062,6 @@ int main() {
     }
 
 
-    {
-        // Adaptive FG on protected Adreno must protect the real source cadence
-        // from the exact Crisis Core failure mode: framegen completion consumes
-        // almost an entire source interval, the source rate falls, and target
-        // demand otherwise asks for even more synthetic work.
-        AdaptiveSourceHealthGuard guard;
-        guard.configure(3);
-        guard.observe(50ms, 0, 0.0, true);
-        assert(guard.telemetry().baselineValid);
-        assert(std::abs(guard.telemetry().baselineSourceFps - 20.0) < 0.01);
-        assert(guard.limit(3) == 3);
-
-        for (int i = 0; i < 6; ++i)
-            guard.observe(95ms, 2, 90.0, true);
-        assert(guard.telemetry().pressure);
-        assert(guard.telemetry().completionRatio > 0.90);
-        assert(guard.telemetry().sourceIntervalRatio > 1.80);
-        assert(guard.limit(3) == 0);
-
-        // Source-only recovery must reopen only a cautious single-frame probe,
-        // not jump immediately back to the target-authoritative density.
-        for (int i = 0; i < 3; ++i)
-            guard.observe(50ms, 0, 0.0, true);
-        assert(!guard.telemetry().pressure);
-        assert(guard.limit(3) == 1);
-
-        // Sustained healthy one-frame probes can restore capacity gradually.
-        for (int i = 0; i < 8; ++i)
-            guard.observe(50ms, 1, 15.0, true);
-        assert(guard.limit(3) == 2);
-    }
-
-    {
-        // Healthy adaptive generation must not be backed off merely because the
-        // source itself is slow. Pressure requires LSFG blocking evidence.
-        AdaptiveSourceHealthGuard guard;
-        guard.configure(3);
-        guard.observe(80ms, 0, 0.0, true);
-        for (int i = 0; i < 12; ++i)
-            guard.observe(82ms, 2, 20.0, true);
-        assert(!guard.telemetry().pressure);
-        assert(guard.limit(3) == 3);
-    }
-
     // Generation-first Adreno executes one synthetic batch inside the real
     // source interval. A fixed 2x request must therefore not compare the
     // complete private-device batch against half of the source interval.

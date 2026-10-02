@@ -2484,17 +2484,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             !this->requiresSourceHistoryWarmup_,
             previousSourceCadenceObservation);
 
-    if (conf.adaptiveFramegen && generationFirstAdreno) {
-        this->adaptiveSourceHealthGuard_.configure(maxAdaptiveGeneratedFrames);
-        this->adaptiveSourceHealthGuard_.observe(
-            sourceInterval,
-            this->lastDispatchedGeneratedFrameCount_,
-            this->lastFramegenBlockingCompletionMs_,
-            !this->requiresSourceHistoryWarmup_);
-    } else {
-        this->adaptiveSourceHealthGuard_.reset();
-    }
-
     size_t plannedGeneratedFrameCount = conf.adaptiveFramegen
         ? this->adaptiveScheduler_.plan(
             sourceInterval, adaptiveFlowTransitionActiveAtCycleStart)
@@ -2502,10 +2491,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     size_t generatedFrameCount = conf.adaptiveFramegen
         ? plannedGeneratedFrameCount
         : requestedFixedGeneratedFrameCount;
-    if (conf.adaptiveFramegen && generationFirstAdreno) {
-        generatedFrameCount = this->adaptiveSourceHealthGuard_.limit(
-            plannedGeneratedFrameCount);
-    }
     size_t interpolationGenerationCount = generatedFrameCount;
     const bool adaptiveFlowStartupSeedCycle =
         lsfg::handoff::startupSeedHistoryOnly(
@@ -3745,11 +3730,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         pollGeneratedDisplayConfirmations();
         metrics.windowSourceFrames++;
         metrics.totalSourceFrames++;
-        // A source-only cycle is the recovery boundary for the adaptive
-        // source-health guard. Never carry the previous generated batch's
-        // blocking completion cost into the next source-only observation.
-        if (generatedFrameCount == 0)
-            this->lastFramegenBlockingCompletionMs_ = 0.0;
         if (firstPresentDiagnostic) {
             std::cerr << "lsfg-vk: runtime stage=present-sync-ready generatedSignals="
                       << generatedFrameCount << " sourceWait=" << sourceWait << "\n";
@@ -3993,8 +3973,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                     : 0.0;
             const auto& presentationTelemetry =
                 this->generatedPresentationCapacityTracker_.telemetry();
-            const auto& sourceHealthTelemetry =
-                this->adaptiveSourceHealthGuard_.telemetry();
             const double effectiveFlowScale = conf.adaptiveFlowScale
                 ? static_cast<double>(this->adaptiveFlowActiveScale_)
                 : static_cast<double>(conf.flowScale);
@@ -4152,19 +4130,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << adaptiveTelemetry.densityTransitionEvidence
                       << " adaptive_cost_limit=" << adaptiveTelemetry.costLimit
                       << " adaptive_final_generated=" << generatedFrameCount
-                      << " adaptive_source_health_cap=" << sourceHealthTelemetry.generationCap
-                      << " adaptive_source_health_pressure="
-                      << (sourceHealthTelemetry.pressure ? 1 : 0)
-                      << " adaptive_source_health_completion_ratio="
-                      << sourceHealthTelemetry.completionRatio
-                      << " adaptive_source_health_interval_ratio="
-                      << sourceHealthTelemetry.sourceIntervalRatio
-                      << " adaptive_source_health_baseline_fps="
-                      << sourceHealthTelemetry.baselineSourceFps
-                      << " adaptive_source_health_pressure_evidence="
-                      << sourceHealthTelemetry.pressureEvidence
-                      << " adaptive_source_health_recovery_evidence="
-                      << sourceHealthTelemetry.recoveryEvidence
                       << " adaptive_fractional_phase=" << adaptiveTelemetry.fractionalPhase
                       << " adaptive_synthetic_opportunities="
                       << adaptiveTelemetry.syntheticOpportunitiesCreated
@@ -4324,10 +4289,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "presentation_slot_budget_ms=%.3f planned=%zu admitted=%zu "
                 "pred_total_ms=%.3f reserve_ms=%.3f effective_budget_ms=%.3f "
                 "wanted=%.3f cost_limit=%zu final_generated=%zu history_only=%llu "
-                "adaptive_source_health_cap=%zu adaptive_source_health_pressure=%d "
-                "adaptive_source_health_completion_ratio=%.3f "
-                "adaptive_source_health_interval_ratio=%.3f "
-                "adaptive_source_health_baseline_fps=%.3f "
                 "flow_mode=%s flow_effective=%.3f "
                 "flow_active=%.3f flow_gpu=%.1f flow_output_fps=%.3f "
                 "flow_deficit=%d flow_reason=%s multiplier=%zu adaptive=%d target=%u "
@@ -4374,11 +4335,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 adaptiveTelemetry.costLimit,
                 generatedFrameCount,
                 static_cast<unsigned long long>(metrics.windowAdaptiveZeroGenerationCycles),
-                sourceHealthTelemetry.generationCap,
-                sourceHealthTelemetry.pressure ? 1 : 0,
-                sourceHealthTelemetry.completionRatio,
-                sourceHealthTelemetry.sourceIntervalRatio,
-                sourceHealthTelemetry.baselineSourceFps,
                 flowMode,
                 effectiveFlowScale,
                 effectiveFlowScale,
@@ -4859,10 +4815,6 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 RuntimeMetrics::Clock::now() - waitIdleStart).count();
         metrics.windowWaitIdleMs += framegenBlockingCompletionMs;
         metrics.windowFramegenCompletionWaitMs += framegenBlockingCompletionMs;
-        this->lastFramegenBlockingCompletionMs_ =
-            framegenReady && generatedFrameCount > 0
-                ? framegenBlockingCompletionMs
-                : 0.0;
         if (framegenReady && generatedFrameCount > 0) {
             // This is the cost that actually blocks the matching source present
             // on protected Adreno. GPU timestamps omit queue residency and were
@@ -6624,8 +6576,6 @@ void LsContext::resetAdaptiveSourceEpoch(
     if (resetScheduler)
         this->adaptiveScheduler_.reset();
     this->fixedSourceCadenceTracker_.reset();
-    this->adaptiveSourceHealthGuard_.reset();
-    this->lastFramegenBlockingCompletionMs_ = 0.0;
     this->adaptiveSceneTransitionGuard_.reset();
     this->advanceAdaptiveFlowTimingEpoch();
     this->deadlineAdmissionPredictor_.reset();
@@ -6713,8 +6663,6 @@ void LsContext::enterSourceOnlyBypass() {
     this->advanceAdaptiveFlowTimingEpoch();
     this->adaptiveScheduler_.reset();
     this->fixedSourceCadenceTracker_.reset();
-    this->adaptiveSourceHealthGuard_.reset();
-    this->lastFramegenBlockingCompletionMs_ = 0.0;
     this->deadlineAdmissionPredictor_.reset();
     this->adaptiveFlowController_.reset();
     this->adaptiveSceneTransitionGuard_.reset();

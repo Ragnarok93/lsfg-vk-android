@@ -250,53 +250,6 @@ private:
 };
 
 
-struct AdaptiveSourceHealthTelemetry {
-    double baselineSourceFps{};
-    double sourceIntervalRatio{1.0};
-    double completionRatio{};
-    std::size_t generationCap{};
-    bool baselineValid{false};
-    bool pressure{false};
-    unsigned pressureEvidence{};
-    unsigned recoveryEvidence{};
-};
-
-/// Protects the real-source cadence on the host-completed Adreno compatibility
-/// path. This is intentionally separate from AdaptiveFrameScheduler: the
-/// scheduler remains target-authoritative, while this guard may cap Adaptive FG
-/// work only when the previous LSFG batch itself consumed a pathological share
-/// of the source interval. Fixed multiplier mode never calls this policy.
-class AdaptiveSourceHealthGuard {
-public:
-    void configure(std::size_t maxGeneratedFrames);
-    void observe(
-        std::chrono::nanoseconds sourceInterval,
-        std::size_t previousGeneratedFrames,
-        double previousCompletionWaitMs,
-        bool generationAllowed);
-    [[nodiscard]] std::size_t limit(std::size_t requested) const;
-    void reset();
-
-    [[nodiscard]] const AdaptiveSourceHealthTelemetry& telemetry() const {
-        return telemetry_;
-    }
-
-private:
-    static constexpr double kSevereCompletionRatio = 0.70;
-    static constexpr double kModerateCompletionRatio = 0.45;
-    static constexpr double kSourceSlowdownRatio = 1.20;
-    static constexpr double kRecoveryIntervalRatio = 1.15;
-    static constexpr unsigned kPressureSamplesPerStep = 2;
-    static constexpr unsigned kSourceOnlyRecoverySamples = 3;
-    static constexpr unsigned kHealthyProbeSamplesPerStep = 8;
-
-    std::size_t maxGeneratedFrames_{0};
-    double baselineIntervalSeconds_{0.0};
-    unsigned pressureStepEvidence_{0};
-    AdaptiveSourceHealthTelemetry telemetry_{};
-};
-
-
 enum class GeneratedPresentationCapChangeReason {
     None,
     RejectionProbe,

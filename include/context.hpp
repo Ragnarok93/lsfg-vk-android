@@ -283,9 +283,7 @@ private:
     AdaptiveFrameScheduler adaptiveScheduler_;
     AdaptiveSceneTransitionGuard adaptiveSceneTransitionGuard_;
     FixedSourceCadenceTracker fixedSourceCadenceTracker_;
-    AdaptiveSourceHealthGuard adaptiveSourceHealthGuard_;
     std::size_t lastDispatchedGeneratedFrameCount_{0};
-    double lastFramegenBlockingCompletionMs_{0.0};
     // Classifies the previous intercepted source cycle for Flow cadence diagnostics.
     SourceCadenceObservation lastSourceCadenceObservation_{
         SourceCadenceObservation::SourceOnly};
