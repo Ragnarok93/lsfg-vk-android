@@ -41,19 +41,23 @@ class AdaptiveFlowRuntimePressureContractTest(unittest.TestCase):
         self.assertIn('" flow_mode="', source)
         self.assertIn('" flow_effective="', source)
 
-    def test_adaptive_source_health_guard_is_adaptive_adreno_only(self) -> None:
+    def test_adaptive_fg_has_no_source_health_generation_cap(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
-        self.assertIn("adaptiveSourceHealthGuard_", source)
+        header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
+        scheduler_header = (ROOT / "include/adaptive_scheduler.hpp").read_text(encoding="utf-8")
+        scheduler_source = (ROOT / "src/adaptive_scheduler.cpp").read_text(encoding="utf-8")
+
+        self.assertNotIn("AdaptiveSourceHealthGuard", scheduler_header)
+        self.assertNotIn("AdaptiveSourceHealthTelemetry", scheduler_header)
+        self.assertNotIn("AdaptiveSourceHealthGuard::", scheduler_source)
+        self.assertNotIn("adaptiveSourceHealthGuard_", header)
+        self.assertNotIn("adaptiveSourceHealthGuard_", source)
+        self.assertNotIn("adaptive_source_health_", source)
+        self.assertNotIn("generatedFrameCount = this->adaptiveSourceHealthGuard_.limit(", source)
         self.assertIn(
-            "conf.adaptiveFramegen && generationFirstAdreno",
-            source,
-        )
-        self.assertIn(
-            "generatedFrameCount = this->adaptiveSourceHealthGuard_.limit(",
-            source,
-        )
-        self.assertIn(
-            ": requestedFixedGeneratedFrameCount;",
+            "size_t generatedFrameCount = conf.adaptiveFramegen\n"
+            "        ? plannedGeneratedFrameCount\n"
+            "        : requestedFixedGeneratedFrameCount;",
             source,
         )
 
