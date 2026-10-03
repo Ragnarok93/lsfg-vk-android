@@ -33,6 +33,25 @@ class AndroidHostDisplayProvenanceTest(unittest.TestCase):
         self.assertIn("framegenContextCreateEpoch_", header)
         self.assertIn(".contextEpoch = this->framegenContextCreateEpoch_", source)
 
+    def test_provenance_v2_carries_exact_temporal_intent(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("kHostFrameProvenanceVersion = 2", source)
+        self.assertIn("desiredPresentTimeNs", source)
+        self.assertIn("desired_present_time_ns=", source)
+        self.assertIn("syntheticDesiredTimeNs", source)
+        self.assertIn("currentSourceTimeline_.sourceDesiredTimeNs", source)
+        self.assertIn("HostFrameKind::Generated, imageIdx", source)
+        self.assertIn("HostFrameKind::Source, presentIdx", source)
+
+    def test_fixed_multiplier_delivery_density_is_not_pressure_backed_off(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("fixedGeneratedFrameCount", source)
+        self.assertIn("conf.multiplier - 1", source)
+        self.assertIn("Fixed multiplier generation is authoritative", source)
+        self.assertNotIn("frameQueue", source[source.index("fixedGeneratedFrameCount") - 500:source.index("fixedGeneratedFrameCount") + 1000])
+
     def test_bridge_is_nonblocking_and_does_not_use_files_per_frame(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         start = source.index("publishHostFrameProvenance")
@@ -48,6 +67,20 @@ class AndroidHostDisplayProvenanceTest(unittest.TestCase):
         self.assertNotIn("ofstream", bridge)
         self.assertNotIn("fwrite", bridge)
         self.assertNotIn("fsync", bridge)
+
+
+    def test_host_display_feedback_is_nonblocking_telemetry_only(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("LSFG_DISPLAY_FEEDBACK_SOCKET", source)
+        self.assertIn("pollHostDisplayFeedback", source)
+        self.assertIn("SOCK_NONBLOCK", source)
+        self.assertIn("MSG_DONTWAIT", source)
+        self.assertIn("host_feedback_generated_confirmed_total=", source)
+        self.assertIn("host_feedback_generated_unknown_total=", source)
+        self.assertIn("host_feedback_source_confirmed_total=", source)
+        self.assertIn("LSFG_HOST_FEEDBACK", source)
+
 
 
 if __name__ == "__main__":
