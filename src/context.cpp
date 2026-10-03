@@ -130,6 +130,176 @@ struct HostFrameProvenancePacket {
 
 static_assert(std::is_trivially_copyable_v<HostFrameProvenancePacket>);
 
+// Telemetry-only return channel from the final GameNative compositor. This
+// never participates in admission, synchronization, generation density, or
+// presentation decisions.
+constexpr char LSFG_DISPLAY_FEEDBACK_SOCKET[] =
+    "gamenative-lsfg-display-feedback-v1";
+constexpr uint32_t kHostDisplayFeedbackMagic = 0x4c534644U; // "LSFD"
+constexpr uint16_t kHostDisplayFeedbackVersion = 1;
+
+enum class HostDisplayFeedbackStatus : uint8_t {
+    Unknown = 0,
+    Confirmed = 1,
+};
+
+struct HostDisplayFeedbackPacket {
+    uint32_t magic{kHostDisplayFeedbackMagic};
+    uint16_t version{kHostDisplayFeedbackVersion};
+    uint8_t status{0};
+    uint8_t kind{0};
+    uint64_t runtimeSessionId{0};
+    uint64_t contextEpoch{0};
+    uint64_t deliveryId{0};
+    uint64_t actualPresentTimeNs{0};
+    uint64_t provenanceDesiredPresentTimeNs{0};
+    uint64_t submittedDesiredPresentTimeNs{0};
+    uint64_t swapchainGeneration{0};
+};
+static_assert(std::is_trivially_copyable_v<HostDisplayFeedbackPacket>);
+
+struct HostDisplayFeedbackStats {
+    uint64_t rxTotal{0};
+    uint64_t generatedConfirmedTotal{0};
+    uint64_t generatedUnknownTotal{0};
+    uint64_t sourceConfirmedTotal{0};
+    uint64_t sourceUnknownTotal{0};
+    uint64_t lastDeliveryId{0};
+    uint64_t lastContextEpoch{0};
+    uint64_t lastSwapchainGeneration{0};
+    uint64_t lastActualPresentTimeNs{0};
+};
+
+HostDisplayFeedbackStats hostDisplayFeedbackStats;
+int hostDisplayFeedbackSocketFd = -2; // -2 = uninitialized, -1 = unavailable.
+
+int ensureHostDisplayFeedbackSocket() noexcept {
+    if (hostDisplayFeedbackSocketFd != -2)
+        return hostDisplayFeedbackSocketFd;
+
+    const int fd = ::socket(
+        AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        hostDisplayFeedbackSocketFd = -1;
+        __android_log_print(
+            ANDROID_LOG_WARN, "LSFG_HOST_FEEDBACK",
+            "host-feedback-bind-failed stage=socket errno=%d", errno);
+        return -1;
+    }
+
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    address.sun_path[0] = '\0';
+    constexpr std::size_t socketNameLength =
+        sizeof(LSFG_DISPLAY_FEEDBACK_SOCKET) - 1;
+    static_assert(socketNameLength + 1 <= sizeof(address.sun_path));
+    std::memcpy(
+        address.sun_path + 1,
+        LSFG_DISPLAY_FEEDBACK_SOCKET,
+        socketNameLength);
+    const socklen_t addressLength = static_cast<socklen_t>(
+        offsetof(sockaddr_un, sun_path) + 1 + socketNameLength);
+    if (::bind(
+            fd, reinterpret_cast<const sockaddr*>(&address),
+            addressLength) != 0) {
+        const int error = errno;
+        ::close(fd);
+        hostDisplayFeedbackSocketFd = -1;
+        __android_log_print(
+            ANDROID_LOG_WARN, "LSFG_HOST_FEEDBACK",
+            "host-feedback-bind-failed stage=bind errno=%d", error);
+        return -1;
+    }
+
+    hostDisplayFeedbackSocketFd = fd;
+    __android_log_print(
+        ANDROID_LOG_INFO, "LSFG_HOST_FEEDBACK",
+        "host-feedback-bind-ok socket=%s",
+        LSFG_DISPLAY_FEEDBACK_SOCKET);
+    return fd;
+}
+
+void pollHostDisplayFeedback() noexcept {
+    const int fd = ensureHostDisplayFeedbackSocket();
+    if (fd < 0)
+        return;
+
+    for (;;) {
+        HostDisplayFeedbackPacket packet{};
+        const ssize_t received = ::recvfrom(
+            fd, &packet, sizeof(packet), MSG_DONTWAIT, nullptr, nullptr);
+        if (received < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                break;
+            __android_log_print(
+                ANDROID_LOG_WARN, "LSFG_HOST_FEEDBACK",
+                "host-feedback-recv-failed errno=%d", errno);
+            break;
+        }
+        if (received != static_cast<ssize_t>(sizeof(packet))
+                || packet.magic != kHostDisplayFeedbackMagic
+                || packet.version != kHostDisplayFeedbackVersion
+                || packet.deliveryId == 0) {
+            continue;
+        }
+
+        ++hostDisplayFeedbackStats.rxTotal;
+        const bool generated =
+            packet.kind == static_cast<uint8_t>(HostFrameKind::Generated);
+        const bool confirmed =
+            packet.status
+                == static_cast<uint8_t>(HostDisplayFeedbackStatus::Confirmed);
+        if (generated) {
+            if (confirmed)
+                ++hostDisplayFeedbackStats.generatedConfirmedTotal;
+            else
+                ++hostDisplayFeedbackStats.generatedUnknownTotal;
+        } else {
+            if (confirmed)
+                ++hostDisplayFeedbackStats.sourceConfirmedTotal;
+            else
+                ++hostDisplayFeedbackStats.sourceUnknownTotal;
+        }
+        hostDisplayFeedbackStats.lastDeliveryId = packet.deliveryId;
+        hostDisplayFeedbackStats.lastContextEpoch = packet.contextEpoch;
+        hostDisplayFeedbackStats.lastSwapchainGeneration =
+            packet.swapchainGeneration;
+        hostDisplayFeedbackStats.lastActualPresentTimeNs =
+            packet.actualPresentTimeNs;
+
+        if (hostDisplayFeedbackStats.rxTotal == 1
+                || hostDisplayFeedbackStats.rxTotal % 120 == 0) {
+            __android_log_print(
+                ANDROID_LOG_INFO, "LSFG_HOST_FEEDBACK",
+                "host_feedback_rx_total=%llu "
+                "host_feedback_generated_confirmed_total=%llu "
+                "host_feedback_generated_unknown_total=%llu "
+                "host_feedback_source_confirmed_total=%llu "
+                "host_feedback_source_unknown_total=%llu "
+                "last_delivery_id=%llu context_epoch=%llu "
+                "swapchain_generation=%llu actual_present_time_ns=%llu",
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.rxTotal),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.generatedConfirmedTotal),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.generatedUnknownTotal),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.sourceConfirmedTotal),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.sourceUnknownTotal),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.lastDeliveryId),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.lastContextEpoch),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.lastSwapchainGeneration),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.lastActualPresentTimeNs));
+        }
+    }
+}
+
 void publishHostFrameProvenance(const HostFrameProvenancePacket& packet) noexcept {
     static const int socketFd = []() noexcept {
         return ::socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
@@ -1860,6 +2030,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const std::vector<VkSemaphore>& gameRenderSemaphores, uint32_t presentIdx) {
     const auto conf = Config::snapshot();
 #ifdef __ANDROID__
+    // Best-effort telemetry only; MSG_DONTWAIT guarantees this cannot stall
+    // guest presentation or the protected cross-device synchronization path.
+    pollHostDisplayFeedback();
     const bool adrenoHostCompletionFallback =
         this->conservativeCrossDeviceSync_
         && this->syntheticQueue_ == VK_NULL_HANDLE
@@ -3906,6 +4079,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                             ? "google-display-timing"
                             : "none")
                       << " generated_delivery_confidence=" << generatedDeliveryConfidence
+                      << " host_feedback_rx_total=" << hostDisplayFeedbackStats.rxTotal
+                      << " host_feedback_generated_confirmed_total="
+                      << hostDisplayFeedbackStats.generatedConfirmedTotal
+                      << " host_feedback_generated_unknown_total="
+                      << hostDisplayFeedbackStats.generatedUnknownTotal
+                      << " host_feedback_source_confirmed_total="
+                      << hostDisplayFeedbackStats.sourceConfirmedTotal
+                      << " host_feedback_source_unknown_total="
+                      << hostDisplayFeedbackStats.sourceUnknownTotal
                       << " history_invalidation_reason="
                       << sourceHistoryInvalidationReasonName(
                             this->lastHistoryInvalidationReason_)
@@ -3924,6 +4106,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 "generated_display_not_shown_total=%llu generated_display_unknown_total=%llu "
                 "display_timing_query_failures=%llu "
                 "generated_delivery_backend=%s generated_delivery_confidence=%s "
+                "host_feedback_rx_total=%llu "
+                "host_feedback_generated_confirmed_total=%llu "
+                "host_feedback_generated_unknown_total=%llu "
+                "host_feedback_source_confirmed_total=%llu "
+                "host_feedback_source_unknown_total=%llu "
                 "history_invalidation_reason=%s history_reprime_reason=%s",
                 static_cast<unsigned long long>(metrics.windowGeneratedDispatched),
                 static_cast<unsigned long long>(metrics.windowGeneratedCompleted),
@@ -3941,6 +4128,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 this->generatedDisplayConfirmationEnabled_
                     ? "google-display-timing" : "none",
                 generatedDeliveryConfidence,
+                static_cast<unsigned long long>(hostDisplayFeedbackStats.rxTotal),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.generatedConfirmedTotal),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.generatedUnknownTotal),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.sourceConfirmedTotal),
+                static_cast<unsigned long long>(
+                    hostDisplayFeedbackStats.sourceUnknownTotal),
                 sourceHistoryInvalidationReasonName(
                     this->lastHistoryInvalidationReason_),
                 sourceHistoryInvalidationReasonName(
