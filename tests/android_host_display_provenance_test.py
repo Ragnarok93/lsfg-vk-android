@@ -69,5 +69,19 @@ class AndroidHostDisplayProvenanceTest(unittest.TestCase):
         self.assertNotIn("fsync", bridge)
 
 
+    def test_host_display_feedback_is_nonblocking_telemetry_only(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("LSFG_DISPLAY_FEEDBACK_SOCKET", source)
+        self.assertIn("pollHostDisplayFeedback", source)
+        self.assertIn("SOCK_NONBLOCK", source)
+        self.assertIn("MSG_DONTWAIT", source)
+        self.assertIn("host_feedback_generated_confirmed_total=", source)
+        self.assertIn("host_feedback_generated_unknown_total=", source)
+        self.assertIn("host_feedback_source_confirmed_total=", source)
+        self.assertIn("LSFG_HOST_FEEDBACK", source)
+
+
+
 if __name__ == "__main__":
     unittest.main()
