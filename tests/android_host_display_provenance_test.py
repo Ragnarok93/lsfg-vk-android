@@ -25,6 +25,22 @@ class AndroidHostDisplayProvenanceTest(unittest.TestCase):
         self.assertIn('kind=generated', source)
         self.assertIn('kind=source', source)
 
+    def test_legacy_implementation_is_explicit_in_runtime_telemetry(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "framegen-context-create implementation=legacy-lsfg-vk",
+            source,
+        )
+        self.assertIn(
+            "delivery-metrics implementation=legacy-lsfg-vk",
+            source,
+        )
+        self.assertIn(
+            "LSFG compatibility path: implementation=legacy-lsfg-vk",
+            source,
+        )
+
     def test_provenance_carries_context_epoch_across_swapchain_recreation(self) -> None:
         header = (ROOT / "include/context.hpp").read_text(encoding="utf-8")
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
