@@ -1202,7 +1202,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
         const char* creationReasonName =
             framegenContextCreationReasonName(creationReason);
 
-        std::cerr << "lsfg-vk: framegen-context-create"
+        std::cerr << "lsfg-vk: framegen-context-create implementation=legacy-lsfg-vk"
                   << " epoch=" << contextCreateEpoch
                   << " reason=" << creationReasonName
                   << " immutable_config=1"
@@ -4056,7 +4056,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                                     : (metrics.windowGeneratedWsiAccepted > 0
                                         ? "wsi-accepted-only"
                                         : "none")));
-            std::cerr << "lsfg-vk: delivery-metrics"
+            std::cerr << "lsfg-vk: delivery-metrics implementation=legacy-lsfg-vk"
                       << " generated_dispatched=" << metrics.windowGeneratedDispatched
                       << " generated_completed=" << metrics.windowGeneratedCompleted
                       << " generated_copy_submitted=" << metrics.windowGeneratedCopySubmitted
