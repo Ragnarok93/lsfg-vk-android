@@ -1562,7 +1562,7 @@ LsContext::LsContext(const Hooks::DeviceInfo& info, VkSwapchainKHR swapchain,
             ? "host-completion+real-copy-fence+wsi-reacquire"
             : (xclipseCompatibilityPath ? "xclipse-current" : "capability-current");
 
-    std::cerr << "lsfg-vk: LSFG compatibility path:"
+    std::cerr << "lsfg-vk: LSFG compatibility path: implementation=legacy-lsfg-vk"
               << " gpu=\"" << gameDeviceProperties.deviceName << "\""
               << " vendor="
               << AndroidSyncPolicy::compatibilityVendorName(
