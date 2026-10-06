@@ -191,6 +191,32 @@ int main() {
     }
 
     {
+        // Adaptive-FG output-target pressure remains authoritative when
+        // presentation pressure is also present. The quality actuator must
+        // reach its preset floor before generation density becomes the next
+        // actuator; otherwise persistent delivery loss can bounce between two
+        // Flow states forever.
+        AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
+        assert(controller.seedCurrentScale(0.50F));
+        for (int i = 0; i < 240; ++i) {
+            auto observation = sample(8.0, 3.0, 33.333);
+            observation.adaptiveFramegenMode = true;
+            observation.outputCadenceValid = true;
+            observation.outputTargeted = true;
+            observation.outputTargetSatisfied = false;
+            observation.outputDeficit = true;
+            observation.outputFps = 30.0;
+            observation.outputTargetFps = 60.0;
+            observation.sourceFps = 30.0;
+            observation.wsiPresentationPressure = true;
+            observation.wsiLossRate = 0.50;
+            controller.observe(observation);
+        }
+        assert(near(controller.currentScale(), 0.25F));
+        assert(controller.telemetry().stateIndex == 15);
+    }
+
+    {
         // Recovery is also one .05 state per confirmed decision. This prevents
         // a quality upstep from skipping over a state whose cost has not yet
         // been measured.
