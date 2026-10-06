@@ -505,7 +505,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         const bool targetPressureRemains =
             (downstepOutputDriven_
                 && directOutputTargetMiss
-                && !downstepBaselineWsiPressure_)
+                && (!downstepBaselineWsiPressure_
+                    || observation.adaptiveFramegenMode))
             || (downstepSourceDriven_ && sourcePressure);
 
         if (downstepExploratorySourceDriven_) {
