@@ -4271,7 +4271,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " generated_present_avg_ms=" << generatedPresentAvgMs
                       << " source_interval_avg_ms=" << sourceIntervalAvgMs
                       << " source_interval_max_ms=" << metrics.windowSourceIntervalMaxMs
-                      << " source_deadline_error_avg_ms="                      << " source_deadline_error_avg_ms=" << sourceDeadlineErrorAvgMs
+                      << " source_deadline_error_avg_ms=" << sourceDeadlineErrorAvgMs
                       << " source_deadline_error_max_ms="
                       << metrics.windowSourceDeadlineErrorMaxMs
                       << " source_timeline_rebases="
