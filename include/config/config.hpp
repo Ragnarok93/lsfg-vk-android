@@ -47,6 +47,9 @@ namespace Config {
         /// Experimental flag for overriding the synchronization method.
         VkPresentModeKHR e_present;
 
+        uint64_t transactionId{0};
+        uint64_t configurationRevision{0};
+
         /// Path to the configuration file.
         std::filesystem::path config_file;
         /// File timestamp of the configuration file

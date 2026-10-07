@@ -809,6 +809,14 @@ int main() {
         assert(!cadence.snapshot().deficitConfirmed);
         assert(cadence.snapshot().targetSatisfiedConfirmed);
 
+        // Confirmed silence is a real output deficit, not unavailable telemetry.
+        for (int i = 0; i < 36; ++i)
+            cadence.observe(33333333ns, 0, 0);
+        assert(cadence.snapshot().valid);
+        assert(cadence.snapshot().outputFps == 0.0);
+        assert(cadence.snapshot().deficitConfirmed);
+        assert(!cadence.snapshot().targetSatisfiedConfirmed);
+
         // A Flow transition's bounded history-only cycles must not retain the
         // preceding deficit/satisfied evidence as if output were continuous.
         cadence.beginTransition();

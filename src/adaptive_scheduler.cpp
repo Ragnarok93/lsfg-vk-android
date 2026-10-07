@@ -891,7 +891,7 @@ void LsfgOutputCadenceTracker::rebuildSnapshot(double evidenceSeconds) {
     snapshot_.targeted = targeted_;
     snapshot_.coverageSeconds = seconds;
     snapshot_.valid =
-        seconds >= kMinimumCoverageSeconds && frames > 0;
+        seconds >= kMinimumCoverageSeconds; // confirmed silence is a measured zero
     snapshot_.outputFps = snapshot_.valid
         ? static_cast<double>(frames) / seconds
         : 0.0;

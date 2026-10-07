@@ -138,6 +138,8 @@ void Config::updateConfig(const std::string& file) {
             .frameQueueEnabled = toml::find_or(gameTable, "frame_queue_enabled", false),
             .frameQueueTarget = toml::find_or(gameTable, "frame_queue_target", 0U),
             .e_present = into_present(toml::find_or(gameTable, "experimental_present_mode", "")),
+            .transactionId = toml::find_or<uint64_t>(gameTable, "transaction_id", 0ULL),
+            .configurationRevision = toml::find_or<uint64_t>(gameTable, "configuration_revision", 0ULL),
             .config_file = file,
             .timestamp = global.timestamp
         };

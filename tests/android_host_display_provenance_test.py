@@ -33,10 +33,10 @@ class AndroidHostDisplayProvenanceTest(unittest.TestCase):
         self.assertIn("framegenContextCreateEpoch_", header)
         self.assertIn(".contextEpoch = this->framegenContextCreateEpoch_", source)
 
-    def test_provenance_v2_carries_exact_temporal_intent(self) -> None:
+    def test_provenance_v3_carries_exact_temporal_intent(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("kHostFrameProvenanceVersion = 2", source)
+        self.assertIn("kHostFrameProvenanceVersion = 3", source)
         self.assertIn("desiredPresentTimeNs", source)
         self.assertIn("desired_present_time_ns=", source)
         self.assertIn("syntheticDesiredTimeNs", source)
@@ -69,11 +69,15 @@ class AndroidHostDisplayProvenanceTest(unittest.TestCase):
         self.assertNotIn("fsync", bridge)
 
 
-    def test_host_display_feedback_is_nonblocking_telemetry_only(self) -> None:
+    def test_host_display_feedback_is_nonblocking_and_revision_filtered(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
 
         self.assertIn("LSFG_DISPLAY_FEEDBACK_SOCKET", source)
         self.assertIn("pollHostDisplayFeedback", source)
+        self.assertIn("packet.configurationRevision != conf.configurationRevision", source)
+        self.assertIn("packet.contextEpoch != contextEpoch", source)
+        self.assertIn("hostDisplayFeedbackStats.sourceConfirmedDelta", source)
+        self.assertIn("hostDisplayFeedbackStats.generatedConfirmedDelta", source)
         self.assertIn("SOCK_NONBLOCK", source)
         self.assertIn("MSG_DONTWAIT", source)
         self.assertIn("host_feedback_generated_confirmed_total=", source)

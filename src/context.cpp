@@ -104,7 +104,7 @@ constexpr uint32_t kConservativeSourceReprimeFrames = 2;
 // absence/backpressure of a receiver must never alter guest presentation.
 constexpr char LSFG_PROVENANCE_SOCKET[] = "gamenative-lsfg-provenance-v1";
 constexpr uint32_t kHostFrameProvenanceMagic = 0x4c534650U; // "LSFP"
-constexpr uint16_t kHostFrameProvenanceVersion = 2;
+constexpr uint16_t kHostFrameProvenanceVersion = 3;
 
 enum class HostFrameKind : uint8_t {
     Source = 0,
@@ -126,21 +126,24 @@ struct HostFrameProvenancePacket {
     // VK_GOOGLE_display_timing uses CLOCK_MONOTONIC nanoseconds. Zero means
     // temporal intent was unavailable or intentionally discarded.
     uint64_t desiredPresentTimeNs{0};
+    uint64_t transactionId{0};
+    uint64_t configurationRevision{0};
 };
 
 static_assert(std::is_trivially_copyable_v<HostFrameProvenancePacket>);
 
-// Telemetry-only return channel from the final GameNative compositor. This
-// never participates in admission, synchronization, generation density, or
-// presentation decisions.
+// Nonblocking return channel from the final GameNative compositor. Physical
+// confirmation is the output-cadence feedback for controllers; it never changes
+// guest Vulkan synchronization or compute/admission algorithms.
 constexpr char LSFG_DISPLAY_FEEDBACK_SOCKET[] =
     "gamenative-lsfg-display-feedback-v1";
 constexpr uint32_t kHostDisplayFeedbackMagic = 0x4c534644U; // "LSFD"
-constexpr uint16_t kHostDisplayFeedbackVersion = 1;
+constexpr uint16_t kHostDisplayFeedbackVersion = 2;
 
 enum class HostDisplayFeedbackStatus : uint8_t {
     Unknown = 0,
     Confirmed = 1,
+    Unavailable = 2,
 };
 
 struct HostDisplayFeedbackPacket {
@@ -155,10 +158,15 @@ struct HostDisplayFeedbackPacket {
     uint64_t provenanceDesiredPresentTimeNs{0};
     uint64_t submittedDesiredPresentTimeNs{0};
     uint64_t swapchainGeneration{0};
+    uint64_t transactionId{0};
+    uint64_t configurationRevision{0};
 };
 static_assert(std::is_trivially_copyable_v<HostDisplayFeedbackPacket>);
 
 struct HostDisplayFeedbackStats {
+    bool confirmationAvailable{false};
+    uint64_t transactionId{0}, configurationRevision{0}, runtimeSessionId{0}, contextEpoch{0};
+    uint64_t sourceConfirmedDelta{0}, generatedConfirmedDelta{0};
     uint64_t rxTotal{0};
     uint64_t generatedConfirmedTotal{0};
     uint64_t generatedUnknownTotal{0};
@@ -219,7 +227,20 @@ int ensureHostDisplayFeedbackSocket() noexcept {
     return fd;
 }
 
-void pollHostDisplayFeedback() noexcept {
+void pollHostDisplayFeedback(
+        uint64_t runtimeSession, uint64_t contextEpoch, const Config::Configuration& conf) noexcept {
+    auto& stats = hostDisplayFeedbackStats;
+    if (stats.runtimeSessionId != runtimeSession || stats.contextEpoch != contextEpoch
+            || stats.transactionId != conf.transactionId
+            || stats.configurationRevision != conf.configurationRevision) {
+        stats = {};
+        stats.runtimeSessionId = runtimeSession;
+        stats.contextEpoch = contextEpoch;
+        stats.transactionId = conf.transactionId;
+        stats.configurationRevision = conf.configurationRevision;
+    }
+    stats.sourceConfirmedDelta = 0;
+    stats.generatedConfirmedDelta = 0;
     const int fd = ensureHostDisplayFeedbackSocket();
     if (fd < 0)
         return;
@@ -243,6 +264,14 @@ void pollHostDisplayFeedback() noexcept {
             continue;
         }
 
+        // Ignore confirmations from retired contexts or older settings even
+        // when their delivery IDs happen to match the current swapchain.
+        if (packet.runtimeSessionId != runtimeSession || packet.contextEpoch != contextEpoch
+                || packet.transactionId != conf.transactionId
+                || packet.configurationRevision != conf.configurationRevision)
+            continue;
+        stats.confirmationAvailable = packet.status
+            != static_cast<uint8_t>(HostDisplayFeedbackStatus::Unavailable);
         ++hostDisplayFeedbackStats.rxTotal;
         const bool generated =
             packet.kind == static_cast<uint8_t>(HostFrameKind::Generated);
@@ -250,13 +279,17 @@ void pollHostDisplayFeedback() noexcept {
             packet.status
                 == static_cast<uint8_t>(HostDisplayFeedbackStatus::Confirmed);
         if (generated) {
-            if (confirmed)
+            if (confirmed) {
                 ++hostDisplayFeedbackStats.generatedConfirmedTotal;
+                ++stats.generatedConfirmedDelta;
+            }
             else
                 ++hostDisplayFeedbackStats.generatedUnknownTotal;
         } else {
-            if (confirmed)
+            if (confirmed) {
                 ++hostDisplayFeedbackStats.sourceConfirmedTotal;
+                ++stats.sourceConfirmedDelta;
+            }
             else
                 ++hostDisplayFeedbackStats.sourceUnknownTotal;
         }
@@ -2032,7 +2065,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 #ifdef __ANDROID__
     // Best-effort telemetry only; MSG_DONTWAIT guarantees this cannot stall
     // guest presentation or the protected cross-device synchronization path.
-    pollHostDisplayFeedback();
+    pollHostDisplayFeedback(
+        this->runtimeSessionId_ != 0 ? this->runtimeSessionId_ : processRuntimeSessionId(),
+        this->framegenContextCreateEpoch_, conf);
     const bool adrenoHostCompletionFallback =
         this->conservativeCrossDeviceSync_
         && this->syntheticQueue_ == VK_NULL_HANDLE
@@ -2075,6 +2110,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 .sourceIndex = this->currentSourceTimeline_.sourceIndex,
                 .batchId = this->adaptiveFlowLastObservedBatchId_,
                 .desiredPresentTimeNs = desiredPresentTimeNs,
+                .transactionId = conf.transactionId,
+                .configurationRevision = conf.configurationRevision,
             });
         }
         return result;
@@ -2541,7 +2578,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (!this->runtimeConfigSignatureValid_) {
         this->runtimeConfigSignature_ = currentConfigSignature;
         this->runtimeConfigSignatureValid_ = true;
-        this->configRevision_ = nextRuntimeConfigRevision();
+        this->configRevision_ = conf.configurationRevision != 0
+            ? conf.configurationRevision : nextRuntimeConfigRevision();
         // One-shot context identity marker. Mode-boundary recreation should
         // produce a new backend context id and a new runtime config revision.
         std::cerr << "lsfg-vk: runtime stage=framegen-context-epoch"
@@ -2555,7 +2593,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                   << "\n";
     } else if (this->runtimeConfigSignature_ != currentConfigSignature) {
         this->runtimeConfigSignature_ = currentConfigSignature;
-        this->configRevision_ = nextRuntimeConfigRevision();
+        this->configRevision_ = conf.configurationRevision != 0
+            ? conf.configurationRevision : nextRuntimeConfigRevision();
         // Resident hot reloads deliberately preserve the swapchain/AHB
         // allocation, but their generated cadence cannot inherit temporal
         // history from the pre-menu configuration. Start a fresh source epoch
@@ -3925,7 +3964,11 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto cycleEnd = RuntimeMetrics::Clock::now();
         const double cycleMs = std::chrono::duration<double, std::milli>(
             cycleEnd - cycleStart).count();
-        if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
+        if (!hostDisplayFeedbackStats.confirmationAvailable) {
+            // WSI delivery is unknown until the final compositor confirms it.
+            // Logical presents remain diagnostics and cannot satisfy a target.
+            this->lsfgOutputCadenceTracker_.reset();
+        } else if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
             // Android can stop the guest while it is already inside this
             // present call. In that case sourceInterval was sampled before the
             // stop and looks normal, while host wall-clock dispatch/wait/cycle
@@ -4022,12 +4065,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 std::chrono::milliseconds(250), 0, 0);
         } else if (sourceInterval.count() > 0
                 && !adaptiveFlowTransitionActiveForCadence) {
-            const size_t cadenceGeneratedFrames =
-                this->deferredAdrenoCompletionEnabled_
-                    ? deferredDeliveredGeneratedFrameCount
-                    : this->lastGeneratedFrameCount_;
             this->lsfgOutputCadenceTracker_.observe(
-                sourceInterval, 1, cadenceGeneratedFrames);
+                sourceInterval,
+                hostDisplayFeedbackStats.sourceConfirmedDelta,
+                hostDisplayFeedbackStats.generatedConfirmedDelta);
         }
         if (this->adaptiveFlowCadenceHandoffPending_
                 && !adaptiveFlowTransitionBackendActiveForCadence) {
@@ -4041,7 +4082,14 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const double generatedCount = static_cast<double>(metrics.windowGeneratedFrames);
             const double sourceFps = sourceCount / elapsedSeconds;
             const double generatedFps = generatedCount / elapsedSeconds;
-            const double outputFps = (sourceCount + generatedCount) / elapsedSeconds;
+            const double logicalOutputFps = (sourceCount + generatedCount) / elapsedSeconds;
+            const auto& physicalCadence = this->lsfgOutputCadenceTracker_.snapshot();
+            const double outputFps = physicalCadence.valid ? physicalCadence.outputFps : 0.0;
+            std::cerr << "lsfg-vk: output-domain logical_output_fps=" << logicalOutputFps
+                      << " confirmed_output_fps=" << outputFps
+                      << " confirmed_available=" << (hostDisplayFeedbackStats.confirmationAvailable ? 1 : 0)
+                      << " transaction_id=" << conf.transactionId
+                      << " configuration_revision=" << conf.configurationRevision << "\n";
             const uint64_t generatedDisplayPending =
                 static_cast<uint64_t>(this->generatedDisplayPendingSet_.size());
             const char* generatedDeliveryConfidence =
