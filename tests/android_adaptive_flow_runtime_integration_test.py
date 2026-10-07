@@ -360,13 +360,23 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
     def test_rolling_output_tracker_updates_per_completed_source_cycle(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
         self.assertIn("lsfgOutputCadenceTracker_.observe", source)
-        self.assertIn("cadenceGeneratedFrames", source)
+        self.assertIn("hostDisplayFeedbackStats.sourceConfirmedDelta", source)
+        self.assertIn("hostDisplayFeedbackStats.generatedConfirmedDelta", source)
         self.assertIn("deferredDeliveredGeneratedFrameCount", source)
         self.assertIn(
-            "sourceInterval, 1, cadenceGeneratedFrames",
+            "hostDisplayFeedbackStats.confirmationAvailable",
             source,
         )
         self.assertIn("std::chrono::milliseconds(250), 0, 0", source)
+
+    def test_suspend_recovery_is_independent_of_confirmation_availability(self) -> None:
+        source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
+        start = source.index("const auto cycleEnd = RuntimeMetrics::Clock::now()")
+        end = source.index("if (!excludeCurrentCycleFromTimingMetrics)", start)
+        recovery = source[start:end]
+        self.assertIn("if (cycleMs >= kRuntimeTimingDiscontinuityMs)", recovery)
+        self.assertNotIn("else if (cycleMs >= kRuntimeTimingDiscontinuityMs)", recovery)
+        self.assertIn("SourceHistoryInvalidationReason::SuspendResume", recovery)
 
     def test_drop_metrics_are_true_per_window_counters(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")
@@ -712,7 +722,9 @@ class AndroidAdaptiveFlowRuntimeIntegrationTest(unittest.TestCase):
         self.assertIn("outputTargetValid", source)
         self.assertIn("output_target_valid=", source)
         self.assertIn("adaptiveFlowTransitionPending_", cadence_block)
-        self.assertIn("cadenceGeneratedFrames", cadence_block)
+        self.assertIn("hostDisplayFeedbackStats.generatedConfirmedDelta", cadence_block)
+        self.assertIn("hostDisplayFeedbackStats.confirmationAvailable", cadence_block)
+        self.assertNotIn("sourceInterval, 1,", cadence_block)
 
     def test_fixed_multiplier_flow_target_uses_clean_source_baseline(self) -> None:
         source = (ROOT / "src/context.cpp").read_text(encoding="utf-8")

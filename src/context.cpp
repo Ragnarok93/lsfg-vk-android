@@ -165,6 +165,7 @@ static_assert(std::is_trivially_copyable_v<HostDisplayFeedbackPacket>);
 
 struct HostDisplayFeedbackStats {
     bool confirmationAvailable{false};
+    std::chrono::steady_clock::time_point lastFeedbackReceived{};
     uint64_t transactionId{0}, configurationRevision{0}, runtimeSessionId{0}, contextEpoch{0};
     uint64_t sourceConfirmedDelta{0}, generatedConfirmedDelta{0};
     uint64_t rxTotal{0};
@@ -241,6 +242,13 @@ void pollHostDisplayFeedback(
     }
     stats.sourceConfirmedDelta = 0;
     stats.generatedConfirmedDelta = 0;
+    const auto now = std::chrono::steady_clock::now();
+    // A live host emits confirmed/unknown packets. Silence on this best-effort
+    // channel is missing evidence, not a measurement of zero physical output.
+    constexpr auto kFeedbackFreshness = std::chrono::milliseconds(250);
+    if (stats.lastFeedbackReceived == std::chrono::steady_clock::time_point{}
+            || now - stats.lastFeedbackReceived >= kFeedbackFreshness)
+        stats.confirmationAvailable = false;
     const int fd = ensureHostDisplayFeedbackSocket();
     if (fd < 0)
         return;
@@ -270,6 +278,7 @@ void pollHostDisplayFeedback(
                 || packet.transactionId != conf.transactionId
                 || packet.configurationRevision != conf.configurationRevision)
             continue;
+        stats.lastFeedbackReceived = now;
         stats.confirmationAvailable = packet.status
             != static_cast<uint8_t>(HostDisplayFeedbackStatus::Unavailable);
         ++hostDisplayFeedbackStats.rxTotal;
@@ -3968,7 +3977,8 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             // WSI delivery is unknown until the final compositor confirms it.
             // Logical presents remain diagnostics and cannot satisfy a target.
             this->lsfgOutputCadenceTracker_.reset();
-        } else if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
+        }
+        if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
             // Android can stop the guest while it is already inside this
             // present call. In that case sourceInterval was sampled before the
             // stop and looks normal, while host wall-clock dispatch/wait/cycle
@@ -4060,7 +4070,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const bool adaptiveFlowTransitionActiveForCadence =
             adaptiveFlowTransitionBackendActiveForCadence
             || this->adaptiveFlowCadenceHandoffPending_;
-        if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
+        if (!hostDisplayFeedbackStats.confirmationAvailable) {
+            this->lsfgOutputCadenceTracker_.reset();
+        } else if (cycleMs >= kRuntimeTimingDiscontinuityMs) {
             this->lsfgOutputCadenceTracker_.observe(
                 std::chrono::milliseconds(250), 0, 0);
         } else if (sourceInterval.count() > 0
