@@ -144,6 +144,7 @@ enum class HostDisplayFeedbackStatus : uint8_t {
     Unknown = 0,
     Confirmed = 1,
     Unavailable = 2,
+    Dropped = 3,
 };
 
 struct HostDisplayFeedbackPacket {
@@ -168,6 +169,8 @@ struct HostDisplayFeedbackStats {
     std::chrono::steady_clock::time_point lastFeedbackReceived{};
     uint64_t transactionId{0}, configurationRevision{0}, runtimeSessionId{0}, contextEpoch{0};
     uint64_t sourceConfirmedDelta{0}, generatedConfirmedDelta{0};
+    uint64_t sourceDroppedDelta{0}, generatedDroppedDelta{0};
+    uint64_t sourceDroppedTotal{0}, generatedDroppedTotal{0};
     uint64_t rxTotal{0};
     uint64_t generatedConfirmedTotal{0};
     uint64_t generatedUnknownTotal{0};
@@ -242,6 +245,8 @@ void pollHostDisplayFeedback(
     }
     stats.sourceConfirmedDelta = 0;
     stats.generatedConfirmedDelta = 0;
+    stats.sourceDroppedDelta = 0;
+    stats.generatedDroppedDelta = 0;
     const auto now = std::chrono::steady_clock::now();
     // A live host emits confirmed/unknown packets. Silence on this best-effort
     // channel is missing evidence, not a measurement of zero physical output.
@@ -278,9 +283,13 @@ void pollHostDisplayFeedback(
                 || packet.transactionId != conf.transactionId
                 || packet.configurationRevision != conf.configurationRevision)
             continue;
-        stats.lastFeedbackReceived = now;
-        stats.confirmationAvailable = packet.status
-            != static_cast<uint8_t>(HostDisplayFeedbackStatus::Unavailable);
+        const bool dropped = packet.status
+            == static_cast<uint8_t>(HostDisplayFeedbackStatus::Dropped);
+        if (!dropped) {
+            stats.lastFeedbackReceived = now;
+            stats.confirmationAvailable = packet.status
+                != static_cast<uint8_t>(HostDisplayFeedbackStatus::Unavailable);
+        }
         ++hostDisplayFeedbackStats.rxTotal;
         const bool generated =
             packet.kind == static_cast<uint8_t>(HostFrameKind::Generated);
@@ -292,14 +301,20 @@ void pollHostDisplayFeedback(
                 ++hostDisplayFeedbackStats.generatedConfirmedTotal;
                 ++stats.generatedConfirmedDelta;
             }
-            else
+            else if (dropped) {
+                ++stats.generatedDroppedTotal;
+                ++stats.generatedDroppedDelta;
+            } else
                 ++hostDisplayFeedbackStats.generatedUnknownTotal;
         } else {
             if (confirmed) {
                 ++hostDisplayFeedbackStats.sourceConfirmedTotal;
                 ++stats.sourceConfirmedDelta;
             }
-            else
+            else if (dropped) {
+                ++stats.sourceDroppedTotal;
+                ++stats.sourceDroppedDelta;
+            } else
                 ++hostDisplayFeedbackStats.sourceUnknownTotal;
         }
         hostDisplayFeedbackStats.lastDeliveryId = packet.deliveryId;
@@ -709,6 +724,7 @@ RuntimePressureSample readRuntimePressure(
     bool sawSource = false;
     bool sawFrameTime = false;
     bool sawSlowRatio = false;
+    bool sourceMetricsValid = true; // Older producers lack the explicit validity flag.
     std::string line;
     while (std::getline(input, line)) {
         const auto separator = line.find('=');
@@ -721,6 +737,7 @@ RuntimePressureSample readRuntimePressure(
             || key == "gpu_usage_percent"
             || key == "thermal_status"
             || key == "source_fps"
+            || key == "source_metrics_valid"
             || key == "output_fps"
             || key == "frame_time_p95_ms"
             || key == "slow_frame_ratio";
@@ -748,6 +765,8 @@ RuntimePressureSample readRuntimePressure(
                 sample.thermalStatus = thermal;
                 sample.thermalStatusValid = true;
             }
+        } else if (key == "source_metrics_valid") {
+            sourceMetricsValid = parsed == 1.0;
         } else if (key == "source_fps") {
             sample.sourceFps = parsed;
             sawSource = true;
@@ -767,7 +786,8 @@ RuntimePressureSample readRuntimePressure(
     // a reader that races a replacement, or a stale producer with missing
     // fields, cannot turn default-zero values into false global pressure.
     sample.valid =
-        sawTimestamp
+        sourceMetricsValid
+        && sawTimestamp
         && sawGpu
         && sawSource
         && sawFrameTime
@@ -2828,6 +2848,24 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         }
     }
 
+    // Protected Adreno completes a private-device batch before handing its
+    // images to the host. An interpolation slot inside the compute interval is
+    // not yet a usable display slot. Reserve one source interval plus a host
+    // presentation period for the WHOLE batch; admission keeps its original
+    // source clock and cannot borrow this display latency as compute credit.
+    const uint64_t presentationDelayNs = generationFirstAdreno
+        ? this->currentSourceTimeline_.intervalNs
+            + (this->adaptivePresentPeriodNs_ != 0
+                ? this->adaptivePresentPeriodNs_ : 16'666'667ULL)
+        : 0;
+    this->currentPresentationTimeline_ = this->presentationTimeline_.schedule(
+        this->currentSourceTimeline_, presentationDelayNs);
+    if (!this->currentPresentationTimeline_.valid) {
+        plannedGeneratedFrameCount = 0;
+        generatedFrameCount = 0;
+        interpolationGenerationCount = 0;
+    }
+
     // Warmup is a genuine history/lifecycle condition, not a function of
     // current fractional demand. Advance it through the conservative source
     // path even when Adaptive plans zero generated frames; otherwise a rejected
@@ -4102,6 +4140,21 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                       << " confirmed_available=" << (hostDisplayFeedbackStats.confirmationAvailable ? 1 : 0)
                       << " transaction_id=" << conf.transactionId
                       << " configuration_revision=" << conf.configurationRevision << "\n";
+            const uint64_t hostGeneratedOutcomes = hostDisplayFeedbackStats.generatedConfirmedTotal
+                + hostDisplayFeedbackStats.generatedDroppedTotal
+                + hostDisplayFeedbackStats.generatedUnknownTotal;
+            const double hostOutcomeEfficiency = hostGeneratedOutcomes > 0
+                ? static_cast<double>(hostDisplayFeedbackStats.generatedConfirmedTotal) / hostGeneratedOutcomes : 0.0;
+            __android_log_print(ANDROID_LOG_INFO, "LSFG_DELIVERY",
+                "event=final-host-outcomes context_epoch=%llu host_generated_displayed_total=%llu "
+                "host_generated_not_shown_total=%llu host_generated_unknown_total=%llu "
+                "host_generated_outcome_efficiency=%.4f confirmed_output_fps=%.3f "
+                "confirmation_available=%d",
+                static_cast<unsigned long long>(this->framegenContextCreateEpoch_),
+                static_cast<unsigned long long>(hostDisplayFeedbackStats.generatedConfirmedTotal),
+                static_cast<unsigned long long>(hostDisplayFeedbackStats.generatedDroppedTotal),
+                static_cast<unsigned long long>(hostDisplayFeedbackStats.generatedUnknownTotal),
+                hostOutcomeEfficiency, outputFps, hostDisplayFeedbackStats.confirmationAvailable ? 1 : 0);
             const uint64_t generatedDisplayPending =
                 static_cast<uint64_t>(this->generatedDisplayPendingSet_.size());
             const char* generatedDeliveryConfidence =
@@ -4944,7 +4997,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                 .pNext = adaptivePresentPNext(
                     pNext,
-                    this->currentSourceTimeline_.sourceDesiredTimeNs,
+                    this->currentPresentationTimeline_.sourceDesiredTimeNs,
                     sourcePresentTime,
                     sourcePresentTimes),
                 .waitSemaphoreCount = 1,
@@ -4956,7 +5009,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const auto sourceResult =
                 presentWithHostProvenance(
             queue, &sourcePresentInfo,
-            HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+            HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
             if (sourceResult != VK_SUCCESS
                     && sourceResult != VK_SUBOPTIMAL_KHR) {
                 metrics.windowSourcePresentFailures++;
@@ -4999,7 +5052,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                 .pNext = adaptivePresentPNext(
                     pNext,
-                    this->currentSourceTimeline_.sourceDesiredTimeNs,
+                    this->currentPresentationTimeline_.sourceDesiredTimeNs,
                     warmupPresentTime,
                     warmupPresentTimes),
                 .waitSemaphoreCount = 1,
@@ -5011,7 +5064,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const auto warmupResult =
                 presentWithHostProvenance(
             queue, &warmupPresentInfo,
-            HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+            HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
             if (warmupResult != VK_SUCCESS
                     && warmupResult != VK_SUBOPTIMAL_KHR) {
                 metrics.windowSourcePresentFailures++;
@@ -5107,7 +5160,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             const auto timeoutPresentResult =
                 presentWithHostProvenance(
             queue, &timeoutPresentInfo,
-            HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+            HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
             if (timeoutPresentResult != VK_SUCCESS
                     && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
                 metrics.windowSourcePresentFailures++;
@@ -5181,7 +5234,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 / static_cast<double>(interpolationGenerationCount + 1);
             const uint64_t syntheticDesiredTimeNs =
                 this->sourceTimeline_.syntheticDesiredTimeNs(
-                    this->currentSourceTimeline_,
+                    this->currentPresentationTimeline_,
                     syntheticFraction);
             VkPresentTimeGOOGLE generatedPresentTime{};
             VkPresentTimesInfoGOOGLE generatedPresentTimes{};
@@ -5241,7 +5294,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = adaptivePresentPNext(
                 finalSourceDownstreamPNext,
-                this->currentSourceTimeline_.sourceDesiredTimeNs,
+                this->currentPresentationTimeline_.sourceDesiredTimeNs,
                 finalSourcePresentTime,
                 finalSourcePresentTimes),
             .waitSemaphoreCount = 1,
@@ -5253,7 +5306,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         auto res =
             presentWithHostProvenance(
             queue, &finalPresentInfo,
-            HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+            HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
         if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
             metrics.totalSourcePresentFailures++;
@@ -5352,7 +5405,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = adaptivePresentPNext(
                 pNext,
-                this->currentSourceTimeline_.sourceDesiredTimeNs,
+                this->currentPresentationTimeline_.sourceDesiredTimeNs,
                 bypassPresentTime, bypassPresentTimes),
             .waitSemaphoreCount =
                 static_cast<uint32_t>(gameRenderSemaphores.size()),
@@ -5365,7 +5418,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto bypassResult =
             presentWithHostProvenance(
             queue, &bypassPresentInfo,
-            HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+            HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
         if (this->conservativeCrossDeviceSync_ && isAdrenoWsiRetirementResult(bypassResult))
             return bypassResult;
         if (bypassResult != VK_SUCCESS
@@ -5667,7 +5720,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto failOpenResult =
             presentWithHostProvenance(
             queue, &failOpenPresentInfo,
-            HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+            HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
         if (failOpenResult != VK_SUCCESS
                 && failOpenResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
@@ -5692,7 +5745,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = adaptivePresentPNext(
                 pNext,
-                this->currentSourceTimeline_.sourceDesiredTimeNs,
+                this->currentPresentationTimeline_.sourceDesiredTimeNs,
                 sourcePresentTime, sourcePresentTimes),
             .waitSemaphoreCount = 1,
             .pWaitSemaphores = &sourceReady,
@@ -5705,7 +5758,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const auto sourceResult =
             presentWithHostProvenance(
             queue, &sourcePresentInfo,
-            HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+            HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
         if (this->conservativeCrossDeviceSync_ && isAdrenoWsiRetirementResult(sourceResult))
             return sourceResult;
         if (sourceResult != VK_SUCCESS
@@ -5944,7 +5997,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 const auto timeoutResult =
                     presentWithHostProvenance(
             queue, &timeoutPresentInfo,
-            HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+            HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
                 if (timeoutResult != VK_SUCCESS
                         && timeoutResult != VK_SUBOPTIMAL_KHR) {
                     metrics.windowSourcePresentFailures++;
@@ -5980,7 +6033,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = adaptivePresentPNext(
                 pNext,
-                this->currentSourceTimeline_.sourceDesiredTimeNs,
+                this->currentPresentationTimeline_.sourceDesiredTimeNs,
                 adaptiveSourcePresentTime, adaptiveSourcePresentTimes),
             .waitSemaphoreCount = 1,
             .pWaitSemaphores = &sourceReady,
@@ -5992,7 +6045,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
         const auto adaptiveSourceResult = presentWithHostProvenance(
             queue, &adaptiveSourcePresentInfo,
-            HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+            HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
         if (adaptiveSourceResult != VK_SUCCESS
                 && adaptiveSourceResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
@@ -6161,7 +6214,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 const auto deferredSourceResult =
                     presentWithHostProvenance(
                         queue, &deferredSourcePresentInfo,
-                        HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+                        HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
                 if (isAdrenoWsiRetirementResult(deferredSourceResult))
                     return deferredSourceResult;
                 if (deferredSourceResult != VK_SUCCESS
@@ -6338,7 +6391,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         this->retainPresentWait(presentIdx, pass.preCopySemaphores.at(0));
         const auto timeoutPresentResult = presentWithHostProvenance(
             queue, &timeoutPresentInfo,
-            HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+            HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
         if (timeoutPresentResult != VK_SUCCESS && timeoutPresentResult != VK_SUBOPTIMAL_KHR) {
             metrics.windowSourcePresentFailures++;
             metrics.totalSourcePresentFailures++;
@@ -6394,7 +6447,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             / static_cast<double>(interpolationGenerationCount + 1);
         const uint64_t syntheticDesiredTimeNs =
             this->sourceTimeline_.syntheticDesiredTimeNs(
-                this->currentSourceTimeline_, syntheticFraction);
+                this->currentPresentationTimeline_, syntheticFraction);
         const uint64_t syntheticAdmissionNowNs = monotonicNowNs();
         // Strict FIFO is itself the downstream ordering clock. Once a batch has
         // passed pre-dispatch admission and framegen has been submitted, do not
@@ -6622,7 +6675,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = adaptivePresentPNext(
             finalSourceDownstreamPNext,
-            this->currentSourceTimeline_.sourceDesiredTimeNs,
+            this->currentPresentationTimeline_.sourceDesiredTimeNs,
             finalSourcePresentTime,
             finalSourcePresentTimes),
         .waitSemaphoreCount = 1,
@@ -6648,7 +6701,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             : queue;
     auto res = presentWithHostProvenance(
         finalSourcePresentQueue, &finalPresentInfo,
-        HostFrameKind::Source, presentIdx, 0, 0, this->currentSourceTimeline_.sourceDesiredTimeNs);
+        HostFrameKind::Source, presentIdx, 0, 0, this->currentPresentationTimeline_.sourceDesiredTimeNs);
     if (this->conservativeCrossDeviceSync_
             && isAdrenoWsiRetirementResult(res))
         return res;
@@ -6853,6 +6906,8 @@ void LsContext::resetAdaptiveSourceEpoch(
     this->lsfgOutputCadenceTracker_.reset();
     this->deadlineBatchDecision_ = {};
     this->sourceTimeline_.reset();
+    this->presentationTimeline_.reset();
+    this->currentPresentationTimeline_ = {};
     this->currentSourceTimeline_ = {};
     this->adaptivePresentPeriodNs_ = 0;
 
@@ -6937,6 +6992,8 @@ void LsContext::enterSourceOnlyBypass() {
     this->adaptiveFlowController_.reset();
     this->adaptiveSceneTransitionGuard_.reset();
     this->sourceTimeline_.reset();
+    this->presentationTimeline_.reset();
+    this->currentPresentationTimeline_ = {};
     this->currentSourceTimeline_ = {};
     this->deadlineBatchDecision_ = {};
     this->adaptiveFlowNextPressureRead_ = {};
@@ -6986,5 +7043,14 @@ void LsContext::enterSourceOnlyBypass() {
     this->runtimeMetrics.hasLastSourcePresent = false;
     this->runtimeMetrics.lastSourcePresent = {};
     this->adaptivePresentPeriodNs_ = 0;
+}
+#endif
+
+
+#ifdef __ANDROID__
+uint64_t LsContext::hostGeneratedDisplayConfirmedTotal() const {
+    return hostDisplayFeedbackStats.runtimeSessionId == this->runtimeSessionId_
+        && hostDisplayFeedbackStats.contextEpoch == this->framegenContextCreateEpoch_
+        ? hostDisplayFeedbackStats.generatedConfirmedTotal : 0;
 }
 #endif

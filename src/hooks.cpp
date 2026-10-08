@@ -456,6 +456,7 @@ namespace {
         uint64_t windowGeneratedFrames{0};
         uint64_t totalSourceFrames{0};
         uint64_t totalGeneratedFrames{0};
+        uint64_t lastHostGeneratedConfirmedTotal{0};
         uint64_t presentFailures{0};
     };
 
@@ -787,7 +788,10 @@ namespace {
                 << "generation_initialized=" << (generationInitialized ? 1 : 0) << '\n'
                 << "generated_presented=" << (generatedPresented ? 1 : 0) << '\n'
                 << "degraded=" << (degraded ? 1 : 0) << '\n'
-                << "fps=" << outputFps << '\n'
+                << "logical_output_fps=" << outputFps << '\n'
+                << "confirmed_output_valid=" << (adaptiveFlow.lsfgOutputValid ? 1 : 0) << '\n'
+                << "fps_domain=display-confirmed" << '\n'
+                << "fps=" << (adaptiveFlow.lsfgOutputValid ? adaptiveFlow.lsfgOutputFps : 0.0) << '\n'
                 << "source_fps=" << sourceFps << '\n'
                 << "generated_fps=" << generatedFps << '\n'
                 << "source_frames_total=" << stats.totalSourceFrames << '\n'
@@ -924,7 +928,10 @@ namespace {
         const double generatedFps = static_cast<double>(stats.windowGeneratedFrames) / elapsedSeconds;
         const double outputFps = sourceFps + generatedFps;
         const bool generationActive = multiplier > 1;
-        const bool generatedPresented = generationActive && stats.totalGeneratedFrames > 0;
+        const uint64_t hostGeneratedConfirmed = context.hostGeneratedDisplayConfirmedTotal();
+        const bool generatedPresented = generationActive &&
+            hostGeneratedConfirmed > stats.lastHostGeneratedConfirmedTotal;
+        stats.lastHostGeneratedConfirmedTotal = hostGeneratedConfirmed;
         const auto adaptiveFlow = context.adaptiveFlowRuntimeSnapshot();
         writeRuntimeStatsFile(configFile,
             generationActive ? "generating" : "source_only",
@@ -1747,3 +1754,4 @@ std::unordered_map<std::string, PFN_vkVoidFunction> Hooks::hooks = {
     {"vkQueuePresentKHR", reinterpret_cast<PFN_vkVoidFunction>(myvkQueuePresentKHR)},
     {"vkDestroySwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(myvkDestroySwapchainKHR)}
 };
+

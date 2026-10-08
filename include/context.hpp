@@ -1,5 +1,7 @@
 #pragma once
 
+#include "presentation_timeline.hpp"
+
 #include <vulkan/vulkan_core.h>
 
 #ifdef __ANDROID__
@@ -145,6 +147,7 @@ public:
 
 #ifdef __ANDROID__
     void enterSourceOnlyBypass();
+    [[nodiscard]] uint64_t hostGeneratedDisplayConfirmedTotal() const;
 
     [[nodiscard]] const LSFG::FramegenSupportDecision& framegenSupportDecision() const {
         return framegenSupportDecision_;
@@ -365,6 +368,8 @@ private:
     static constexpr std::size_t kGeneratedDisplayPendingLimit = 512;
 
     SourceProtectedTimeline sourceTimeline_;
+    SourcePresentationTimeline presentationTimeline_;
+    SourceTimelineSample currentPresentationTimeline_{};
     SourceTimelineSample currentSourceTimeline_;
 
     static constexpr uint32_t kSourceHistoryWarmupFrames = 4;
@@ -606,3 +611,4 @@ private:
 
     std::array<RenderPassInfo, 8> passInfos; // allocate 8 because why not
 };
+
