@@ -5853,22 +5853,25 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
 
             if (historySync.gpuDependenciesExported
                     && historySync.batchCompleteFd >= 0) {
+                // The importer consumes the descriptor even when Vulkan import fails.
+                // Remove it from caller ownership BEFORE invoking that importer.
+                const int historyCompleteFd = historySync.batchCompleteFd;
+                historySync.batchCompleteFd = -1;
                 try {
                     if (this->conservativeCrossDeviceSync_) {
                         this->conservativePendingHistoryCompleteSemaphore_ =
                             Mini::Semaphore(
-                                info.device, historySync.batchCompleteFd,
+                                info.device, historyCompleteFd,
                                 VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
                         this->conservativePendingHistoryCompleteValid_ = true;
                     } else {
                         // Preserve the existing Xclipse/generic history release
                         // ownership exactly as before.
                         pass.framegenBatchCompleteSemaphore = Mini::Semaphore(
-                            info.device, historySync.batchCompleteFd,
+                            info.device, historyCompleteFd,
                             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
                         pass.framegenBatchCompleteValid = true;
                     }
-                    historySync.batchCompleteFd = -1;
                     historyReleaseImported = true;
                     metrics.windowHistoryAsyncReleases++;
                     metrics.totalHistoryAsyncReleases++;
@@ -6281,37 +6284,31 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
     if (this->asyncFramegenCompletionEnabled_
             && framegenSync.gpuDependenciesExported) {
         bool importFailed = framegenSync.outputReadyFds.size() != generatedFrameCount;
+        // A conservative duplicated completion descriptor must also be retired
+        // if import throws before it can enter the pending-poll owner.
+        int batchCompletePollFd = -1;
         try {
             if (!importFailed) {
                 for (size_t i = 0; i < generatedFrameCount; ++i) {
                     const int fd = framegenSync.outputReadyFds.at(i);
                     if (fd < 0)
                         continue;
-                    // Mini::Semaphore consumes/closes a SYNC_FD when import
-                    // fails. On the Adreno compatibility path transfer ownership
-                    // before import so fallback cleanup cannot double-close a
-                    // descriptor that the constructor already consumed.
-                    if (this->conservativeCrossDeviceSync_)
-                        framegenSync.outputReadyFds.at(i) = -1;
+                    // All import paths consume/close a SYNC_FD on failure.
+                    // The cleanup vector must relinquish ownership first.
+                    framegenSync.outputReadyFds.at(i) = -1;
                     pass.renderSemaphores.at(i) = Mini::Semaphore(
                         info.device, fd,
                         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
-                    if (!this->conservativeCrossDeviceSync_)
-                        framegenSync.outputReadyFds.at(i) = -1;
                     outputReadyWaitValid.at(i) = true;
                 }
                 if (framegenSync.batchCompleteFd >= 0) {
                     const int batchCompleteFd = framegenSync.batchCompleteFd;
-                    int batchCompletePollFd = -1;
+                    framegenSync.batchCompleteFd = -1;
                     if (this->conservativeCrossDeviceSync_)
                         batchCompletePollFd = ::dup(batchCompleteFd);
-                    if (this->conservativeCrossDeviceSync_)
-                        framegenSync.batchCompleteFd = -1;
                     pass.framegenBatchCompleteSemaphore = Mini::Semaphore(
                         info.device, batchCompleteFd,
                         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
-                    if (!this->conservativeCrossDeviceSync_)
-                        framegenSync.batchCompleteFd = -1;
                     pass.framegenBatchCompleteValid = true;
                     if (this->conservativeCrossDeviceSync_) {
                         if (this->conservativePendingBatchCompletePollFd_ >= 0)
@@ -6328,6 +6325,10 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 }
             }
         } catch (const std::exception& e) {
+            if (batchCompletePollFd >= 0) {
+                ::close(batchCompletePollFd);
+                batchCompletePollFd = -1;
+            }
             importFailed = true;
             std::cerr << "lsfg-vk: framegen completion SYNC_FD import failed: "
                       << e.what() << "; using bounded host fallback\n";
