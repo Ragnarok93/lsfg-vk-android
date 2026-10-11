@@ -64,6 +64,25 @@ constexpr double kMaterialTotalReliefRatio = 0.95;
 constexpr double kMaterialWsiReliefRatio = 0.75;
 constexpr double kMaterialGlobalGpuReliefPercent = 3.0;
 
+bool materiallyChanged(const AdaptiveFlowObservation& a, const AdaptiveFlowObservation& b) {
+    const auto changed = [](double x, double y) {
+        return std::isfinite(x) && std::isfinite(y)
+            && std::abs(x-y) > std::max(0.5, std::abs(y)*0.10);
+    };
+    return a.fixedMultiplierMode != b.fixedMultiplierMode
+        || a.adaptiveFramegenMode != b.adaptiveFramegenMode
+        || changed(a.frameBudgetMs,b.frameBudgetMs)
+        || changed(a.totalLsfgMs,b.totalLsfgMs)
+        || changed(a.flowMs,b.flowMs)
+        || changed(a.sourceFps,b.sourceFps)
+        || changed(a.sourceTargetFps,b.sourceTargetFps)
+        || changed(a.outputTargetFps,b.outputTargetFps)
+        || (a.outputCadenceValid && b.outputCadenceValid
+            && changed(a.outputFps,b.outputFps))
+        || (a.globalPressureValid && b.globalPressureValid
+            && std::abs(a.globalGpuUsagePercent-b.globalGpuUsagePercent)>5.0);
+}
+
 std::span<const float> states(AdaptiveFlowPreset preset) {
     switch (preset) {
     case AdaptiveFlowPreset::Quality: return kQualityStates;
@@ -103,6 +122,8 @@ void AdaptiveFlowController::configure(bool enabled, AdaptiveFlowPreset preset) 
     recoveryPacingRetryBlockedUntilSeconds_ = 0.0;
     recoveryPacingBaselineSourceFps_ = 0.0;
     recoveryPacingBaselineDensity_ = 0.0;
+    rejectedDownstep_ = rejectedRecovery_ = false;
+    rejectedDownstepChangeSeconds_ = rejectedRecoveryChangeSeconds_ = 0.0;
     resetFixedExploration();
     resetEvidence();
     selectTargetState();
@@ -169,6 +190,8 @@ void AdaptiveFlowController::reset() {
     recoveryPacingRetryBlockedUntilSeconds_ = 0.0;
     recoveryPacingBaselineSourceFps_ = 0.0;
     recoveryPacingBaselineDensity_ = 0.0;
+    rejectedDownstep_ = rejectedRecovery_ = false;
+    rejectedDownstepChangeSeconds_ = rejectedRecoveryChangeSeconds_ = 0.0;
     resetFixedExploration();
     resetEvidence();
     selectTargetState();
@@ -295,7 +318,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     if (!fixedMultiplierMode || sourceTargetValid) {
         resetFixedExploration();
     } else if (sourceSampleValid
-            && observation.generatedWorkSample
+            && (observation.generatedWorkSample || observation.generatedCadenceSample)
             && observation.generationCount > 0) {
         if (!fixedExplorationReferenceValid_) {
             fixedExplorationReferenceValid_ = true;
@@ -335,7 +358,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         && fixedExplorationReferenceValid_
         && fixedExplorationProbePending_
         && sourceSampleValid
-        && observation.generatedWorkSample
+        && (observation.generatedWorkSample || observation.generatedCadenceSample)
         && observation.generationCount > 0;
     const bool globalGpuPressure =
         observation.globalPressureValid
@@ -398,6 +421,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                 AdaptiveFlowDecisionReason::RecoveryPacingReverted;
             recoveryPacingEvaluationActive_ = false;
             recoveryPacingRegressionSeconds_ = 0.0;
+            rejectedRecovery_ = true;
+            rejectedRecoveryChangeSeconds_ = 0.0;
             recoveryPacingRetryBlockedUntilSeconds_ =
                 observedSeconds_ + kRecoveryPacingRevertHoldSeconds;
             cooldownUntilSeconds_ =
@@ -493,22 +518,6 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
             && observation.globalGpuUsagePercent
                 <= downstepBaselineGlobalGpuPercent_
                     - kMaterialGlobalGpuReliefPercent;
-        // A target-driven step is useful while its measured target remains
-        // missed. Reverting solely because one short, noisy cadence window did
-        // not improve enough caused adjacent-state oscillation without ever
-        // recovering the requested rate.
-        const bool directOutputTargetMiss =
-            !fixedMultiplierMode
-            && observation.outputCadenceValid
-            && observation.outputTargeted
-            && !observation.outputTargetSatisfied;
-        const bool targetPressureRemains =
-            (downstepOutputDriven_
-                && directOutputTargetMiss
-                && (!downstepBaselineWsiPressure_
-                    || observation.adaptiveFramegenMode))
-            || (downstepSourceDriven_ && sourcePressure);
-
         if (downstepExploratorySourceDriven_) {
             // Missing-baseline probes must recover source cadence. Cheaper GPU
             // work alone is not enough to justify a quality reduction.
@@ -516,7 +525,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         } else {
             downstepBenefitSeen_ = downstepBenefitSeen_
                 || outputBenefit || sourceBenefit || computeBenefit
-                || wsiBenefit || globalBenefit || targetPressureRemains;
+                || wsiBenefit || globalBenefit;
         }
 
         const double downstepEvaluationSeconds =
@@ -564,6 +573,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         downstepOutputDriven_ = false;
         downstepSourceDriven_ = false;
         downstepExploratorySourceDriven_ = false;
+        rejectedDownstep_ = true;
+        rejectedDownstepChangeSeconds_ = 0.0;
         telemetry_.reason = AdaptiveFlowDecisionReason::DownstepReverted;
         cooldownUntilSeconds_ =
             observedSeconds_ + kDownstepNoBenefitHoldSeconds;
@@ -577,6 +588,18 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         return telemetry_.currentScale;
     }
 
+    // Rejected graph changes remain rejected at the same operating point.
+    // A sustained material scene/workload change permits a fresh bounded probe.
+    if (rejectedDownstep_) {
+        rejectedDownstepChangeSeconds_ = materiallyChanged(observation, downstepOperatingPoint_)
+            ? rejectedDownstepChangeSeconds_ + evidenceSeconds : 0.0;
+        if (rejectedDownstepChangeSeconds_ >= 0.5) rejectedDownstep_ = false;
+    }
+    if (rejectedRecovery_) {
+        rejectedRecoveryChangeSeconds_ = materiallyChanged(observation, recoveryOperatingPoint_)
+            ? rejectedRecoveryChangeSeconds_ + evidenceSeconds : 0.0;
+        if (rejectedRecoveryChangeSeconds_ >= 0.5) rejectedRecovery_ = false;
+    }
     const auto presetStates = states(preset_);
     const std::size_t index = telemetry_.stateIndex;
     const bool canLower = index + 1 < presetStates.size();
@@ -593,7 +616,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool thermalAcceleratedPressure =
         thermalSevere && pressure && !fastPressure && !globalPressure;
 
-    if (pressure && canLower) {
+    if (pressure && canLower && !rejectedDownstep_) {
         const double currentScale = static_cast<double>(presetStates[index]);
         const double lowerScale = static_cast<double>(presetStates[index + 1]);
         const double scaleWorkRatio = (lowerScale * lowerScale) / (currentScale * currentScale);
@@ -605,15 +628,23 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         // material-contribution gate under local and global pressure so quality
         // is never traded for a few tenths of a millisecond that cannot
         // plausibly recover the requested cadence.
-        // A trustworthy source/output miss remains authoritative all the way
-        // to the preset floor. Do not stop early because one 0.05 Flow step
-        // looks small in isolation. Missing-baseline exploration retains the
-        // material-contribution probe gate.
-        const bool targetDrivenPressure = targetPressure && !computePressure;
+        // Source/output misses permit a single measured probe. Further
+        // reductions require a confirmed benefit. Pure downstream losses
+        // retain the material-contribution gate; absent GPU timing permits
+        // only a bounded probe backed by actual generated dispatches.
+        const bool targetDrivenPressure = targetPressure && !computePressure
+            && !wsiPressure
+            && (observation.flowMs >= 1.0
+                || (!observation.generatedWorkSample
+                    && !observation.retainedGeneratedTimingSample
+                    && observation.generatedCadenceSample));
         const bool exploratoryDrivenPressure =
             exploratorySourcePressure && !targetPressure && !computePressure;
         const bool materiallyUsefulForExploration =
-            observation.flowMs >= 1.0 && predictedReliefMs >= 0.25;
+            (observation.flowMs >= 1.0 && predictedReliefMs >= 0.25)
+            || (!observation.generatedWorkSample
+                && !observation.retainedGeneratedTimingSample
+                && observation.generatedCadenceSample);
         const bool globalOnlyPressure =
             globalPressure && !computePressure && !fastPressure;
         const bool globallyProfitable =
@@ -622,7 +653,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         if ((!targetDrivenPressure
                 && ((exploratoryDrivenPressure
                         && !materiallyUsefulForExploration)
-                    || (!fastPressure
+                    || ((!fastPressure || wsiPressure || targetPressure)
                         && (telemetry_.flowBudgetRatio < kMinimumFlowBudgetRatio
                             || predictedReliefRatio < kMinimumPredictedReliefRatio))))
                 || !globallyProfitable) {
@@ -642,6 +673,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                         ? kThermalAcceleratedConfirmSeconds
                         : kDownConfirmSeconds));
         if (pressureSeconds_ >= downConfirmSeconds) {
+            downstepOperatingPoint_ = observation;
             downstepEvaluationActive_ = true;
             downstepBenefitSeen_ = false;
             downstepPreviousIndex_ = index;
@@ -713,9 +745,9 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         !observation.thermalPressureValid
         || observation.thermalStatus <= kThermalStatusModerate;
     const bool outputRecoverySatisfied =
-        fixedMultiplierMode
-        || !observation.outputTargeted
-        || observation.outputTargetSatisfied;
+        !observation.outputTargeted
+        || (observation.outputCadenceValid
+            && (fixedMultiplierMode || observation.outputTargetSatisfied));
     // Fixed mode commonly starts with generated work already active, so the
     // clean source-only tracker can legitimately have no baseline. Once the
     // exploratory hill-climb has settled (no probe pending), treat its best
@@ -738,6 +770,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
         || exploratorySourceRecoverySatisfied;
     const bool retainedHistoryRecoveryEligible =
         !observation.generatedWorkSample
+        && observation.retainedGeneratedTimingSample
         && observation.globalPressureValid
         && globalRecoveryHeadroom
         && !actionableOutputDeficit
@@ -745,6 +778,8 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
     const bool recoveryTimingEligible =
         observation.generatedWorkSample || retainedHistoryRecoveryEligible;
     if (canRaise
+            && !rejectedRecovery_
+            && !pressure
             && !observation.deadlineMissed
             && recoveryTimingEligible
             && !actionableOutputDeficit
@@ -781,6 +816,7 @@ float AdaptiveFlowController::observe(const AdaptiveFlowObservation& observation
                     && sourceSampleValid
                     && observation.scheduledGenerationDensity >= 0.0
                     && std::isfinite(observation.scheduledGenerationDensity)) {
+                recoveryOperatingPoint_ = observation;
                 recoveryPacingEvaluationActive_ = true;
                 recoveryPacingPreviousIndex_ = index;
                 recoveryPacingEvaluationStartedSeconds_ = observedSeconds_;

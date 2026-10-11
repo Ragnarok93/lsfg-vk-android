@@ -690,12 +690,15 @@ double adaptiveFlowFrameBudgetMs(
 
 struct RuntimePressureSample {
     bool valid{false};
-    double gpuUsagePercent{0.0};
+    double gpuUsagePercent{-1.0};
     bool thermalStatusValid{false};
     int thermalStatus{0};
-    double sourceFps{0.0};
-    double frameTimeP95Ms{0.0};
-    double slowFrameRatio{0.0};
+    bool sourceFpsValid{false};
+    double sourceFps{-1.0};
+    bool frameTimeP95Valid{false};
+    double frameTimeP95Ms{-1.0};
+    bool slowFrameRatioValid{false};
+    double slowFrameRatio{-1.0};
 };
 
 RuntimePressureSample readRuntimePressure(
@@ -720,6 +723,7 @@ RuntimePressureSample readRuntimePressure(
         return sample;
 
     bool sawTimestamp = false;
+    double timestampMs = 0.0;
     bool sawGpu = false;
     bool sawSource = false;
     bool sawFrameTime = false;
@@ -755,11 +759,13 @@ RuntimePressureSample readRuntimePressure(
             continue;
 
         if (key == "timestamp_ms") {
+            timestampMs = parsed;
             sawTimestamp = parsed > 0.0;
         } else if (key == "gpu_usage_percent") {
             sample.gpuUsagePercent = parsed;
             sawGpu = true;
         } else if (key == "thermal_status") {
+            if (parsed < 0.0 || parsed > 6.0) continue;
             const int thermal = static_cast<int>(parsed);
             if (parsed == static_cast<double>(thermal) && thermal >= 0 && thermal <= 6) {
                 sample.thermalStatus = thermal;
@@ -782,22 +788,21 @@ RuntimePressureSample readRuntimePressure(
         }
     }
 
-    // GameNative publishes this file atomically. Require the complete record so
-    // a reader that races a replacement, or a stale producer with missing
-    // fields, cannot turn default-zero values into false global pressure.
-    sample.valid =
-        sourceMetricsValid
-        && sawTimestamp
-        && sawGpu
-        && sawSource
-        && sawFrameTime
-        && sawSlowRatio
-        && sample.gpuUsagePercent >= 0.0
-        && sample.gpuUsagePercent <= 100.0
-        && sample.sourceFps >= 0.0
-        && sample.frameTimeP95Ms >= 0.0
-        && sample.slowFrameRatio >= 0.0
-        && sample.slowFrameRatio <= 1.0;
+    const double nowMs = std::chrono::duration<double, std::milli>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    // A freshly copied file cannot refresh stale measurement contents.
+    if (!sawTimestamp || nowMs < timestampMs || nowMs - timestampMs > 2000.0)
+        return RuntimePressureSample{};
+    sample.valid = sawGpu && sample.gpuUsagePercent >= 0.0
+        && sample.gpuUsagePercent <= 100.0;
+    sample.sourceFpsValid = sourceMetricsValid && sawSource && sample.sourceFps >= 0.0;
+    sample.frameTimeP95Valid = sourceMetricsValid && sawFrameTime && sample.frameTimeP95Ms >= 0.0;
+    sample.slowFrameRatioValid = sourceMetricsValid && sawSlowRatio
+        && sample.slowFrameRatio >= 0.0 && sample.slowFrameRatio <= 1.0;
+    if (!sample.valid) sample.gpuUsagePercent = -1.0;
+    if (!sample.sourceFpsValid) sample.sourceFps = -1.0;
+    if (!sample.frameTimeP95Valid) sample.frameTimeP95Ms = -1.0;
+    if (!sample.slowFrameRatioValid) sample.slowFrameRatio = -1.0;
     return sample;
 }
 
@@ -3253,6 +3258,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         && !conservativeSourceOnlyWarmup
         && !conservativeHistoryGap;
 
+    const size_t previousCycleGeneratedDispatches = this->lastDispatchedGeneratedFrameCount_;
     this->lastGeneratedFrameCount_ = historyOnly ? 0 : generatedFrameCount;
 
     const auto updateAdaptiveFlowGovernor = [&]() {
@@ -3335,16 +3341,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             this->adaptiveFlowGlobalGpuUsagePercent_ =
                 pressure.valid ? pressure.gpuUsagePercent : 0.0;
             this->adaptiveFlowThermalPressureValid_ =
-                pressure.valid && pressure.thermalStatusValid;
+                pressure.thermalStatusValid;
             this->adaptiveFlowThermalStatus_ =
                 this->adaptiveFlowThermalPressureValid_
                     ? pressure.thermalStatus : 0;
             this->adaptiveFlowGlobalSourceFps_ =
-                pressure.valid ? pressure.sourceFps : 0.0;
+                pressure.sourceFpsValid ? pressure.sourceFps : -1.0;
             this->adaptiveFlowGlobalFrameTimeP95Ms_ =
-                pressure.valid ? pressure.frameTimeP95Ms : 0.0;
+                pressure.frameTimeP95Valid ? pressure.frameTimeP95Ms : -1.0;
             this->adaptiveFlowGlobalSlowFrameRatio_ =
-                pressure.valid ? pressure.slowFrameRatio : 0.0;
+                pressure.slowFrameRatioValid ? pressure.slowFrameRatio : -1.0;
         }
 
         const bool schedulerTransition =
@@ -3361,10 +3367,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             outputCadence.valid && !adaptiveFlowTransitionActive;
         const bool adaptiveOutputTargeted =
             conf.adaptiveFramegen
-            && conf.fpsLimit > 0
-            && outputCadenceValidForControl;
+            && conf.fpsLimit > 0;
         const bool adaptiveOutputDeficit =
-            adaptiveOutputTargeted && outputCadence.deficitConfirmed;
+            adaptiveOutputTargeted && outputCadenceValidForControl && outputCadence.deficitConfirmed;
         constexpr double kFixedMultiplierOutputTolerance = 0.98;
         const auto& fixedCadenceTelemetry =
             this->fixedSourceCadenceTracker_.telemetry();
@@ -3394,14 +3399,16 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 * static_cast<double>(conf.multiplier)
             : 0.0;
         const bool fixedMultiplierOutputTargeted =
-            outputCadenceValidForControl && fixedMultiplierOutputTargetFps > 0.0;
+            fixedMultiplierOutputTargetFps > 0.0;
         const bool fixedMultiplierOutputSatisfied =
             fixedMultiplierOutputTargeted
+            && outputCadenceValidForControl
             && outputCadence.outputFps
                 >= fixedMultiplierOutputTargetFps
                     * kFixedMultiplierOutputTolerance;
         const bool fixedMultiplierOutputDeficit =
-            fixedMultiplierOutputTargeted && !fixedMultiplierOutputSatisfied;
+            fixedMultiplierOutputTargeted && outputCadenceValidForControl
+            && !fixedMultiplierOutputSatisfied;
         const bool outputTargetValid =
             adaptiveOutputTargeted || fixedMultiplierOutputTargeted;
         const bool outputTargeted = outputTargetValid;
@@ -3455,7 +3462,9 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
         const double observationTotalMs = generatedWorkSample
             ? timing.totalLsfgMs : this->adaptiveFlowRetainedTotalLsfgMs_;
         const size_t observationGenerationCount = generatedWorkSample
-            ? timing.generationCount : this->adaptiveFlowRetainedGenerationCount_;
+            ? timing.generationCount
+            : (retainedTimingUsable ? this->adaptiveFlowRetainedGenerationCount_
+                : previousCycleGeneratedDispatches);
         const double observationBudgetMs = generatedWorkSample
             && timing.frameBudgetMs > 0.0
             && std::isfinite(timing.frameBudgetMs)
@@ -3488,7 +3497,7 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
                 !conf.adaptiveFramegen && conf.multiplier > 1,
             .outputFps = outputCadence.outputFps,
             .outputTargetFps = outputTargetFps,
-            .outputCadenceValid = outputCadence.valid,
+            .outputCadenceValid = outputCadenceValidForControl,
             .outputTargeted = outputTargeted,
             .outputTargetSatisfied = outputTargetSatisfied,
             .fixedMultiplierBaseTarget = fixedMultiplierOutputTargeted,
@@ -3500,13 +3509,15 @@ VkResult LsContext::present(const Hooks::DeviceInfo& info, const void* pNext, Vk
             .outputDeficit = outputDeficit,
             .syntheticDropPressure = false,
             .generatedWorkSample = generatedWorkSample,
+            .generatedCadenceSample = previousCycleGeneratedDispatches > 0
+                && !adaptiveFlowTransitionActive,
             .retainedGeneratedTimingSample =
                 !generatedWorkSample && retainedTimingUsable,
             .schedulerTransition = schedulerTransition,
             .flowTransition = adaptiveFlowTransitionActive,
             .valid = observationBudgetValid
                 && sourceInterval.count() > 0
-                && retainedTimingUsable
+                && (retainedTimingUsable || previousCycleGeneratedDispatches > 0)
                 && (!cadenceDiscontinuity || generatedWorkSample),
         };
 
@@ -6862,11 +6873,12 @@ void LsContext::resetAdaptiveSourceEpoch(
         SourceHistoryInvalidationReason reason) {
     const float activeFlowScaleBeforeReset = this->adaptiveFlowActiveScale_;
     const bool preserveActiveFlowScale =
-        this->conservativeCrossDeviceSync_
-        && this->adaptiveFlowRuntimeAvailable_
+        this->adaptiveFlowRuntimeAvailable_
         && std::isfinite(activeFlowScaleBeforeReset)
-        && (reason == SourceHistoryInvalidationReason::TimelineDiscontinuity
-            || reason == SourceHistoryInvalidationReason::SuspendResume);
+        && (reason == SourceHistoryInvalidationReason::RuntimeConfigChange
+            || (this->conservativeCrossDeviceSync_
+                && (reason == SourceHistoryInvalidationReason::TimelineDiscontinuity
+                    || reason == SourceHistoryInvalidationReason::SuspendResume)));
 
     if (preserveActiveFlowScale
             && this->adaptiveFlowTransitionPending_

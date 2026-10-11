@@ -91,6 +91,8 @@ struct AdaptiveFlowObservation {
     bool syntheticDropPressure{false};
     /// Current timing comes from a cycle that actually generated LSFG output.
     bool generatedWorkSample{true};
+    /// Actual generated dispatch provenance, independent of optional GPU timestamps.
+    bool generatedCadenceSample{false};
     /// Timing is retained from the most recent real generated batch. This is
     /// explicit provenance, not permission to treat arbitrary history-only
     /// telemetry as fresh GPU work.
@@ -165,6 +167,13 @@ private:
     double schedulerHoldUntilSeconds_{};
     bool flowTransitionHoldActive_{false};
     double flowTransitionSettleUntilSeconds_{};
+
+    bool rejectedDownstep_{false};
+    bool rejectedRecovery_{false};
+    double rejectedDownstepChangeSeconds_{};
+    double rejectedRecoveryChangeSeconds_{};
+    AdaptiveFlowObservation downstepOperatingPoint_{};
+    AdaptiveFlowObservation recoveryOperatingPoint_{};
 
     bool downstepEvaluationActive_{false};
     bool downstepBenefitSeen_{false};

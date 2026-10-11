@@ -191,11 +191,9 @@ int main() {
     }
 
     {
-        // Adaptive-FG output-target pressure remains authoritative when
-        // presentation pressure is also present. The quality actuator must
-        // reach its preset floor before generation density becomes the next
-        // actuator; otherwise persistent delivery loss can bounce between two
-        // Flow states forever.
+        // Downstream presentation loss without GPU saturation is not a Flow
+        // quality actuator. A missed output target alone cannot justify serial
+        // quality reductions without measured benefit.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
         assert(controller.seedCurrentScale(0.50F));
         for (int i = 0; i < 240; ++i) {
@@ -212,8 +210,8 @@ int main() {
             observation.wsiLossRate = 0.50;
             controller.observe(observation);
         }
-        assert(near(controller.currentScale(), 0.25F));
-        assert(controller.telemetry().stateIndex == 15);
+        assert(near(controller.currentScale(), 0.50F));
+        assert(controller.telemetry().stateIndex == 10);
     }
 
     {
@@ -401,7 +399,7 @@ int main() {
         assert(near(controller.currentScale(), 0.80F));
         bool sawSecondDownstep = false;
         for (int i = 0; i < 80 && !sawSecondDownstep; ++i) {
-            controller.observe(sample(16.2, 5.0));
+            controller.observe(sample(18.2, 5.0));
             sawSecondDownstep = controller.telemetry().reason
                 == AdaptiveFlowDecisionReason::SustainedPressure;
         }
@@ -522,9 +520,11 @@ int main() {
         assert(near(controller.currentScale(), 0.95F));
 
         for (int i = 0; i < 70; ++i) {
-            controller.observe(sample(
+            auto retained = sample(
                 5.0, 1.5, 16.666, false, false,
-                45.0, true, false, false, false));
+                45.0, true, false, false, false);
+            retained.retainedGeneratedTimingSample = true;
+            controller.observe(retained);
         }
         assert(near(controller.currentScale(), 1.00F));
     }
@@ -802,7 +802,7 @@ int main() {
             observation.outputFps = 70.0;
             observation.sourceFps = 18.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.45F);
+            lowered = near(controller.currentScale(), 0.50F);
         }
         assert(lowered);
     }
@@ -822,7 +822,7 @@ int main() {
             observation.outputFps = 42.0;
             observation.sourceFps = 16.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.45F);
+            lowered = near(controller.currentScale(), 0.50F);
         }
         assert(lowered);
     }
@@ -854,9 +854,8 @@ int main() {
     }
 
     {
-        // A target-driven downstep must not be rolled back while the target
-        // remains missed. Otherwise Flow oscillates one state up/down while
-        // the user-visible cadence never recovers.
+        // An unchanged missed target supplies no benefit: revert the bounded
+        // probe and hold rather than rebuilding graphs repeatedly.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         bool lowered = false;
         for (int i = 0; i < 6 && !lowered; ++i) {
@@ -868,7 +867,7 @@ int main() {
             observation.outputFps = 48.0;
             observation.sourceFps = 24.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.90F);
+            lowered = near(controller.currentScale(), 0.95F);
         }
         assert(lowered);
 
@@ -885,17 +884,15 @@ int main() {
             observation.sourceFps = 24.0;
             controller.observe(observation);
         }
-        assert(controller.currentScale() <= 0.90F);
+        assert(near(controller.currentScale(), 1.00F));
         assert(controller.telemetry().reason
             != AdaptiveFlowDecisionReason::DownstepReverted);
     }
 
 
     {
-        // A target-driven downstep must remain committed while the measured
-        // output target is still missed even if the deficit debounce clears
-        // for a short cadence window. This is the exact runtime case that
-        // previously bounced 0.95 -> 1.00 with output_satisfied=0.
+        // A short debounce clearing does not create a benefit. The measured
+        // two percent output improvement below remains below confirmation.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Quality);
         bool lowered = false;
         for (int i = 0; i < 8 && !lowered; ++i) {
@@ -906,7 +903,7 @@ int main() {
             observation.outputDeficit = true;
             observation.outputFps = 48.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.90F);
+            lowered = near(controller.currentScale(), 0.95F);
         }
         assert(lowered);
 
@@ -916,19 +913,18 @@ int main() {
             observation.outputTargeted = true;
             observation.outputTargetSatisfied = false;
             observation.outputDeficit = false;
-            observation.outputFps = 49.0;
+            observation.outputFps = 48.5;
             controller.observe(observation);
         }
-        assert(controller.currentScale() <= 0.90F);
+        assert(near(controller.currentScale(), 1.00F));
         assert(controller.telemetry().reason
             != AdaptiveFlowDecisionReason::DownstepReverted);
     }
 
 
     {
-        // A trustworthy fixed source target remains authoritative even when
-        // the next 0.05 step has little predicted standalone relief. Keep
-        // lowering until the source target recovers or the Auto floor is hit.
+        // An unchanged clean-source deficit must not sacrifice all quality
+        // when reducing Flow provides no measured source cadence improvement.
         AdaptiveFlowController controller(AdaptiveFlowPreset::Auto);
         for (int i = 0; i < 200 && !near(controller.currentScale(), 0.25F); ++i) {
             auto observation = sample(8.0, 0.6, 50.0);
@@ -938,7 +934,7 @@ int main() {
             observation.sourceTargetFps = 30.0;
             controller.observe(observation);
         }
-        assert(near(controller.currentScale(), 0.25F));
+        assert(near(controller.currentScale(), 1.00F));
     }
 
     {
@@ -1071,7 +1067,7 @@ int main() {
             observation.sourceFps = 22.0;
             observation.sourceTargetFps = 30.0;
             controller.observe(observation);
-            lowered = near(controller.currentScale(), 0.90F);
+            lowered = near(controller.currentScale(), 0.95F);
         }
         assert(lowered);
         for (int i = 0; i < 50; ++i) {
@@ -1082,7 +1078,7 @@ int main() {
             observation.outputDeficit = false;
             observation.outputFps = 60.0;
             observation.fixedMultiplierBaseTarget = true;
-            observation.sourceFps = 22.0;
+            observation.sourceFps = 24.0;
             observation.sourceTargetFps = 30.0;
             controller.observe(observation);
         }

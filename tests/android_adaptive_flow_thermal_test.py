@@ -18,7 +18,7 @@ class AdaptiveFlowThermalTest(unittest.TestCase):
 
     def test_controller_never_uses_thermal_as_standalone_pressure(self) -> None:
         source = (ROOT / "src/adaptive_flow_controller.cpp").read_text(encoding="utf-8")
-        pressure = source[source.index("const bool pressure ="):source.index("if (pressure && canLower)")]
+        pressure = source[source.index("const bool pressure ="):source.index("if (pressure && canLower")]
         self.assertNotIn("thermalSevere ||", pressure)
         self.assertIn("thermalSevere && pressure", pressure)
         self.assertIn("thermalRecoveryHeadroom", source)
