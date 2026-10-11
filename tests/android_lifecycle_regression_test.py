@@ -74,7 +74,9 @@ class AndroidLifecycleRegressionTest(unittest.TestCase):
         self.assertIn('"generated_presented="', hooks)
         self.assertIn('"degraded="', hooks)
         self.assertIn("publishRuntimeState", hooks)
-        self.assertIn('publishRuntimeState(configFile, "degraded"', hooks)
+        self.assertIn('publishRuntimeState(conf, "degraded"', hooks)
+        self.assertIn('"transaction_id=" << consumedConfig.transactionId', hooks)
+        self.assertIn('"configuration_revision=" << consumedConfig.configurationRevision', hooks)
         self.assertIn("const bool generationActive = activeConf.multiplier > 1", hooks)
         self.assertIn('generationActive ? "generating" : "source_only"', hooks)
 
