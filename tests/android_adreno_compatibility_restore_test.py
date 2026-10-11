@@ -438,32 +438,24 @@ class AndroidAdrenoCompatibilityRestoreTest(unittest.TestCase):
             "if (this->asyncFramegenCompletionEnabled_\n"
             "            && framegenSync.gpuDependenciesExported)", 1
         )[1].split("// 3. Compatibility/error fallback only.", 1)[0]
-
-        self.assertIn("const int fd = framegenSync.outputReadyFds.at(i);", generated)
-        self.assertIn(
-            "if (this->conservativeCrossDeviceSync_)\n"
-            "                        framegenSync.outputReadyFds.at(i) = -1;",
-            generated,
-        )
-        self.assertIn(
-            "if (!this->conservativeCrossDeviceSync_)\n"
-            "                        framegenSync.outputReadyFds.at(i) = -1;",
-            generated,
-        )
-        self.assertIn(
-            "const int batchCompleteFd = framegenSync.batchCompleteFd;",
-            generated,
-        )
-        self.assertIn(
-            "if (this->conservativeCrossDeviceSync_)\n"
-            "                        framegenSync.batchCompleteFd = -1;",
-            generated,
-        )
-        self.assertIn(
-            "if (!this->conservativeCrossDeviceSync_)\n"
-            "                        framegenSync.batchCompleteFd = -1;",
-            generated,
-        )
+        # Both conservative Adreno and generic/Xclipse paths must transfer
+        # ownership before construction, because the importer closes on error.
+        output_transfer = "framegenSync.outputReadyFds.at(i) = -1;"
+        output_import = "pass.renderSemaphores.at(i) = Mini::Semaphore("
+        batch_transfer = "framegenSync.batchCompleteFd = -1;"
+        batch_import = "pass.framegenBatchCompleteSemaphore = Mini::Semaphore("
+        self.assertEqual(generated.count(output_transfer), 1)
+        self.assertEqual(generated.count(batch_transfer), 1)
+        self.assertLess(generated.index(output_transfer), generated.index(output_import))
+        self.assertLess(generated.index(batch_transfer), generated.index(batch_import))
+        self.assertIn("if (batchCompletePollFd >= 0)", generated)
+        self.assertIn("::close(batchCompletePollFd);", generated)
+        history = source.split(
+            "if (historySync.gpuDependenciesExported\n"
+            "                    && historySync.batchCompleteFd >= 0)", 1
+        )[1].split("else if (historySync.hostWaitFallback)", 1)[0]
+        self.assertLess(history.index("historySync.batchCompleteFd = -1;"),
+                        history.index("Mini::Semaphore("))
 
     def test_adreno_does_not_rewrite_game_device_queue_creation(self) -> None:
         hooks = (ROOT / "src/hooks.cpp").read_text(encoding="utf-8")
