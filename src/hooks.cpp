@@ -678,11 +678,12 @@ namespace {
         return value;
     }
 
-    void publishRuntimeState(const std::string& configFile, const char* state,
+    void publishRuntimeState(const Config::Configuration& consumedConfig, const char* state,
             bool active, bool generationReady, bool resident, bool sourceOnly,
             bool generationInitialized, bool generatedPresented, bool degraded, int multiplier,
             bool performance, bool adaptive, uint32_t targetFps,
             const LSFG::FramegenSupportDecision* support = nullptr) {
+        const auto configFile = consumedConfig.config_file.string();
         if (configFile.empty())
             return;
         std::lock_guard fileLock(runtimeStatsFileMutex);
@@ -696,6 +697,8 @@ namespace {
             if (!out)
                 throw std::runtime_error("unable to open temporary stats file");
             out << "state=" << state << '\n'
+                << "transaction_id=" << consumedConfig.transactionId << '\n'
+                << "configuration_revision=" << consumedConfig.configurationRevision << '\n'
                 << "active=" << (active ? 1 : 0) << '\n'
                 << "generation_ready=" << (generationReady ? 1 : 0) << '\n'
                 << "resident=" << (resident ? 1 : 0) << '\n'
@@ -759,7 +762,7 @@ namespace {
         }
     }
 
-    void writeRuntimeStatsFile(const std::string& configFile, const char* state,
+    void writeRuntimeStatsFile(const Config::Configuration& consumedConfig, const char* state,
             bool active, bool generationReady, bool resident, bool sourceOnly,
             bool generationInitialized, bool generatedPresented, bool degraded,
             double outputFps, double sourceFps, double generatedFps,
@@ -767,6 +770,7 @@ namespace {
             bool adaptive, uint32_t targetFps,
             const AdaptiveFlowRuntimeSnapshot& adaptiveFlow,
             const LSFG::FramegenSupportDecision& support) {
+        const auto configFile = consumedConfig.config_file.string();
         if (configFile.empty())
             return;
         std::lock_guard fileLock(runtimeStatsFileMutex);
@@ -781,6 +785,8 @@ namespace {
                 throw std::runtime_error("unable to open temporary stats file");
             out << std::fixed << std::setprecision(3)
                 << "state=" << state << '\n'
+                << "transaction_id=" << consumedConfig.transactionId << '\n'
+                << "configuration_revision=" << consumedConfig.configurationRevision << '\n'
                 << "active=" << (active ? 1 : 0) << '\n'
                 << "generation_ready=" << (generationReady ? 1 : 0) << '\n'
                 << "resident=" << (resident ? 1 : 0) << '\n'
@@ -910,7 +916,7 @@ namespace {
     }
 
     void recordSuccessfulOutputCycle(SwapchainState& state,
-            const LsContext& context, const std::string& configFile, uint64_t generated,
+            const LsContext& context, const Config::Configuration& consumedConfig, uint64_t generated,
             int multiplier, bool performance, bool adaptive, uint32_t targetFps) {
         auto& stats = state.runtimeStats;
         stats.windowSourceFrames++;
@@ -933,7 +939,7 @@ namespace {
             hostGeneratedConfirmed > stats.lastHostGeneratedConfirmedTotal;
         stats.lastHostGeneratedConfirmedTotal = hostGeneratedConfirmed;
         const auto adaptiveFlow = context.adaptiveFlowRuntimeSnapshot();
-        writeRuntimeStatsFile(configFile,
+        writeRuntimeStatsFile(consumedConfig,
             generationActive ? "generating" : "source_only",
             generationActive, generationActive, true, !generationActive, true,
             generatedPresented, false,
@@ -1211,7 +1217,7 @@ namespace {
                         + std::string(e.what()));
                 }
 #ifdef __ANDROID__
-                publishRuntimeState(activeConf.config_file, "pass_through",
+                publishRuntimeState(activeConf, "pass_through",
                     false, false, false, false, false, false, false,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
                     activeConf.adaptiveFramegen, activeConf.fpsLimit);
@@ -1438,7 +1444,7 @@ namespace {
             std::cerr << "lsfg-vk: init stage=ls-context-ready images=" << imageCount << "\n";
 #ifdef __ANDROID__
             const bool generationActive = activeConf.multiplier > 1;
-            publishRuntimeState(activeConf.config_file,
+            publishRuntimeState(activeConf,
                 generationActive ? "generating" : "source_only",
                 generationActive, generationActive, true, !generationActive, true,
                 false, false,
@@ -1497,7 +1503,7 @@ namespace {
                     .supported = false,
                     .rejectionReason = e.what(),
                 };
-                publishRuntimeState(activeConf.config_file, "degraded",
+                publishRuntimeState(activeConf, "degraded",
                     false, false, false, false, false, false, true,
                     static_cast<int>(activeConf.multiplier), activeConf.performance,
                     activeConf.adaptiveFramegen, activeConf.fpsLimit, &failureDecision);
@@ -1646,7 +1652,7 @@ namespace {
             }
             if (recreateSwapchain) {
 #ifdef __ANDROID__
-                publishRuntimeState(configFile, "degraded",
+                publishRuntimeState(conf, "degraded",
                     false, false, false, false, false, false, true,
                     static_cast<int>(conf.multiplier), conf.performance,
                     conf.adaptiveFramegen, conf.fpsLimit);
@@ -1688,7 +1694,7 @@ namespace {
             const auto res = Layer::ovkQueuePresentKHR(queue, pPresentInfo);
             if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
                 recordSuccessfulOutputCycle(*state, *state->context,
-                    conf.config_file, 0, 1, conf.performance,
+                    conf, 0, 1, conf.performance,
                     conf.adaptiveFramegen, conf.fpsLimit);
                 Utils::resetLimitN("swapPresent");
             } else {
@@ -1713,7 +1719,7 @@ namespace {
 
 #ifdef __ANDROID__
             recordSuccessfulOutputCycle(*state, *state->context,
-                conf.config_file, state->context->lastGeneratedFrameCount(),
+                conf, state->context->lastGeneratedFrameCount(),
                 conf.multiplier, conf.performance,
                 conf.adaptiveFramegen, conf.fpsLimit);
 #endif
@@ -1722,7 +1728,7 @@ namespace {
         } catch (const std::exception& e) {
 #ifdef __ANDROID__
             recordOutputFailure(*state);
-            publishRuntimeState(conf.config_file, "degraded",
+            publishRuntimeState(conf, "degraded",
                 false, false, false, false, false, false, true,
                 static_cast<int>(conf.multiplier), conf.performance,
                 conf.adaptiveFramegen, conf.fpsLimit);
